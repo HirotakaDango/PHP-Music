@@ -2237,6 +2237,7 @@ function perform_full_scan($db) {
         cursor: pointer;
         padding: 5px 0;
         position: relative;
+        margin-bottom: 0.2em;
       }
       .progress-bar-bg {
         height: 4px;
