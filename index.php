@@ -474,6 +474,9 @@ function init_db($db) {
     }
   }
 
+  $music_columns = $db->query("PRAGMA table_info(music);")->fetchAll(PDO::FETCH_COLUMN, 1);
+  $music_table_exists = !empty($music_columns);
+  
   $db->exec("
     CREATE TABLE IF NOT EXISTS music (
       id INTEGER PRIMARY KEY,
@@ -487,9 +490,17 @@ function init_db($db) {
       duration INTEGER,
       image BLOB,
       last_modified INTEGER,
+      bitrate INTEGER,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
     );
   ");
+
+  if ($music_table_exists) {
+    if (!in_array('bitrate', $music_columns)) {
+        $db->exec("ALTER TABLE music ADD COLUMN bitrate INTEGER;");
+    }
+  }
+  
   $db->exec("
     CREATE TABLE IF NOT EXISTS favorites (
       user_id INTEGER NOT NULL,
@@ -575,7 +586,7 @@ function get_upload_limit() {
   return "Max file size: " . min($max_upload, $max_post);
 }
 
-function process_image_to_webp($imageData, $target_width = 250, $quality = 75) {
+function process_image_to_webp($imageData, $target_width = 500, $quality = 75) {
   if (!$imageData || !function_exists('imagecreatefromstring') || !function_exists('imagewebp')) {
     return null;
   }
@@ -809,12 +820,13 @@ if (isset($_GET['action'])) {
           $album = trim($info['comments']['album'][0] ?? 'Unknown Album');
           $year = (int)($info['comments']['year'][0] ?? 0);
           $duration = (int)($info['playtime_seconds'] ?? 0);
+          $bitrate = (int)($info['audio']['bitrate'] ?? 0);
           $genre = trim($info['comments']['genre'][0] ?? '') ?: trim($_POST['genre'] ?? '') ?: 'Uploaded';
           $raw_image_data = isset($info['comments']['picture'][0]['data']) ? $info['comments']['picture'][0]['data'] : null;
           $webp_image_data = process_image_to_webp($raw_image_data);
 
-          $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-          $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $webp_image_data, time()]);
+          $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+          $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, time()]);
 
           $new_count = ($user_data['last_upload_date'] === $today) ? $daily_upload_count + 1 : 1;
           $update_stmt = $db->prepare("UPDATE users SET daily_upload_count = ?, last_upload_date = ? WHERE id = ?");
@@ -1272,7 +1284,7 @@ if (isset($_GET['action'])) {
 
     case 'get_song_data':
       $id = intval($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id = ?");
+      $stmt = $db->prepare("SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id = ?");
       $stmt->execute([$user_id, $id]);
       $song = $stmt->fetch();
       if ($song) {
@@ -1697,15 +1709,10 @@ function perform_full_scan($db) {
   echo "Step 5: Comparing disk files with database records...\n";
   $files_to_add = array_diff_key($files_on_disk, $db_files);
   $files_to_delete = array_diff_key($db_files, $files_on_disk);
-  $files_to_update = [];
-  $potential_updates = array_intersect_key($files_on_disk, $db_files);
-  foreach ($potential_updates as $path => $mtime) {
-    if ($mtime > $db_files[$path]) {
-      $files_to_update[$path] = $mtime;
-    }
-  }
+  $files_to_update = array_intersect_key($files_on_disk, $db_files);
+
   echo " - To add: " . count($files_to_add) . "\n";
-  echo " - To update: " . count($files_to_update) . "\n";
+  echo " - To update (all existing): " . count($files_to_update) . "\n";
   echo " - To delete: " . count($files_to_delete) . "\n\n";
 
   $files_to_process = $files_to_add + $files_to_update;
@@ -1715,8 +1722,8 @@ function perform_full_scan($db) {
 
   echo "Step 6: Processing changes...\n";
   $getID3 = new getID3;
-  $insert_stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-  $update_stmt = $db->prepare("UPDATE music SET title=?, artist=?, album=?, genre=?, year=?, duration=?, image=?, last_modified=? WHERE file=?");
+  $insert_stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  $update_stmt = $db->prepare("UPDATE music SET title=?, artist=?, album=?, genre=?, year=?, duration=?, bitrate=?, image=?, last_modified=? WHERE file=?");
   $delete_stmt = $db->prepare("DELETE FROM music WHERE file = ?");
   $processed_count = 0;
   $total_to_process = count($files_to_process) + count($files_to_delete);
@@ -1736,13 +1743,14 @@ function perform_full_scan($db) {
       $genre = trim($info['comments']['genre'][0] ?? 'Unknown Genre');
       $year = (int)($info['comments']['year'][0] ?? 0);
       $duration = (int)($info['playtime_seconds'] ?? 0);
+      $bitrate = (int)($info['audio']['bitrate'] ?? 0);
       $raw_image_data = $info['comments']['picture'][0]['data'] ?? null;
       $webp_image_data = process_image_to_webp($raw_image_data);
       
       if (isset($files_to_add[$filePath])) {
-        $insert_stmt->execute([$library_user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $webp_image_data, $mtime]);
+        $insert_stmt->execute([$library_user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime]);
       } else {
-        $update_stmt->execute([$title, $artist, $album, $genre, $year, $duration, $webp_image_data, $mtime, $filePath]);
+        $update_stmt->execute([$title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime, $filePath]);
       }
     }
 
@@ -3887,13 +3895,14 @@ function perform_full_scan($db) {
           currentSong = data;
           currentSong.logged = false;
           audio.src = currentSong.stream_url;
+          audio.load();
           audio.play().catch(e => console.error("Audio play failed:", e));
           isPlaying = true;
           updatePlayerUI();
           if ('mediaSession' in navigator) {
             navigator.mediaSession.metadata = new MediaMetadata({
               title: currentSong.title, artist: currentSong.artist, album: currentSong.album,
-              artwork: [{ src: currentSong.image_url, sizes: '250x250', type: 'image/webp' }]
+              artwork: [{ src: currentSong.image_url, sizes: '500x500', type: 'image/webp' }]
             });
             navigator.mediaSession.setActionHandler('play', togglePlayPause);
             navigator.mediaSession.setActionHandler('pause', togglePlayPause);
@@ -4577,6 +4586,7 @@ function perform_full_scan($db) {
                       <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Genre:</strong> <span>${metaSongData.genre || 'N/A'}</span></li>
                       <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Year:</strong> <span>${metaSongData.year || 'N/A'}</span></li>
                       <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Duration:</strong> <span>${formatTime(metaSongData.duration)}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Bitrate:</strong> <span>${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + ' kbps' : 'N/A'}</span></li>
                     </ul>`;
                   metadataModal.show();
               }
@@ -4787,7 +4797,7 @@ function perform_full_scan($db) {
             editPlaylistModal.hide();
             showToast(data.message, 'success');
             if (currentView.type === 'get_user_playlists') {
-              loadView(currentView);
+                loadView(currentView);
             }
           }
         });
