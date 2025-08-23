@@ -538,7 +538,7 @@ function init_db($db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       song_id INTEGER NOT NULL,
-      played_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      played_at TEXT,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
     );
@@ -549,7 +549,7 @@ function init_db($db) {
       user_id INTEGER NOT NULL,
       song_id INTEGER NOT NULL,
       play_count INTEGER DEFAULT 1,
-      last_played DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_played TEXT,
       PRIMARY KEY (user_id, song_id),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
@@ -1509,20 +1509,21 @@ if (isset($_GET['action'])) {
       }
       $data = json_decode(file_get_contents('php://input'), true);
       $song_id = intval($data['id'] ?? 0);
-
+      $played_at_iso = $data['played_at'] ?? (new DateTime())->format(DateTime::ATOM);
+    
       if ($song_id > 0) {
         try {
           $db->beginTransaction();
-
+    
           $db->prepare("DELETE FROM history WHERE user_id = ? AND song_id = ?")->execute([$user_id, $song_id]);
-          $db->prepare("INSERT INTO history (user_id, song_id) VALUES (?, ?)")->execute([$user_id, $song_id]);
-
+          $db->prepare("INSERT INTO history (user_id, song_id, played_at) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $played_at_iso]);
+    
           $db->prepare("
-            INSERT INTO play_counts (user_id, song_id, play_count, last_played) VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+            INSERT INTO play_counts (user_id, song_id, play_count, last_played) VALUES (?, ?, 1, ?)
             ON CONFLICT(user_id, song_id) DO UPDATE SET
               play_count = play_count + 1,
-              last_played = CURRENT_TIMESTAMP
-          ")->execute([$user_id, $song_id]);
+              last_played = ?
+          ")->execute([$user_id, $song_id, $played_at_iso, $played_at_iso]);
           
           $db->commit();
         } catch (Exception $e) {
@@ -1532,7 +1533,6 @@ if (isset($_GET['action'])) {
           error_log('PHP Music log_play error: ' . $e->getMessage());
         }
       }
-      
       send_json(['status' => 'success']);
       break;
       
@@ -3305,8 +3305,12 @@ function perform_full_scan($db) {
           return `${min}:${sec}`;
         };
         
-        const timeAgo = (date) => {
-          const seconds = Math.floor((new Date() - new Date(date)) / 1000);
+        const timeAgo = (isoString) => {
+          if (!isoString) return '';
+          const date = new Date(isoString);
+          if (isNaN(date)) return isoString;
+        
+          const seconds = Math.floor((new Date() - date) / 1000);
           let interval = seconds / 31536000;
           if (interval > 1) return Math.floor(interval) + " years ago";
           interval = seconds / 2592000;
@@ -3318,7 +3322,7 @@ function perform_full_scan($db) {
           interval = seconds / 60;
           if (interval > 1) return Math.floor(interval) + " minutes ago";
           return "Just now";
-        }
+        };
 
         const fetchData = async (url, options = {}) => {
           try {
@@ -3807,6 +3811,21 @@ function perform_full_scan($db) {
           hideLoader();
         };
 
+        const updateActiveNavLink = (viewType) => {
+          allNavLinks.forEach(l => l.classList.remove('active'));
+          let activeLink;
+          switch(viewType) {
+            case 'artist_songs': activeLink = document.querySelector('.nav-link[data-view="get_artists"]'); break;
+            case 'album_songs': activeLink = document.querySelector('.nav-link[data-view="get_albums"]'); break;
+            case 'genre_songs': activeLink = document.querySelector('.nav-link[data-view="get_genres"]'); break;
+            case 'playlist_songs': activeLink = document.querySelector('.nav-link[data-view="get_user_playlists"]'); break;
+            default: activeLink = document.querySelector(`.nav-link[data-view="${viewType}"]`);
+          }
+          if (activeLink) {
+            activeLink.classList.add('active');
+          }
+        };
+
         const loadView = async (viewConfig) => {
           mainContent.scrollTop = 0;
           currentPage = 1;
@@ -3815,6 +3834,7 @@ function perform_full_scan($db) {
           showLoader();
 
           currentView = viewConfig;
+          updateActiveNavLink(currentView.type);
           setupSortOptions(currentView.type);
           
           let data;
@@ -3924,11 +3944,11 @@ function perform_full_scan($db) {
         };
 
         const logPlay = (songId) => {
-          if (!currentUser) {
-            return;
-          }
+          if (!currentUser) return;
+          const played_at_iso = new Date().toISOString();
           const url = '?action=log_play';
-          const data = JSON.stringify({ id: songId });
+          const data = JSON.stringify({ id: songId, played_at: played_at_iso });
+          
           if (navigator.sendBeacon) {
             const blob = new Blob([data], { type: 'application/json; charset=UTF-8' });
             navigator.sendBeacon(url, blob);
@@ -3938,9 +3958,7 @@ function perform_full_scan($db) {
               headers: { 'Content-Type': 'application/json' },
               body: data,
               keepalive: true,
-            }).catch(error => {
-              console.error('Beacon fallback fetch error for log_play:', error);
-            });
+            }).catch(error => console.error('Beacon fallback fetch error for log_play:', error));
           }
         };
 
@@ -4336,8 +4354,6 @@ function perform_full_scan($db) {
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
-            allNavLinks.forEach(l => l.classList.remove('active'));
-            navLink.classList.add('active');
             
             const viewType = navLink.dataset.view;
             let sort = 'artist_asc';
@@ -4483,7 +4499,7 @@ function perform_full_scan($db) {
             loadView({ type: 'album_songs', param: songAlbumEl.dataset.album, sort: 'title_asc' });
             return;
           }
-          const cardEl = target.closest('.card');
+          const cardEl = target.closest('.card, .shelf-item[data-playlist]');
           if (cardEl && !target.closest('.playlist-more-btn')) {
              let viewType, param, sort;
              if (cardEl.dataset.artist) {
@@ -4679,9 +4695,6 @@ function perform_full_scan($db) {
             
             setTimeout(() => {
               loadView({ type: 'genre_songs', param: genreName, sort: 'artist_asc' });
-              allNavLinks.forEach(l => l.classList.remove('active'));
-              const genreNavLink = document.querySelector('.nav-link[data-view="get_genres"]');
-              if(genreNavLink) genreNavLink.classList.add('active');
               hideMobileSidebar();
             }, 200);
           });
