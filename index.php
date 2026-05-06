@@ -2289,6 +2289,16 @@ function perform_full_scan($db) {
               <i class="bi bi-eraser-fill"></i>
               <span>Clear Cache</span>
             </a>
+			<a href="playlist_downloader.php" target="_blank" 
+			   style="display: flex; align-items: center; gap: 1rem; padding: 0.75rem 1.5rem; color: var(--ytm-secondary-text); text-decoration: none; font-weight: 500; border-left: 3px solid transparent; transition: all 0.2s;"
+			   onmouseover="this.style.backgroundColor='var(--ytm-surface)'; this.style.color='var(--ytm-primary-text)';"
+			   onmouseout="this.style.backgroundColor=''; this.style.color='var(--ytm-secondary-text)';">
+			  <i class="bi bi-download"></i>
+			  <span>Playlist Downloader</span>
+			</a>
+            <div class="text-center mt-3 small text-secondary">
+              Made by <a href="https://github.com/HirotakaDango" target="_blank" class="text-decoration-none text-white-50">HirotakaDango</a>
+            </div>
           </div>
         </div>
       </nav>
