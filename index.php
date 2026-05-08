@@ -941,8 +941,8 @@ if (isset($_GET['action'])) {
       $params =[$user_id];
 
       if (!empty($_GET['artist'])) {
-        $where_clauses[] = 'm.artist = ?';
-        $params[] = $_GET['artist'];
+        $where_clauses[] = 'm.artist LIKE ?';
+        $params[] = '%' . $_GET['artist'] . '%';
       }
       if (!empty($_GET['album'])) {
         $where_clauses[] = 'm.album = ?';
@@ -951,6 +951,10 @@ if (isset($_GET['action'])) {
       if (!empty($_GET['genre'])) {
         $where_clauses[] = 'm.genre = ?';
         $params[] = $_GET['genre'];
+      }
+      if (!empty($_GET['filter_user_id'])) {
+        $where_clauses[] = 'm.user_id = ?';
+        $params[] = $_GET['filter_user_id'];
       }
       $where_sql = count($where_clauses) > 0 ? 'WHERE ' . implode(' AND ', $where_clauses) : '';
       
@@ -1063,6 +1067,7 @@ if (isset($_GET['action'])) {
       $view_type = $post_data['view_type'] ?? '';
       $param = $post_data['param'] ?? '';
       $sort = $post_data['sort'] ?? '';
+      $filter_user_id = $post_data['filter_user_id'] ?? '';
 
       if (in_array($view_type,['artist_songs', 'album_songs', 'genre_songs', 'playlist_songs'])) {
         $param = urldecode($param);
@@ -1096,8 +1101,8 @@ if (isset($_GET['action'])) {
           $default_sort = 'history_desc';
           break;
         case 'artist_songs':
-          $conditions = "WHERE m.artist = ?";
-          $params[] = $param;
+          $conditions = "WHERE m.artist LIKE ?";
+          $params[] = '%' . $param . '%';
           $default_sort = 'album_asc';
           break;
         case 'album_songs':
@@ -1117,7 +1122,7 @@ if (isset($_GET['action'])) {
           $default_sort = 'manual_order';
           break;
         case 'search':
-          $conditions = "WHERE m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?";
+          $conditions = "WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?)";
           $query_param = '%' . $param . '%';
           $params =[$query_param, $query_param, $query_param];
           break;
@@ -1126,6 +1131,16 @@ if (isset($_GET['action'])) {
         default:
           send_json([]);
       }
+      
+      if ($filter_user_id !== '') {
+        if (empty($conditions)) {
+          $conditions = "WHERE m.user_id = ?";
+        } else {
+          $conditions .= " AND m.user_id = ?";
+        }
+        $params[] = $filter_user_id;
+      }
+
       $sort_map =[
         'id_desc' => 'ORDER BY m.id DESC',
         'id_asc' => 'ORDER BY m.id ASC',
@@ -1147,20 +1162,34 @@ if (isset($_GET['action'])) {
       }
       $order_by = $sort_map[$sort] ?? $sort_map[$default_sort];
       
-      $stmt = $db->prepare($sql . $conditions . " " . $order_by);
+      $stmt = $db->prepare($sql . " " . $conditions . " " . $order_by);
       $stmt->execute($params);
       send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
       break;
 
     case 'get_artists':
         $sort_key = $_GET['sort'] ?? 'name_asc';
-        $sort_map =[
-            'name_asc' => 'ORDER BY artist COLLATE NOCASE ASC',
-            'name_desc' => 'ORDER BY artist COLLATE NOCASE DESC',
-        ];
-        $order_by = $sort_map[$sort_key] ?? $sort_map['name_asc'];
-        $stmt = $db->query("SELECT DISTINCT artist FROM music WHERE artist != '' AND artist IS NOT NULL " . $order_by);
-        send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
+        $stmt = $db->query("SELECT artist, user_id FROM music WHERE artist != '' AND artist IS NOT NULL");
+        $rows = $stmt->fetchAll();
+        $artists =[];
+        foreach ($rows as $row) {
+            $parts = preg_split('/\s*(?:\/|,|&)\s*/', $row['artist']);
+            foreach ($parts as $part) {
+                $p = trim($part);
+                if ($p !== '') {
+                    $key = strtolower($p) . '|' . $row['user_id'];
+                    if (!isset($artists[$key])) {
+                        $artists[$key] =['name' => $p, 'user_id' => $row['user_id']];
+                    }
+                }
+            }
+        }
+        if ($sort_key === 'name_desc') {
+            usort($artists, function($a, $b) { return strcasecmp($b['name'], $a['name']); });
+        } else {
+            usort($artists, function($a, $b) { return strcasecmp($a['name'], $b['name']); });
+        }
+        send_json(array_values($artists));
         break;
 
     case 'get_albums':
@@ -1174,7 +1203,7 @@ if (isset($_GET['action'])) {
             'year_asc' => 'ORDER BY MAX(m.year) ASC',
         ];
         $order_by = $sort_map[$sort_key] ?? $sort_map['album_asc'];
-        $stmt = $db->query("SELECT m.album, m.artist, MAX(m.id) as id FROM music m WHERE m.album != '' AND m.album IS NOT NULL GROUP BY m.album " . $order_by);
+        $stmt = $db->query("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album != '' AND m.album IS NOT NULL GROUP BY m.album, m.user_id " . $order_by);
         send_json($stmt->fetchAll());
         break;
     
@@ -1263,8 +1292,25 @@ if (isset($_GET['action'])) {
       } elseif (in_array($type,['artist', 'album', 'genre'])) {
         if (empty($name)) { http_response_code(400); exit; }
         $field = $type;
-        $stmt_details = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, MAX(id) as image_id FROM music WHERE {$field} = ?");
-        $stmt_details->execute([$name]);
+        $filter_user_id = $_GET['filter_user_id'] ?? '';
+        $user_cond = "";
+        $user_params =[];
+        
+        if ($type === 'artist') {
+          $field_cond = "m.artist LIKE ?";
+          $user_params[] = '%' . $name . '%';
+        } else {
+          $field_cond = "m.{$field} = ?";
+          $user_params[] = $name;
+        }
+
+        if ($filter_user_id !== '') {
+          $user_cond = " AND m.user_id = ?";
+          $user_params[] = $filter_user_id;
+        }
+
+        $stmt_details = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, MAX(id) as image_id FROM music m WHERE {$field_cond} {$user_cond}");
+        $stmt_details->execute($user_params);
         $details = $stmt_details->fetch();
         $details['name'] = $name;
         $details['image_url'] = '?action=get_image&id=' . ($details['image_id'] ?? 0);
@@ -1278,9 +1324,10 @@ if (isset($_GET['action'])) {
         $stmt_songs = $db->prepare("
           SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-          WHERE m.{$field} = ? {$order_by} {$limit_clause}
+          WHERE {$field_cond} {$user_cond} {$order_by} {$limit_clause}
         ");
-        $stmt_songs->execute([$user_id, $name]);
+        $exec_params = array_merge([$user_id], $user_params);
+        $stmt_songs->execute($exec_params);
         $songs = $stmt_songs->fetchAll();
       }
       send_json(['details' => $details, 'songs' => $songs]);
@@ -1614,7 +1661,7 @@ if (isset($_GET['action'])) {
       if (!$user_id) { send_json(['shelves' => []]); }
       $shelves =[];
       $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
-      $album_fields = "m.album, m.artist, MAX(m.id) as id";
+      $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
 
       $recent_songs_stmt = $db->prepare("
         SELECT {$song_fields}
@@ -1639,11 +1686,11 @@ if (isset($_GET['action'])) {
       if ($top_artist) {
         $more_from_artist_stmt = $db->prepare("
           SELECT {$album_fields} FROM music m
-          WHERE m.artist = :artist_name AND m.album != 'Unknown Album'
+          WHERE m.artist LIKE :artist_name AND m.album != 'Unknown Album'
           AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)
-          GROUP BY m.album ORDER BY RANDOM() LIMIT 10
+          GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
         ");
-        $more_from_artist_stmt->execute([':user_id' => $user_id, ':artist_name' => $top_artist]);
+        $more_from_artist_stmt->execute([':user_id' => $user_id, ':artist_name' => '%' . $top_artist . '%']);
         $artist_albums = $more_from_artist_stmt->fetchAll();
         if (count($artist_albums) > 0) {
           $shelves[] =['title' => 'More from ' . $top_artist, 'type' => 'albums', 'items' => $artist_albums, 'connected_view' => 'artist_songs', 'param' => urlencode($top_artist)];
@@ -1713,7 +1760,7 @@ if (isset($_GET['action'])) {
       $discovery_stmt = $db->prepare("
         SELECT {$album_fields} FROM music m
         WHERE m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id) AND m.album != 'Unknown Album'
-        GROUP BY m.album ORDER BY RANDOM() LIMIT 10
+        GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
       ");
       $discovery_stmt->execute([':user_id' => $user_id]);
       $discovery_albums = $discovery_stmt->fetchAll();
@@ -2289,13 +2336,6 @@ function perform_full_scan($db) {
               <i class="bi bi-eraser-fill"></i>
               <span>Clear Cache</span>
             </a>
-			<a href="playlist_downloader.php" target="_blank" 
-			   style="display: flex; align-items: center; gap: 1rem; padding: 0.75rem 1.5rem; color: var(--ytm-secondary-text); text-decoration: none; font-weight: 500; border-left: 3px solid transparent; transition: all 0.2s;"
-			   onmouseover="this.style.backgroundColor='var(--ytm-surface)'; this.style.color='var(--ytm-primary-text)';"
-			   onmouseout="this.style.backgroundColor=''; this.style.color='var(--ytm-secondary-text)';">
-			  <i class="bi bi-download"></i>
-			  <span>Playlist Downloader</span>
-			</a>
             <div class="text-center mt-3 small text-secondary">
               Made by <a href="https://github.com/HirotakaDango" target="_blank" class="text-decoration-none text-white-50">HirotakaDango</a>
             </div>
@@ -2741,7 +2781,7 @@ function perform_full_scan($db) {
         };
         
         const audio = new Audio();
-        let currentView = { type: 'get_songs', param: '', sort: 'artist_asc' };
+        let currentView = { type: 'get_songs', param: '', sort: 'artist_asc', filter_user_id: '' };
         let currentUser = null;
         let currentSong = null;
         let queue =[];
@@ -2878,10 +2918,15 @@ function perform_full_scan($db) {
             <button class="btn btn-outline-light border-0 share-view-btn" title="Share ${type}" data-share-id="${details.public_id || encodeURIComponent(details.name)}" data-share-name="${encodeURIComponent(details.name)}">
               <i class="bi bi-share-fill"></i> <span class="d-none d-md-inline">Share</span>
             </button>`;
+          let downloadButtonHTML = '';
 
           if (type === 'playlist') {
             typeText = `Playlist by ${details.creator}`;
             document.title = `${details.name} - ${details.creator} - PHP Music`;
+            downloadButtonHTML = `
+              <a href="playlist_downloader.php?id=${details.public_id}" target="_blank" class="btn btn-outline-light border-0 ms-2" title="Download Playlist">
+                <i class="bi bi-download"></i> <span class="d-none d-md-inline">Download</span>
+              </a>`;
           } else if (type === 'profile') {
             typeText = 'My Profile';
             shareButtonHTML = '';
@@ -2900,7 +2945,10 @@ function perform_full_scan($db) {
                 <h2 class="name text-truncate text-truncate-width">${details.name}</h2>
                 <div class="stats">${statsText}</div>
               </div>
-              ${shareButtonHTML}
+              <div class="d-flex align-items-center">
+                ${shareButtonHTML}
+                ${downloadButtonHTML}
+              </div>
             </div>`;
           contentArea.insertAdjacentHTML('afterbegin', headerHTML);
         };
@@ -3045,7 +3093,7 @@ function perform_full_scan($db) {
                 dataValue = item.public_id;
                 publicId = item.public_id;
               } else {
-                name = item;
+                name = item.name || item;
                 subtext = null;
                 dataType = type.replace('get_','').slice(0, -1);
                 dataValue = name;
@@ -3053,6 +3101,8 @@ function perform_full_scan($db) {
                 publicId = '';
               }
               
+              const useridAttr = item.user_id ? `data-userid="${item.user_id}"` : '';
+
               const moreButton = (type === 'get_user_playlists') ? `
                 <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}">
                   <i class="bi bi-three-dots-vertical"></i>
@@ -3060,7 +3110,7 @@ function perform_full_scan($db) {
 
               if (type === 'get_albums' || type === 'get_user_playlists') {
                 return `<div class="col">
-                  <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" style="cursor: pointer;">
+                  <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
                     ${moreButton}
                     <img src="?action=get_image&id=${imageId || 0}" class="card-img-top rounded" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
                     <div class="card-body px-0 py-2">
@@ -3071,7 +3121,7 @@ function perform_full_scan($db) {
                 </div>`;
               } else {
                 return `<div class="col">
-                  <div class="card h-100 bg-transparent text-white border-0" data-${dataType}="${encodeURIComponent(dataValue)}" style="cursor: pointer;">
+                  <div class="card h-100 bg-transparent text-white border-0" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
                     <div class="d-flex align-items-center justify-content-center rounded" style="aspect-ratio: 1/1; background-color: var(--ytm-surface-2);">
                       <i class="bi ${icon}" style="font-size: 4rem; color: var(--ytm-secondary-text);"></i>
                     </div>
@@ -3105,7 +3155,7 @@ function perform_full_scan($db) {
                     `).join('');
                 } else if (shelf.type === 'albums') {
                     itemsHTML = shelf.items.map(album => `
-                        <div class="shelf-item" data-album="${encodeURIComponent(album.album)}">
+                        <div class="shelf-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
                             <img src="?action=get_image&id=${album.id || 0}" alt="${album.album}">
                             <div class="item-title">${album.album}</div>
                             <div class="item-subtitle">${album.artist}</div>
@@ -3249,9 +3299,12 @@ function perform_full_scan($db) {
           
           currentPage++;
           let data;
-          const { type, param, sort } = currentView;
+          const { type, param, sort, filter_user_id } = currentView;
           
           const params = new URLSearchParams({ page: currentPage, sort: sort });
+          if (filter_user_id) {
+            params.append('filter_user_id', filter_user_id);
+          }
 
           switch(type) {
             case 'get_songs':
@@ -3327,6 +3380,9 @@ function perform_full_scan($db) {
           
           let data;
           const params = new URLSearchParams({ sort: currentView.sort, page: 1 });
+          if (currentView.filter_user_id) {
+            params.append('filter_user_id', currentView.filter_user_id);
+          }
           
           switch (currentView.type) {
             case 'get_songs':
@@ -3391,7 +3447,7 @@ function perform_full_scan($db) {
               const name_param = currentView.param;
               updateContentTitle('', false);
 
-              const typeViewData = await fetchData(`?action=get_view_data&type=${type}&name=${name_param}&sort=${currentView.sort}&page=1`);
+              const typeViewData = await fetchData(`?action=get_view_data&type=${type}&name=${name_param}&${params.toString()}`);
               
               contentArea.innerHTML = '';
               if (typeViewData && typeViewData.details) {
@@ -3679,8 +3735,8 @@ function perform_full_scan($db) {
           
           let menuItems = `
             <li class="context-menu-item" data-action="share_song" data-id="${songId}" data-name="${encodeURIComponent(title)}"><i class="bi bi-share-fill"></i> Share Song</li>
-            <li class="context-menu-item" data-action="go_artist" data-name="${encodeURIComponent(artist)}"><i class="bi bi-person-fill"></i> Go to Artist</li>
-            <li class="context-menu-item" data-action="go_album" data-name="${encodeURIComponent(album)}"><i class="bi bi-disc-fill"></i> Go to Album</li>
+            <li class="context-menu-item" data-action="go_artist" data-name="${encodeURIComponent(artist)}" data-userid="${songUserId}"><i class="bi bi-person-fill"></i> Go to Artist</li>
+            <li class="context-menu-item" data-action="go_album" data-name="${encodeURIComponent(album)}" data-userid="${songUserId}"><i class="bi bi-disc-fill"></i> Go to Album</li>
             <li class="context-menu-item" data-action="show_all_genres"><i class="bi bi-tags-fill"></i> View All Genres</li>
             <li class="context-menu-item" data-action="download_song" data-id="${songId}"><i class="bi bi-download"></i> Download Song</li>
             <li class="context-menu-item" data-action="show_metadata" data-id="${songId}"><i class="bi bi-file-earmark-music"></i> View Metadata</li>
@@ -3785,10 +3841,10 @@ function perform_full_scan($db) {
               }
               const shuffledCurrentIndex = queue.findIndex(id => id === currentSongId);
               if (shuffledCurrentIndex > -1) {
-                [queue[0], queue[shuffledCurrentIndex]] = [queue[shuffledCurrentIndex], queue[0]];
+                [queue[0], queue[shuffledCurrentIndex]] =[queue[shuffledCurrentIndex], queue[0]];
               }
             } else {
-              queue = [...originalQueue];
+              queue =[...originalQueue];
             }
             queueIndex = queue.findIndex(id => id === currentSongId);
           }
@@ -3814,6 +3870,7 @@ function perform_full_scan($db) {
                         view_type: viewTypeForIds,
                         param: contextView.param,
                         sort: contextView.sort,
+                        filter_user_id: contextView.filter_user_id || ''
                     })
                 });
                 if (!allIds || allIds.length === 0) { return; }
@@ -3903,14 +3960,14 @@ function perform_full_scan($db) {
             if (viewType === 'get_history') sort = 'history_desc';
             if(viewType === 'get_songs') sort = 'id_desc';
 
-            loadView({ type: viewType, param: '', sort: sort });
+            loadView({ type: viewType, param: '', sort: sort, filter_user_id: '' });
             hideMobileSidebar();
           });
         });
 
         const performSearch = (query) => {
           if (query.trim() !== '') {
-            loadView({ type: 'search', param: query.trim(), sort: 'artist_asc' });
+            loadView({ type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '' });
           }
         };
         searchInputDesktop.addEventListener('keyup', (e) => { if (e.key === 'Enter') performSearch(e.target.value); });
@@ -3939,7 +3996,7 @@ function perform_full_scan($db) {
                 const result = await fetchData('?action=clear_history');
                 if (result && result.status === 'success') {
                     showToast(result.message, 'success');
-                    loadView({type: 'get_history', param: '', sort: 'history_desc'});
+                    loadView({type: 'get_history', param: '', sort: 'history_desc', filter_user_id: ''});
                 }
             }
         });
@@ -4025,21 +4082,24 @@ function perform_full_scan($db) {
           const songArtistEl = target.closest('.song-artist, .item-subtitle');
           if (songArtistEl) {
             const artistEl = songArtistEl.closest('[data-artist]');
+            const songItem = target.closest('.song-item, .shelf-item');
             if(artistEl) {
               e.stopPropagation();
-              loadView({ type: 'artist_songs', param: artistEl.dataset.artist, sort: 'album_asc' });
+              loadView({ type: 'artist_songs', param: artistEl.dataset.artist, sort: 'album_asc', filter_user_id: songItem ? songItem.dataset.songUserId || '' : '' });
               return;
             }
           }
           const songAlbumEl = target.closest('.song-album, .shelf-item[data-album]');
           if (songAlbumEl) {
             e.stopPropagation();
-            loadView({ type: 'album_songs', param: songAlbumEl.dataset.album, sort: 'title_asc' });
+            const songItem = target.closest('.song-item, .shelf-item');
+            loadView({ type: 'album_songs', param: songAlbumEl.dataset.album, sort: 'title_asc', filter_user_id: songItem ? songItem.dataset.userid || songItem.dataset.songUserId || '' : '' });
             return;
           }
           const cardEl = target.closest('.card, .shelf-item[data-playlist]');
           if (cardEl && !target.closest('.playlist-more-btn')) {
              let viewType, param, sort;
+             let filterUserId = cardEl.dataset.userid || '';
              if (cardEl.dataset.artist) {
                viewType = 'artist_songs';
                param = cardEl.dataset.artist;
@@ -4058,7 +4118,7 @@ function perform_full_scan($db) {
                sort = 'manual_order';
              }
              if (viewType) {
-               loadView({ type: viewType, param: param, sort: sort });
+               loadView({ type: viewType, param: param, sort: sort, filter_user_id: filterUserId });
              }
              return;
           }
@@ -4072,7 +4132,7 @@ function perform_full_scan($db) {
               if (viewType === 'get_history') sort = 'history_desc';
               if (viewType === 'artist_songs') sort = 'album_asc';
 
-              loadView({ type: viewType, param: viewParam || '', sort: sort });
+              loadView({ type: viewType, param: viewParam || '', sort: sort, filter_user_id: '' });
               return;
           }
 
@@ -4103,7 +4163,7 @@ function perform_full_scan($db) {
         contextMenu.addEventListener('click', async e => {
           const item = e.target.closest('.context-menu-item');
           if (!item) return;
-          const { action, name, id, publicId } = item.dataset;
+          const { action, name, id, publicId, userid } = item.dataset;
           contextMenu.style.display = 'none';
 
           switch (action) {
@@ -4118,7 +4178,7 @@ function perform_full_scan($db) {
               let view, sort;
               if (action === 'go_artist') { view = 'artist_songs'; sort = 'album_asc'; }
               if (action === 'go_album') { view = 'album_songs'; sort = 'title_asc'; }
-              loadView({ type: view, param: name, sort: sort });
+              loadView({ type: view, param: name, sort: sort, filter_user_id: userid || '' });
               hideMobileSidebar();
               break;
             case 'show_all_genres':
@@ -4232,7 +4292,7 @@ function perform_full_scan($db) {
             closeOpenModals();
             
             setTimeout(() => {
-              loadView({ type: 'genre_songs', param: genreName, sort: 'artist_asc' });
+              loadView({ type: 'genre_songs', param: genreName, sort: 'artist_asc', filter_user_id: '' });
               hideMobileSidebar();
             }, 200);
           });
@@ -4421,7 +4481,7 @@ function perform_full_scan($db) {
           await fetchData('?action=logout');
           currentUser = null;
           updateUIForAuthState();
-          loadView({ type: 'get_songs', param: '', sort: 'artist_asc' });
+          loadView({ type: 'get_songs', param: '', sort: 'artist_asc', filter_user_id: '' });
         };
         
         document.getElementById('profile-dropdown-logout-desktop').addEventListener('click', handleLogout);
@@ -4652,7 +4712,7 @@ function perform_full_scan($db) {
           if (window.initialView) {
             loadView(window.initialView);
           } else {
-            loadView({ type: 'get_songs', param: '', sort: 'id_desc' });
+            loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
           }
         };
 

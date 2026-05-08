@@ -75,7 +75,6 @@ if (isset($_GET['serve']) && isset($_GET['file'])) {
     die("File not found on server.");
   }
 
-  // Use provided title, otherwise build from DB (fallback)
   if ($title_param !== null) {
     $download_name = sanitize_filename($title_param) . '.mp3';
   } else {
@@ -102,16 +101,17 @@ if (isset($_GET['serve']) && isset($_GET['file'])) {
   exit;
 }
 
-$playlist_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+$playlist_public_id = isset($_GET['id']) ? trim($_GET['id']) : '';
 $db = get_db();
 $playlist = null;
 $songs = [];
 
-if ($playlist_id > 0) {
-  $stmt = $db->prepare("SELECT id, name FROM playlists WHERE id = ?");
-  $stmt->execute([$playlist_id]);
+if (!empty($playlist_public_id)) {
+  $stmt = $db->prepare("SELECT id, name FROM playlists WHERE public_id = ?");
+  $stmt->execute([$playlist_public_id]);
   $playlist = $stmt->fetch();
   if ($playlist) {
+    $numeric_playlist_id = $playlist['id'];
     $stmt = $db->prepare("
       SELECT m.id, m.title, m.artist, m.album, m.duration
       FROM playlist_songs ps
@@ -119,7 +119,7 @@ if ($playlist_id > 0) {
       WHERE ps.playlist_id = ?
       ORDER BY ps.sort_order ASC, ps.added_at ASC
     ");
-    $stmt->execute([$playlist_id]);
+    $stmt->execute([$numeric_playlist_id]);
     $songs = $stmt->fetchAll();
   }
 }
@@ -290,7 +290,7 @@ if ($playlist_id > 0) {
             <form method="GET" class="mb-4">
               <div class="mb-3">
                 <label for="playlist_id" class="form-label">Playlist ID</label>
-                <input type="number" class="form-control" id="playlist_id" name="id" placeholder="Enter numeric ID">
+                <input type="text" class="form-control" id="playlist_id" name="id" placeholder="Enter Playlist Public ID">
               </div>
               <button type="submit" class="btn btn-danger">Load Playlist</button>
             </form>
@@ -523,7 +523,6 @@ if ($playlist_id > 0) {
         log(`Ready. ${allSongs.length} songs loaded.`);
       });
       <?php else: ?>
-      // ✅ FIXED: Single song download now uses "Title - Artist.mp3" format
       document.getElementById('download_song_btn')?.addEventListener('click', async () => {
         const songId = parseInt(document.getElementById('song_id_input').value);
         if (isNaN(songId) || songId <= 0) {
@@ -537,9 +536,7 @@ if ($playlist_id > 0) {
             return;
           }
           const song = await response.json();
-          // Build the same filename format as playlist manual downloads
           const safeTitle = (song.title + ' - ' + (song.artist || 'Unknown')).replace(/[^a-zA-Z0-9\s\.\-\(\)\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g, '_');
-          // Pass it as a title parameter so the server uses it
           const url = `?serve=1&file=${encodeURIComponent(songId)}&title=${encodeURIComponent(safeTitle)}`;
           const a = document.createElement('a');
           a.href = url;
