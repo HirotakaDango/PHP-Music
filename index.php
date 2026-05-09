@@ -1793,7 +1793,7 @@ if (isset($_GET['action'])) {
       if (empty($public_id)) { http_response_code(400); exit; }
 
       $stmt = $db->prepare("
-        SELECT p.name, m.file FROM playlists p 
+        SELECT p.name, m.file, m.title, m.artist FROM playlists p 
         JOIN playlist_songs ps ON p.id = ps.playlist_id 
         JOIN music m ON ps.song_id = m.id 
         WHERE p.public_id = ? AND p.user_id = ?
@@ -1805,13 +1805,17 @@ if (isset($_GET['action'])) {
       if (empty($rows)) { http_response_code(404); exit; }
 
       $playlist_name = $rows[0]['name'];
-      $song_filenames = array_map(function($row) {
-        return basename($row['file']);
+      $song_data = array_map(function($row) {
+        return[
+          'title' => $row['title'],
+          'artist' => $row['artist'],
+          'filename' => basename(str_replace('\\', '/', $row['file']))
+        ];
       }, $rows);
 
       $export_data =[
         'name' => $playlist_name,
-        'songs' => $song_filenames
+        'songs' => $song_data
       ];
       
       header('Content-Type: application/json');
@@ -1825,7 +1829,8 @@ if (isset($_GET['action'])) {
       
       $file = $_FILES['playlist_file'];
       if ($file['error'] !== UPLOAD_ERR_OK) { http_response_code(400); send_json(['status' => 'error', 'message' => 'Upload error: ' . $file['error']]); }
-      if ($file['type'] !== 'application/json') { http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid file type. Only JSON is allowed.']); }
+      $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+      if ($file['type'] !== 'application/json' && $ext !== 'json') { http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid file type. Only JSON is allowed.']); }
       
       $json_content = file_get_contents($file['tmp_name']);
       $import_data = json_decode($json_content, true);
@@ -1841,16 +1846,35 @@ if (isset($_GET['action'])) {
         $stmt_create->execute([$user_id, $import_data['name'], $public_id]);
         $playlist_id = $db->lastInsertId();
 
-        $stmt_find_song = $db->prepare("SELECT id FROM music WHERE file LIKE ? LIMIT 1");
+        $stmt_find_exact = $db->prepare("SELECT id FROM music WHERE title = ? AND artist = ? LIMIT 1");
+        $stmt_find_fallback = $db->prepare("SELECT id FROM music WHERE file LIKE ? OR file LIKE ? LIMIT 1");
         $stmt_insert_song = $db->prepare("INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, sort_order) VALUES (?, ?, ?)");
         
         $song_count = 0;
         $order = 0;
-        foreach ($import_data['songs'] as $filename) {
-          $stmt_find_song->execute(['%/' . basename($filename)]);
-          $song = $stmt_find_song->fetch();
-          if ($song) {
-            $stmt_insert_song->execute([$playlist_id, $song['id'], $order++]);
+        foreach ($import_data['songs'] as $song) {
+          $found = null;
+          if (is_array($song)) {
+            $title = $song['title'] ?? '';
+            $artist = $song['artist'] ?? '';
+            $filename = basename(str_replace('\\', '/', $song['filename'] ?? ''));
+
+            if ($title && $artist) {
+              $stmt_find_exact->execute([$title, $artist]);
+              $found = $stmt_find_exact->fetch();
+            }
+            if (!$found && $filename) {
+              $stmt_find_fallback->execute(['%/' . $filename, '%\\' . $filename]);
+              $found = $stmt_find_fallback->fetch();
+            }
+          } else {
+            $filename = basename(str_replace('\\', '/', $song));
+            $stmt_find_fallback->execute(['%/' . $filename, '%\\' . $filename]);
+            $found = $stmt_find_fallback->fetch();
+          }
+
+          if ($found) {
+            $stmt_insert_song->execute([$playlist_id, $found['id'], $order++]);
             $song_count++;
           }
         }
@@ -1863,7 +1887,7 @@ if (isset($_GET['action'])) {
       }
       break;
 
-    case 'fork_playlist':
+    case 'copy_playlist':
       if (!$user_id) { http_response_code(403); exit; }
       $public_id = $_POST['public_id'] ?? '';
       if (empty($public_id)) { http_response_code(400); exit; }
@@ -1873,11 +1897,11 @@ if (isset($_GET['action'])) {
       $source_playlist = $stmt_source->fetch();
 
       if (!$source_playlist) { http_response_code(404); send_json(['status' => 'error', 'message' => 'Playlist not found.']); }
-      if ($source_playlist['user_id'] == $user_id) { http_response_code(400); send_json(['status' => 'error', 'message' => 'Cannot fork your own playlist.']); }
+      if ($source_playlist['user_id'] == $user_id) { http_response_code(400); send_json(['status' => 'error', 'message' => 'Cannot copy your own playlist.']); }
 
       $db->beginTransaction();
       try {
-        $new_name = "Fork of " . $source_playlist['name'];
+        $new_name = "Copy of " . $source_playlist['name'];
         $new_public_id = bin2hex(random_bytes(8));
         $stmt_create = $db->prepare("INSERT INTO playlists (user_id, name, public_id) VALUES (?, ?, ?)");
         $stmt_create->execute([$user_id, $new_name, $new_public_id]);
@@ -1892,11 +1916,11 @@ if (isset($_GET['action'])) {
           $stmt_insert_song->execute([$new_playlist_id, $song['song_id'], $song['sort_order']]);
         }
         $db->commit();
-        send_json(['status' => 'success', 'message' => "Playlist forked successfully."]);
+        send_json(['status' => 'success', 'message' => "Playlist copied successfully."]);
       } catch (Exception $e) {
         $db->rollBack();
         http_response_code(500);
-        send_json(['status' => 'error', 'message' => 'Database error during fork: ' . $e->getMessage()]);
+        send_json(['status' => 'error', 'message' => 'Database error during copy: ' . $e->getMessage()]);
       }
       break;
   }
@@ -3092,7 +3116,7 @@ function perform_full_scan($db) {
         const renderViewDetailsHeader = (details, type) => {
           let typeText = type.charAt(0).toUpperCase() + type.slice(1);
           let statsText = `${details.song_count || 0} songs &bull; ${formatTime(details.total_duration || 0)}`;
-          let shareButtonHTML = '', forkButtonHTML = '', downloadButtonHTML = '';
+          let shareButtonHTML = '', copyButtonHTML = '', downloadButtonHTML = '';
           
           let shareId = '';
           let shareName = encodeURIComponent(details.name);
@@ -3104,7 +3128,7 @@ function perform_full_scan($db) {
             document.title = `${details.name} - ${details.creator} - PHP Music`;
             downloadButtonHTML = `<a href="playlist_downloader.php?id=${details.public_id}" target="_blank" class="btn btn-outline-light border-0" title="Download Playlist"><i class="bi bi-download"></i> <span class="d-none d-md-inline">Download</span></a>`;
             if (currentUser && currentUser.id !== details.user_id) {
-              forkButtonHTML = `<button class="btn btn-outline-light border-0 fork-playlist-btn" data-public-id="${details.public_id}"><i class="bi bi-sign-turn-right-fill"></i> <span class="d-none d-md-inline">Fork</span></button>`;
+              copyButtonHTML = `<button class="btn btn-outline-light border-0 copy-playlist-btn" data-public-id="${details.public_id}"><i class="bi bi-copy"></i> <span class="d-none d-md-inline">Copy Playlist</span></button>`;
             }
           } else if (type === 'artist') {
             shareId = artistIdForShare;
@@ -3135,7 +3159,7 @@ function perform_full_scan($db) {
                 <div class="stats">${statsText}</div>
               </div>
               <div class="d-flex align-items-center gap-2">
-                ${forkButtonHTML}
+                ${copyButtonHTML}
                 ${shareButtonHTML}
                 ${downloadButtonHTML}
               </div>
@@ -4290,13 +4314,13 @@ function perform_full_scan($db) {
             showShareModal(shareType, shareId, shareName, artistId);
             return;
           }
-          const forkBtn = target.closest('.fork-playlist-btn');
-          if (forkBtn) {
+          const copyBtn = target.closest('.copy-playlist-btn');
+          if (copyBtn) {
             e.stopPropagation();
-            if(confirm('Are you sure you want to fork this playlist?')) {
+            if(confirm('Are you sure you want to copy this playlist?')) {
               const formData = new FormData();
-              formData.append('public_id', forkBtn.dataset.publicId);
-              fetch('?action=fork_playlist', { method: 'POST', body: formData })
+              formData.append('public_id', copyBtn.dataset.publicId);
+              fetch('?action=copy_playlist', { method: 'POST', body: formData })
                 .then(res => res.json())
                 .then(data => {
                   showToast(data.message, data.status);
