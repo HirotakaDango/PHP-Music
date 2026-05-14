@@ -625,10 +625,16 @@ function process_image_to_webp($imageData, $target_width = 500, $quality = 75) {
   $sourceImage = @imagecreatefromstring($imageData);
   if (!$sourceImage) { return null; }
 
+  $src_w = imagesx($sourceImage);
+  $src_h = imagesy($sourceImage);
+  $min_dim = min($src_w, $src_h);
+  $src_x = (int)(($src_w - $min_dim) / 2);
+  $src_y = (int)(($src_h - $min_dim) / 2);
+
   $resizedImage = imagecreatetruecolor($target_width, $target_width);
   imagealphablending($resizedImage, false);
   imagesavealpha($resizedImage, true);
-  imagecopyresampled($resizedImage, $sourceImage, 0, 0, 0, 0, $target_width, $target_width, imagesx($sourceImage), imagesy($sourceImage));
+  imagecopyresampled($resizedImage, $sourceImage, 0, 0, $src_x, $src_y, $target_width, $target_width, $min_dim, $min_dim);
 
   ob_start();
   imagewebp($resizedImage, null, $quality);
@@ -1779,7 +1785,7 @@ if (isset($_GET['action'])) {
         GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
       ");
       $discovery_stmt->execute([':user_id' => $user_id]);
-      $discovery_albums = $discovery_stmt->fetchAll();
+      $discovery_albums = $discovery_albums_stmt->fetchAll();
       if (count($discovery_albums) > 0) {
         $shelves[] =['title' => 'Discover New Albums', 'type' => 'albums', 'items' => $discovery_albums];
       }
