@@ -880,13 +880,39 @@ if (isset($_GET['action'])) {
       $new_album = trim(htmlspecialchars($data['album'] ?? '', ENT_QUOTES, 'UTF-8'));
       $new_genre = trim(htmlspecialchars($data['genre'] ?? '', ENT_QUOTES, 'UTF-8'));
 
-      $stmt = $db->prepare("SELECT user_id FROM music WHERE id = ?");
+      $stmt = $db->prepare("SELECT user_id, file FROM music WHERE id = ?");
       $stmt->execute([$song_id]);
       $song = $stmt->fetch();
 
       if ($song && ($song['user_id'] == $user_id || $_SESSION['user_artist'] == 'Music Library')) {
         $stmt = $db->prepare("UPDATE music SET title = ?, album = ?, genre = ? WHERE id = ?");
         $stmt->execute([$new_title, $new_album, $new_genre, $song_id]);
+
+        if (file_exists(__DIR__ . '/getid3/write.php') && file_exists($song['file'])) {
+          require_once __DIR__ . '/getid3/write.php';
+          $tagwriter = new getid3_writetags;
+          $tagwriter->filename = $song['file'];
+          $ext = strtolower(pathinfo($song['file'], PATHINFO_EXTENSION));
+          if ($ext === 'mp3') {
+            $tagwriter->tagformats = ['id3v1', 'id3v2.3'];
+          } elseif ($ext === 'flac') {
+            $tagwriter->tagformats = ['metaflac'];
+          } elseif ($ext === 'ogg') {
+            $tagwriter->tagformats = ['vorbiscomment'];
+          } else {
+            $tagwriter->tagformats = ['id3v2.3'];
+          }
+          $tagwriter->overwrite_tags = true;
+          $tagwriter->tag_encoding = 'UTF-8';
+          $tagwriter->remove_other_tags = false;
+          $tagwriter->tag_data = [
+            'title' => [htmlspecialchars_decode($new_title, ENT_QUOTES)],
+            'album' => [htmlspecialchars_decode($new_album, ENT_QUOTES)],
+            'genre' => [htmlspecialchars_decode($new_genre, ENT_QUOTES)]
+          ];
+          $tagwriter->WriteTags();
+        }
+
         send_json(['status' => 'success', 'message' => 'Metadata updated successfully.']);
       } else {
         http_response_code(403);
@@ -2569,7 +2595,7 @@ function perform_full_scan($db) {
               <i class="bi bi-arrows-fullscreen"></i>
               <span>Full Screen</span>
             </a>
-            <div class="text-center my-5 small text-secondary">
+            <div class="text-center mt-5 small text-secondary">
               Made by <a href="https://github.com/HirotakaDango" target="_blank" class="text-decoration-none text-white-50">HirotakaDango</a>
             </div>
           </div>
