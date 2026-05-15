@@ -3215,7 +3215,7 @@ function perform_full_scan($db) {
         const renderViewDetailsHeader = (details, type) => {
           let typeText = type.charAt(0).toUpperCase() + type.slice(1);
           let statsText = `${details.song_count || 0} songs &bull; ${formatTime(details.total_duration || 0)}`;
-          let shareButtonHTML = '', copyButtonHTML = '', downloadButtonHTML = '';
+          let shareButtonHTML = '', copyButtonHTML = '', downloadButtonHTML = '', downloadExportPlaylistZipButtonHTML = '';
           
           let shareId = '';
           let shareName = encodeURIComponent(details.name);
@@ -3225,7 +3225,8 @@ function perform_full_scan($db) {
             typeText = `Playlist by ${details.creator}`;
             shareId = details.public_id;
             document.title = `${details.name} - ${details.creator} - PHP Music`;
-            downloadButtonHTML = `<a href="?action=export_playlist&id=${details.public_id}" target="_blank" class="btn btn-outline-light border-0" title="Export Playlist"><i class="bi bi-box-arrow-up"></i> <span class="d-none d-md-inline">Export</span></a>`;
+            downloadButtonHTML = `<a href="playlist_downloader.php?id=${details.public_id}" target="_blank" class="btn btn-outline-light border-0" title="Download Playlist"><i class="bi bi-download"></i> <span class="d-none d-md-inline">Download</span></a>`;
+            downloadExportPlaylistZipButtonHTML = `<a href="?action=export_playlist&id=${details.public_id}" target="_blank" class="btn btn-outline-light border-0" title="Export Playlist"><i class="bi bi-box-arrow-up"></i> <span class="d-none d-md-inline">Export</span></a>`;
             if (currentUser && currentUser.id !== details.user_id) {
               copyButtonHTML = `<button class="btn btn-outline-light border-0 copy-playlist-btn" data-public-id="${details.public_id}"><i class="bi bi-copy"></i> <span class="d-none d-md-inline">Copy Playlist</span></button>`;
             }
@@ -3261,6 +3262,7 @@ function perform_full_scan($db) {
                 ${copyButtonHTML}
                 ${shareButtonHTML}
                 ${downloadButtonHTML}
+                ${downloadExportPlaylistZipButtonHTML}
               </div>
             </div>`;
           contentArea.insertAdjacentHTML('afterbegin', headerHTML);
