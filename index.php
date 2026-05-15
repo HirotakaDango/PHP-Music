@@ -2565,7 +2565,11 @@ function perform_full_scan($db) {
               <i class="bi bi-eraser-fill"></i>
               <span>Clear Cache</span>
             </a>
-            <div class="text-center mt-3 small text-secondary">
+            <a href="#" class="nav-link" id="fullscreen-btn">
+              <i class="bi bi-arrows-fullscreen"></i>
+              <span>Full Screen</span>
+            </a>
+            <div class="text-center my-5 small text-secondary">
               Made by <a href="https://github.com/HirotakaDango" target="_blank" class="text-decoration-none text-white-50">HirotakaDango</a>
             </div>
           </div>
@@ -2887,7 +2891,7 @@ function perform_full_scan($db) {
             <form id="import-playlist-form">
               <div class="mb-3">
                 <label for="import-playlist-file" class="form-label">Select JSON file</label>
-                <input type="file" class="form-control" id="import-playlist-file" accept="application/json" required>
+                <input type="file" class="form-control" id="import-playlist-file" accept="application/json,.json" required>
               </div>
               <button type="submit" class="btn btn-danger w-100">Import</button>
             </form>
@@ -2906,7 +2910,7 @@ function perform_full_scan($db) {
             <form id="import-favorites-form">
               <div class="mb-3">
                 <label for="import-favorites-file" class="form-label">Select JSON file</label>
-                <input type="file" class="form-control" id="import-favorites-file" accept="application/json" required>
+                <input type="file" class="form-control" id="import-favorites-file" accept="application/json,.json" required>
               </div>
               <button type="submit" class="btn btn-danger w-100">Import</button>
             </form>
@@ -3026,6 +3030,7 @@ function perform_full_scan($db) {
         const infiniteScrollLoader = document.getElementById('infinite-scroll-loader');
         const installPwaBtn = document.getElementById('install-pwa-btn');
         const clearCacheBtn = document.getElementById('clear-cache-btn');
+        const fullscreenBtn = document.getElementById('fullscreen-btn');
         const fullScanModalEl = document.getElementById('full-scan-modal');
         const fullScanIframe = document.getElementById('full-scan-iframe');
 
@@ -3117,6 +3122,45 @@ function perform_full_scan($db) {
           volumeDown: `<i class="bi bi-volume-down-fill"></i>`,
           volumeMute: `<i class="bi bi-volume-mute-fill"></i>`,
         };
+
+        const updateFullscreenIcon = () => {
+          if (fullscreenBtn) {
+            const isFull = document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement || document.mozFullScreenElement;
+            fullscreenBtn.innerHTML = isFull ? '<i class="bi bi-fullscreen-exit"></i><span>Exit Full Screen</span>' : '<i class="bi bi-arrows-fullscreen"></i><span>Full Screen</span>';
+          }
+        };
+
+        if (fullscreenBtn) {
+          fullscreenBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            if (!document.fullscreenElement && !document.webkitFullscreenElement && !document.msFullscreenElement && !document.mozFullScreenElement) {
+              if (document.documentElement.requestFullscreen) {
+                document.documentElement.requestFullscreen();
+              } else if (document.documentElement.webkitRequestFullscreen) {
+                document.documentElement.webkitRequestFullscreen();
+              } else if (document.documentElement.msRequestFullscreen) {
+                document.documentElement.msRequestFullscreen();
+              } else if (document.documentElement.mozRequestFullScreen) {
+                document.documentElement.mozRequestFullScreen();
+              }
+            } else {
+              if (document.exitFullscreen) {
+                document.exitFullscreen();
+              } else if (document.webkitExitFullscreen) {
+                document.webkitExitFullscreen();
+              } else if (document.msExitFullscreen) {
+                document.msExitFullscreen();
+              } else if (document.mozCancelFullScreen) {
+                document.mozCancelFullScreen();
+              }
+            }
+          });
+        }
+        
+        document.addEventListener('fullscreenchange', updateFullscreenIcon);
+        document.addEventListener('webkitfullscreenchange', updateFullscreenIcon);
+        document.addEventListener('MSFullscreenChange', updateFullscreenIcon);
+        document.addEventListener('mozfullscreenchange', updateFullscreenIcon);
 
         const formatTime = (seconds) => {
           if (isNaN(seconds) || seconds < 0) return '0:00';
@@ -3277,7 +3321,6 @@ function perform_full_scan($db) {
             if (!contentArea.querySelector('.view-details-header') && currentView.type !== 'get_favorites') {
               contentArea.innerHTML = '';
             } else if (currentView.type === 'get_favorites' && !contentArea.querySelector('.song-list')) {
-              // Header exists but list doesn't, keep header.
             }
           }
 
@@ -4301,7 +4344,7 @@ function perform_full_scan($db) {
         };
         
         allNavLinks.forEach(link => {
-          if (link.getAttribute('data-bs-toggle') === 'modal' || link.id === 'logout-btn' || link.id === 'clear-cache-btn') return;
+          if (link.getAttribute('data-bs-toggle') === 'modal' || link.id === 'logout-btn' || link.id === 'clear-cache-btn' || link.id === 'fullscreen-btn') return;
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
