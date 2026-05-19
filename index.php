@@ -462,7 +462,7 @@ function init_db($db) {
 
   if ($music_table_exists) {
     if (!in_array('bitrate', $music_columns)) {
-        $db->exec("ALTER TABLE music ADD COLUMN bitrate INTEGER;");
+      $db->exec("ALTER TABLE music ADD COLUMN bitrate INTEGER;");
     }
   }
   
@@ -585,6 +585,30 @@ function process_image_to_webp($imageData, $target_width = 500, $quality = 75) {
   imagedestroy($sourceImage);
   imagedestroy($resizedImage);
   return $webpData;
+}
+
+function process_image_to_jpeg($imageData, $target_width = 500, $quality = 85) {
+  if (!$imageData || !function_exists('imagecreatefromstring') || !function_exists('imagejpeg')) {
+    return null;
+  }
+  $sourceImage = @imagecreatefromstring($imageData);
+  if (!$sourceImage) { return null; }
+
+  $src_w = imagesx($sourceImage);
+  $src_h = imagesy($sourceImage);
+  $min_dim = min($src_w, $src_h);
+  $src_x = (int)(($src_w - $min_dim) / 2);
+  $src_y = (int)(($src_h - $min_dim) / 2);
+
+  $resizedImage = imagecreatetruecolor($target_width, $target_width);
+  imagecopyresampled($resizedImage, $sourceImage, 0, 0, $src_x, $src_y, $target_width, $target_width, $min_dim, $min_dim);
+
+  ob_start();
+  imagejpeg($resizedImage, null, $quality);
+  $jpegData = ob_get_clean();
+  imagedestroy($sourceImage);
+  imagedestroy($resizedImage);
+  return $jpegData;
 }
 
 if (isset($_GET['action'])) {
@@ -780,8 +804,8 @@ if (isset($_GET['action'])) {
       if (isset($_FILES['song'])) {
         $file = $_FILES['song'];
         if ($file['error'] !== UPLOAD_ERR_OK) {
-            http_response_code(400);
-            send_json(['status' => 'error', 'message' => 'Upload error: ' . $file['error']]);
+          http_response_code(400);
+          send_json(['status' => 'error', 'message' => 'Upload error: ' . $file['error']]);
         }
         $getID3 = new getID3;
         $info = $getID3->analyze($file['tmp_name']);
@@ -874,19 +898,35 @@ if (isset($_GET['action'])) {
 
     case 'edit_metadata':
       if (!$user_id) { http_response_code(403); exit; }
-      $data = json_decode(file_get_contents('php://input'), true);
-      $song_id = intval($data['id']);
-      $new_title = trim(htmlspecialchars($data['title'] ?? '', ENT_QUOTES, 'UTF-8'));
-      $new_album = trim(htmlspecialchars($data['album'] ?? '', ENT_QUOTES, 'UTF-8'));
-      $new_genre = trim(htmlspecialchars($data['genre'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $song_id = intval($_POST['id'] ?? 0);
+      $new_title = trim(htmlspecialchars($_POST['title'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $new_artist = trim(htmlspecialchars($_POST['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $new_album = trim(htmlspecialchars($_POST['album'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $new_genre = trim(htmlspecialchars($_POST['genre'] ?? '', ENT_QUOTES, 'UTF-8'));
 
       $stmt = $db->prepare("SELECT user_id, file FROM music WHERE id = ?");
       $stmt->execute([$song_id]);
       $song = $stmt->fetch();
 
       if ($song && ($song['user_id'] == $user_id || $_SESSION['user_artist'] == 'Music Library')) {
-        $stmt = $db->prepare("UPDATE music SET title = ?, album = ?, genre = ? WHERE id = ?");
-        $stmt->execute([$new_title, $new_album, $new_genre, $song_id]);
+        $update_fields = ["title = ?", "artist = ?", "album = ?", "genre = ?"];
+        $update_params = [$new_title, $new_artist, $new_album, $new_genre];
+
+        $jpeg_data = null;
+        $webp_data = null;
+        if (isset($_FILES['cover_image']) && $_FILES['cover_image']['error'] === UPLOAD_ERR_OK) {
+          $raw_img = file_get_contents($_FILES['cover_image']['tmp_name']);
+          $webp_data = process_image_to_webp($raw_img);
+          $jpeg_data = process_image_to_jpeg($raw_img);
+          if ($webp_data) {
+            $update_fields[] = "image = ?";
+            $update_params[] = $webp_data;
+          }
+        }
+
+        $update_params[] = $song_id;
+        $stmt = $db->prepare("UPDATE music SET " . implode(", ", $update_fields) . " WHERE id = ?");
+        $stmt->execute($update_params);
 
         if (file_exists(__DIR__ . '/getid3/write.php') && file_exists($song['file'])) {
           require_once __DIR__ . '/getid3/write.php';
@@ -907,9 +947,21 @@ if (isset($_GET['action'])) {
           $tagwriter->remove_other_tags = false;
           $tagwriter->tag_data = [
             'title' => [htmlspecialchars_decode($new_title, ENT_QUOTES)],
+            'artist' => [htmlspecialchars_decode($new_artist, ENT_QUOTES)],
             'album' => [htmlspecialchars_decode($new_album, ENT_QUOTES)],
             'genre' => [htmlspecialchars_decode($new_genre, ENT_QUOTES)]
           ];
+
+          if ($jpeg_data) {
+            $tagwriter->tag_data['attached_picture'] = [
+              [
+                'data' => $jpeg_data,
+                'picturetypeid' => 3,
+                'description' => 'Cover',
+                'mime' => 'image/jpeg'
+              ]
+            ];
+          }
           $tagwriter->WriteTags();
         }
 
@@ -1162,45 +1214,45 @@ if (isset($_GET['action'])) {
       break;
 
     case 'get_artists':
-        $sort_key = $_GET['sort'] ?? 'name_asc';
-        $stmt = $db->query("SELECT artist FROM music WHERE artist != '' AND artist IS NOT NULL");
-        $rows = $stmt->fetchAll();
-        $artists = [];
-        foreach ($rows as $row) {
-            $parts = preg_split('/\s*(?:\/|,|&)\s*/', $row['artist']);
-            foreach ($parts as $part) {
-                $p = trim($part);
-                if ($p !== '') {
-                    $key = strtolower($p);
-                    if (!isset($artists[$key])) {
-                        $artists[$key] = ['name' => $p];
-                    }
-                }
+      $sort_key = $_GET['sort'] ?? 'name_asc';
+      $stmt = $db->query("SELECT artist FROM music WHERE artist != '' AND artist IS NOT NULL");
+      $rows = $stmt->fetchAll();
+      $artists = [];
+      foreach ($rows as $row) {
+        $parts = preg_split('/\s*(?:\/|,|&)\s*/', $row['artist']);
+        foreach ($parts as $part) {
+          $p = trim($part);
+          if ($p !== '') {
+            $key = strtolower($p);
+            if (!isset($artists[$key])) {
+              $artists[$key] = ['name' => $p];
             }
+          }
         }
-        if ($sort_key === 'name_desc') {
-            usort($artists, function($a, $b) { return strcasecmp($b['name'], $a['name']); });
-        } else {
-            usort($artists, function($a, $b) { return strcasecmp($a['name'], $b['name']); });
-        }
-        $sliced = array_slice($artists, $offset, PAGE_SIZE);
-        send_json(array_values($sliced));
-        break;
+      }
+      if ($sort_key === 'name_desc') {
+        usort($artists, function($a, $b) { return strcasecmp($b['name'], $a['name']); });
+      } else {
+        usort($artists, function($a, $b) { return strcasecmp($a['name'], $b['name']); });
+      }
+      $sliced = array_slice($artists, $offset, PAGE_SIZE);
+      send_json(array_values($sliced));
+      break;
 
     case 'get_albums':
-        $sort_key = $_GET['sort'] ?? 'album_asc';
-        $sort_map = [
-            'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC',
-            'album_desc' => 'ORDER BY m.album COLLATE NOCASE DESC',
-            'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC',
-            'artist_desc' => 'ORDER BY m.artist COLLATE NOCASE DESC',
-            'year_desc' => 'ORDER BY MAX(m.year) DESC',
-            'year_asc' => 'ORDER BY MAX(m.year) ASC',
-        ];
-        $order_by = $sort_map[$sort_key] ?? $sort_map['album_asc'];
-        $stmt = $db->query("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album != '' AND m.album IS NOT NULL GROUP BY m.album, m.user_id " . $order_by . $limit_clause);
-        send_json($stmt->fetchAll());
-        break;
+      $sort_key = $_GET['sort'] ?? 'album_asc';
+      $sort_map = [
+        'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC',
+        'album_desc' => 'ORDER BY m.album COLLATE NOCASE DESC',
+        'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC',
+        'artist_desc' => 'ORDER BY m.artist COLLATE NOCASE DESC',
+        'year_desc' => 'ORDER BY MAX(m.year) DESC',
+        'year_asc' => 'ORDER BY MAX(m.year) ASC',
+      ];
+      $order_by = $sort_map[$sort_key] ?? $sort_map['album_asc'];
+      $stmt = $db->query("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album != '' AND m.album IS NOT NULL GROUP BY m.album, m.user_id " . $order_by . $limit_clause);
+      send_json($stmt->fetchAll());
+      break;
     
     case 'get_genres':
       $stmt = $db->query("SELECT DISTINCT genre FROM music WHERE genre != '' AND genre IS NOT NULL ORDER BY genre COLLATE NOCASE" . $limit_clause);
@@ -1331,31 +1383,31 @@ if (isset($_GET['action'])) {
       break;
 
     case 'get_user_profile':
-        if (!$user_id) { http_response_code(403); exit; }
-        $stmt_user = $db->prepare("SELECT artist FROM users WHERE id = ?");
-        $stmt_user->execute([$user_id]);
-        $profile = $stmt_user->fetch();
+      if (!$user_id) { http_response_code(403); exit; }
+      $stmt_user = $db->prepare("SELECT artist FROM users WHERE id = ?");
+      $stmt_user->execute([$user_id]);
+      $profile = $stmt_user->fetch();
 
-        if (!$profile) { http_response_code(404); exit; }
-        
-        $profile['image_url'] = '?action=get_profile_picture&id=' . $user_id . '&v=' . time();
-        send_json($profile);
-        break;
+      if (!$profile) { http_response_code(404); exit; }
+      
+      $profile['image_url'] = '?action=get_profile_picture&id=' . $user_id . '&v=' . time();
+      send_json($profile);
+      break;
 
     case 'get_user_stats':
-        if (!$user_id) { http_response_code(403); exit; }
-        $stats = [];
-        $stats_queries = [
-            'uploads' => "SELECT COUNT(*) FROM music WHERE user_id = {$user_id}",
-            'favorites' => "SELECT COUNT(*) FROM favorites WHERE user_id = {$user_id}",
-            'playlists' => "SELECT COUNT(*) FROM playlists WHERE user_id = {$user_id}",
-            'play_count' => "SELECT SUM(play_count) FROM play_counts WHERE user_id = {$user_id}"
-        ];
-        foreach ($stats_queries as $key => $query) {
-            $stats[$key] = $db->query($query)->fetchColumn() ?: 0;
-        }
-        send_json(['stats' => $stats]);
-        break;
+      if (!$user_id) { http_response_code(403); exit; }
+      $stats = [];
+      $stats_queries = [
+        'uploads' => "SELECT COUNT(*) FROM music WHERE user_id = {$user_id}",
+        'favorites' => "SELECT COUNT(*) FROM favorites WHERE user_id = {$user_id}",
+        'playlists' => "SELECT COUNT(*) FROM playlists WHERE user_id = {$user_id}",
+        'play_count' => "SELECT SUM(play_count) FROM play_counts WHERE user_id = {$user_id}"
+      ];
+      foreach ($stats_queries as $key => $query) {
+        $stats[$key] = $db->query($query)->fetchColumn() ?: 0;
+      }
+      send_json(['stats' => $stats]);
+      break;
 
     case 'search':
       $query = '%' . ($_GET['q'] ?? '') . '%';
@@ -1384,7 +1436,7 @@ if (isset($_GET['action'])) {
       $file_path = $stmt->fetchColumn();
       if ($file_path && file_exists($file_path)) {
         session_write_close();
-        while (ob_get_level()) { ob_end_clean(); }
+        while (ob_get_level() > 0) { ob_end_clean(); }
         $filesize = filesize($file_path);
         
         $mime_type = 'audio/mpeg';
@@ -1404,16 +1456,22 @@ if (isset($_GET['action'])) {
         $length = $filesize;
 
         if (isset($_SERVER['HTTP_RANGE'])) {
-          $range = $_SERVER['HTTP_RANGE'];
-          $range = str_replace('bytes=', '', $range);
-          list($start_range, $end_range) = explode('-', $range, 2);
-          $start = intval($start_range);
-          if ($end_range !== '') {
-            $end = intval($end_range);
+          $range = str_replace('bytes=', '', $_SERVER['HTTP_RANGE']);
+          $parts = explode('-', $range, 2);
+          $start = intval($parts[0]);
+          if (isset($parts[1]) && $parts[1] !== '') {
+            $end = intval($parts[1]);
+          }
+          if ($start > $end || $start >= $filesize) {
+            header('HTTP/1.1 416 Range Not Satisfiable');
+            header("Content-Range: bytes */$filesize");
+            exit;
           }
           $length = $end - $start + 1;
           header('HTTP/1.1 206 Partial Content');
           header("Content-Range: bytes $start-$end/$filesize");
+        } else {
+          header('HTTP/1.1 200 OK');
         }
 
         header('Content-Length: ' . $length);
@@ -1423,10 +1481,10 @@ if (isset($_GET['action'])) {
           fseek($f, $start);
           $chunk_size = 1024 * 8;
           $bytes_left = $length;
+          ob_clean();
+          flush();
           while ($bytes_left > 0 && !feof($f)) {
-            if (connection_aborted()) {
-              break;
-            }
+            if (connection_aborted()) break;
             $read_size = min($chunk_size, $bytes_left);
             $data = fread($f, $read_size);
             if ($data === false) break;
@@ -2583,7 +2641,7 @@ function perform_full_scan($db) {
               <i class="bi bi-hdd-stack-fill"></i>
               <span>Scan All</span>
             </a>
-            <a href="#" class="nav-link d-none" id="install-pwa-btn">
+            <a href="#" class="nav-link" id="install-pwa-btn">
               <i class="bi bi-cloud-arrow-down-fill"></i>
               <span>Install App</span>
             </a>
@@ -2958,12 +3016,11 @@ function perform_full_scan($db) {
     </div>
     <div class="modal fade" id="metadata-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header border-0">
-            <h5 class="modal-title">Song Metadata</h5>
+        <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
+          <div class="modal-header border-0 pb-0">
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body" id="metadata-modal-body">
+          <div class="modal-body pt-0" id="metadata-modal-body">
           </div>
         </div>
       </div>
@@ -2976,11 +3033,20 @@ function perform_full_scan($db) {
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body">
-            <form id="edit-metadata-form">
+            <form id="edit-metadata-form" enctype="multipart/form-data">
               <input type="hidden" id="edit-metadata-id">
+              <div class="mb-3 text-center">
+                <img id="edit-metadata-cover-preview" src="" class="img-thumbnail bg-transparent border-secondary mb-2" style="width: 150px; height: 150px; object-fit: cover; border-radius: 8px;">
+                <input type="file" class="form-control form-control-sm" id="edit-metadata-cover" accept="image/*">
+                <small class="text-secondary d-block mt-1">Upload a new cover image (1:1 crop)</small>
+              </div>
               <div class="mb-3">
                 <label class="form-label">Title</label>
                 <input type="text" class="form-control" id="edit-metadata-title">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Artist</label>
+                <input type="text" class="form-control" id="edit-metadata-artist">
               </div>
               <div class="mb-3">
                 <label class="form-label">Album</label>
@@ -4370,7 +4436,7 @@ function perform_full_scan($db) {
         };
         
         allNavLinks.forEach(link => {
-          if (link.getAttribute('data-bs-toggle') === 'modal' || link.id === 'logout-btn' || link.id === 'clear-cache-btn' || link.id === 'fullscreen-btn') return;
+          if (link.getAttribute('data-bs-toggle') === 'modal' || link.id === 'logout-btn' || link.id === 'clear-cache-btn' || link.id === 'fullscreen-btn' || link.id === 'install-pwa-btn') return;
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
@@ -4683,10 +4749,15 @@ function perform_full_scan($db) {
               }
               break;
             case 'edit_metadata':
+              const songItemEl = document.querySelector(`.song-item[data-song-id="${id}"]`);
+              const songArtist = songItemEl ? decodeURIComponent(songItemEl.dataset.songArtist) : '';
               document.getElementById('edit-metadata-id').value = id;
               document.getElementById('edit-metadata-title').value = decodeURIComponent(title || '');
+              document.getElementById('edit-metadata-artist').value = songArtist;
               document.getElementById('edit-metadata-album').value = decodeURIComponent(album || '');
               document.getElementById('edit-metadata-genre').value = decodeURIComponent(genre || '');
+              document.getElementById('edit-metadata-cover-preview').src = `?action=get_image&id=${id}&v=${Date.now()}`;
+              document.getElementById('edit-metadata-cover').value = '';
               if (editMetadataModal) editMetadataModal.show();
               break;
             case 'show_metadata':
@@ -4802,17 +4873,20 @@ function perform_full_scan($db) {
         window.addEventListener('beforeinstallprompt', (e) => {
           e.preventDefault();
           deferredInstallPrompt = e;
-          installPwaBtn.classList.remove('d-none');
         });
 
-        installPwaBtn.addEventListener('click', async (e) => {
-          e.preventDefault();
-          if (!deferredInstallPrompt) return;
-          deferredInstallPrompt.prompt();
-          await deferredInstallPrompt.userChoice;
-          deferredInstallPrompt = null;
-          installPwaBtn.classList.add('d-none');
-        });
+        if (installPwaBtn) {
+          installPwaBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            if (!deferredInstallPrompt) {
+              showToast('To install, use your browser menu (Add to Home Screen).', 'info');
+              return;
+            }
+            deferredInstallPrompt.prompt();
+            await deferredInstallPrompt.userChoice;
+            deferredInstallPrompt = null;
+          });
+        }
 
         clearCacheBtn.addEventListener('click', async (e) => {
           e.preventDefault();
@@ -4965,15 +5039,21 @@ function perform_full_scan($db) {
         if (editMetadataForm) {
           editMetadataForm.addEventListener('submit', async e => {
             e.preventDefault();
-            const id = document.getElementById('edit-metadata-id').value;
-            const title = document.getElementById('edit-metadata-title').value;
-            const album = document.getElementById('edit-metadata-album').value;
-            const genre = document.getElementById('edit-metadata-genre').value;
+            const formData = new FormData();
+            formData.append('id', document.getElementById('edit-metadata-id').value);
+            formData.append('title', document.getElementById('edit-metadata-title').value);
+            formData.append('artist', document.getElementById('edit-metadata-artist').value);
+            formData.append('album', document.getElementById('edit-metadata-album').value);
+            formData.append('genre', document.getElementById('edit-metadata-genre').value);
+            
+            const coverInput = document.getElementById('edit-metadata-cover');
+            if (coverInput && coverInput.files.length > 0) {
+              formData.append('cover_image', coverInput.files[0]);
+            }
             
             const result = await fetchData('?action=edit_metadata', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id: id, title: title, album: album, genre: genre })
+              body: formData
             });
             
             if (result && result.status === 'success') {
@@ -4982,6 +5062,19 @@ function perform_full_scan($db) {
               loadView(currentView);
             }
           });
+
+          const coverInput = document.getElementById('edit-metadata-cover');
+          if (coverInput) {
+            coverInput.addEventListener('change', function(e) {
+              if (this.files && this.files[0]) {
+                const reader = new FileReader();
+                reader.onload = e => {
+                  document.getElementById('edit-metadata-cover-preview').src = e.target.result;
+                };
+                reader.readAsDataURL(this.files[0]);
+              }
+            });
+          }
         }
         
         const handleLogout = async () => {
