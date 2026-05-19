@@ -877,6 +877,7 @@ if (isset($_GET['action'])) {
       $song = $stmt->fetch();
 
       if ($song && file_exists($song['file'])) {
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         $ext = pathinfo($song['file'], PATHINFO_EXTENSION);
         $dl_name = trim(($song['title'] ?? '') . (($song['artist'] && $song['title']) ? ' - ' : '') . ($song['artist'] ?? ''));
         $dl_name = $dl_name ? $dl_name . '.' . $ext : basename($song['file']);
@@ -886,8 +887,7 @@ if (isset($_GET['action'])) {
         finfo_close($finfo);
         header('Content-Length: ' . filesize($song['file']));
         header("Content-Disposition: attachment; filename=\"song." . $ext . "\"; filename*=UTF-8''" . $encoded);
-        ob_clean();
-        flush();
+        @flush();
         readfile($song['file']);
         exit;
       } else {
@@ -1436,7 +1436,7 @@ if (isset($_GET['action'])) {
       $file_path = $stmt->fetchColumn();
       if ($file_path && file_exists($file_path)) {
         session_write_close();
-        while (ob_get_level() > 0) { ob_end_clean(); }
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         $filesize = filesize($file_path);
         
         $mime_type = 'audio/mpeg';
@@ -1481,15 +1481,14 @@ if (isset($_GET['action'])) {
           fseek($f, $start);
           $chunk_size = 1024 * 8;
           $bytes_left = $length;
-          ob_clean();
-          flush();
+          @flush();
           while ($bytes_left > 0 && !feof($f)) {
             if (connection_aborted()) break;
             $read_size = min($chunk_size, $bytes_left);
             $data = fread($f, $read_size);
             if ($data === false) break;
             echo $data;
-            flush();
+            @flush();
             $bytes_left -= strlen($data);
           }
           fclose($f);
@@ -2388,6 +2387,7 @@ function perform_full_scan($db) {
       .song-artist-name, .view-details-header-info .name {
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
+      .song-item .song-title-wrapper { grid-column: 2; grid-row: 1; min-width: 0; }
       .song-item .song-title { color: var(--ytm-primary-text); font-weight: 500; }
       .song-item .song-thumb {
         width: 40px; height: 40px; object-fit: cover; border-radius: 4px; background-color: var(--ytm-surface);
@@ -2420,9 +2420,10 @@ function perform_full_scan($db) {
       .player-bar .track-info { display: flex; align-items: center; gap: 1rem; min-width: 0; }
       .player-bar .track-info-art { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
       .player-bar .track-info-text { overflow: hidden; }
-      .player-bar .track-info-text .title, .player-bar .track-info-text .artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .player-bar .track-info-text .title, .player-bar .track-info-text .artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
       .player-bar .track-info-text .title { font-weight: 500; }
       .player-bar .track-info-text .artist { color: var(--ytm-secondary-text); font-size: 0.875rem; }
+      .player-bar .track-info-text .artist:hover { text-decoration: underline; }
       .player-bar .player-controls { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; }
       .player-bar .player-buttons { display: flex; align-items: center; justify-content: center; gap: 1.5rem; width: 100%; }
       .player-btn {
@@ -2499,6 +2500,7 @@ function perform_full_scan($db) {
       .shelf-item img { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 6px; margin-bottom: 0.5rem; background-color: var(--ytm-surface-2); }
       .shelf-item .item-title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .shelf-item .item-subtitle { font-size: 0.875rem; color: var(--ytm-secondary-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .shelf-item .item-subtitle:hover { text-decoration: underline; }
       .user-profile-page, .user-stats-page { text-align: center; padding: 2rem; }
       .user-profile-page .profile-picture-lg { width: 200px; height: 200px; margin-bottom: 1.5rem; }
       .user-profile-page .display-name { font-size: 2.5rem; font-weight: 700; }
@@ -2537,8 +2539,8 @@ function perform_full_scan($db) {
         .song-item { grid-template-columns: 40px minmax(0, 1fr) 40px; grid-template-rows: auto auto; padding: 0.75rem 0.5rem; border-radius: 0; border-bottom: 1px solid var(--ytm-surface-2); }
         .song-item .song-album, .song-item .song-artist, .song-item .song-duration { display: none; }
         .song-item .song-thumb, .song-item .song-indicator-wrapper { grid-row: 1 / span 2; }
-        .song-item .song-title-wrapper { grid-column: 2; grid-row: 1; }
-        .song-item .song-artist-mobile { display: flex !important; justify-content: space-between; align-items: center; grid-column: 2; grid-row: 2; font-size: 0.8rem; color: var(--ytm-secondary-text); gap: 1rem; }
+        .song-item .song-title-wrapper { grid-column: 2; grid-row: 1; min-width: 0; }
+        .song-item .song-artist-mobile { display: flex !important; justify-content: space-between; align-items: center; grid-column: 2; grid-row: 2; font-size: 0.8rem; color: var(--ytm-secondary-text); gap: 0.5rem; min-width: 0; }
         .song-duration-mobile { display: block !important; flex-shrink: 0; }
         .song-item .song-more { grid-column: 3; grid-row: 1 / span 2; }
         .view-details-header { flex-direction: column; align-items: center; text-align: center; }
@@ -2554,7 +2556,8 @@ function perform_full_scan($db) {
       #player-modal-art { width: 100%; max-width: 400px; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
       .player-modal-track-info { text-align: left; margin-bottom: 1rem; }
       .player-modal-track-info .title { font-weight: 700; font-size: 1.5rem; }
-      .player-modal-track-info .artist { color: var(--ytm-secondary-text); font-size: 1rem; }
+      .player-modal-track-info .artist { color: var(--ytm-secondary-text); font-size: 1rem; cursor: pointer; }
+      .player-modal-track-info .artist:hover { text-decoration: underline; }
       .player-modal-progress { width: 100%; margin-bottom: 1rem; }
       .player-modal-progress .time-stamps { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--ytm-secondary-text); margin-top: 0.5rem; }
       .player-modal-controls { display: flex; justify-content: space-around; align-items: center; margin-bottom: 1.5rem; }
@@ -2566,6 +2569,7 @@ function perform_full_scan($db) {
       .player-modal-extra-controls { display: flex; justify-content: space-between; align-items: center; }
       .add-to-playlist-item { cursor: pointer; }
       .add-to-playlist-item:hover { background-color: var(--ytm-surface-2); }
+      .song-artist:hover, .song-artist-name:hover { text-decoration: underline; }
     </style>
   </head>
   <body class="logged-out">
@@ -3062,6 +3066,18 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+    <div class="modal fade" id="artists-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content" style="background: var(--ytm-surface); border: 1px solid #444;">
+          <div class="modal-header border-0 pb-0">
+            <h5 class="modal-title">Artists</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-0" id="artists-modal-body">
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="modal fade" id="share-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -3145,6 +3161,9 @@ function perform_full_scan($db) {
         const metadataModalBody = document.getElementById('metadata-modal-body');
         const editMetadataModalEl = document.getElementById('edit-metadata-modal');
         const editMetadataModal = editMetadataModalEl ? new bootstrap.Modal(editMetadataModalEl) : null;
+        const artistsModalEl = document.getElementById('artists-modal');
+        const artistsModal = artistsModalEl ? new bootstrap.Modal(artistsModalEl) : null;
+        const artistsModalBody = document.getElementById('artists-modal-body');
         const shareModalEl = document.getElementById('share-modal');
         const shareModal = shareModalEl ? new bootstrap.Modal(shareModalEl) : null;
         const shareModalTitle = document.getElementById('share-modal-title');
@@ -3431,7 +3450,7 @@ function perform_full_scan($db) {
             songList.className = 'song-list';
             const isHistory = currentView.type === 'get_history';
             const header = `<div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) ${isHistory ? 'minmax(0, 2fr)' : ''} 80px 40px;">
-              <div>#</div><div>Title</div><div>Artist</div><div>Album</div>${isHistory ? '<div>Played</div>' : ''}<div>Time</div><div></div>
+              <div></div><div>Title</div><div>Artist</div><div>Album</div>${isHistory ? '<div>Played</div>' : ''}<div>Time</div><div></div>
             </div>`;
             contentArea.insertAdjacentHTML('beforeend', header);
             contentArea.appendChild(songList);
@@ -3456,9 +3475,9 @@ function perform_full_scan($db) {
                 <img src="?action=get_image&id=${song.id}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                 <i class="bi bi-soundwave playing-icon"></i>
               </div>
-              <div class="song-title-wrapper"><div class="song-title">${song.title}</div></div>
-              <div class="song-artist" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${song.artist}</div>
-              <div class="song-album" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
+              <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.title}</div></div>
+              <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${song.artist}</div>
+              <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
               ${isHistory ? `<div class="d-none d-md-block">${playedAtHTML}</div>` : ''}
               <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
               <div class="song-more">
@@ -3466,10 +3485,10 @@ function perform_full_scan($db) {
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>
               </div>
-              <div class="song-artist-mobile d-md-none">
-                <span class="song-artist-name">${song.artist}</span>
+              <div class="song-artist-mobile d-md-none w-100">
+                <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
                 ${isHistory ? playedAtHTML : ''}
-                <span class="song-duration-mobile">${formatTime(song.duration)}</span>
+                <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
               </div>
             </div>
           `}).join('');
@@ -4539,6 +4558,51 @@ function perform_full_scan($db) {
             }
           });
         }
+
+        const closeOpenModals = () => {
+          [playerModalEl, genresModalEl, artistsModalEl].forEach(el => {
+            if (!el) return;
+            const instance = bootstrap.Modal.getInstance(el);
+            if (instance && instance._isShown) instance.hide();
+          });
+        };
+
+        playerElements.artist.forEach(el => {
+          el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (!currentSong) return;
+            const artistRaw = currentSong.artist;
+            const userId = currentSong.user_id || '';
+            const artistsList = artistRaw.split(/\s*(?:,|&|\/)\s*/).filter(a => a.trim() !== '');
+            if (artistsList.length > 1) {
+              if (artistsModalBody) {
+                artistsModalBody.innerHTML = `
+                  <div class="list-group list-group-flush rounded">
+                    ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userId}">${a}</button>`).join('')}
+                  </div>
+                `;
+                if (artistsModal) artistsModal.show();
+              }
+            } else {
+              closeOpenModals();
+              loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId });
+            }
+          });
+        });
+
+        if (artistsModalBody) {
+          artistsModalBody.addEventListener('click', e => {
+            const btn = e.target.closest('.artist-modal-item');
+            if (!btn) return;
+            const artistName = decodeURIComponent(btn.dataset.artist);
+            const userId = btn.dataset.userid;
+            closeOpenModals();
+            setTimeout(() => {
+              loadView({ type: 'artist_songs', param: artistName, sort: 'album_asc', filter_user_id: userId });
+              hideMobileSidebar();
+            }, 200);
+          });
+        }
         
         contentArea.addEventListener('click', e => {
           const target = e.target;
@@ -4598,10 +4662,25 @@ function perform_full_scan($db) {
             importPlaylistModal.show();
             return;
           }
-          const songArtistEl = target.closest('.song-artist, .item-subtitle[data-artist]');
+          const songArtistEl = target.closest('.song-artist, .song-artist-name, .item-subtitle[data-artist]');
           if (songArtistEl) {
             e.stopPropagation();
-            loadView({ type: 'artist_songs', param: songArtistEl.dataset.artist, sort: 'album_asc', filter_user_id: songArtistEl.dataset.userid || '' });
+            const artistRaw = songArtistEl.dataset.artist ? decodeURIComponent(songArtistEl.dataset.artist) : songArtistEl.textContent.trim();
+            const userId = songArtistEl.dataset.userid || '';
+            const artistsList = artistRaw.split(/\s*(?:,|&|\/)\s*/).filter(a => a.trim() !== '');
+            
+            if (artistsList.length > 1) {
+              if (artistsModalBody) {
+                artistsModalBody.innerHTML = `
+                  <div class="list-group list-group-flush rounded">
+                    ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userId}">${a}</button>`).join('')}
+                  </div>
+                `;
+                if (artistsModal) artistsModal.show();
+              }
+            } else {
+              loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId });
+            }
             return;
           }
           const songAlbumEl = target.closest('.song-album, .shelf-item[data-album]');
@@ -4663,17 +4742,6 @@ function perform_full_scan($db) {
             contextMenu.style.display = 'none';
           }
         });
-
-        const closeOpenModals = () => {
-          const playerModalInstance = bootstrap.Modal.getInstance(playerModalEl);
-          if (playerModalInstance && playerModalInstance._isShown) {
-            playerModalInstance.hide();
-          }
-          const genresModalInstance = bootstrap.Modal.getInstance(genresModalEl);
-          if (genresModalInstance && genresModalInstance._isShown) {
-            genresModalInstance.hide();
-          }
-        };
         
         contextMenu.addEventListener('click', async e => {
           const item = e.target.closest('.context-menu-item');
@@ -4688,12 +4756,26 @@ function perform_full_scan($db) {
               showShareModal('song', id, name);
               break;
             case 'go_artist':
+              closeOpenModals();
+              const artistRaw = decodeURIComponent(name);
+              const artistsList = artistRaw.split(/\s*(?:,|&|\/)\s*/).filter(a => a.trim() !== '');
+              if (artistsList.length > 1) {
+                if (artistsModalBody) {
+                  artistsModalBody.innerHTML = `
+                    <div class="list-group list-group-flush rounded">
+                      ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userid}">${a}</button>`).join('')}
+                    </div>
+                  `;
+                  if (artistsModal) artistsModal.show();
+                }
+              } else {
+                loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userid || '' });
+                hideMobileSidebar();
+              }
+              break;
             case 'go_album':
               closeOpenModals();
-              let view, sort;
-              if (action === 'go_artist') { view = 'artist_songs'; sort = 'album_asc'; }
-              if (action === 'go_album') { view = 'album_songs'; sort = 'title_asc'; }
-              loadView({ type: view, param: name, sort: sort, filter_user_id: userid || '' });
+              loadView({ type: 'album_songs', param: name, sort: 'title_asc', filter_user_id: userid || '' });
               hideMobileSidebar();
               break;
             case 'show_all_genres':
@@ -4766,10 +4848,10 @@ function perform_full_scan($db) {
               if (metaSongData && metadataModalBody) {
                   metadataModalBody.innerHTML = `
                     <ul class="list-group list-group-flush">
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Title:</strong> <span>${metaSongData.title || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Artist:</strong> <span>${metaSongData.artist || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Album:</strong> <span>${metaSongData.album || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Genre:</strong> <span>${metaSongData.genre || 'N/A'}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Title:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.title || 'N/A'}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Artist:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.artist || 'N/A'}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Album:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.album || 'N/A'}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Genre:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.genre || 'N/A'}</span></li>
                       <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Year:</strong> <span>${metaSongData.year || 'N/A'}</span></li>
                       <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Duration:</strong> <span>${formatTime(metaSongData.duration)}</span></li>
                       <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Bitrate:</strong> <span>${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + ' kbps' : 'N/A'}</span></li>
