@@ -1783,20 +1783,20 @@ if (isset($_GET['action'])) {
       $recent_favorites_stmt->execute([':user_id' => $user_id]);
       $recent_favorites = $recent_favorites_stmt->fetchAll();
       if (count($recent_favorites) > 0) {
-          $shelves[] = ['title' => 'Your Favorites', 'type' => 'songs', 'items' => $recent_favorites, 'connected_view' => 'get_favorites'];
+        $shelves[] = ['title' => 'Your Favorites', 'type' => 'songs', 'items' => $recent_favorites, 'connected_view' => 'get_favorites'];
       }
 
       $recent_playlists_stmt = $db->prepare("
-          SELECT p.name, p.public_id, u.artist as creator,
-          (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
-          FROM playlists p JOIN users u ON p.user_id = u.id
-          WHERE p.user_id = :user_id
-          ORDER BY p.created_at DESC LIMIT 5
+        SELECT p.name, p.public_id, u.artist as creator,
+        (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
+        FROM playlists p JOIN users u ON p.user_id = u.id
+        WHERE p.user_id = :user_id
+        ORDER BY p.created_at DESC LIMIT 5
       ");
       $recent_playlists_stmt->execute([':user_id' => $user_id]);
       $recent_playlists = $recent_playlists_stmt->fetchAll();
       if (count($recent_playlists) > 0) {
-          $shelves[] = ['title' => 'Your Playlists', 'type' => 'playlists', 'items' => $recent_playlists, 'connected_view' => 'get_user_playlists'];
+        $shelves[] = ['title' => 'Your Playlists', 'type' => 'playlists', 'items' => $recent_playlists, 'connected_view' => 'get_user_playlists'];
       }
 
       $discovery_songs_stmt = $db->prepare("
@@ -1817,7 +1817,7 @@ if (isset($_GET['action'])) {
         GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
       ");
       $discovery_stmt->execute([':user_id' => $user_id]);
-      $discovery_albums = $discovery_albums_stmt->fetchAll();
+      $discovery_albums = $discovery_stmt->fetchAll();
       if (count($discovery_albums) > 0) {
         $shelves[] = ['title' => 'Discover New Albums', 'type' => 'albums', 'items' => $discovery_albums];
       }
@@ -2149,58 +2149,79 @@ function perform_full_scan($db) {
   try {
     foreach ($files_to_process as $filePath => $mtime) {
       $processed_count++;
+      @set_time_limit(30);
       echo "[$processed_count/$total_to_process] Processing: " . basename($filePath) . "\n";
       
-      $info = $getID3->analyze($filePath);
-      getid3_lib::CopyTagsToComments($info);
-      
-      $title = trim($info['comments']['title'][0] ?? pathinfo($filePath, PATHINFO_FILENAME));
-      $artist_tag = trim($info['comments']['artist'][0] ?? 'Unknown Artist');
-      $album = trim($info['comments']['album'][0] ?? 'Unknown Album');
-      $genre = trim($info['comments']['genre'][0] ?? 'Unknown Genre');
-      $year = (int)($info['comments']['year'][0] ?? 0);
-      $duration = (int)($info['playtime_seconds'] ?? 0);
-      $bitrate = (int)($info['audio']['bitrate'] ?? 0);
-      $raw_image_data = $info['comments']['picture'][0]['data'] ?? null;
-      $webp_image_data = process_image_to_webp($raw_image_data);
-      
-      $file_user_id = $library_user_id;
+      try {
+        $info = $getID3->analyze($filePath);
+        getid3_lib::CopyTagsToComments($info);
+        
+        $title = trim($info['comments']['title'][0] ?? pathinfo($filePath, PATHINFO_FILENAME));
+        $artist_tag = trim($info['comments']['artist'][0] ?? 'Unknown Artist');
+        $album = trim($info['comments']['album'][0] ?? 'Unknown Album');
+        $genre = trim($info['comments']['genre'][0] ?? 'Unknown Genre');
+        $year = (int)($info['comments']['year'][0] ?? 0);
+        $duration = (int)($info['playtime_seconds'] ?? 0);
+        $bitrate = (int)($info['audio']['bitrate'] ?? 0);
+        $raw_image_data = $info['comments']['picture'][0]['data'] ?? null;
+        $webp_image_data = process_image_to_webp($raw_image_data);
+        
+        $file_user_id = $library_user_id;
 
-      $main_artist = trim(preg_split('/\s*(?:\/|,|&)\s*/', $artist_tag)[0]);
+        $main_artist = trim(preg_split('/\s*(?:\/|,|&)\s*/', $artist_tag)[0]);
 
-      if ($main_artist !== 'Unknown Artist' && !empty($main_artist)) {
-        $find_user_stmt->execute([$main_artist]);
-        $found_user_id = $find_user_stmt->fetchColumn();
-        if ($found_user_id) {
-          $file_user_id = $found_user_id;
-        } else {
-          echo " -> New artist found: '{$main_artist}'. Creating account.\n";
-          $sanitized_artist_base = sanitize_for_path($main_artist);
-          $password = $sanitized_artist_base;
-          $hash = password_hash($password, PASSWORD_DEFAULT);
-          
-          $email = $sanitized_artist_base . '@mail.com';
-          $counter = 1;
-          while (true) {
-            $check_email_stmt->execute([$email]);
-            if (!$check_email_stmt->fetch()) break;
-            $counter++;
-            $email = $sanitized_artist_base . $counter . '@mail.com';
+        if ($main_artist !== 'Unknown Artist' && !empty($main_artist)) {
+          $find_user_stmt->execute([$main_artist]);
+          $found_user_id = $find_user_stmt->fetchColumn();
+          if ($found_user_id) {
+            $file_user_id = $found_user_id;
+          } else {
+            echo " -> New artist found: '{$main_artist}'. Creating account.\n";
+            $sanitized_artist_base = sanitize_for_path($main_artist);
+            $password = $sanitized_artist_base;
+            $hash = password_hash($password, PASSWORD_DEFAULT);
+            
+            $email = $sanitized_artist_base . '@mail.com';
+            $counter = 1;
+            while (true) {
+              $check_email_stmt->execute([$email]);
+              if (!$check_email_stmt->fetch()) break;
+              $counter++;
+              $email = $sanitized_artist_base . $counter . '@mail.com';
+            }
+            
+            $insert_user_stmt->execute([$email, $main_artist, $hash]);
+            $file_user_id = $db->lastInsertId();
+            echo " -> Account created with ID: {$file_user_id}, Email: {$email}\n";
           }
-          
-          $insert_user_stmt->execute([$email, $main_artist, $hash]);
-          $file_user_id = $db->lastInsertId();
-          echo " -> Account created with ID: {$file_user_id}, Email: {$email}\n";
         }
+
+        $insert_stmt->execute([$file_user_id, $filePath, $title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime]);
+      } catch (Exception $file_exception) {
+        echo " -> Error processing " . basename($filePath) . ": " . $file_exception->getMessage() . "\n";
       }
 
-      $insert_stmt->execute([$file_user_id, $filePath, $title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime]);
+      unset($info);
+      unset($webp_image_data);
+
+      if ($processed_count % 50 === 0) {
+        $db->commit();
+        $db->beginTransaction();
+        $getID3 = new getID3;
+        gc_collect_cycles();
+      }
     }
 
     foreach ($files_to_delete as $filePath => $mtime) {
       $processed_count++;
       echo "[$processed_count/$total_to_process] Deleting: " . basename($filePath) . "\n";
       $delete_stmt->execute([$filePath]);
+
+      if ($processed_count % 50 === 0) {
+        $db->commit();
+        $db->beginTransaction();
+        gc_collect_cycles();
+      }
     }
     
     $db->commit();
@@ -3792,7 +3813,7 @@ function perform_full_scan($db) {
             params.append('filter_user_id', filter_user_id);
           }
 
-          switch(type) {
+          switch (type) {
             case 'get_songs':
             case 'get_favorites':
             case 'get_history':
@@ -3852,7 +3873,7 @@ function perform_full_scan($db) {
         const updateActiveNavLink = (viewType) => {
           allNavLinks.forEach(l => l.classList.remove('active'));
           let activeLink;
-          switch(viewType) {
+          switch (viewType) {
             case 'artist_songs': activeLink = document.querySelector('.nav-link[data-view="get_artists"]'); break;
             case 'album_songs': activeLink = document.querySelector('.nav-link[data-view="get_albums"]'); break;
             case 'genre_songs': activeLink = document.querySelector('.nav-link[data-view="get_genres"]'); break;
@@ -3877,7 +3898,7 @@ function perform_full_scan($db) {
           
           let data;
           let pageParams = new URLSearchParams({ sort: currentView.sort, page: 1 });
-          if(currentView.filter_user_id) pageParams.append('filter_user_id', currentView.filter_user_id);
+          if (currentView.filter_user_id) pageParams.append('filter_user_id', currentView.filter_user_id);
           
           switch (currentView.type) {
             case 'get_songs':
@@ -3898,18 +3919,18 @@ function perform_full_scan($db) {
               }
               break;
             case 'get_user_stats':
-                updateContentTitle('My Statistics', !!currentUser);
-                if (currentUser) {
-                  const userStatsData = await fetchData(`?action=get_user_stats`);
-                  if(userStatsData) renderUserStats(userStatsData);
-                } else {
-                  contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your statistics.</div>`;
-                }
-                allContentloaded = true;
-                break;
+              updateContentTitle('My Statistics', !!currentUser);
+              if (currentUser) {
+                const userStatsData = await fetchData(`?action=get_user_stats`);
+                if (userStatsData) renderUserStats(userStatsData);
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your statistics.</div>`;
+              }
+              allContentloaded = true;
+              break;
             case 'get_favorites':
               updateContentTitle('Favorites', !!currentUser);
-              if(currentUser) {
+              if (currentUser) {
                 contentArea.innerHTML = `<div class="p-3 d-flex gap-2">
                   <a href="?action=export_favorites" class="btn btn-outline-light" id="export-favorites-btn"><i class="bi bi-box-arrow-up"></i> Export Favorites</a>
                   <button class="btn btn-outline-light" id="import-favorites-btn"><i class="bi bi-box-arrow-in-down"></i> Import Favorites</button>
@@ -3921,24 +3942,24 @@ function perform_full_scan($db) {
               }
               break;
             case 'get_history':
-                updateContentTitle('History', !!currentUser);
-                if(currentUser) {
-                  data = await fetchData(`?action=get_history&${pageParams.toString()}`);
-                  renderSongs(data, false);
-                } else {
-                  contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your history.</div>`;
-                }
-                break;
+              updateContentTitle('History', !!currentUser);
+              if (currentUser) {
+                data = await fetchData(`?action=get_history&${pageParams.toString()}`);
+                renderSongs(data, false);
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your history.</div>`;
+              }
+              break;
             case 'get_recommendations':
-                updateContentTitle('For You', !!currentUser);
-                 if(currentUser) {
-                  data = await fetchData(`?action=get_recommendations`);
-                  renderRecommendations(data);
-                } else {
-                  contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to get recommendations.</div>`;
-                }
-                allContentloaded = true;
-                break;
+              updateContentTitle('For You', !!currentUser);
+              if (currentUser) {
+                data = await fetchData(`?action=get_recommendations`);
+                renderRecommendations(data);
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to get recommendations.</div>`;
+              }
+              allContentloaded = true;
+              break;
             case 'get_albums':
             case 'get_artists':
             case 'get_genres':
@@ -3990,7 +4011,7 @@ function perform_full_scan($db) {
                 songToHighlight.style.transition = 'background-color 2s ease';
                 songToHighlight.style.backgroundColor = 'rgba(255, 0, 0, 0.3)';
                 setTimeout(() => {
-                    songToHighlight.style.backgroundColor = '';
+                  songToHighlight.style.backgroundColor = '';
                 }, 2000);
               }
             }, 500);
@@ -4268,7 +4289,7 @@ function perform_full_scan($db) {
             menuItems += `<li class="context-menu-item" data-action="toggle_favorite" data-id="${songId}">${favIcon} ${favText}</li>`;
             menuItems += `<li class="context-menu-item" data-action="add_to_playlist" data-id="${songId}"><i class="bi bi-plus-lg"></i> Add to Playlist</li>`;
             if (currentView.type === 'playlist_songs') {
-                menuItems += `<li class="context-menu-item text-danger" data-action="remove_from_playlist" data-id="${songId}"><i class="bi bi-x-circle-fill"></i> Remove from Playlist</li>`;
+              menuItems += `<li class="context-menu-item text-danger" data-action="remove_from_playlist" data-id="${songId}"><i class="bi bi-x-circle-fill"></i> Remove from Playlist</li>`;
             }
             if (currentUser.id === songUserId || currentUser.artist === 'Music Library') {
               menuItems += `<hr class="dropdown-divider bg-secondary mx-2 my-1">`;
@@ -4373,37 +4394,37 @@ function perform_full_scan($db) {
         };
 
         const setQueueAndPlay = async (startId, view) => {
-            const contextView = view || currentView;
-            if (contextView.type === 'get_recommendations') {
-                const allShelfSongs = [...document.querySelectorAll('.shelf-item[data-song-id]')];
-                const allSongIds = allShelfSongs.map(item => parseInt(item.dataset.songId));
-                originalQueue = allSongIds;
-            } else {
-                let viewTypeForIds = contextView.type;
-                if (contextView.type === 'user_profile') {
-                    viewTypeForIds = 'get_profile_songs';
-                }
-                const allIds = await fetchData('?action=get_view_ids', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        view_type: viewTypeForIds,
-                        param: contextView.param,
-                        sort: contextView.sort,
-                        filter_user_id: contextView.filter_user_id || ''
-                    })
-                });
-                if (!allIds || allIds.length === 0) { return; }
-                originalQueue = allIds;
+          const contextView = view || currentView;
+          if (contextView.type === 'get_recommendations') {
+            const allShelfSongs = [...document.querySelectorAll('.shelf-item[data-song-id]')];
+            const allSongIds = allShelfSongs.map(item => parseInt(item.dataset.songId));
+            originalQueue = allSongIds;
+          } else {
+            let viewTypeForIds = contextView.type;
+            if (contextView.type === 'user_profile') {
+              viewTypeForIds = 'get_profile_songs';
             }
+            const allIds = await fetchData('?action=get_view_ids', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                view_type: viewTypeForIds,
+                param: contextView.param,
+                sort: contextView.sort,
+                filter_user_id: contextView.filter_user_id || ''
+              })
+            });
+            if (!allIds || allIds.length === 0) { return; }
+            originalQueue = allIds;
+          }
           
-            queue = [...originalQueue];
-            if (isShuffle) { 
-               isShuffle = false; toggleShuffle();
-            }
-            queueIndex = queue.findIndex(id => id === startId);
-            if (queueIndex === -1) { return; }
-            playSongById(startId);
+          queue = [...originalQueue];
+          if (isShuffle) { 
+            isShuffle = false; toggleShuffle();
+          }
+          queueIndex = queue.findIndex(id => id === startId);
+          if (queueIndex === -1) { return; }
+          playSongById(startId);
         };
 
         const hideMobileSidebar = () => {
@@ -4426,9 +4447,9 @@ function perform_full_scan($db) {
               holdTimer = setTimeout(() => {
                 isHolding = true;
                 skipInterval = setInterval(() => {
-                   if (!audio.duration || !isFinite(audio.duration)) return;
-                   const change = direction === 'next' ? 5 : -5;
-                   audio.currentTime = Math.max(0, Math.min(audio.duration, audio.currentTime + change));
+                  if (!audio.duration || !isFinite(audio.duration)) return;
+                  const change = direction === 'next' ? 5 : -5;
+                  audio.currentTime = Math.max(0, Math.min(audio.duration, audio.currentTime + change));
                 }, 200);
               }, 400);
             };
@@ -4456,10 +4477,10 @@ function perform_full_scan($db) {
             btn.addEventListener('touchcancel', endHold, {passive: false});
             
             btn.addEventListener('keydown', (e) => {
-               if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  defaultAction();
-               }
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                defaultAction();
+              }
             });
           });
         };
@@ -4478,7 +4499,7 @@ function perform_full_scan($db) {
             if (viewType === 'get_artists') sort = 'name_asc';
             if (viewType === 'user_profile') sort = 'id_desc';
             if (viewType === 'get_history') sort = 'history_desc';
-            if(viewType === 'get_songs') sort = 'id_desc';
+            if (viewType === 'get_songs') sort = 'id_desc';
 
             loadView({ type: viewType, param: '', sort: sort, filter_user_id: '' });
             hideMobileSidebar();
@@ -4512,13 +4533,13 @@ function perform_full_scan($db) {
         }
         
         clearHistoryBtn.addEventListener('click', async () => {
-            if (confirm('Are you sure you want to clear your entire listening history? This cannot be undone.')) {
-                const result = await fetchData('?action=clear_history');
-                if (result && result.status === 'success') {
-                    showToast(result.message, 'success');
-                    loadView({type: 'get_history', param: '', sort: 'history_desc', filter_user_id: ''});
-                }
+          if (confirm('Are you sure you want to clear your entire listening history? This cannot be undone.')) {
+            const result = await fetchData('?action=clear_history');
+            if (result && result.status === 'success') {
+              showToast(result.message, 'success');
+              loadView({type: 'get_history', param: '', sort: 'history_desc', filter_user_id: ''});
             }
+          }
         });
         
         playerElements.playPauseBtn.forEach(btn => btn.addEventListener('click', togglePlayPause));
@@ -4641,14 +4662,14 @@ function perform_full_scan($db) {
           const copyBtn = target.closest('.copy-playlist-btn');
           if (copyBtn) {
             e.stopPropagation();
-            if(confirm('Are you sure you want to copy this playlist?')) {
+            if (confirm('Are you sure you want to copy this playlist?')) {
               const formData = new FormData();
               formData.append('public_id', copyBtn.dataset.publicId);
               fetch('?action=copy_playlist', { method: 'POST', body: formData })
                 .then(res => res.json())
                 .then(data => {
                   showToast(data.message, data.status);
-                  if(data.status === 'success') loadView({ type: 'get_user_playlists', sort: 'name_asc' });
+                  if (data.status === 'success') loadView({ type: 'get_user_playlists', sort: 'name_asc' });
                 });
             }
             return;
@@ -4702,42 +4723,42 @@ function perform_full_scan($db) {
           }
           const cardEl = target.closest('.card, .shelf-item[data-playlist]');
           if (cardEl && !target.closest('.playlist-more-btn')) {
-             let viewType, param, sort;
-             let filterUserId = cardEl.dataset.userid || '';
-             if (cardEl.dataset.artist) {
-               viewType = 'artist_songs';
-               param = cardEl.dataset.artist;
-               sort = 'album_asc';
-             } else if (cardEl.dataset.album) {
-               viewType = 'album_songs';
-               param = cardEl.dataset.album;
-               sort = 'title_asc';
-             } else if (cardEl.dataset.genre) {
-               viewType = 'genre_songs';
-               param = cardEl.dataset.genre;
-               sort = 'artist_asc';
-             } else if (cardEl.dataset.playlist) {
-               viewType = 'playlist_songs';
-               param = cardEl.dataset.playlist;
-               sort = 'manual_order';
-             }
-             if (viewType) {
-               loadView({ type: viewType, param: param, sort: sort, filter_user_id: filterUserId });
-             }
-             return;
+            let viewType, param, sort;
+            let filterUserId = cardEl.dataset.userid || '';
+            if (cardEl.dataset.artist) {
+              viewType = 'artist_songs';
+              param = cardEl.dataset.artist;
+              sort = 'album_asc';
+            } else if (cardEl.dataset.album) {
+              viewType = 'album_songs';
+              param = cardEl.dataset.album;
+              sort = 'title_asc';
+            } else if (cardEl.dataset.genre) {
+              viewType = 'genre_songs';
+              param = cardEl.dataset.genre;
+              sort = 'artist_asc';
+            } else if (cardEl.dataset.playlist) {
+              viewType = 'playlist_songs';
+              param = cardEl.dataset.playlist;
+              sort = 'manual_order';
+            }
+            if (viewType) {
+              loadView({ type: viewType, param: param, sort: sort, filter_user_id: filterUserId });
+            }
+            return;
           }
           const seeAllButton = target.closest('.shelf-header button');
           if (seeAllButton) {
-              e.stopPropagation();
-              const viewType = seeAllButton.dataset.view;
-              const viewParam = seeAllButton.dataset.viewParam;
-              let sort = 'artist_asc';
-              if (viewType === 'get_favorites' || viewType === 'get_user_playlists') sort = 'manual_order';
-              if (viewType === 'get_history') sort = 'history_desc';
-              if (viewType === 'artist_songs') sort = 'album_asc';
+            e.stopPropagation();
+            const viewType = seeAllButton.dataset.view;
+            const viewParam = seeAllButton.dataset.viewParam;
+            let sort = 'artist_asc';
+            if (viewType === 'get_favorites' || viewType === 'get_user_playlists') sort = 'manual_order';
+            if (viewType === 'get_history') sort = 'history_desc';
+            if (viewType === 'artist_songs') sort = 'album_asc';
 
-              loadView({ type: viewType, param: viewParam || '', sort: sort, filter_user_id: '' });
-              return;
+            loadView({ type: viewType, param: viewParam || '', sort: sort, filter_user_id: '' });
+            return;
           }
 
           const songItem = target.closest('.song-item, .shelf-item[data-song-id]');
@@ -4798,27 +4819,27 @@ function perform_full_scan($db) {
               songIdForPlaylist = parseInt(id);
               const playlists = await fetchData('?action=get_user_playlists');
               if (playlists && playlists.length > 0) {
-                  addToPlaylistModalBody.innerHTML = playlists.map(p => 
-                      `<li class="list-group-item list-group-item-action bg-transparent text-white add-to-playlist-item my-2 p-2 border rounded" data-playlist-id="${p.id}">${p.name}</li>`
-                  ).join('');
+                addToPlaylistModalBody.innerHTML = playlists.map(p => 
+                  `<li class="list-group-item list-group-item-action bg-transparent text-white add-to-playlist-item my-2 p-2 border rounded" data-playlist-id="${p.id}">${p.name}</li>`
+                ).join('');
               } else {
-                  addToPlaylistModalBody.innerHTML = `<p class="text-secondary text-center">No playlists found. Create one first!</p>`;
+                addToPlaylistModalBody.innerHTML = `<p class="text-secondary text-center">No playlists found. Create one first!</p>`;
               }
               addToPlaylistModal.show();
               break;
             case 'remove_from_playlist':
-                if (confirm('Are you sure you want to remove this song from the playlist?')) {
-                    const result = await fetchData('?action=remove_from_playlist', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ song_id: parseInt(id), playlist_public_id: decodeURIComponent(currentView.param) })
-                    });
-                    if (result && result.status === 'success') {
-                        showToast(result.message, 'success');
-                        loadView(currentView);
-                    }
+              if (confirm('Are you sure you want to remove this song from the playlist?')) {
+                const result = await fetchData('?action=remove_from_playlist', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ song_id: parseInt(id), playlist_public_id: decodeURIComponent(currentView.param) })
+                });
+                if (result && result.status === 'success') {
+                  showToast(result.message, 'success');
+                  loadView(currentView);
                 }
-                break;
+              }
+              break;
             case 'edit_playlist':
               document.getElementById('edit-playlist-id-input').value = publicId;
               document.getElementById('edit-playlist-name-input').value = name;
@@ -4856,17 +4877,17 @@ function perform_full_scan($db) {
               const songIdForMeta = parseInt(id);
               const metaSongData = await fetchData(`?action=get_song_data&id=${songIdForMeta}`);
               if (metaSongData && metadataModalBody) {
-                  metadataModalBody.innerHTML = `
-                    <ul class="list-group list-group-flush">
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Title:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.title || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Artist:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.artist || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Album:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.album || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Genre:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.genre || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Year:</strong> <span>${metaSongData.year || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Duration:</strong> <span>${formatTime(metaSongData.duration)}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Bitrate:</strong> <span>${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + ' kbps' : 'N/A'}</span></li>
-                    </ul>`;
-                  metadataModal.show();
+                metadataModalBody.innerHTML = `
+                  <ul class="list-group list-group-flush">
+                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Title:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.title || 'N/A'}</span></li>
+                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Artist:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.artist || 'N/A'}</span></li>
+                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Album:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.album || 'N/A'}</span></li>
+                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Genre:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.genre || 'N/A'}</span></li>
+                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Year:</strong> <span>${metaSongData.year || 'N/A'}</span></li>
+                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Duration:</strong> <span>${formatTime(metaSongData.duration)}</span></li>
+                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Bitrate:</strong> <span>${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + ' kbps' : 'N/A'}</span></li>
+                  </ul>`;
+                metadataModal.show();
               }
               break;
             case 'download_song':
@@ -4914,12 +4935,12 @@ function perform_full_scan($db) {
               body: JSON.stringify({ playlist_id: playlistId, song_id: songIdForPlaylist })
             });
             if (result) {
-                showToast(result.message, result.status === 'success' ? 'success' : 'info');
-                addToPlaylistModal.hide();
-                if (currentView.type === 'get_user_playlists') {
-                    loadView(currentView);
-                }
-                songIdForPlaylist = null;
+              showToast(result.message, result.status === 'success' ? 'success' : 'info');
+              addToPlaylistModal.hide();
+              if (currentView.type === 'get_user_playlists') {
+                loadView(currentView);
+              }
+              songIdForPlaylist = null;
             }
           });
         }
@@ -4948,12 +4969,12 @@ function perform_full_scan($db) {
         audio.addEventListener('ended', () => (repeatMode === 'one') ? audio.play() : playNext());
         
         playerElements.progressContainer.forEach(container => {
-            container.addEventListener('click', e => {
-              if (!audio.duration || !isFinite(audio.duration)) return;
-              const bounds = container.getBoundingClientRect();
-              const percent = Math.max(0, Math.min(1, (e.clientX - bounds.left) / bounds.width));
-              audio.currentTime = percent * audio.duration;
-            });
+          container.addEventListener('click', e => {
+            if (!audio.duration || !isFinite(audio.duration)) return;
+            const bounds = container.getBoundingClientRect();
+            const percent = Math.max(0, Math.min(1, (e.clientX - bounds.left) / bounds.width));
+            audio.currentTime = percent * audio.duration;
+          });
         });
 
         mainContent.addEventListener('scroll', () => {
@@ -5083,7 +5104,7 @@ function perform_full_scan($db) {
             editPlaylistModal.hide();
             showToast(data.message, 'success');
             if (currentView.type === 'get_user_playlists') {
-                loadView(currentView);
+              loadView(currentView);
             }
           }
         });
@@ -5097,9 +5118,9 @@ function perform_full_scan($db) {
 
           const result = await fetch('?action=import_playlist', { method: 'POST', body: formData }).then(res => res.json());
           
-          if(result){
+          if (result) {
             showToast(result.message, result.status);
-            if(result.status === 'success'){
+            if (result.status === 'success') {
               importPlaylistModal.hide();
               importPlaylistForm.reset();
               loadView({type: 'get_user_playlists', sort: 'name_asc'});
@@ -5188,7 +5209,7 @@ function perform_full_scan($db) {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ new_password })
           });
-          if(data && data.status === 'success') {
+          if (data && data.status === 'success') {
             bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
             changePwForm.reset();
             showToast(data.message, 'success');
@@ -5196,25 +5217,25 @@ function perform_full_scan($db) {
         });
         
         profilePicForm.addEventListener('submit', async e => {
-            e.preventDefault();
-            const fileInput = document.getElementById('profile-picture-input');
-            if (fileInput.files.length === 0) {
-                showToast('Please select an image file.', 'error');
-                return;
-            }
-            const formData = new FormData();
-            formData.append('profile_picture', fileInput.files[0]);
+          e.preventDefault();
+          const fileInput = document.getElementById('profile-picture-input');
+          if (fileInput.files.length === 0) {
+            showToast('Please select an image file.', 'error');
+            return;
+          }
+          const formData = new FormData();
+          formData.append('profile_picture', fileInput.files[0]);
 
-            const result = await fetchData('?action=upload_profile_picture', {
-                method: 'POST',
-                body: formData
-            });
+          const result = await fetchData('?action=upload_profile_picture', {
+            method: 'POST',
+            body: formData
+          });
 
-            if (result && result.status === 'success') {
-                showToast(result.message, 'success');
-                await checkSession();
-                bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
-            }
+          if (result && result.status === 'success') {
+            showToast(result.message, 'success');
+            await checkSession();
+            bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
+          }
         });
 
         const uploadLimitText = document.getElementById('upload-limit-text');
@@ -5268,8 +5289,8 @@ function perform_full_scan($db) {
                   progressBar.textContent = 'Error';
                   try {
                     showToast(`Upload failed for ${file.name}: ${JSON.parse(xhr.responseText).message}`, 'error');
-                  } catch(e) {
-                     showToast(`Upload failed for ${file.name}: Server error.`, 'error');
+                  } catch (e) {
+                    showToast(`Upload failed for ${file.name}: Server error.`, 'error');
                   }
                 }
                 resolve();
@@ -5363,23 +5384,23 @@ function perform_full_scan($db) {
           audio.preload = 'auto';
           
           audio.addEventListener('stalled', () => {
-             if (isPlaying && audio.readyState < 3) {
-                const currentPos = audio.currentTime;
-                audio.load();
-                audio.currentTime = currentPos;
-                audio.play();
-             }
+            if (isPlaying && audio.readyState < 3) {
+              const currentPos = audio.currentTime;
+              audio.load();
+              audio.currentTime = currentPos;
+              audio.play();
+            }
           });
           
           audio.addEventListener('error', (e) => {
             console.error('Audio playback error or interrupted stream:', e);
             if (isPlaying && currentSong) {
-               const currentPos = audio.currentTime;
-               setTimeout(() => {
-                 audio.load();
-                 audio.currentTime = currentPos;
-                 audio.play();
-               }, 1500);
+              const currentPos = audio.currentTime;
+              setTimeout(() => {
+                audio.load();
+                audio.currentTime = currentPos;
+                audio.play();
+              }, 1500);
             }
           });
 
