@@ -1215,7 +1215,7 @@ if (isset($_GET['action'])) {
 
     case 'get_artists':
       $sort_key = $_GET['sort'] ?? 'name_asc';
-      $stmt = $db->query("SELECT artist FROM music WHERE artist != '' AND artist IS NOT NULL");
+      $stmt = $db->query("SELECT artist, id FROM music WHERE artist != '' AND artist IS NOT NULL ORDER BY id DESC");
       $rows = $stmt->fetchAll();
       $artists = [];
       foreach ($rows as $row) {
@@ -1225,7 +1225,7 @@ if (isset($_GET['action'])) {
           if ($p !== '') {
             $key = strtolower($p);
             if (!isset($artists[$key])) {
-              $artists[$key] = ['name' => $p];
+              $artists[$key] = ['name' => $p, 'id' => $row['id']];
             }
           }
         }
@@ -1817,7 +1817,7 @@ if (isset($_GET['action'])) {
         GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
       ");
       $discovery_stmt->execute([':user_id' => $user_id]);
-      $discovery_albums = $discovery_stmt->fetchAll();
+      $discovery_albums = $discovery_albums_stmt->fetchAll();
       if (count($discovery_albums) > 0) {
         $shelves[] = ['title' => 'Discover New Albums', 'type' => 'albums', 'items' => $discovery_albums];
       }
@@ -3407,7 +3407,7 @@ function perform_full_scan($db) {
 
           const headerHTML = `
             <div class="view-details-header">
-              <img src="${details.image_url}" alt="${details.name}" class="${type === 'profile' ? 'profile-picture-lg' : ''}">
+              <img src="${details.image_url}" alt="${details.name}" class="${(type === 'profile' || type === 'artist') ? 'profile-picture-lg' : ''}">
               <div class="view-details-header-info">
                 <div class="type">${typeText}</div>
                 <h2 class="name text-truncate text-truncate-width">${details.name}</h2>
@@ -3552,7 +3552,7 @@ function perform_full_scan($db) {
           }
           
           const itemsHTML = items.map(item => {
-              let name, subtext, imageId, dataType, dataValue, icon, publicId;
+              let name, subtext, imageId, dataType, dataValue, icon, publicId, imgClass = 'rounded', titleClass = '', subtextClass = '';
               if (type === 'get_albums') {
                 name = item.album;
                 subtext = item.artist;
@@ -3560,6 +3560,16 @@ function perform_full_scan($db) {
                 dataType = 'album';
                 dataValue = name;
                 publicId = '';
+              } else if (type === 'get_artists') {
+                name = item.name;
+                subtext = null;
+                imageId = item.id;
+                dataType = 'artist';
+                dataValue = name;
+                publicId = '';
+                imgClass = 'rounded-circle';
+                titleClass = 'text-center';
+                subtextClass = 'text-center';
               } else if (type === 'get_user_playlists') {
                 name = item.name;
                 subtext = `${item.song_count} songs`;
@@ -3572,7 +3582,7 @@ function perform_full_scan($db) {
                 subtext = null;
                 dataType = type.replace('get_','').slice(0, -1);
                 dataValue = name;
-                icon = (type === 'get_artists') ? 'bi-person-fill' : 'bi-tag-fill';
+                icon = 'bi-tag-fill';
                 publicId = '';
               }
               
@@ -3583,14 +3593,14 @@ function perform_full_scan($db) {
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>` : '';
 
-              if (type === 'get_albums' || type === 'get_user_playlists') {
+              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists') {
                 return `<div class="col">
                   <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
                     ${moreButton}
-                    <img src="?action=get_image&id=${imageId || 0}" class="card-img-top rounded" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
+                    <img src="?action=get_image&id=${imageId || 0}" class="card-img-top ${imgClass}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
                     <div class="card-body px-0 py-2">
-                      <h5 class="card-title fs-6 fw-normal text-truncate">${name}</h5>
-                      ${subtext ? `<p class="card-text small text-secondary text-truncate">${subtext}</p>` : ''}
+                      <h5 class="card-title fs-6 fw-normal text-truncate ${titleClass}">${name}</h5>
+                      ${subtext ? `<p class="card-text small text-secondary text-truncate ${subtextClass}">${subtext}</p>` : ''}
                     </div>
                   </div>
                 </div>`;
