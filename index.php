@@ -656,7 +656,7 @@ if (isset($_GET['action'])) {
     case 'get_app_icon':
       header('Content-Type: image/svg+xml');
       $size = intval($_GET['size'] ?? 192);
-      echo '<svg xmlns="http://www.w3.org/2000/svg" width="'.$size.'" height="'.$size.'" fill="white" class="bi bi-boombox-fill" viewBox="0 0 16 16"><path d="M11.538 6.237a.5.5 0 0 0-.738.03l-1.36 2.04a.5.5 0 0 0 .37.823h2.72a.5.5 0 0 0 .37-.823l-1.359-2.04a.5.5 0 0 0-.363-.17z"/><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM4.5 5.5a1 1 0 1 0 0-2 1 1 0 0 0 0 2m7 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2M6 6.5a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 0-1h-3a.5.5 0 0 0-.5.5m-1.5 6a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 0-1h-5a.5.5 0 0 0-.5.5"/></svg>';
+      echo '<?xml version="1.0" encoding="utf-8"?><svg width="'.$size.'px" height="'.$size.'px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 10V13" stroke="#1C1C1C" stroke-width="1.7" stroke-linecap="round"/><path d="M16 10V13" stroke="#1C1C1C" stroke-width="1.7" stroke-linecap="round"/><path d="M7 7L7 16" stroke="#DF1463" stroke-width="1.7" stroke-linecap="round"/><path d="M13 7L13 16" stroke="#1C1C1C" stroke-width="1.7" stroke-linecap="round"/><path d="M19 7L19 16" stroke="#1C1C1C" stroke-width="1.7" stroke-linecap="round"/><path d="M10 4L10 19" stroke="#1C1C1C" stroke-width="1.7" stroke-linecap="round"/></svg>';
       exit;
 
     case 'get_session':
@@ -1901,7 +1901,7 @@ if (isset($_GET['action'])) {
         GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
       ");
       $discovery_stmt->execute([':user_id' => $user_id]);
-      $discovery_albums = $discovery_albums_stmt->fetchAll();
+      $discovery_albums = $discovery_stmt->fetchAll();
       if (count($discovery_albums) > 0) {
         $shelves[] = ['title' => 'Discover New Albums', 'type' => 'albums', 'items' => $discovery_albums];
       }
@@ -2897,7 +2897,7 @@ function perform_full_scan($db) {
             </div>
             <div class="player-modal-track-info">
               <h3 id="player-modal-title" class="title text-truncate">Song Title</h3>
-              <p id="player-modal-artist" class="artist">Artist Name</p>
+              <p id="player-modal-artist" class="artist text-truncate">Artist Name</p>
             </div>
             <div class="player-modal-progress">
               <div class="progress-bar-container" id="player-modal-progress-container">
