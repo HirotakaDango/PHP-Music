@@ -30,7 +30,7 @@ if (isset($_GET['pwa'])) {
   if ($_GET['pwa'] == 'sw') {
     header('Content-Type: application/javascript; charset=utf-8');
     echo <<<SW
-    const CACHE_NAME = 'php-music-cache-v24';
+    const CACHE_NAME = 'php-music-cache-v25';
     const STATIC_ASSETS =[
       './',
       'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
@@ -65,8 +65,22 @@ if (isset($_GET['pwa'])) {
       const isApiCall = url.searchParams.has('action') || url.searchParams.has('share_type');
       const isPwaCall = url.searchParams.has('pwa');
 
-      if (isApiCall || isPwaCall) {
+      if (isApiCall || isPwaCall || event.request.headers.get('range')) {
         event.respondWith(fetch(event.request));
+        return;
+      }
+      
+      if (event.request.mode === 'navigate' || url.pathname.endsWith('/')) {
+        event.respondWith(
+          fetch(event.request).then(networkResponse => {
+            return caches.open(CACHE_NAME).then(cache => {
+              cache.put(event.request, networkResponse.clone());
+              return networkResponse;
+            });
+          }).catch(() => {
+            return caches.match(event.request);
+          })
+        );
         return;
       }
       
@@ -93,7 +107,7 @@ set_time_limit(0);
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '1.10');
+define('APP_VERSION', '1.11');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -464,6 +478,9 @@ function init_db($db) {
     if (!in_array('bitrate', $music_columns)) {
       $db->exec("ALTER TABLE music ADD COLUMN bitrate INTEGER;");
     }
+    if (!in_array('lyrics', $music_columns)) {
+      $db->exec("ALTER TABLE music ADD COLUMN lyrics TEXT;");
+    }
   }
   
   $db->exec("
@@ -518,6 +535,16 @@ function init_db($db) {
       PRIMARY KEY (user_id, song_id),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+    );
+  ");
+
+  $db->exec("
+    CREATE TABLE IF NOT EXISTS follows (
+      follower_id INTEGER NOT NULL,
+      following_id INTEGER NOT NULL,
+      PRIMARY KEY (follower_id, following_id),
+      FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (following_id) REFERENCES users(id) ON DELETE CASCADE
     );
   ");
 
@@ -760,8 +787,16 @@ if (isset($_GET['action'])) {
         header('Content-Type: ' . $pic_data['profile_picture_type']);
         echo $pic_data['profile_picture'];
       } else {
-        header('Content-Type: image/svg+xml');
-        echo '<svg xmlns="http://www.w3.org/2000/svg" fill="#404040" viewBox="0 0 16 16"><path d="M11 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0"/><path fill-rule="evenodd" d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8m8-7a7 7 0 0 0-5.468 11.37C3.242 11.226 4.805 10 8 10s4.757 1.225 5.468 2.37A7 7 0 0 0 8 1"/></svg>';
+        $stmt2 = $db->prepare("SELECT image FROM music WHERE user_id = ? AND image IS NOT NULL LIMIT 1");
+        $stmt2->execute([$pic_user_id]);
+        $song_img = $stmt2->fetchColumn();
+        if ($song_img) {
+          header('Content-Type: image/webp');
+          echo $song_img;
+        } else {
+          header('Content-Type: image/svg+xml');
+          echo '<svg xmlns="http://www.w3.org/2000/svg" fill="#404040" viewBox="0 0 16 16"><path d="M11 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0"/><path fill-rule="evenodd" d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8m8-7a7 7 0 0 0-5.468 11.37C3.242 11.226 4.805 10 8 10s4.757 1.225 5.468 2.37A7 7 0 0 0 8 1"/></svg>';
+        }
       }
       exit;
 
@@ -903,14 +938,15 @@ if (isset($_GET['action'])) {
       $new_artist = trim(htmlspecialchars($_POST['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
       $new_album = trim(htmlspecialchars($_POST['album'] ?? '', ENT_QUOTES, 'UTF-8'));
       $new_genre = trim(htmlspecialchars($_POST['genre'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $new_lyrics = trim(htmlspecialchars($_POST['lyrics'] ?? '', ENT_QUOTES, 'UTF-8'));
 
       $stmt = $db->prepare("SELECT user_id, file FROM music WHERE id = ?");
       $stmt->execute([$song_id]);
       $song = $stmt->fetch();
 
       if ($song && ($song['user_id'] == $user_id || $_SESSION['user_artist'] == 'Music Library')) {
-        $update_fields = ["title = ?", "artist = ?", "album = ?", "genre = ?"];
-        $update_params = [$new_title, $new_artist, $new_album, $new_genre];
+        $update_fields = ["title = ?", "artist = ?", "album = ?", "genre = ?", "lyrics = ?"];
+        $update_params = [$new_title, $new_artist, $new_album, $new_genre, $new_lyrics];
 
         $jpeg_data = null;
         $webp_data = null;
@@ -1071,6 +1107,13 @@ if (isset($_GET['action'])) {
       send_json($stmt->fetchAll());
       break;
 
+    case 'get_following':
+      if (!$user_id) { send_json([]); }
+      $stmt = $db->prepare("SELECT u.artist as name, u.id as id FROM follows f JOIN users u ON f.following_id = u.id WHERE f.follower_id = ? ORDER BY u.artist COLLATE NOCASE ASC " . $limit_clause);
+      $stmt->execute([$user_id]);
+      send_json($stmt->fetchAll());
+      break;
+
     case 'toggle_favorite':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
@@ -1086,6 +1129,24 @@ if (isset($_GET['action'])) {
         $max_order = $stmt->fetchColumn() ?? 0;
         $db->prepare("INSERT INTO favorites (user_id, song_id, sort_order) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $max_order + 1]);
         send_json(['status' => 'added', 'is_favorite' => true]);
+      }
+      break;
+
+    case 'toggle_follow':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $following_id = intval($data['following_id']);
+      if ($following_id === $user_id) {
+        send_json(['status' => 'error', 'message' => 'Cannot follow yourself.']);
+      }
+      $stmt = $db->prepare("SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?");
+      $stmt->execute([$user_id, $following_id]);
+      if ($stmt->fetch()) {
+        $db->prepare("DELETE FROM follows WHERE follower_id = ? AND following_id = ?")->execute([$user_id, $following_id]);
+        send_json(['status' => 'unfollowed']);
+      } else {
+        $db->prepare("INSERT INTO follows (follower_id, following_id) VALUES (?, ?)")->execute([$user_id, $following_id]);
+        send_json(['status' => 'followed']);
       }
       break;
 
@@ -1364,6 +1425,28 @@ if (isset($_GET['action'])) {
         $details['image_url'] = '?action=get_image&id=' . ($details['image_id'] ?? 0);
         $details['public_id'] = null;
 
+        if ($type === 'artist') {
+          $stmt_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
+          $stmt_user->execute([$name]);
+          $artist_user_id = $stmt_user->fetchColumn();
+
+          if ($artist_user_id) {
+            $details['is_user'] = true;
+            $details['user_id'] = $artist_user_id;
+            $details['image_url'] = '?action=get_profile_picture&id=' . $artist_user_id;
+            if ($user_id) {
+              $stmt_follow = $db->prepare("SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?");
+              $stmt_follow->execute([$user_id, $artist_user_id]);
+              $details['is_following'] = (bool)$stmt_follow->fetchColumn();
+            } else {
+              $details['is_following'] = false;
+            }
+            $stmt_playlists = $db->prepare("SELECT p.name, p.public_id, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id FROM playlists p WHERE p.user_id = ? ORDER BY p.created_at DESC");
+            $stmt_playlists->execute([$artist_user_id]);
+            $details['playlists'] = $stmt_playlists->fetchAll();
+          }
+        }
+
         $sort_map = [
           'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC, m.album COLLATE NOCASE ASC', 'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
           'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC', 'year_desc' => 'ORDER BY m.year DESC', 'year_asc' => 'ORDER BY m.year ASC',
@@ -1419,7 +1502,7 @@ if (isset($_GET['action'])) {
 
     case 'get_song_data':
       $id = intval($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id = ?");
+      $stmt = $db->prepare("SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id = ?");
       $stmt->execute([$user_id, $id]);
       $song = $stmt->fetch();
       if ($song) {
@@ -1658,6 +1741,7 @@ if (isset($_GET['action'])) {
       if (!$user_id) {
         exit;
       }
+      session_write_close();
       $data = json_decode(file_get_contents('php://input'), true);
       $song_id = intval($data['id'] ?? 0);
       $played_at_iso = $data['played_at'] ?? (new DateTime())->format(DateTime::ATOM);
@@ -1817,7 +1901,7 @@ if (isset($_GET['action'])) {
         GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
       ");
       $discovery_stmt->execute([':user_id' => $user_id]);
-      $discovery_albums = $discovery_stmt->fetchAll();
+      $discovery_albums = $discovery_albums_stmt->fetchAll();
       if (count($discovery_albums) > 0) {
         $shelves[] = ['title' => 'Discover New Albums', 'type' => 'albums', 'items' => $discovery_albums];
       }
@@ -2328,6 +2412,10 @@ function perform_full_scan($db) {
       ::-webkit-scrollbar-track { background: var(--ytm-surface); }
       ::-webkit-scrollbar-thumb { background: var(--ytm-surface-2); border-radius: 4px; }
       ::-webkit-scrollbar-thumb:hover { background: #555; }
+      .nav-tabs { border-bottom-color: var(--ytm-surface-2); }
+      .nav-tabs .nav-link { color: var(--ytm-secondary-text); border: none; border-bottom: 2px solid transparent; padding: 0.75rem 1.5rem; font-weight: 500; cursor: pointer; background: transparent; }
+      .nav-tabs .nav-link:hover { border-color: transparent; color: var(--ytm-primary-text); }
+      .nav-tabs .nav-link.active { background-color: transparent; color: var(--ytm-primary-text); border-color: transparent; border-bottom-color: var(--ytm-accent); }
       .app-container { display: flex; height: 100%; }
       .sidebar {
         width: 240px; background-color: var(--ytm-bg);
@@ -2526,7 +2614,7 @@ function perform_full_scan($db) {
       .user-profile-page .profile-picture-lg { width: 200px; height: 200px; margin-bottom: 1.5rem; }
       .user-profile-page .display-name { font-size: 2.5rem; font-weight: 700; }
       .user-stats-page .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 2rem; margin-top: 2rem; }
-      .user-stats-page .stat-item .stat-value { font-size: 2rem; font-weight: 700; }
+      .user-stats-page .stat-item .stat-value { font-size: 2.5rem; font-weight: 700; }
       .user-stats-page .stat-item .stat-label { color: var(--ytm-secondary-text); text-transform: uppercase; font-size: 0.9rem; }
       @keyframes soundwave-pulse { 0% { transform: scaleY(0.4); } 25% { transform: scaleY(1); } 50% { transform: scaleY(0.6); } 75% { transform: scaleY(0.8); } 100% { transform: scaleY(0.4); } }
       @media (max-width: 767.98px) {
@@ -2642,6 +2730,10 @@ function perform_full_scan($db) {
             <a href="#" class="nav-link" data-view="get_user_playlists">
               <i class="bi bi-music-note-beamed"></i>
               <span>Playlists</span>
+            </a>
+            <a href="#" class="nav-link" data-view="get_following">
+              <i class="bi bi-person-lines-fill"></i>
+              <span>Following</span>
             </a>
           </div>
           
@@ -3050,6 +3142,18 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+    <div class="modal fade" id="lyrics-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
+          <div class="modal-header border-0 pb-0">
+            <h5 class="modal-title w-100 text-center" id="lyrics-modal-title">Lyrics</h5>
+            <button type="button" class="btn-close btn-close-white position-absolute end-0 me-3" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body" id="lyrics-modal-body">
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="modal fade" id="edit-metadata-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -3080,6 +3184,10 @@ function perform_full_scan($db) {
               <div class="mb-3">
                 <label class="form-label">Genre</label>
                 <input type="text" class="form-control" id="edit-metadata-genre">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Lyrics</label>
+                <textarea class="form-control" id="edit-metadata-lyrics" rows="4"></textarea>
               </div>
               <button type="submit" class="btn btn-danger w-100">Save Changes</button>
             </form>
@@ -3426,6 +3534,13 @@ function perform_full_scan($db) {
               </button>`;
           }
 
+          let followButtonHTML = '';
+          if (type === 'artist' && details.is_user && currentUser && currentUser.id !== details.user_id) {
+             const followText = details.is_following ? 'Unfollow' : 'Follow';
+             const followClass = details.is_following ? 'btn-outline-light' : 'btn-danger';
+             followButtonHTML = `<button class="btn ${followClass} border-0 follow-btn" data-user-id="${details.user_id}">${followText}</button>`;
+          }
+
           const headerHTML = `
             <div class="view-details-header">
               <img src="${details.image_url}" alt="${details.name}" class="${(type === 'profile' || type === 'artist') ? 'profile-picture-lg' : ''}">
@@ -3435,6 +3550,7 @@ function perform_full_scan($db) {
                 <div class="stats">${statsText}</div>
               </div>
               <div class="d-flex align-items-center gap-2">
+                ${followButtonHTML}
                 ${copyButtonHTML}
                 ${shareButtonHTML}
                 ${downloadButtonHTML}
@@ -3442,6 +3558,44 @@ function perform_full_scan($db) {
               </div>
             </div>`;
           contentArea.insertAdjacentHTML('afterbegin', headerHTML);
+
+          if (type === 'artist') {
+            const isUser = details.is_user;
+            const hasPlaylists = details.playlists && details.playlists.length > 0;
+            
+            let tabsHTML = `
+              <ul class="nav nav-tabs mt-4 mb-3" id="artistTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link active" id="songs-tab" data-bs-toggle="tab" data-bs-target="#songs-pane" type="button" role="tab">All Songs</button>
+                </li>
+                ${isUser ? `
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link" id="playlists-tab" data-bs-toggle="tab" data-bs-target="#playlists-pane" type="button" role="tab">Playlists</button>
+                </li>` : ''}
+              </ul>
+              <div class="tab-content" id="artistTabsContent">
+                <div class="tab-pane fade show active" id="songs-pane" role="tabpanel"></div>
+                ${isUser ? `
+                <div class="tab-pane fade" id="playlists-pane" role="tabpanel">
+                  ${hasPlaylists ? `
+                  <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 row-cols-lg-5 row-cols-xl-6 g-4">
+                    ${details.playlists.map(p => `
+                      <div class="col">
+                        <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
+                          <img src="?action=get_image&id=${p.image_id || 0}" class="card-img-top rounded" alt="${p.name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
+                          <div class="card-body px-0 py-2">
+                            <h5 class="card-title fs-6 fw-normal text-truncate">${p.name}</h5>
+                          </div>
+                        </div>
+                      </div>
+                    `).join('')}
+                  </div>
+                  ` : `<div class="text-center p-5 text-secondary">No playlists found.</div>`}
+                </div>` : ''}
+              </div>
+            `;
+            contentArea.insertAdjacentHTML('beforeend', tabsHTML);
+          }
         };
 
         const renderSongs = (songs, append = false) => {
@@ -3456,16 +3610,18 @@ function perform_full_scan($db) {
             }
           }
 
+          let targetContainer = document.getElementById('songs-pane') || contentArea;
+
           if (!songs || songs.length === 0) {
             if (!append) {
-              contentArea.innerHTML += `<div class="text-center p-5 text-secondary">No songs found.</div>`;
+              targetContainer.insertAdjacentHTML('beforeend', `<div class="text-center p-5 text-secondary">No songs found.</div>`);
             }
             allContentloaded = true;
             hideLoader();
             return;
           }
 
-          let songList = contentArea.querySelector('.song-list');
+          let songList = targetContainer.querySelector('.song-list');
           if (!songList) {
             songList = document.createElement('div');
             songList.className = 'song-list';
@@ -3473,8 +3629,8 @@ function perform_full_scan($db) {
             const header = `<div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) ${isHistory ? 'minmax(0, 2fr)' : ''} 80px 40px;">
               <div></div><div>Title</div><div>Artist</div><div>Album</div>${isHistory ? '<div>Played</div>' : ''}<div>Time</div><div></div>
             </div>`;
-            contentArea.insertAdjacentHTML('beforeend', header);
-            contentArea.appendChild(songList);
+            targetContainer.insertAdjacentHTML('beforeend', header);
+            targetContainer.appendChild(songList);
           }
           
           const escapeAttr = (str) => str ? String(str).replace(/'/g, "&apos;").replace(/"/g, "&quot;") : '';
@@ -3574,6 +3730,7 @@ function perform_full_scan($db) {
           
           const itemsHTML = items.map(item => {
               let name, subtext, imageId, dataType, dataValue, icon, publicId, imgClass = 'rounded', titleClass = '', subtextClass = '';
+              let imgSrc = `?action=get_image&id=`;
               if (type === 'get_albums') {
                 name = item.album;
                 subtext = item.artist;
@@ -3591,6 +3748,17 @@ function perform_full_scan($db) {
                 imgClass = 'rounded-circle';
                 titleClass = 'text-center';
                 subtextClass = 'text-center';
+              } else if (type === 'get_following') {
+                name = item.name;
+                subtext = 'Artist';
+                imageId = item.id;
+                dataType = 'artist';
+                dataValue = name;
+                publicId = '';
+                imgClass = 'rounded-circle';
+                titleClass = 'text-center';
+                subtextClass = 'text-center';
+                imgSrc = `?action=get_profile_picture&id=`;
               } else if (type === 'get_user_playlists') {
                 name = item.name;
                 subtext = `${item.song_count} songs`;
@@ -3607,18 +3775,18 @@ function perform_full_scan($db) {
                 publicId = '';
               }
               
-              const useridAttr = item.user_id ? `data-userid="${item.user_id}"` : '';
+              const useridAttr = item.user_id ? `data-userid="${item.user_id}"` : (type === 'get_following' ? `data-userid="${item.id}"` : '');
 
               const moreButton = (type === 'get_user_playlists') ? `
                 <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}">
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>` : '';
 
-              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists') {
+              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists' || type === 'get_following') {
                 return `<div class="col">
                   <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
                     ${moreButton}
-                    <img src="?action=get_image&id=${imageId || 0}" class="card-img-top ${imgClass}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
+                    <img src="${imgSrc}${imageId || 0}" class="card-img-top ${imgClass}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
                     <div class="card-body px-0 py-2">
                       <h5 class="card-title fs-6 fw-normal text-truncate ${titleClass}">${name}</h5>
                       ${subtext ? `<p class="card-text small text-secondary text-truncate ${subtextClass}">${subtext}</p>` : ''}
@@ -3643,79 +3811,79 @@ function perform_full_scan($db) {
         };
         
         const renderRecommendations = (data) => {
-            contentArea.innerHTML = '';
-            if (!data.shelves || data.shelves.length === 0) {
-                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Not enough listening history to generate recommendations. Keep listening!</div>`;
-                return;
+          contentArea.innerHTML = '';
+          if (!data.shelves || data.shelves.length === 0) {
+            contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Not enough listening history to generate recommendations. Keep listening!</div>`;
+            return;
+          }
+
+          data.shelves.forEach(shelf => {
+            let itemsHTML = '';
+            if (shelf.type === 'songs') {
+              itemsHTML = shelf.items.map(song => `
+                <div class="shelf-item" data-song-id="${song.id}">
+                  <img src="?action=get_image&id=${song.id}" alt="${song.title}">
+                  <div class="item-title">${song.title}</div>
+                  <div class="item-subtitle" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${song.artist}</div>
+                </div>
+              `).join('');
+            } else if (shelf.type === 'albums') {
+              itemsHTML = shelf.items.map(album => `
+                <div class="shelf-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
+                  <img src="?action=get_image&id=${album.id || 0}" alt="${album.album}">
+                  <div class="item-title">${album.album}</div>
+                  <div class="item-subtitle">${album.artist}</div>
+                </div>
+              `).join('');
+            } else if (shelf.type === 'playlists') {
+              itemsHTML = shelf.items.map(playlist => `
+                <div class="shelf-item" data-playlist="${encodeURIComponent(playlist.public_id)}">
+                  <img src="?action=get_image&id=${playlist.image_id || 0}" alt="${playlist.name}">
+                  <div class="item-title">${playlist.name}</div>
+                  <div class="item-subtitle">by ${playlist.creator}</div>
+                </div>
+              `).join('');
             }
 
-            data.shelves.forEach(shelf => {
-                let itemsHTML = '';
-                if (shelf.type === 'songs') {
-                    itemsHTML = shelf.items.map(song => `
-                        <div class="shelf-item" data-song-id="${song.id}">
-                            <img src="?action=get_image&id=${song.id}" alt="${song.title}">
-                            <div class="item-title">${song.title}</div>
-                            <div class="item-subtitle" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${song.artist}</div>
-                        </div>
-                    `).join('');
-                } else if (shelf.type === 'albums') {
-                    itemsHTML = shelf.items.map(album => `
-                        <div class="shelf-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
-                            <img src="?action=get_image&id=${album.id || 0}" alt="${album.album}">
-                            <div class="item-title">${album.album}</div>
-                            <div class="item-subtitle">${album.artist}</div>
-                        </div>
-                    `).join('');
-                } else if (shelf.type === 'playlists') {
-                    itemsHTML = shelf.items.map(playlist => `
-                        <div class="shelf-item" data-playlist="${encodeURIComponent(playlist.public_id)}">
-                            <img src="?action=get_image&id=${playlist.image_id || 0}" alt="${playlist.name}">
-                            <div class="item-title">${playlist.name}</div>
-                            <div class="item-subtitle">by ${playlist.creator}</div>
-                        </div>
-                    `).join('');
-                }
-
-                const shelfHTML = `
-                    <div class="recommendation-shelf">
-                        <div class="shelf-header">
-                            <h3 class="shelf-title">${shelf.title}</h3>
-                            ${shelf.connected_view ? `<button class="btn btn-sm btn-outline-light border-0" data-view="${shelf.connected_view}" ${shelf.param ? `data-view-param="${shelf.param}"` : ''}>See All</button>` : ''}
-                        </div>
-                        <div class="shelf-items">
-                            ${itemsHTML}
-                        </div>
-                    </div>
-                `;
-                contentArea.insertAdjacentHTML('beforeend', shelfHTML);
-            });
+            const shelfHTML = `
+              <div class="recommendation-shelf">
+                <div class="shelf-header">
+                  <h3 class="shelf-title">${shelf.title}</h3>
+                  ${shelf.connected_view ? `<button class="btn btn-sm btn-outline-light border-0" data-view="${shelf.connected_view}" ${shelf.param ? `data-view-param="${shelf.param}"` : ''}>See All</button>` : ''}
+                </div>
+                <div class="shelf-items">
+                  ${itemsHTML}
+                </div>
+              </div>
+            `;
+            contentArea.insertAdjacentHTML('beforeend', shelfHTML);
+          });
         };
         
         const renderUserStats = (data) => {
-            contentArea.innerHTML = `
-                <div class="user-stats-page">
-                    <h2 class="content-title">My Statistics</h2>
-                    <div class="stats-grid">
-                        <div class="stat-item">
-                            <div class="stat-value">${data.stats.uploads}</div>
-                            <div class="stat-label">Uploads</div>
-                        </div>
-                        <div class="stat-item">
-                            <div class="stat-value">${data.stats.favorites}</div>
-                            <div class="stat-label">Favorites</div>
-                        </div>
-                        <div class="stat-item">
-                            <div class="stat-value">${data.stats.playlists}</div>
-                            <div class="stat-label">Playlists</div>
-                         </div>
-                         <div class="stat-item">
-                            <div class="stat-value">${data.stats.play_count}</div>
-                            <div class="stat-label">Total Plays</div>
-                        </div>
-                    </div>
+          contentArea.innerHTML = `
+            <div class="user-stats-page">
+              <h2 class="content-title">My Statistics</h2>
+              <div class="stats-grid">
+                <div class="stat-item">
+                  <div class="stat-value">${data.stats.uploads}</div>
+                  <div class="stat-label">Uploads</div>
                 </div>
-            `;
+                <div class="stat-item">
+                  <div class="stat-value">${data.stats.favorites}</div>
+                  <div class="stat-label">Favorites</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-value">${data.stats.playlists}</div>
+                  <div class="stat-label">Playlists</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-value">${data.stats.play_count}</div>
+                  <div class="stat-label">Total Plays</div>
+                </div>
+              </div>
+            </div>
+          `;
         };
         
         const setupSortOptions = (viewType) => {
@@ -3730,7 +3898,7 @@ function perform_full_scan($db) {
               case 'search':
                 options = {
                   'id_desc': 'Recently Added', 'artist_asc': 'Artist', 'title_asc': 'Title', 'album_asc': 'Album',
-                  'year_desc': 'Year (Newest)', 'year_asc': 'Year (Oldest)',
+                  'year_desc': 'Year (Newest)', 'year_asc': 'Year (Oldest)'
                 };
                 break;
               case 'artist_songs':
@@ -3741,17 +3909,13 @@ function perform_full_scan($db) {
                  break;
               case 'user_profile':
                   options = { 'id_desc': 'Recently Added', 'artist_asc': 'Artist', 'title_asc': 'Title', 'album_asc': 'Album',
-                  'year_desc': 'Year (Newest)', 'year_asc': 'Year (Oldest)', };
+                  'year_desc': 'Year (Newest)', 'year_asc': 'Year (Oldest)'};
                   break;
               case 'get_favorites':
               case 'playlist_songs':
                 options = { 
-                  'manual_order': 'My Order',
-                  'added_newest': 'Added Newest',
-                  'added_oldest': 'Added Oldest',
-                  'artist_asc': 'Artist', 
-                  'title_asc': 'Title', 
-                  'album_asc': 'Album',
+                  'manual_order': 'My Order', 'added_newest': 'Added Newest', 'added_oldest': 'Added Oldest',
+                  'artist_asc': 'Artist', 'title_asc': 'Title', 'album_asc': 'Album'
                 };
                 break;
               case 'get_history':
@@ -3759,32 +3923,23 @@ function perform_full_scan($db) {
                 break;
               case 'get_albums':
                 options = {
-                  'album_asc': 'Title (A-Z)', 
-                  'album_desc': 'Title (Z-A)', 
-                  'artist_asc': 'Artist (A-Z)',
-                  'artist_desc': 'Artist (Z-A)',
-                  'year_desc': 'Year (Newest)', 
-                  'year_asc': 'Year (Oldest)',
+                  'album_asc': 'Title (A-Z)', 'album_desc': 'Title (Z-A)', 
+                  'artist_asc': 'Artist (A-Z)', 'artist_desc': 'Artist (Z-A)',
+                  'year_desc': 'Year (Newest)', 'year_asc': 'Year (Oldest)'
                 };
                 break;
               case 'get_artists':
-                options = {
-                  'name_asc': 'Name (A-Z)', 
-                  'name_desc': 'Name (Z-A)',
-                };
+                options = { 'name_asc': 'Name (A-Z)', 'name_desc': 'Name (Z-A)' };
                 break;
               case 'get_user_playlists':
                 options = {
-                  'name_asc': 'Name (A-Z)', 
-                  'name_desc': 'Name (Z-A)',
-                  'modified_desc': 'Date Modified (Newest)',
-                  'modified_asc': 'Date Modified (Oldest)',
+                  'name_asc': 'Name (A-Z)', 'name_desc': 'Name (Z-A)',
+                  'modified_desc': 'Date Modified (Newest)', 'modified_asc': 'Date Modified (Oldest)'
                 };
                 break;
             }
 
-            sortSelect.innerHTML = Object.entries(options)
-              .map(([value, text]) => `<option value="${value}" ${currentView.sort === value ? 'selected' : ''}>${text}</option>`).join('');
+            sortSelect.innerHTML = Object.entries(options).map(([value, text]) => `<option value="${value}" ${currentView.sort === value ? 'selected' : ''}>${text}</option>`).join('');
             sortControls.classList.remove('d-none');
           } else {
             sortControls.classList.add('d-none');
@@ -3799,7 +3954,7 @@ function perform_full_scan($db) {
 
         const loadMoreContent = async () => {
           if (isLoadingMore || allContentloaded) return;
-          if (!currentUser && (currentView.type === 'get_favorites' || currentView.type === 'get_history')) return;
+          if (!currentUser && (currentView.type === 'get_favorites' || currentView.type === 'get_history' || currentView.type === 'get_following')) return;
           
           isLoadingMore = true;
           showLoader(false);
@@ -3855,6 +4010,7 @@ function perform_full_scan($db) {
             case 'get_artists':
             case 'get_genres':
             case 'get_user_playlists':
+            case 'get_following':
               data = await fetchData(`?action=${type}&${params.toString()}`);
               renderGrid(data, type, true);
               break;
@@ -3950,6 +4106,16 @@ function perform_full_scan($db) {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your history.</div>`;
               }
               break;
+            case 'get_following':
+              updateContentTitle('Following', !!currentUser);
+              if (currentUser) {
+                pageParams.delete('page');
+                data = await fetchData(`?action=get_following&${pageParams.toString()}`);
+                renderGrid(data, 'get_following', false);
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see who you follow.</div>`;
+              }
+              break;
             case 'get_recommendations':
               updateContentTitle('For You', !!currentUser);
               if (currentUser) {
@@ -3979,9 +4145,7 @@ function perform_full_scan($db) {
               const type = currentView.type.split('_')[0];
               const name_param = currentView.param;
               updateContentTitle('', false);
-
               const typeViewData = await fetchData(`?action=get_view_data&type=${type}&name=${name_param}&${pageParams.toString()}`);
-              
               contentArea.innerHTML = '';
               if (typeViewData && typeViewData.details) {
                 renderViewDetailsHeader(typeViewData.details, type);
@@ -4280,6 +4444,7 @@ function perform_full_scan($db) {
             <li class="context-menu-item" data-action="show_all_genres"><i class="bi bi-tags-fill"></i> View All Genres</li>
             <li class="context-menu-item" data-action="download_song" data-id="${songId}"><i class="bi bi-download"></i> Download Song</li>
             <li class="context-menu-item" data-action="show_metadata" data-id="${songId}"><i class="bi bi-file-earmark-music"></i> View Metadata</li>
+            <li class="context-menu-item" data-action="show_lyrics" data-id="${songId}"><i class="bi bi-music-note-list"></i> Show Lyrics</li>
             `;
           
           if (currentUser) {
@@ -4637,6 +4802,29 @@ function perform_full_scan($db) {
         
         contentArea.addEventListener('click', e => {
           const target = e.target;
+          const followBtn = target.closest('.follow-btn');
+          if (followBtn) {
+            e.stopPropagation();
+            const userId = followBtn.dataset.userId;
+            fetchData('?action=toggle_follow', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ following_id: userId })
+            }).then(res => {
+              if (res && res.status === 'followed') {
+                followBtn.textContent = 'Unfollow';
+                followBtn.classList.remove('btn-danger');
+                followBtn.classList.add('btn-outline-light');
+              } else if (res && res.status === 'unfollowed') {
+                followBtn.textContent = 'Follow';
+                followBtn.classList.remove('btn-outline-light');
+                followBtn.classList.add('btn-danger');
+              } else {
+                showToast(res.message || 'Error toggling follow', 'error');
+              }
+            });
+            return;
+          }
           const moreBtn = target.closest('.more-btn');
           if (moreBtn) {
             e.preventDefault();
@@ -4871,6 +5059,8 @@ function perform_full_scan($db) {
               document.getElementById('edit-metadata-genre').value = decodeURIComponent(genre || '');
               document.getElementById('edit-metadata-cover-preview').src = `?action=get_image&id=${id}&v=${Date.now()}`;
               document.getElementById('edit-metadata-cover').value = '';
+              const metaSongDataToEdit = await fetchData(`?action=get_song_data&id=${id}`);
+              document.getElementById('edit-metadata-lyrics').value = metaSongDataToEdit ? (metaSongDataToEdit.lyrics || '') : '';
               if (editMetadataModal) editMetadataModal.show();
               break;
             case 'show_metadata':
@@ -4888,6 +5078,22 @@ function perform_full_scan($db) {
                     <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Bitrate:</strong> <span>${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + ' kbps' : 'N/A'}</span></li>
                   </ul>`;
                 metadataModal.show();
+              }
+              break;
+            case 'show_lyrics':
+              const lyricsSongData = await fetchData(`?action=get_song_data&id=${id}`);
+              if (lyricsSongData) {
+                const lyricsTitleEl = document.getElementById('lyrics-modal-title');
+                const lyricsBodyEl = document.getElementById('lyrics-modal-body');
+                if (lyricsTitleEl) lyricsTitleEl.textContent = lyricsSongData.title;
+                if (lyricsBodyEl) {
+                  lyricsBodyEl.innerHTML = lyricsSongData.lyrics ? `<pre style="white-space: pre-wrap; font-family: 'Roboto', sans-serif;">${lyricsSongData.lyrics}</pre>` : '<p class="text-center text-secondary">No lyrics available.</p>';
+                }
+                const lyricsModalEl = document.getElementById('lyrics-modal');
+                if (lyricsModalEl) {
+                  const lyricsModal = bootstrap.Modal.getOrCreateInstance(lyricsModalEl);
+                  lyricsModal.show();
+                }
               }
               break;
             case 'download_song':
@@ -5158,6 +5364,7 @@ function perform_full_scan($db) {
             formData.append('artist', document.getElementById('edit-metadata-artist').value);
             formData.append('album', document.getElementById('edit-metadata-album').value);
             formData.append('genre', document.getElementById('edit-metadata-genre').value);
+            formData.append('lyrics', document.getElementById('edit-metadata-lyrics').value);
             
             const coverInput = document.getElementById('edit-metadata-cover');
             if (coverInput && coverInput.files.length > 0) {
