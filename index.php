@@ -1493,11 +1493,64 @@ if (isset($_GET['action'])) {
       break;
 
     case 'search':
-      $query = '%' . ($_GET['q'] ?? '') . '%';
-      $order_by = 'ORDER BY m.artist COLLATE NOCASE ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC';
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) " . $order_by . " " . $limit_clause);
+      $q = $_GET['q'] ?? '';
+      $query = '%' . $q . '%';
+      $shelves = [];
+
+      $artists = [];
+      $added_artists = [];
+      
+      $stmt = $db->prepare("SELECT id, artist as name FROM users WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL ORDER BY artist ASC LIMIT 15");
+      $stmt->execute([$query]);
+      $user_artists = $stmt->fetchAll();
+      
+      foreach ($user_artists as $ua) {
+          $artists[] = ['name' => $ua['name'], 'id' => $ua['id'], 'is_user' => true];
+          $added_artists[strtolower($ua['name'])] = true;
+      }
+
+      $stmt = $db->prepare("SELECT DISTINCT artist, MAX(id) as id FROM music WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL GROUP BY artist LIMIT 15");
+      $stmt->execute([$query]);
+      $music_artists = $stmt->fetchAll();
+      
+      foreach ($music_artists as $ma) {
+          $parts = preg_split('/\s*(?:\/|,|&)\s*/', $ma['artist']);
+          foreach ($parts as $p) {
+              $p = trim($p);
+              if ($p !== '' && stripos($p, $q) !== false && !isset($added_artists[strtolower($p)])) {
+                  $artists[] = ['name' => $p, 'id' => $ma['id'], 'is_user' => false];
+                  $added_artists[strtolower($p)] = true;
+              }
+          }
+      }
+      
+      if (count($artists) > 0) {
+          $shelves[] = ['title' => 'Artists', 'type' => 'artists', 'items' => array_slice($artists, 0, 15)];
+      }
+
+      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album LIKE ? AND m.album != '' AND m.album IS NOT NULL GROUP BY m.album, m.user_id ORDER BY m.album ASC LIMIT 15");
+      $stmt->execute([$query]);
+      $albums = $stmt->fetchAll();
+      if (count($albums) > 0) {
+          $shelves[] = ['title' => 'Albums', 'type' => 'albums', 'items' => $albums];
+      }
+
+      $stmt = $db->prepare("SELECT p.name, p.public_id, u.artist as creator, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id FROM playlists p JOIN users u ON p.user_id = u.id WHERE p.name LIKE ? ORDER BY p.name ASC LIMIT 15");
+      $stmt->execute([$query]);
+      $playlists = $stmt->fetchAll();
+      if (count($playlists) > 0) {
+          $shelves[] = ['title' => 'Playlists', 'type' => 'playlists', 'items' => $playlists];
+      }
+
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) ORDER BY m.title ASC LIMIT 50");
       $stmt->execute([$user_id, $query, $query, $query]);
-      send_json($stmt->fetchAll());
+      $songs = $stmt->fetchAll();
+      if (count($songs) > 0) {
+          $shelves[] = ['title' => 'Songs', 'type' => 'songs_list', 'items' => $songs];
+      }
+
+      send_json(['shelves' => $shelves]);
       break;
 
     case 'get_song_data':
@@ -1904,6 +1957,31 @@ if (isset($_GET['action'])) {
       $discovery_albums = $discovery_stmt->fetchAll();
       if (count($discovery_albums) > 0) {
         $shelves[] = ['title' => 'Discover New Albums', 'type' => 'albums', 'items' => $discovery_albums];
+      }
+
+      $rec_artists_stmt = $db->prepare("
+        SELECT m.artist AS name, MAX(m.id) AS id
+        FROM music m
+        WHERE m.artist != 'Unknown Artist' AND m.artist != '' AND m.artist IS NOT NULL
+        AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)
+        GROUP BY m.artist
+        ORDER BY RANDOM() LIMIT 10
+      ");
+      $rec_artists_stmt->execute([':user_id' => $user_id]);
+      $rec_artists_rows = $rec_artists_stmt->fetchAll();
+      $rec_artists = [];
+      $stmt_is_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
+      foreach ($rec_artists_rows as $da) {
+        $stmt_is_user->execute([$da['name']]);
+        $uid = $stmt_is_user->fetchColumn();
+        $rec_artists[] = [
+          'name' => $da['name'],
+          'id' => $uid ? $uid : $da['id'],
+          'is_user' => (bool)$uid
+        ];
+      }
+      if (count($rec_artists) > 0) {
+        $shelves[] = ['title' => 'Discover Artists', 'type' => 'artists', 'items' => $rec_artists];
       }
 
       send_json(['shelves' => $shelves]);
@@ -2601,8 +2679,11 @@ function perform_full_scan($db) {
       .shelf-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
       .shelf-title { font-size: 1.5rem; font-weight: 700; }
       .shelf-items {
-        display: grid; grid-auto-flow: column; grid-auto-columns: minmax(180px, 1fr); overflow-x: auto;
+        display: grid; grid-auto-flow: column; grid-auto-columns: minmax(130px, 1fr); overflow-x: auto;
         gap: 1rem; padding-bottom: 1rem; scrollbar-color: var(--ytm-surface-2) var(--ytm-surface); scrollbar-width: thin;
+      }
+      @media (min-width: 768px) {
+        .shelf-items { grid-auto-columns: minmax(160px, 1fr); }
       }
       .shelf-items::-webkit-scrollbar { height: 8px; }
       .shelf-item { background-color: transparent; border: none; cursor: pointer; }
@@ -3557,7 +3638,7 @@ function perform_full_scan($db) {
                 ${downloadExportPlaylistZipButtonHTML}
               </div>
             </div>`;
-          contentArea.insertAdjacentHTML('afterbegin', headerHTML);
+                    contentArea.insertAdjacentHTML('afterbegin', headerHTML);
 
           if (type === 'artist') {
             const isUser = details.is_user;
@@ -3813,12 +3894,68 @@ function perform_full_scan($db) {
         const renderRecommendations = (data) => {
           contentArea.innerHTML = '';
           if (!data.shelves || data.shelves.length === 0) {
-            contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Not enough listening history to generate recommendations. Keep listening!</div>`;
+            contentArea.innerHTML = `<div class="text-center p-5 text-secondary">No results found.</div>`;
             return;
           }
 
           data.shelves.forEach(shelf => {
             let itemsHTML = '';
+            
+            if (shelf.type === 'songs_list') {
+              const shelfHTML = `
+                <div class="recommendation-shelf mb-4">
+                  <div class="shelf-header">
+                    <h3 class="shelf-title">${shelf.title}</h3>
+                  </div>
+                  <div id="search-songs-pane"></div>
+                </div>
+              `;
+              contentArea.insertAdjacentHTML('beforeend', shelfHTML);
+              const targetPane = document.getElementById('search-songs-pane');
+
+              let songList = document.createElement('div');
+              songList.className = 'song-list';
+              const header = `<div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) 80px 40px;">
+                <div></div><div>Title</div><div>Artist</div><div>Album</div><div>Time</div><div></div>
+              </div>`;
+              targetPane.insertAdjacentHTML('beforeend', header);
+              
+              const escapeAttr = (str) => str ? String(str).replace(/'/g, "&apos;").replace(/"/g, "&quot;") : '';
+              const songsHTML = shelf.items.map(song => {
+                const isNowPlaying = currentSong && currentSong.id === song.id;
+                return `
+                <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''}" 
+                  data-song-id="${song.id}" 
+                  data-is-favorite="${song.is_favorite == 1 ? '1' : '0'}"
+                  data-song-title="${escapeAttr(song.title)}"
+                  data-song-artist="${escapeAttr(song.artist)}"
+                  data-song-album="${escapeAttr(song.album)}"
+                  data-song-genre="${escapeAttr(song.genre)}"
+                  data-song-user-id="${song.user_id}">
+                  <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
+                    <img src="?action=get_image&id=${song.id}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                    <i class="bi bi-soundwave playing-icon"></i>
+                  </div>
+                  <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.title}</div></div>
+                  <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${song.artist}</div>
+                  <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
+                  <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
+                  <div class="song-more">
+                    <button class="more-btn" data-song-id="${song.id}">
+                      <i class="bi bi-three-dots-vertical"></i>
+                    </button>
+                  </div>
+                  <div class="song-artist-mobile d-md-none w-100">
+                    <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
+                    <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
+                  </div>
+                </div>
+              `}).join('');
+              songList.insertAdjacentHTML('beforeend', songsHTML);
+              targetPane.appendChild(songList);
+              return;
+            }
+
             if (shelf.type === 'songs') {
               itemsHTML = shelf.items.map(song => `
                 <div class="shelf-item" data-song-id="${song.id}">
@@ -3841,6 +3978,14 @@ function perform_full_scan($db) {
                   <img src="?action=get_image&id=${playlist.image_id || 0}" alt="${playlist.name}">
                   <div class="item-title">${playlist.name}</div>
                   <div class="item-subtitle">by ${playlist.creator}</div>
+                </div>
+              `).join('');
+            } else if (shelf.type === 'artists') {
+              itemsHTML = shelf.items.map(artist => `
+                <div class="shelf-item text-center" data-artist="${encodeURIComponent(artist.name)}" data-userid="${artist.id || ''}">
+                  <img src="${artist.is_user ? `?action=get_profile_picture&id=${artist.id}` : `?action=get_image&id=${artist.id || 0}`}" class="rounded-circle" alt="${artist.name}" style="aspect-ratio: 1/1; object-fit: cover;">
+                  <div class="item-title mt-2">${artist.name}</div>
+                  <div class="item-subtitle text-uppercase small text-secondary">Artist</div>
                 </div>
               `).join('');
             }
@@ -3887,7 +4032,7 @@ function perform_full_scan($db) {
         };
         
         const setupSortOptions = (viewType) => {
-          const isSortable = ['get_songs', 'get_favorites', 'artist_songs', 'album_songs', 'genre_songs', 'user_profile', 'search', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
+          const isSortable = ['get_songs', 'get_favorites', 'artist_songs', 'album_songs', 'genre_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
           
           if (isSortable) {
             let options = {};
@@ -3895,7 +4040,6 @@ function perform_full_scan($db) {
             switch(viewType) {
               case 'get_songs':
               case 'genre_songs':
-              case 'search':
                 options = {
                   'id_desc': 'Recently Added', 'artist_asc': 'Artist', 'title_asc': 'Title', 'album_asc': 'Album',
                   'year_desc': 'Year (Newest)', 'year_asc': 'Year (Oldest)'
@@ -3953,7 +4097,7 @@ function perform_full_scan($db) {
         };
 
         const loadMoreContent = async () => {
-          if (isLoadingMore || allContentloaded) return;
+          if (isLoadingMore || allContentloaded || currentView.type === 'search') return;
           if (!currentUser && (currentView.type === 'get_favorites' || currentView.type === 'get_history' || currentView.type === 'get_following')) return;
           
           isLoadingMore = true;
@@ -3981,12 +4125,6 @@ function perform_full_scan($db) {
                 renderSongs(profileData.songs, true);
                 data = profileData.songs;
               }
-              break;
-            case 'search':
-              params.delete('sort');
-              params.append('q', param);
-              data = await fetchData(`?action=search&${params.toString()}`);
-              renderSongs(data, true);
               break;
             case 'artist_songs':
             case 'album_songs':
@@ -4160,11 +4298,14 @@ function perform_full_scan($db) {
               pageParams.delete('sort');
               pageParams.append('q', currentView.param);
               data = await fetchData(`?action=search&${pageParams.toString()}`);
-              renderSongs(data, false);
+              if (data && data.shelves) {
+                renderRecommendations(data);
+              }
+              allContentloaded = true;
               break;
           }
 
-          if (data && data.length < PAGE_SIZE) {
+          if (data && data.length < PAGE_SIZE && currentView.type !== 'search') {
             allContentloaded = true;
           }
           if (viewConfig.highlight) {
@@ -4560,10 +4701,10 @@ function perform_full_scan($db) {
 
         const setQueueAndPlay = async (startId, view) => {
           const contextView = view || currentView;
-          if (contextView.type === 'get_recommendations') {
-            const allShelfSongs = [...document.querySelectorAll('.shelf-item[data-song-id]')];
+          if (contextView.type === 'get_recommendations' || contextView.type === 'search') {
+            const allShelfSongs = [...document.querySelectorAll('.shelf-item[data-song-id], .song-item[data-song-id]')];
             const allSongIds = allShelfSongs.map(item => parseInt(item.dataset.songId));
-            originalQueue = allSongIds;
+            originalQueue = [...new Set(allSongIds)];
           } else {
             let viewTypeForIds = contextView.type;
             if (contextView.type === 'user_profile') {
@@ -4909,7 +5050,7 @@ function perform_full_scan($db) {
             loadView({ type: 'album_songs', param: songAlbumEl.dataset.album, sort: 'title_asc', filter_user_id: songItem ? songItem.dataset.userid || songItem.dataset.songUserId || '' : '' });
             return;
           }
-          const cardEl = target.closest('.card, .shelf-item[data-playlist]');
+          const cardEl = target.closest('.card, .shelf-item[data-playlist], .shelf-item[data-artist]');
           if (cardEl && !target.closest('.playlist-more-btn')) {
             let viewType, param, sort;
             let filterUserId = cardEl.dataset.userid || '';
