@@ -180,7 +180,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       .nav-link { color: var(--ytm-secondary-text); display: flex; align-items: center; font-weight: 500; border-left: 3px solid transparent; gap: 1rem; text-decoration: none; padding: 0.75rem 1.5rem; }
       .nav-link:hover { background-color: var(--ytm-surface); color: var(--ytm-primary-text); }
       .page-header { padding: 1.5rem 2rem 1.5rem 2rem; }
-      .content-title { font-size: 2rem; font-weight: 700; margin-bottom: 1.5rem; }
+      .content-title { font-size: 2rem; font-weight: 700; margin-bottom: 0; }
       .user-list { background-color: var(--ytm-surface); border-radius: 8px; overflow: hidden; }
       .user-list-header { background-color: var(--ytm-surface-2); font-weight: 500; }
       .user-item > *, .user-list-header > * { min-width: 0; }
@@ -243,8 +243,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <a href="?access=admin&logout=1" class="nav-link"><i class="bi bi-box-arrow-left"></i><span>Logout</span></a>
       </nav>
       <main class="main-content">
-        <div class="page-header">
-          <h1 class="content-title">User Management</h1>
+        <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
+          <h1 class="content-title m-0">User Management</h1>
+          <?php $search = $_GET['search'] ?? ''; ?>
+          <form method="GET" action="" class="d-flex w-100" style="max-width: 300px;">
+            <input type="hidden" name="access" value="admin">
+            <input type="text" name="search" class="form-control me-2" placeholder="Search user..." value="<?php echo htmlspecialchars($search); ?>">
+            <button type="submit" class="btn btn-danger"><i class="bi bi-search"></i></button>
+          </form>
         </div>
         <div class="content-area-wrapper">
           <div class="user-list">
@@ -255,13 +261,31 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $db = get_db();
               $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
               $offset = ($page - 1) * ADMIN_PAGE_SIZE;
-              $total_users_stmt = $db->query("SELECT COUNT(id) FROM users");
+              
+              $where = '';
+              $params = [];
+              if ($search !== '') {
+                $where = "WHERE id = ? OR email LIKE ? OR artist LIKE ?";
+                $params = [$search, "%$search%", "%$search%"];
+              }
+              
+              $total_users_stmt = $db->prepare("SELECT COUNT(id) FROM users $where");
+              $total_users_stmt->execute($params);
               $total_users = $total_users_stmt->fetchColumn();
               $total_pages = ceil($total_users / ADMIN_PAGE_SIZE);
-              $stmt = $db->prepare("SELECT id, email, artist, verified, last_upload_date, daily_upload_count FROM users ORDER BY id ASC LIMIT ? OFFSET ?");
-              $stmt->bindValue(1, ADMIN_PAGE_SIZE, PDO::PARAM_INT);
-              $stmt->bindValue(2, $offset, PDO::PARAM_INT);
+              
+              $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count FROM users $where ORDER BY id ASC LIMIT ? OFFSET ?";
+              $stmt = $db->prepare($sql);
+              $param_index = 1;
+              if ($search !== '') {
+                $stmt->bindValue($param_index++, $search);
+                $stmt->bindValue($param_index++, "%$search%");
+                $stmt->bindValue($param_index++, "%$search%");
+              }
+              $stmt->bindValue($param_index++, (int)ADMIN_PAGE_SIZE, PDO::PARAM_INT);
+              $stmt->bindValue($param_index++, (int)$offset, PDO::PARAM_INT);
               $stmt->execute();
+              
               $users = $stmt->fetchAll();
               foreach ($users as $user):
             ?>
@@ -282,7 +306,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="user-artist text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
               </div>
               <div class="user-item-action">
-                <form method="POST" action="?access=admin&page=<?php echo $page; ?>" class="d-inline">
+                <form method="POST" action="?access=admin&page=<?php echo $page; ?>&search=<?php echo urlencode($search); ?>" class="d-inline">
                   <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
                   <button type="submit" name="toggle_verify" class="btn <?php echo $user['verified'] === 'yes' ? 'btn-warning' : 'btn-success'; ?>">
                     <?php echo $user['verified'] === 'yes' ? 'Un-verify' : 'Verify'; ?>
@@ -310,15 +334,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <nav class="mt-4" aria-label="User pagination">
             <ul class="pagination justify-content-center">
               <li class="page-item <?php echo ($page <= 1) ? 'disabled' : ''; ?>">
-                <a class="page-link" href="?access=admin&page=<?php echo $page - 1; ?>">Previous</a>
+                <a class="page-link" href="?access=admin&page=<?php echo $page - 1; ?>&search=<?php echo urlencode($search); ?>">Previous</a>
               </li>
-              <?php for ($i = 1; $i <= $total_pages; $i++): ?>
+              <?php
+                $start_page = max(1, $page - 1);
+                $end_page = min($total_pages, $start_page + 2);
+                if ($end_page - $start_page < 2) {
+                  $start_page = max(1, $end_page - 2);
+                }
+              ?>
+              <?php for ($i = $start_page; $i <= $end_page; $i++): ?>
               <li class="page-item <?php echo ($page == $i) ? 'active' : ''; ?>">
-                <a class="page-link" href="?access=admin&page=<?php echo $i; ?>"><?php echo $i; ?></a>
+                <a class="page-link" href="?access=admin&page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>"><?php echo $i; ?></a>
               </li>
               <?php endfor; ?>
               <li class="page-item <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>">
-                <a class="page-link" href="?access=admin&page=<?php echo $page + 1; ?>">Next</a>
+                <a class="page-link" href="?access=admin&page=<?php echo $page + 1; ?>&search=<?php echo urlencode($search); ?>">Next</a>
               </li>
             </ul>
           </nav>
@@ -748,6 +779,26 @@ if (isset($_GET['action'])) {
       send_json(['status' => 'success', 'message' => 'Password changed successfully.']);
       break;
 
+    case 'change_name':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $new_name = trim(htmlspecialchars($data['new_name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      if (empty($new_name)) {
+        http_response_code(400);
+        send_json(['status' => 'error', 'message' => 'Name cannot be empty.']);
+      }
+      $stmt = $db->prepare("SELECT id FROM users WHERE artist = ? AND id != ? COLLATE NOCASE");
+      $stmt->execute([$new_name, $user_id]);
+      if ($stmt->fetch()) {
+        http_response_code(409);
+        send_json(['status' => 'error', 'message' => 'Display name already taken.']);
+      }
+      $stmt = $db->prepare("UPDATE users SET artist = ? WHERE id = ?");
+      $stmt->execute([$new_name, $user_id]);
+      $_SESSION['user_artist'] = $new_name;
+      send_json(['status' => 'success', 'message' => 'Name changed successfully.']);
+      break;
+
     case 'upload_profile_picture':
       if (!$user_id) { http_response_code(403); send_json(['status' => 'error', 'message' => 'Not logged in.']); }
       if (isset($_FILES['profile_picture'])) {
@@ -895,7 +946,7 @@ if (isset($_GET['action'])) {
       
       if ($song && ($song['user_id'] == $user_id || $_SESSION['user_artist'] == 'Music Library')) {
         $db->prepare("DELETE FROM music WHERE id = ?")->execute([$song_id]);
-        if ($song['file'] && file_exists($song['file']) && strpos(realpath($song['file']), realpath(MUSIC_DIR . '/uploads')) === 0) {
+        if ($song['file'] && file_exists($song['file'])) {
           @unlink($song['file']);
         }
         send_json(['status' => 'success', 'message' => 'Song deleted.']);
@@ -1094,6 +1145,9 @@ if (isset($_GET['action'])) {
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
       
+      $is_all = isset($_GET['all']) && $_GET['all'] == '1';
+      $current_limit = $is_all ? '' : $limit_clause;
+      
       $stmt = $db->prepare("
         SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
         FROM music m
@@ -1101,7 +1155,7 @@ if (isset($_GET['action'])) {
         JOIN playlists p ON ps.playlist_id = p.id
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
         WHERE p.public_id = ?
-        {$order_by} {$limit_clause}
+        {$order_by} {$current_limit}
       ");
       $stmt->execute([$user_id, $public_id]);
       send_json($stmt->fetchAll());
@@ -2698,6 +2752,22 @@ function perform_full_scan($db) {
       .user-stats-page .stat-item .stat-value { font-size: 2.5rem; font-weight: 700; }
       .user-stats-page .stat-item .stat-label { color: var(--ytm-secondary-text); text-transform: uppercase; font-size: 0.9rem; }
       @keyframes soundwave-pulse { 0% { transform: scaleY(0.4); } 25% { transform: scaleY(1); } 50% { transform: scaleY(0.6); } 75% { transform: scaleY(0.8); } 100% { transform: scaleY(0.4); } }
+      #playlist-downloader-modal * { color: #ffffff !important; }
+      .pd-song-row {
+        display: grid;
+        grid-template-columns: 50px 2fr 2fr 100px 60px;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid var(--ytm-surface-2);
+      }
+      @media (max-width: 768px) {
+        .pd-song-row { grid-template-columns: 40px 1fr 30px !important; gap: 0.5rem !important; }
+        .pd-song-row .artist-col, .pd-song-row .duration-col { display: none !important; }
+        .pd-song-row .title-col { grid-column: 2; }
+        .pd-song-row .download-col { grid-column: 3; }
+        .pd-mobile-artist { grid-column: 2; font-size: 0.75rem; }
+      }
       @media (max-width: 767.98px) {
         .text-truncate-width { max-width: 250px; }
         body.player-visible { padding-bottom: 130px; }
@@ -2831,6 +2901,10 @@ function perform_full_scan($db) {
           
           <div class="mt-auto">
             <hr class="text-secondary">
+            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#playlist-downloader-modal">
+              <i class="bi bi-cloud-arrow-down-fill"></i>
+              <span>Downloader</span>
+            </a>
             <a href="#" class="nav-link logged-in-only verified-user-only" data-bs-toggle="modal" data-bs-target="#upload-modal">
               <i class="bi bi-cloud-upload-fill"></i>
               <span>Upload Song</span>
@@ -3070,6 +3144,15 @@ function perform_full_scan($db) {
                     <input class="form-control" type="file" id="profile-picture-input" accept="image/png, image/jpeg, image/gif">
                 </div>
                 <button type="submit" class="btn btn-danger w-100">Save Picture</button>
+            </form>
+            <hr class="text-secondary">
+            <h6 class="mt-4">Change Display Name</h6>
+            <form id="change-name-form">
+              <div class="mb-3">
+                <label for="new-name" class="form-label">New Name</label>
+                <input type="text" class="form-control" id="new-name" required>
+              </div>
+              <button type="submit" class="btn btn-danger w-100">Save Name</button>
             </form>
             <hr class="text-secondary">
             <h6 class="mt-4">Change Password</h6>
@@ -3321,6 +3404,69 @@ function perform_full_scan($db) {
           </div>
           <div class="modal-body p-0">
             <iframe id="full-scan-iframe" src="about:blank" style="width: 100%; height: 60vh; border: none; background-color: #030303;"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="playlist-downloader-modal" tabindex="-1">
+      <div class="modal-dialog modal-fullscreen">
+        <div class="modal-content" style="background-color: var(--ytm-bg);">
+          <div class="modal-header border-0" style="background-color: var(--ytm-surface-2);">
+            <h5 class="modal-title"><i class="bi bi-cloud-arrow-down-fill"></i> Playlist Downloader</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-2 p-md-4">
+            <div class="container-fluid mx-auto" style="max-width: 1000px;">
+              <div class="card mb-4" style="background-color: var(--ytm-surface); border: none;">
+                <div class="card-header" style="background-color: var(--ytm-surface-2); font-weight: bold; border: none; color: #ffffff !important;">Load Playlist / Song</div>
+                <div class="card-body">
+                  <form id="pd-load-form" class="mb-4">
+                    <div class="mb-3">
+                      <label for="pd-playlist-id" class="form-label" style="color: #ffffff !important;">Playlist ID</label>
+                      <input type="text" class="form-control" id="pd-playlist-id" placeholder="Enter Playlist Public ID">
+                    </div>
+                    <button type="submit" class="btn btn-danger">Load Playlist</button>
+                  </form>
+                  <hr class="text-secondary">
+                  <div class="mb-3">
+                    <label for="pd-song-id" class="form-label" style="color: #ffffff !important;">Download a single song by ID</label>
+                    <div class="input-group">
+                      <input type="number" class="form-control" id="pd-song-id" placeholder="Song ID">
+                      <button class="btn btn-outline-light" type="button" id="pd-download-single" style="color: #ffffff !important;">Download</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div id="pd-results-card" class="card d-none" style="background-color: var(--ytm-surface); border: none;">
+                <div class="card-header" style="background-color: var(--ytm-surface-2); font-weight: bold; border: none; color: #ffffff !important;" id="pd-playlist-title">
+                  Playlist Details
+                </div>
+                <div class="card-body">
+                  <button class="btn btn-danger w-100 mb-3" id="pd-start-auto" style="color: #ffffff !important;">
+                    <i class="bi bi-play-fill" style="color: #ffffff !important;"></i> Download All Songs (Sequential)
+                  </button>
+                  <div class="mb-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2" style="color: #ffffff !important;">
+                      <span><i class="bi bi-terminal" style="color: #ffffff !important;"></i> Download Log</span>
+                      <button class="btn btn-sm btn-outline-secondary" id="pd-clear-log" style="color: #ffffff !important; border-color: #ffffff;">Clear</button>
+                    </div>
+                    <div class="log-area" id="pd-log" style="background-color: var(--ytm-surface-2); border-radius: 8px; padding: 1rem; font-family: monospace; font-size: 0.85rem; height: 300px; overflow-y: auto; color: #ffffff !important;"></div>
+                  </div>
+                  <div>
+                    <strong style="color: #ffffff !important;">Song List</strong>
+                    <div class="song-list mt-2" style="background-color: var(--ytm-surface); border-radius: 12px; overflow: hidden;">
+                      <div class="song-item small d-none d-md-grid pd-song-row" style="color: #ffffff !important;">
+                        <div style="color: #ffffff !important;">#</div><div style="color: #ffffff !important;">Title</div><div style="color: #ffffff !important;">Artist</div><div style="color: #ffffff !important;">Duration</div><div></div>
+                      </div>
+                      <div id="pd-song-rows"></div>
+                    </div>
+                    <div id="pd-infinite-scroll-loader" class="text-center p-3 d-none" style="color: var(--ytm-secondary-text);">Loading more...</div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -3590,7 +3736,7 @@ function perform_full_scan($db) {
             typeText = `Playlist by ${details.creator}`;
             shareId = details.public_id;
             document.title = `${details.name} - ${details.creator} - PHP Music`;
-            downloadButtonHTML = `<a href="playlist_downloader.php?id=${details.public_id}" target="_blank" class="btn btn-outline-light border-0" title="Download Playlist"><i class="bi bi-download"></i> <span class="d-none d-md-inline">Download</span></a>`;
+            downloadButtonHTML = `<button class="btn btn-outline-light border-0 open-pd-btn" data-public-id="${details.public_id}" title="Download Playlist"><i class="bi bi-download"></i> <span class="d-none d-md-inline">Download</span></button>`;
             downloadExportPlaylistZipButtonHTML = `<a href="?action=export_playlist&id=${details.public_id}" target="_blank" class="btn btn-outline-light border-0" title="Export Playlist"><i class="bi bi-box-arrow-up"></i> <span class="d-none d-md-inline">Export</span></a>`;
             if (currentUser && currentUser.id !== details.user_id) {
               copyButtonHTML = `<button class="btn btn-outline-light border-0 copy-playlist-btn" data-public-id="${details.public_id}"><i class="bi bi-copy"></i> <span class="d-none d-md-inline">Copy Playlist</span></button>`;
@@ -3864,7 +4010,7 @@ function perform_full_scan($db) {
                 </button>` : '';
 
               if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists' || type === 'get_following') {
-                return `<div class="col">
+                                return `<div class="col">
                   <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
                     ${moreButton}
                     <img src="${imgSrc}${imageId || 0}" class="card-img-top ${imgClass}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
@@ -4106,7 +4252,7 @@ function perform_full_scan($db) {
           currentPage++;
           let data;
           const { type, param, sort, filter_user_id } = currentView;
-          
+
           const params = new URLSearchParams({ page: currentPage, sort: sort });
           if (filter_user_id) {
             params.append('filter_user_id', filter_user_id);
@@ -4966,6 +5112,16 @@ function perform_full_scan($db) {
             });
             return;
           }
+          const openPdBtn = target.closest('.open-pd-btn');
+          if (openPdBtn) {
+            e.stopPropagation();
+            const publicId = openPdBtn.dataset.publicId;
+            pdPlaylistIdInput.value = publicId;
+            const downloaderModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('playlist-downloader-modal'));
+            downloaderModal.show();
+            pdLoadForm.dispatchEvent(new Event('submit'));
+            return;
+          }
           const moreBtn = target.closest('.more-btn');
           if (moreBtn) {
             e.preventDefault();
@@ -5381,6 +5537,7 @@ function perform_full_scan($db) {
         
         const loginForm = document.getElementById('login-form');
         const registerForm = document.getElementById('register-form');
+        const changeNameForm = document.getElementById('change-name-form');
         const changePwForm = document.getElementById('change-password-form');
         const profilePicForm = document.getElementById('profile-picture-form');
         const createPlaylistForm = document.getElementById('create-playlist-form');
@@ -5550,6 +5707,22 @@ function perform_full_scan($db) {
         document.getElementById('profile-dropdown-stats-desktop').addEventListener('click', () => loadView({type: 'get_user_stats'}));
         document.getElementById('profile-dropdown-stats-mobile').addEventListener('click', () => loadView({type: 'get_user_stats'}));
 
+        changeNameForm.addEventListener('submit', async e => {
+          e.preventDefault();
+          const new_name = document.getElementById('new-name').value;
+          const data = await fetchData('?action=change_name', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ new_name })
+          });
+          if (data && data.status === 'success') {
+            bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
+            changeNameForm.reset();
+            showToast(data.message, 'success');
+            await checkSession();
+            if (currentView.type === 'user_profile') loadView(currentView);
+          }
+        });
+
         changePwForm.addEventListener('submit', async e => {
           e.preventDefault();
           const new_password = document.getElementById('new-password').value;
@@ -5677,6 +5850,227 @@ function perform_full_scan($db) {
           });
         }
 
+        let pdAllSongs = [];
+        let pdCurrentPage = 1;
+        const pdItemsPerPage = 50;
+        let pdIsDownloading = false;
+        let pdStopRequested = false;
+
+        const pdPlaylistIdInput = document.getElementById('pd-playlist-id');
+        const pdSongIdInput = document.getElementById('pd-song-id');
+        const pdLoadForm = document.getElementById('pd-load-form');
+        const pdDownloadSingleBtn = document.getElementById('pd-download-single');
+        const pdResultsCard = document.getElementById('pd-results-card');
+        const pdPlaylistTitle = document.getElementById('pd-playlist-title');
+        const pdStartAutoBtn = document.getElementById('pd-start-auto');
+        const pdLogArea = document.getElementById('pd-log');
+        const pdClearLogBtn = document.getElementById('pd-clear-log');
+        const pdSongRows = document.getElementById('pd-song-rows');
+
+        const pdEscapeHtml = (str) => {
+          if (!str) return '';
+          return str.replace(/[&<>]/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[m] || m))
+                    .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, c => c);
+        };
+        const pdTruncate = (str, len = 50) => str.length > len ? str.substring(0, len) + '…' : str;
+
+        const pdLog = (message, isError = false) => {
+          const time = new Date().toLocaleTimeString();
+          const div = document.createElement('div');
+          div.className = 'log-line';
+          div.style.color = isError ? '#ff8888' : '#aaaaaa';
+          div.style.borderBottom = '1px solid #404040';
+          div.style.padding = '0.25rem 0';
+          div.innerHTML = `[${time}] ${message}`;
+          pdLogArea.appendChild(div);
+          div.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        };
+
+        const pdDownloadSong = async (song, isAuto = false, index = null, total = null) => {
+          const safeTitle = (song.title + ' - ' + (song.artist || 'Unknown')).replace(/[^a-zA-Z0-9\s\.\-\(\)\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g, '_');
+          const url = `?action=download_song&id=${encodeURIComponent(song.id)}`;
+          if (isAuto) {
+            pdLog(`Downloading ${index+1}/${total}: ${song.title} - ${song.artist || 'Unknown'}`);
+          } else {
+            pdLog(`Manual download: ${song.title} - ${song.artist || 'Unknown'}`);
+          }
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = safeTitle + '.mp3';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          await new Promise(r => setTimeout(r, 1200));
+        };
+
+        const handleManualDl = async (e) => {
+          e.preventDefault();
+          const songId = parseInt(e.currentTarget.dataset.id);
+          const song = pdAllSongs.find(s => s.id === songId);
+          if (song) await pdDownloadSong(song, false);
+        };
+
+        const pdRenderSongRows = () => {
+          pdSongRows.innerHTML = '';
+          const start = 0;
+          const end = pdItemsPerPage;
+          const pageSongs = pdAllSongs.slice(start, end);
+          
+          const rowsHtml = pageSongs.map((song, idx) => {
+            const globalIdx = start + idx;
+            return `
+              <div class="song-item pd-song-row" style="color: #ffffff !important;">
+                <div class="text-secondary small d-none d-md-block" style="color: #ffffff !important;">${globalIdx + 1}</div>
+                <div class="title-col text-truncate" title="${pdEscapeHtml(song.title)}" style="color: #ffffff !important;">${pdEscapeHtml(pdTruncate(song.title, 60))}</div>
+                <div class="artist-col text-truncate d-none d-md-block" title="${pdEscapeHtml(song.artist)}" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : 'Unknown')}</div>
+                <div class="duration-col d-none d-md-block" style="color: #ffffff !important;">${formatTime(song.duration)}</div>
+                <div class="download-col"><button class="btn btn-sm btn-outline-light pd-manual-dl" data-id="${song.id}" style="color: #ffffff !important; border-color: #ffffff !important;"><i class="bi bi-download"></i></button></div>
+                <div class="pd-mobile-artist d-md-none text-truncate" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : 'Unknown')}</div>
+              </div>
+            `;
+          }).join('');
+          
+          pdSongRows.innerHTML = rowsHtml;
+          
+          document.querySelectorAll('.pd-manual-dl').forEach(btn => {
+            btn.removeEventListener('click', handleManualDl);
+            btn.addEventListener('click', handleManualDl);
+          });
+        };
+
+        const pdStopAutoDownload = () => {
+          if (!pdIsDownloading) return;
+          pdStopRequested = true;
+          pdLog('⏹️ Stopping download process...', false);
+          pdStartAutoBtn.disabled = true;
+          pdStartAutoBtn.innerHTML = '<i class="bi bi-stop-fill" style="color: #ffffff !important;"></i> Stopping...';
+        };
+
+        const pdStartAutoDownload = async () => {
+          if (pdIsDownloading) return;
+          pdIsDownloading = true;
+          pdStopRequested = false;
+          
+          pdStartAutoBtn.removeEventListener('click', pdStartAutoDownload);
+          pdStartAutoBtn.addEventListener('click', pdStopAutoDownload);
+          pdStartAutoBtn.classList.replace('btn-danger', 'btn-warning');
+          pdStartAutoBtn.innerHTML = '<i class="bi bi-stop-fill" style="color: #ffffff !important;"></i> Stop Download';
+          pdStartAutoBtn.disabled = false;
+          
+          pdLog('🚀 Starting sequential download of ALL songs. Click "Stop Download" to cancel.');
+          for (let i = 0; i < pdAllSongs.length; i++) {
+            if (pdStopRequested) {
+              pdLog(`⏹️ Download stopped by user after ${i}/${pdAllSongs.length} songs.`);
+              break;
+            }
+            await pdDownloadSong(pdAllSongs[i], true, i, pdAllSongs.length);
+          }
+          
+          pdStartAutoBtn.removeEventListener('click', pdStopAutoDownload);
+          pdStartAutoBtn.addEventListener('click', pdStartAutoDownload);
+          pdStartAutoBtn.classList.replace('btn-warning', 'btn-danger');
+          pdStartAutoBtn.innerHTML = '<i class="bi bi-play-fill" style="color: #ffffff !important;"></i> Download All Songs (Sequential)';
+          pdStartAutoBtn.disabled = false;
+          
+          if (!pdStopRequested) pdLog(`✅ All ${pdAllSongs.length} songs have been sent for download!`);
+          pdIsDownloading = false;
+          pdStopRequested = false;
+        };
+
+        pdLoadForm.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const publicId = pdPlaylistIdInput.value.trim();
+          if (!publicId) return;
+          
+          pdLogArea.innerHTML = '';
+          pdLog(`Fetching playlist details for: ${publicId}`);
+          
+          try {
+            const data = await fetchData(`?action=get_playlist_songs&public_id=${publicId}&sort=manual_order&all=1`);
+            if (data && data.length > 0) {
+              pdAllSongs = data;
+              pdCurrentPage = 1;
+              pdResultsCard.classList.remove('d-none');
+              pdPlaylistTitle.innerHTML = `<i class="bi bi-music-note-beamed" style="color: #ffffff !important;"></i> Playlist loaded <span class="badge bg-secondary ms-2">${pdAllSongs.length} songs</span>`;
+              pdLog(`✅ Successfully loaded ${pdAllSongs.length} songs.`);
+              pdRenderSongRows();
+              const loader = document.getElementById('pd-infinite-scroll-loader');
+              if (loader) {
+                if (pdCurrentPage * pdItemsPerPage < pdAllSongs.length) {
+                  loader.classList.remove('d-none');
+                } else {
+                  loader.classList.add('d-none');
+                }
+              }
+            } else {
+              showToast('Playlist not found or empty', 'error');
+              pdLog('❌ Failed to load playlist or it is empty.', true);
+            }
+          } catch (err) {
+            showToast('Error fetching playlist', 'error');
+          }
+        });
+
+        pdDownloadSingleBtn.addEventListener('click', async () => {
+          const songId = parseInt(pdSongIdInput.value);
+          if (isNaN(songId) || songId <= 0) {
+            showToast('Enter a valid song ID', 'error');
+            return;
+          }
+          try {
+            const song = await fetchData(`?action=get_song_data&id=${songId}`);
+            if (song && song.id) {
+              await pdDownloadSong(song, false);
+            } else {
+              showToast('Song not found', 'error');
+            }
+          } catch (err) {
+            showToast('Error fetching song', 'error');
+          }
+        });
+
+        pdStartAutoBtn.addEventListener('click', pdStartAutoDownload);
+        pdClearLogBtn.addEventListener('click', () => { pdLogArea.innerHTML = ''; pdLog('Log cleared.'); });
+
+        const pdModalBody = document.querySelector('#playlist-downloader-modal .modal-body');
+        if (pdModalBody) {
+          pdModalBody.addEventListener('scroll', () => {
+            if (pdResultsCard.classList.contains('d-none') || pdAllSongs.length === 0) return;
+            const scrollBottom = pdModalBody.scrollHeight - pdModalBody.scrollTop - pdModalBody.clientHeight;
+            if (scrollBottom < 200 && pdCurrentPage * pdItemsPerPage < pdAllSongs.length) {
+              const start = pdCurrentPage * pdItemsPerPage;
+              pdCurrentPage++;
+              const end = pdCurrentPage * pdItemsPerPage;
+              const pageSongs = pdAllSongs.slice(start, end);
+              
+              const rowsHtml = pageSongs.map((song, idx) => {
+                const globalIdx = start + idx;
+                return `
+                  <div class="song-item pd-song-row" style="color: #ffffff !important;">
+                    <div class="text-secondary small d-none d-md-block" style="color: #ffffff !important;">${globalIdx + 1}</div>
+                    <div class="title-col text-truncate" title="${pdEscapeHtml(song.title)}" style="color: #ffffff !important;">${pdEscapeHtml(pdTruncate(song.title, 60))}</div>
+                    <div class="artist-col text-truncate d-none d-md-block" title="${pdEscapeHtml(song.artist)}" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : 'Unknown')}</div>
+                    <div class="duration-col d-none d-md-block" style="color: #ffffff !important;">${formatTime(song.duration)}</div>
+                    <div class="download-col"><button class="btn btn-sm btn-outline-light pd-manual-dl" data-id="${song.id}" style="color: #ffffff !important; border-color: #ffffff !important;"><i class="bi bi-download"></i></button></div>
+                    <div class="pd-mobile-artist d-md-none text-truncate" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : 'Unknown')}</div>
+                  </div>
+                `;
+              }).join('');
+              pdSongRows.insertAdjacentHTML('beforeend', rowsHtml);
+              document.querySelectorAll('.pd-manual-dl').forEach(btn => {
+                btn.removeEventListener('click', handleManualDl);
+                btn.addEventListener('click', handleManualDl);
+              });
+              const loader = document.getElementById('pd-infinite-scroll-loader');
+              if (loader) {
+                if (pdCurrentPage * pdItemsPerPage >= pdAllSongs.length) {
+                  loader.classList.add('d-none');
+                }
+              }
+            }
+          });
+        }
+
         function updateUIForAuthState() {
           const isLoggedIn = !!currentUser;
           document.body.classList.toggle('logged-in', isLoggedIn);
@@ -5696,6 +6090,8 @@ function perform_full_scan($db) {
           const data = await fetchData('?action=get_session');
           if (data && data.status === 'loggedin') {
             currentUser = data.user;
+            const newNameInput = document.getElementById('new-name');
+            if (newNameInput) newNameInput.value = currentUser.artist;
             if (uploadLimitText) uploadLimitText.textContent = data.upload_limit;
             if (uploadRemainingText) {
               uploadRemainingText.textContent = `Today's remaining uploads: ${currentUser.uploads_remaining}`;
