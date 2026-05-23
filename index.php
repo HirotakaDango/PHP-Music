@@ -687,7 +687,7 @@ if (isset($_GET['action'])) {
     case 'get_app_icon':
       header('Content-Type: image/svg+xml');
       $size = intval($_GET['size'] ?? 192);
-      echo '<?xml version="1.0" encoding="utf-8"?><svg width="'.$size.'px" height="'.$size.'px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 10V13" stroke="#1C1C1C" stroke-width="1.7" stroke-linecap="round"/><path d="M16 10V13" stroke="#1C1C1C" stroke-width="1.7" stroke-linecap="round"/><path d="M7 7L7 16" stroke="#DF1463" stroke-width="1.7" stroke-linecap="round"/><path d="M13 7L13 16" stroke="#1C1C1C" stroke-width="1.7" stroke-linecap="round"/><path d="M19 7L19 16" stroke="#1C1C1C" stroke-width="1.7" stroke-linecap="round"/><path d="M10 4L10 19" stroke="#1C1C1C" stroke-width="1.7" stroke-linecap="round"/></svg>';
+      echo '<?xml version="1.0" encoding="utf-8"?><svg width="'.$size.'px" height="'.$size.'px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="24" height="24" rx="6" fill="#F3F4F6"/><path d="M0 24L24 0V24H0Z" fill="#E5E7EB" clip-path="inset(0px round 6px)"/><path d="M4 10V13" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M16 10V13" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M7 7L7 16" stroke="#DF1463" stroke-width="1.7" stroke-linecap="round"/><path d="M13 7L13 16" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M19 7L19 16" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M10 4L10 19" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/></svg>';
       exit;
 
     case 'get_session':
