@@ -1704,23 +1704,32 @@ if (isset($_GET['action'])) {
 
     case 'get_user_playlists':
       if (!$user_id) { send_json([]); }
+      $song_id = isset($_GET['song_id']) ? intval($_GET['song_id']) : 0;
       $sort_key = $_GET['sort'] ?? 'name_asc';
       $sort_map = [
         'name_asc' => 'ORDER BY p.name COLLATE NOCASE ASC',
         'name_desc' => 'ORDER BY p.name COLLATE NOCASE DESC',
-        'modified_desc' => 'ORDER BY p.created_at DESC',
-        'modified_asc' => 'ORDER BY p.created_at ASC',
+        'modified_desc' => 'ORDER BY COALESCE((SELECT MAX(added_at) FROM playlist_songs WHERE playlist_id = p.id), p.created_at) DESC',
+        'modified_asc' => 'ORDER BY COALESCE((SELECT MAX(added_at) FROM playlist_songs WHERE playlist_id = p.id), p.created_at) ASC',
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['name_asc'];
+      
+      $is_added_sql = $song_id > 0 ? ", (SELECT 1 FROM playlist_songs WHERE playlist_id = p.id AND song_id = ?) as is_added" : ", 0 as is_added";
+      
       $stmt = $db->prepare("
         SELECT p.id, p.name, p.public_id, COUNT(ps.song_id) as song_count,
         (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
+        {$is_added_sql}
         FROM playlists p LEFT JOIN playlist_songs ps ON p.id = ps.playlist_id
         WHERE p.user_id = ?
         GROUP BY p.id, p.name, p.public_id
         {$order_by} {$limit_clause}
       ");
-      $stmt->execute([$user_id]);
+      if ($song_id > 0) {
+        $stmt->execute([$song_id, $user_id]);
+      } else {
+        $stmt->execute([$user_id]);
+      }
       send_json($stmt->fetchAll());
       break;
 
@@ -4051,12 +4060,12 @@ function perform_full_scan($db) {
               const useridAttr = item.user_id ? `data-userid="${item.user_id}"` : (type === 'get_following' ? `data-userid="${item.id}"` : '');
 
               const moreButton = (type === 'get_user_playlists') ? `
-                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}">
+                                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}">
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>` : '';
 
               if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists' || type === 'get_following') {
-                                return `<div class="col">
+                return `<div class="col">
                   <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
                     ${moreButton}
                     <img src="${imgSrc}${imageId || 0}" class="card-img-top ${imgClass}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
@@ -4992,7 +5001,7 @@ function perform_full_scan($db) {
             const viewType = navLink.dataset.view;
             let sort = 'artist_asc';
             if (['get_favorites', 'playlist_songs'].includes(viewType)) sort = 'manual_order';
-            if (viewType === 'get_user_playlists') sort = 'name_asc';
+            if (viewType === 'get_user_playlists') sort = 'modified_desc';
             if (viewType === 'get_albums') sort = 'album_asc';
             if (viewType === 'get_artists') sort = 'name_asc';
             if (viewType === 'user_profile') sort = 'id_desc';
@@ -5348,13 +5357,24 @@ function perform_full_scan($db) {
               break;
             case 'add_to_playlist':
               songIdForPlaylist = parseInt(id);
-              const playlists = await fetchData('?action=get_user_playlists');
+              const playlists = await fetchData(`?action=get_user_playlists&song_id=${songIdForPlaylist}&sort=modified_desc`);
               if (playlists && playlists.length > 0) {
-                addToPlaylistModalBody.innerHTML = playlists.map(p => 
-                  `<li class="list-group-item list-group-item-action bg-transparent text-white add-to-playlist-item my-2 p-2 border rounded" data-playlist-id="${p.id}">${p.name}</li>`
-                ).join('');
+                addToPlaylistModalBody.innerHTML = `
+                  <div class="list-group list-group-flush">
+                    ${playlists.map(p => `
+                      <button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-3 add-to-playlist-item my-1 p-2 rounded ${p.is_added ? 'bg-secondary text-white border-0 opacity-75' : 'bg-transparent text-white border border-secondary'}" data-playlist-id="${p.id}" ${p.is_added ? 'disabled' : ''}>
+                        <img src="?action=get_image&id=${p.image_id || 0}" class="rounded" style="width: 48px; height: 48px; object-fit: cover; background-color: var(--ytm-surface-2);">
+                        <div class="d-flex flex-column flex-grow-1 text-start overflow-hidden">
+                          <span class="text-truncate fw-medium">${p.name}</span>
+                          <span class="small ${p.is_added ? 'text-white-50' : 'text-secondary'}">${p.song_count} songs</span>
+                        </div>
+                        ${p.is_added ? '<i class="bi bi-check-circle-fill fs-5"></i>' : '<i class="bi bi-plus-circle fs-5"></i>'}
+                      </button>
+                    `).join('')}
+                  </div>
+                `;
               } else {
-                addToPlaylistModalBody.innerHTML = `<p class="text-secondary text-center">No playlists found. Create one first!</p>`;
+                addToPlaylistModalBody.innerHTML = `<p class="text-secondary text-center p-4">No playlists found. Create one first!</p>`;
               }
               addToPlaylistModal.show();
               break;
@@ -5476,7 +5496,7 @@ function perform_full_scan($db) {
         if (addToPlaylistModalBody) {
           addToPlaylistModalBody.addEventListener('click', async e => {
             const item = e.target.closest('.add-to-playlist-item');
-            if (!item || !songIdForPlaylist) return;
+            if (!item || item.disabled || !songIdForPlaylist) return;
             const playlistId = item.dataset.playlistId;
             const result = await fetchData('?action=add_to_playlist', {
               method: 'POST',
