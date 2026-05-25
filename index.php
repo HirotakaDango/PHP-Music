@@ -2038,6 +2038,52 @@ if (isset($_GET['action'])) {
         $shelves[] = ['title' => 'Discover Artists', 'type' => 'artists', 'items' => $rec_artists];
       }
 
+      $latest_followed_songs_stmt = $db->prepare("
+        SELECT {$song_fields} FROM music m
+        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = :user_id
+        WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id)
+        ORDER BY m.id DESC LIMIT 15
+      ");
+      $latest_followed_songs_stmt->execute([':user_id' => $user_id]);
+      $latest_followed_songs = $latest_followed_songs_stmt->fetchAll();
+      if (count($latest_followed_songs) > 0) {
+        $shelves[] = ['title' => 'From Your Artists: New Tracks', 'type' => 'songs', 'items' => $latest_followed_songs];
+      }
+
+      $latest_followed_albums_stmt = $db->prepare("
+        SELECT {$album_fields} FROM music m
+        WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id) AND m.album != 'Unknown Album'
+        GROUP BY m.album, m.user_id ORDER BY MAX(m.id) DESC LIMIT 10
+      ");
+      $latest_followed_albums_stmt->execute([':user_id' => $user_id]);
+      $latest_followed_albums = $latest_followed_albums_stmt->fetchAll();
+      if (count($latest_followed_albums) > 0) {
+        $shelves[] = ['title' => 'From Your Artists: New Albums', 'type' => 'albums', 'items' => $latest_followed_albums];
+      }
+
+      $rec_followed_songs_stmt = $db->prepare("
+        SELECT {$song_fields} FROM music m
+        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = :user_id
+        WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id)
+        ORDER BY RANDOM() LIMIT 15
+      ");
+      $rec_followed_songs_stmt->execute([':user_id' => $user_id]);
+      $rec_followed_songs = $rec_followed_songs_stmt->fetchAll();
+      if (count($rec_followed_songs) > 0) {
+        $shelves[] = ['title' => 'Recommended Songs From Your Artists', 'type' => 'songs', 'items' => $rec_followed_songs];
+      }
+
+      $rec_followed_albums_stmt = $db->prepare("
+        SELECT {$album_fields} FROM music m
+        WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id) AND m.album != 'Unknown Album'
+        GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
+      ");
+      $rec_followed_albums_stmt->execute([':user_id' => $user_id]);
+      $rec_followed_albums = $rec_followed_albums_stmt->fetchAll();
+      if (count($rec_followed_albums) > 0) {
+        $shelves[] = ['title' => 'Recommended Albums From Your Artists', 'type' => 'albums', 'items' => $rec_followed_albums];
+      }
+
       send_json(['shelves' => $shelves]);
       break;
 
