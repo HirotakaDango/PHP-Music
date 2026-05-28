@@ -4,10 +4,12 @@ error_reporting(E_ALL & ~E_DEPRECATED);
 if (isset($_GET['pwa'])) {
   if ($_GET['pwa'] == 'manifest') {
     header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     echo json_encode([
       "name" => "PHP Music",
       "short_name" => "Music",
       "start_url" => "./",
+      "scope" => "./",
       "display" => "standalone",
       "background_color" => "#030303",
       "theme_color" => "#121212",
@@ -29,6 +31,7 @@ if (isset($_GET['pwa'])) {
   }
   if ($_GET['pwa'] == 'sw') {
     header('Content-Type: application/javascript; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     echo <<<SW
     const CACHE_NAME = 'php-music-cache-v25';
     const STATIC_ASSETS =[
@@ -2525,7 +2528,7 @@ function perform_full_scan($db) {
     <title>PHP Music</title>
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
     <meta name="theme-color" content="#121212"/>
-    <link rel="manifest" href="?pwa=manifest">
+    <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
       (function() {
         const appVersion = '<?php echo APP_VERSION; ?>';
@@ -4042,7 +4045,7 @@ function perform_full_scan($db) {
                 subtextClass = 'text-center';
                 imgSrc = `?action=get_profile_picture&id=`;
               } else if (type === 'get_user_playlists') {
-                name = item.name;
+                                name = item.name;
                 subtext = `${item.song_count} songs`;
                 imageId = item.image_id;
                 dataType = 'playlist';
@@ -4060,7 +4063,7 @@ function perform_full_scan($db) {
               const useridAttr = item.user_id ? `data-userid="${item.user_id}"` : (type === 'get_following' ? `data-userid="${item.id}"` : '');
 
               const moreButton = (type === 'get_user_playlists') ? `
-                                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}">
+                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}">
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>` : '';
 
