@@ -2989,7 +2989,7 @@ function perform_full_scan($db) {
       .player-modal-track-info .artist:hover { text-decoration: underline; }
       .player-modal-progress { width: 100%; margin-bottom: 1rem; }
       .player-modal-progress .time-stamps { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--ytm-secondary-text); margin-top: 0.5rem; }
-      .player-modal-controls { display: flex; justify-content: space-between; align-items: center; margin: 0 auto 1.5rem auto; width: 85%; max-width: 400px; }
+      .player-modal-controls { display: flex; justify-content: space-between; align-items: center; margin: 0 auto 1.5rem auto; width: 100%; max-width: 400px; }
       .player-modal-controls .player-btn { color: var(--ytm-primary-text); }
       .player-modal-controls .player-btn.active { color: var(--ytm-accent); }
       .player-modal-controls .player-btn .bi { font-size: 2rem; }
