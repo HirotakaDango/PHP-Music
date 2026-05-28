@@ -33,7 +33,7 @@ if (isset($_GET['pwa'])) {
     header('Content-Type: application/javascript; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     echo <<<SW
-    const CACHE_NAME = 'php-music-cache-v25';
+    const CACHE_NAME = 'php-music-cache-v26';
     const STATIC_ASSETS =[
       './',
       'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
@@ -1233,7 +1233,7 @@ if (isset($_GET['action'])) {
       $sort = $post_data['sort'] ?? '';
       $filter_user_id = $post_data['filter_user_id'] ?? '';
 
-      if (in_array($view_type, ['artist_songs', 'album_songs', 'genre_songs', 'playlist_songs'])) {
+      if (in_array($view_type, ['artist_songs', 'album_songs', 'genre_songs', 'playlist_songs', 'mix_songs'])) {
         $param = urldecode($param);
       }
 
@@ -1285,6 +1285,20 @@ if (isset($_GET['action'])) {
           $params[] = $param;
           $default_sort = 'manual_order';
           break;
+        case 'mix_songs':
+          if (strpos($param, 'mix_artist_') === 0) {
+            $seed = base64_decode(substr($param, 11));
+            $conditions = "WHERE m.artist = ? OR m.artist IN (SELECT artist FROM music ORDER BY RANDOM() LIMIT 10)";
+            $params[] = $seed;
+          } elseif (strpos($param, 'mix_genre_') === 0) {
+            $seed = base64_decode(substr($param, 10));
+            $conditions = "WHERE m.genre = ? OR m.genre IN (SELECT genre FROM music ORDER BY RANDOM() LIMIT 10)";
+            $params[] = $seed;
+          } else {
+            $conditions = "";
+          }
+          $default_sort = 'random';
+          break;
         case 'search':
           $conditions = "WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?)";
           $query_param = '%' . $param . '%';
@@ -1314,6 +1328,7 @@ if (isset($_GET['action'])) {
         'year_desc' => 'ORDER BY m.year DESC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'year_asc' => 'ORDER BY m.year ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'history_desc' => 'ORDER BY MAX(h.played_at) DESC',
+        'random' => 'ORDER BY RANDOM()',
       ];
       if ($view_type === 'get_favorites') {
         $sort_map['manual_order'] = 'ORDER BY f.sort_order ASC';
@@ -1326,7 +1341,9 @@ if (isset($_GET['action'])) {
       }
       $order_by = $sort_map[$sort] ?? $sort_map[$default_sort];
       
-      $stmt = $db->prepare($sql . " " . $conditions . " " . $order_by);
+      $limit_for_ids = ($view_type === 'mix_songs') ? " LIMIT 50" : "";
+      
+      $stmt = $db->prepare($sql . " " . $conditions . " " . $order_by . $limit_for_ids);
       $stmt->execute($params);
       send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
       break;
@@ -1455,6 +1472,55 @@ if (isset($_GET['action'])) {
         ");
         $stmt_songs->execute([$user_id, $name]);
         $songs = $stmt_songs->fetchAll();
+      } elseif ($type === 'mix') {
+        $mix_public_id = $name;
+        $details = [
+          'name' => 'My Mix',
+          'creator' => 'Auto Generated',
+          'image_url' => '?action=get_image&id=0',
+          'song_count' => 0,
+          'total_duration' => 0
+        ];
+        $songs = [];
+        if (strpos($mix_public_id, 'mix_artist_') === 0) {
+          $seed_name = base64_decode(substr($mix_public_id, 11));
+          $details['name'] = 'Mix - ' . $seed_name;
+          $img_stmt = $db->prepare("SELECT id FROM music WHERE artist = ? ORDER BY RANDOM() LIMIT 1");
+          $img_stmt->execute([$seed_name]);
+          $details['image_url'] = '?action=get_image&id=' . ($img_stmt->fetchColumn() ?: 0);
+          $stmt_songs = $db->prepare("
+            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+            FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
+            WHERE m.artist = ? OR m.artist IN (SELECT artist FROM music ORDER BY RANDOM() LIMIT 10)
+            ORDER BY RANDOM() LIMIT 50
+          ");
+          $stmt_songs->execute([$user_id, $seed_name]);
+          $songs = $stmt_songs->fetchAll();
+        } elseif (strpos($mix_public_id, 'mix_genre_') === 0) {
+          $seed_name = base64_decode(substr($mix_public_id, 10));
+          $details['name'] = 'Mix - ' . $seed_name;
+          $img_stmt = $db->prepare("SELECT id FROM music WHERE genre = ? ORDER BY RANDOM() LIMIT 1");
+          $img_stmt->execute([$seed_name]);
+          $details['image_url'] = '?action=get_image&id=' . ($img_stmt->fetchColumn() ?: 0);
+          $stmt_songs = $db->prepare("
+            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+            FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
+            WHERE m.genre = ? OR m.genre IN (SELECT genre FROM music ORDER BY RANDOM() LIMIT 10)
+            ORDER BY RANDOM() LIMIT 50
+          ");
+          $stmt_songs->execute([$user_id, $seed_name]);
+          $songs = $stmt_songs->fetchAll();
+        } else {
+          $stmt_songs = $db->prepare("
+            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+            FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
+            ORDER BY RANDOM() LIMIT 50
+          ");
+          $stmt_songs->execute([$user_id]);
+          $songs = $stmt_songs->fetchAll();
+        }
+        foreach($songs as $s) { $details['total_duration'] += $s['duration']; }
+        $details['song_count'] = count($songs);
       } elseif (in_array($type, ['artist', 'album', 'genre'])) {
         if (empty($name)) { http_response_code(400); exit; }
         $field = $type;
@@ -2049,6 +2115,51 @@ if (isset($_GET['action'])) {
       if (count($rec_artists) > 0) {
         $shelves[] = ['title' => 'Discover Artists', 'type' => 'artists', 'items' => $rec_artists];
       }
+
+      $freq_played_stmt = $db->prepare("
+        SELECT {$song_fields}
+        FROM play_counts pc JOIN music m ON pc.song_id = m.id
+        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = :user_id
+        WHERE pc.user_id = :user_id
+        ORDER BY pc.play_count DESC LIMIT 15
+      ");
+      $freq_played_stmt->execute([':user_id' => $user_id]);
+      $freq_played_songs = $freq_played_stmt->fetchAll();
+      if (count($freq_played_songs) > 0) {
+        $shelves[] = ['title' => 'Frequently Played', 'type' => 'songs', 'items' => $freq_played_songs];
+      }
+
+      $mix_seeds_stmt = $db->query("
+        SELECT * FROM (
+          SELECT DISTINCT artist as seed_name, 'artist' as seed_type FROM music WHERE artist != 'Unknown Artist' AND artist != '' AND artist IS NOT NULL
+          UNION
+          SELECT DISTINCT genre as seed_name, 'genre' as seed_type FROM music WHERE genre != 'Unknown Genre' AND genre != '' AND genre IS NOT NULL
+        ) ORDER BY RANDOM() LIMIT 15
+      ");
+      $seeds = $mix_seeds_stmt->fetchAll();
+      $mixes = [];
+      foreach ($seeds as $seed) {
+        $img_stmt = $db->prepare("SELECT id FROM music WHERE " . $seed['seed_type'] . " = ? ORDER BY RANDOM() LIMIT 1");
+        $img_stmt->execute([$seed['seed_name']]);
+        $img_id = $img_stmt->fetchColumn();
+        $mixes[] = [
+          'public_id' => 'mix_' . $seed['seed_type'] . '_' . base64_encode($seed['seed_name']),
+          'name' => 'Mix - ' . $seed['seed_name'],
+          'creator' => 'PHP-Music Mix Style',
+          'image_id' => $img_id ? $img_id : 0
+        ];
+      }
+      if (empty($mixes)) {
+        for ($i = 1; $i <= 15; $i++) {
+          $mixes[] = [
+            'public_id' => 'mix_random_' . $i,
+            'name' => 'My Mix ' . $i,
+            'creator' => 'Auto Generated',
+            'image_id' => 0
+          ];
+        }
+      }
+      $shelves[] = ['title' => 'Your Mixes', 'type' => 'mixes', 'items' => $mixes];
 
       $latest_followed_songs_stmt = $db->prepare("
         SELECT {$song_fields} FROM music m
@@ -2878,7 +2989,7 @@ function perform_full_scan($db) {
       .player-modal-track-info .artist:hover { text-decoration: underline; }
       .player-modal-progress { width: 100%; margin-bottom: 1rem; }
       .player-modal-progress .time-stamps { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--ytm-secondary-text); margin-top: 0.5rem; }
-      .player-modal-controls { display: flex; justify-content: space-around; align-items: center; margin-bottom: 1.5rem; }
+      .player-modal-controls { display: flex; justify-content: space-between; align-items: center; margin: 0 auto 1.5rem auto; width: 85%; max-width: 400px; }
       .player-modal-controls .player-btn { color: var(--ytm-primary-text); }
       .player-modal-controls .player-btn.active { color: var(--ytm-accent); }
       .player-modal-controls .player-btn .bi { font-size: 2rem; }
@@ -3123,11 +3234,11 @@ function perform_full_scan($db) {
               </div>
             </div>
             <div class="player-modal-controls">
-                <button class="player-btn" id="player-modal-shuffle-btn" title="Shuffle"></button>
-                <button class="player-btn" id="player-modal-prev-btn" title="Previous"></button>
-                <button class="player-btn play-btn" id="player-modal-play-pause-btn" title="Play"></button>
-                <button class="player-btn" id="player-modal-next-btn" title="Next"></button>
-                <button class="player-btn" id="player-modal-repeat-btn" title="Repeat"></button>
+              <button class="player-btn" id="player-modal-shuffle-btn" title="Shuffle"></button>
+              <button class="player-btn" id="player-modal-prev-btn" title="Previous"></button>
+              <button class="player-btn play-btn" id="player-modal-play-pause-btn" title="Play"></button>
+              <button class="player-btn" id="player-modal-next-btn" title="Next"></button>
+              <button class="player-btn" id="player-modal-repeat-btn" title="Repeat"></button>
             </div>
              <div class="player-modal-extra-controls">
              </div>
@@ -4045,7 +4156,7 @@ function perform_full_scan($db) {
                 subtextClass = 'text-center';
                 imgSrc = `?action=get_profile_picture&id=`;
               } else if (type === 'get_user_playlists') {
-                                name = item.name;
+                name = item.name;
                 subtext = `${item.song_count} songs`;
                 imageId = item.image_id;
                 dataType = 'playlist';
@@ -4176,9 +4287,9 @@ function perform_full_scan($db) {
                   <div class="item-subtitle">${album.artist}</div>
                 </div>
               `).join('');
-            } else if (shelf.type === 'playlists') {
+            } else if (shelf.type === 'playlists' || shelf.type === 'mixes') {
               itemsHTML = shelf.items.map(playlist => `
-                <div class="shelf-item" data-playlist="${encodeURIComponent(playlist.public_id)}">
+                <div class="shelf-item" data-${shelf.type === 'mixes' ? 'mix' : 'playlist'}="${encodeURIComponent(playlist.public_id)}">
                   <img src="?action=get_image&id=${playlist.image_id || 0}" alt="${playlist.name}">
                   <div class="item-title">${playlist.name}</div>
                   <div class="item-subtitle">by ${playlist.creator}</div>
@@ -4484,6 +4595,7 @@ function perform_full_scan($db) {
             case 'album_songs':
             case 'genre_songs':
             case 'playlist_songs':
+            case 'mix_songs':
               const type = currentView.type.split('_')[0];
               const name_param = currentView.param;
               updateContentTitle('', false);
@@ -5264,7 +5376,7 @@ function perform_full_scan($db) {
             loadView({ type: 'album_songs', param: songAlbumEl.dataset.album, sort: 'title_asc', filter_user_id: songItem ? songItem.dataset.userid || songItem.dataset.songUserId || '' : '' });
             return;
           }
-          const cardEl = target.closest('.card, .shelf-item[data-playlist], .shelf-item[data-artist]');
+          const cardEl = target.closest('.card, .shelf-item[data-playlist], .shelf-item[data-mix], .shelf-item[data-artist]');
           if (cardEl && !target.closest('.playlist-more-btn')) {
             let viewType, param, sort;
             let filterUserId = cardEl.dataset.userid || '';
@@ -5283,6 +5395,10 @@ function perform_full_scan($db) {
             } else if (cardEl.dataset.playlist) {
               viewType = 'playlist_songs';
               param = cardEl.dataset.playlist;
+              sort = 'manual_order';
+            } else if (cardEl.dataset.mix) {
+              viewType = 'mix_songs';
+              param = cardEl.dataset.mix;
               sort = 'manual_order';
             }
             if (viewType) {
