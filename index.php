@@ -33,7 +33,7 @@ if (isset($_GET['pwa'])) {
     header('Content-Type: application/javascript; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     echo <<<SW
-    const CACHE_NAME = 'php-music-cache-v26';
+    const CACHE_NAME = 'php-music-cache-v27';
     const STATIC_ASSETS =[
       './',
       'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
@@ -110,7 +110,7 @@ set_time_limit(0);
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '1.11');
+define('APP_VERSION', '1.12');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -122,6 +122,12 @@ function get_db() {
     $db = new PDO('sqlite:' . DB_FILE, null, null, [PDO::ATTR_TIMEOUT => 30]);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+    $db->exec("PRAGMA journal_mode=WAL;");
+    $db->exec("PRAGMA synchronous=NORMAL;");
+    $db->exec("PRAGMA cache_size=-64000;");
+    $db->exec("PRAGMA temp_store=MEMORY;");
+    $db->exec("PRAGMA mmap_size=30000000000;");
+    $db->exec("PRAGMA foreign_keys=ON;");
     return $db;
   } catch (PDOException $e) {
     die("Database connection failed: " . $e->getMessage());
@@ -144,6 +150,26 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
     }
+    if (isset($_POST['toggle_ban']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $user_id = (int)$_POST['user_id'];
+      $db->prepare("UPDATE users SET banned = CASE WHEN banned = 1 THEN 0 ELSE 1 END WHERE id = ?")->execute([$user_id]);
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+    if (isset($_POST['delete_user']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $del_uid = (int)$_POST['user_id'];
+      $stmt = $db->prepare("SELECT file FROM music WHERE user_id = ?");
+      $stmt->execute([$del_uid]);
+      while ($row = $stmt->fetch()) {
+        if ($row['file'] && file_exists($row['file'])) @unlink($row['file']);
+      }
+      $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM users WHERE id = ?")->execute([$del_uid]);
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
   }
 
   if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
@@ -163,7 +189,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 ?>
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -174,8 +200,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <style>
       :root { --ytm-bg: #030303; --ytm-surface: #121212; --ytm-surface-2: #282828; --ytm-primary-text: #ffffff; --ytm-secondary-text: #aaaaaa; --ytm-accent: #ff0000; }
       body { background-color: var(--ytm-bg); color: var(--ytm-primary-text); font-family: 'Roboto', sans-serif; }
-      .app-container { display: flex; min-height: 100vh; }
-      .sidebar { width: 240px; background-color: var(--ytm-bg); padding: 1.5rem 0; display: flex; flex-direction: column; flex-shrink: 0; }
+      .app-container { display: flex; min-height: 100vh; flex-direction: column; }
+      .sidebar { width: 240px; background-color: var(--ytm-bg); padding: 1.5rem 0; display: flex; flex-direction: column; flex-shrink: 0; z-index: 1045; }
       .main-content { flex-grow: 1; display: flex; flex-direction: column; overflow-y: auto; }
       .content-area-wrapper { padding: 1.5rem 2rem; }
       .sidebar .logo { font-size: 1.5rem; font-weight: 700; padding: 0 1.5rem 1.5rem 1.5rem; }
@@ -188,10 +214,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       .user-list-header { background-color: var(--ytm-surface-2); font-weight: 500; }
       .user-item > *, .user-list-header > * { min-width: 0; }
       .user-item .text-truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .user-list-header, .user-item { display: grid; grid-template-columns: 50px 1fr 1fr 100px 100px 100px 120px; align-items: center; gap: 1rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--ytm-surface-2); }
+      .user-list-header, .user-item { display: grid; grid-template-columns: 50px 1fr 1fr 120px 100px 100px 220px; align-items: center; gap: 1rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--ytm-surface-2); }
       .user-item { color: var(--ytm-primary-text); }
       .user-item .badge { font-size: 0.85rem; padding: 0.4em 0.6em; }
-      .user-item .btn { padding: .25rem .5rem; font-size: .875rem; }
+      .user-item .btn { padding: .25rem .5rem; font-size: .875rem; margin-right: .25rem; }
       .login-container { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
       .login-card { background-color: var(--ytm-surface); width: 100%; max-width: 400px; padding: 2rem; border-radius: 8px; }
       .form-control { background-color: var(--ytm-surface-2); border: 1px solid #404040; color: var(--ytm-primary-text); }
@@ -199,15 +225,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       .pagination .page-link { background-color: var(--ytm-surface-2); border-color: #404040; color: var(--ytm-primary-text); }
       .pagination .page-item.active .page-link { background-color: var(--ytm-accent); border-color: var(--ytm-accent); }
       .pagination .page-item.disabled .page-link { background-color: var(--ytm-surface); border-color: #404040; color: var(--ytm-secondary-text); }
+      @media (min-width: 992px) {
+        .app-container { flex-direction: row; }
+      }
       @media (max-width: 991.98px) {
         .app-container { flex-direction: column; height: auto; }
-        .sidebar { width: 100%; flex-direction: row; justify-content: space-between; align-items: center; padding: 0.5rem 1rem; height: 60px; }
-        .sidebar .logo { padding: 0; font-size: 1.25rem; }
-        .sidebar .nav-link { padding: 0.5rem; }
-        .sidebar .nav-link span { display: none; }
+        .sidebar { padding: 0; }
         .main-content { overflow-y: visible; }
         .content-area-wrapper { padding: 1rem; }
-        .page-header { padding: 1rem; }
+        .page-header { padding: 1rem; flex-direction: column !important; align-items: stretch !important; gap: 1rem; }
+        .page-header form { max-width: 100% !important; flex-direction: column; gap: 0.5rem; }
+        .page-header form select, .page-header form input { width: 100% !important; margin: 0 !important; }
         .content-title { font-size: 1.5rem; }
         .user-list-header { display: none; }
         .user-item { display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; grid-template-areas: "main action" "stats stats"; padding: 1rem; gap: 0.5rem 1rem; }
@@ -216,7 +244,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         .user-item-main .user-id-mobile { font-size: 0.8rem; color: var(--ytm-secondary-text); }
         .user-item-main .user-email { font-weight: 500; }
         .user-item-main .user-artist { font-size: 0.9rem; color: var(--ytm-secondary-text); }
-        .user-item-action { grid-area: action; display: flex; align-items: center; }
+        .user-item-action { grid-area: action; display: flex; flex-direction: column; gap: 0.5rem; align-items: center; }
         .user-item-stats { grid-area: stats; display: flex; justify-content: space-around; align-items: center; border-top: 1px solid var(--ytm-surface-2); padding-top: 0.75rem; margin-top: 0.75rem; font-size: 0.8rem; text-align: center; }
         .user-item-stats > div { display: flex; flex-direction: column; }
         .user-item-stats .label { text-transform: uppercase; color: var(--ytm-secondary-text); font-size: 0.7rem; margin-bottom: 0.25rem; }
@@ -240,23 +268,37 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     </div>
     <?php else: ?>
     <div class="app-container">
-      <nav class="sidebar">
-        <div class="logo">Admin<span>Panel</span></div>
-        <a href="./" class="nav-link"><i class="bi bi-arrow-left-circle-fill"></i><span>Back to Player</span></a>
-        <a href="?access=admin&logout=1" class="nav-link"><i class="bi bi-box-arrow-left"></i><span>Logout</span></a>
+      <div class="d-lg-none d-flex align-items-center justify-content-between p-3 border-bottom" style="border-color: var(--ytm-surface-2) !important; background-color: var(--ytm-bg);">
+        <div class="logo" style="font-size: 1.25rem; font-weight: 700;">Admin<span style="color: var(--ytm-accent);">Panel</span></div>
+        <button class="btn text-white" type="button" data-bs-toggle="offcanvas" data-bs-target="#admin-sidebar">
+          <i class="bi bi-list fs-2"></i>
+        </button>
+      </div>
+      <nav class="sidebar offcanvas-lg offcanvas-start" tabindex="-1" id="admin-sidebar" style="background-color: var(--ytm-bg);">
+        <div class="offcanvas-header border-bottom" style="border-color: var(--ytm-surface-2) !important;">
+          <h5 class="offcanvas-title logo m-0" style="font-size: 1.25rem; font-weight: 700;">Admin<span style="color: var(--ytm-accent);">Panel</span></h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#admin-sidebar"></button>
+        </div>
+        <div class="offcanvas-body d-flex flex-column p-0 py-lg-4">
+          <div class="logo d-none d-lg-block">Admin<span>Panel</span></div>
+          <a href="./" class="nav-link"><i class="bi bi-arrow-left-circle-fill d-none d-lg-inline-block"></i><span>Back to Player</span></a>
+          <a href="?access=admin&logout=1" class="nav-link"><i class="bi bi-box-arrow-left d-none d-lg-inline-block"></i><span>Logout</span></a>
+        </div>
       </nav>
       <main class="main-content">
         <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
           <h1 class="content-title m-0">User Management</h1>
           <?php $search = $_GET['search'] ?? ''; ?>
           <?php $sort_admin = $_GET['sort'] ?? 'newest'; ?>
-          <form method="GET" action="" class="d-flex w-100" style="max-width: 400px;">
+          <form method="GET" action="" class="d-flex w-100" style="max-width: 450px;">
             <input type="hidden" name="access" value="admin">
-            <select name="sort" class="form-select me-2" style="width: auto;">
+            <select name="sort" class="form-select me-2" style="width: auto;" onchange="this.form.submit()">
               <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest</option>
               <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
               <option value="verified" <?php echo $sort_admin === 'verified' ? 'selected' : ''; ?>>Verified</option>
               <option value="unverified" <?php echo $sort_admin === 'unverified' ? 'selected' : ''; ?>>Unverified</option>
+              <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned</option>
+              <option value="not_banned" <?php echo $sort_admin === 'not_banned' ? 'selected' : ''; ?>>Not Banned</option>
             </select>
             <input type="text" name="search" class="form-control me-2" placeholder="Search user..." value="<?php echo htmlspecialchars($search); ?>">
             <button type="submit" class="btn btn-danger"><i class="bi bi-search"></i></button>
@@ -265,7 +307,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <div class="content-area-wrapper">
           <div class="user-list">
             <div class="user-list-header">
-              <div>ID</div><div>Email</div><div>Artist</div><div>Verified</div><div>Last Up</div><div>Count</div><div>Action</div>
+              <div>ID</div><div>Email</div><div>Artist</div><div>Status</div><div>Last Up</div><div>Count</div><div>Action</div>
             </div>
             <?php
               $db = get_db();
@@ -289,10 +331,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 'oldest' => 'ORDER BY id ASC',
                 'verified' => "ORDER BY verified DESC, id ASC",
                 'unverified' => "ORDER BY verified ASC, id ASC",
+                'banned' => "ORDER BY banned DESC, id ASC",
+                'not_banned' => "ORDER BY banned ASC, id ASC",
               ];
               $admin_order_by = $admin_sort_map[$sort_admin] ?? 'ORDER BY id DESC';
               
-              $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count FROM users $where $admin_order_by LIMIT ? OFFSET ?";
+              $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned FROM users $where $admin_order_by LIMIT ? OFFSET ?";
               $stmt = $db->prepare($sql);
               $param_index = 1;
               if ($search !== '') {
@@ -309,18 +353,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             ?>
             <div class="user-item">
               <div class="user-item-id"><?php echo htmlspecialchars($user['id']); ?></div>
-              <div class="user-item-email-desktop text-truncate"><?php echo htmlspecialchars($user['email']); ?></div>
+              <div class="user-item-email-desktop text-truncate"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
               <div class="user-item-artist-desktop text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
               <div class="user-item-verified-desktop">
                 <span class="badge <?php echo $user['verified'] === 'yes' ? 'bg-success' : 'bg-secondary'; ?>">
                   <?php echo htmlspecialchars(strtoupper($user['verified'])); ?>
                 </span>
+                <?php if ($user['banned']): ?>
+                <span class="badge bg-danger">BANNED</span>
+                <?php endif; ?>
               </div>
               <div class="user-item-last-up-desktop"><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></div>
               <div class="user-item-count-desktop"><?php echo htmlspecialchars($user['daily_upload_count'] ?? '0'); ?></div>
               <div class="user-item-main">
                 <div class="user-id-mobile">ID: <?php echo htmlspecialchars($user['id']); ?></div>
-                <div class="user-email text-truncate"><?php echo htmlspecialchars($user['email']); ?></div>
+                <div class="user-email text-truncate"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
                 <div class="user-artist text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
               </div>
               <div class="user-item-action">
@@ -329,9 +376,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <button type="submit" name="toggle_verify" class="btn <?php echo $user['verified'] === 'yes' ? 'btn-warning' : 'btn-success'; ?>">
                     <?php echo $user['verified'] === 'yes' ? 'Un-verify' : 'Verify'; ?>
                   </button>
+                  <button type="submit" name="toggle_ban" class="btn <?php echo $user['banned'] ? 'btn-secondary' : 'btn-warning'; ?>">
+                    <?php echo $user['banned'] ? 'Unban' : 'Ban'; ?>
+                  </button>
+                  <button type="submit" name="delete_user" class="btn btn-danger" onclick="return confirm('Permanently delete this user and all their data?');">Delete</button>
                 </form>
               </div>
               <div class="user-item-stats">
+                <div>
+                  <span class="label">Status</span>
+                  <span class="badge <?php echo $user['banned'] ? 'bg-danger' : 'bg-success'; ?>"><?php echo $user['banned'] ? 'BANNED' : 'ACTIVE'; ?></span>
+                </div>
                 <div>
                   <span class="label">Verified</span>
                   <span class="badge <?php echo $user['verified'] === 'yes' ? 'bg-success' : 'bg-secondary'; ?>"><?php echo htmlspecialchars(strtoupper($user['verified'])); ?></span>
@@ -339,10 +394,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div>
                   <span class="label">Last Upload</span>
                   <span><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></span>
-                </div>
-                <div>
-                  <span class="label">Daily Count</span>
-                  <span><?php echo htmlspecialchars($user['daily_upload_count'] ?? '0'); ?></span>
                 </div>
               </div>
             </div>
@@ -394,7 +445,7 @@ function send_json($data) {
   $json = json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE);
   if ($json === false) {
     http_response_code(500);
-    echo '{"status":"error", "message":"JSON encoding error: ' . json_last_error_msg() . '"}';
+    echo '{"status":"error", "message":"JSON encoding error"}';
   } else {
     echo $json;
   }
@@ -463,9 +514,6 @@ if (isset($_GET['share_type'])) {
 }
 
 function init_db($db) {
-  $db->exec("PRAGMA journal_mode=WAL;");
-  $db->exec("PRAGMA foreign_keys = ON;");
-
   $users_columns = $db->query("PRAGMA table_info(users);")->fetchAll(PDO::FETCH_COLUMN, 1);
   $users_table_exists = !empty($users_columns);
 
@@ -479,27 +527,21 @@ function init_db($db) {
       daily_upload_count INTEGER DEFAULT 0,
       verified TEXT DEFAULT 'no',
       profile_picture BLOB,
-      profile_picture_type TEXT
+      profile_picture_type TEXT,
+      backup_key TEXT,
+      banned INTEGER DEFAULT 0
     );
   ");
   $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS users_artist_idx ON users(artist);");
 
   if ($users_table_exists) {
-    if (!in_array('last_upload_date', $users_columns)) {
-      $db->exec("ALTER TABLE users ADD COLUMN last_upload_date TEXT;");
-    }
-    if (!in_array('daily_upload_count', $users_columns)) {
-      $db->exec("ALTER TABLE users ADD COLUMN daily_upload_count INTEGER DEFAULT 0;");
-    }
-    if (!in_array('verified', $users_columns)) {
-      $db->exec("ALTER TABLE users ADD COLUMN verified TEXT DEFAULT 'no';");
-    }
-    if (!in_array('profile_picture', $users_columns)) {
-      $db->exec("ALTER TABLE users ADD COLUMN profile_picture BLOB;");
-    }
-    if (!in_array('profile_picture_type', $users_columns)) {
-      $db->exec("ALTER TABLE users ADD COLUMN profile_picture_type TEXT;");
-    }
+    if (!in_array('last_upload_date', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN last_upload_date TEXT;");
+    if (!in_array('daily_upload_count', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN daily_upload_count INTEGER DEFAULT 0;");
+    if (!in_array('verified', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN verified TEXT DEFAULT 'no';");
+    if (!in_array('profile_picture', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_picture BLOB;");
+    if (!in_array('profile_picture_type', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_picture_type TEXT;");
+    if (!in_array('backup_key', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN backup_key TEXT;");
+    if (!in_array('banned', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0;");
   }
 
   $music_columns = $db->query("PRAGMA table_info(music);")->fetchAll(PDO::FETCH_COLUMN, 1);
@@ -519,17 +561,13 @@ function init_db($db) {
       image BLOB,
       last_modified INTEGER,
       bitrate INTEGER,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
   ");
 
   if ($music_table_exists) {
-    if (!in_array('bitrate', $music_columns)) {
-      $db->exec("ALTER TABLE music ADD COLUMN bitrate INTEGER;");
-    }
-    if (!in_array('lyrics', $music_columns)) {
-      $db->exec("ALTER TABLE music ADD COLUMN lyrics TEXT;");
-    }
+    if (!in_array('bitrate', $music_columns)) $db->exec("ALTER TABLE music ADD COLUMN bitrate INTEGER;");
+    if (!in_array('lyrics', $music_columns)) $db->exec("ALTER TABLE music ADD COLUMN lyrics TEXT;");
   }
   
   $db->exec("
@@ -638,11 +676,9 @@ function get_upload_limit() {
 }
 
 function process_image_to_webp($imageData, $target_width = 500, $quality = 75) {
-  if (!$imageData || !function_exists('imagecreatefromstring') || !function_exists('imagewebp')) {
-    return null;
-  }
+  if (!$imageData || !function_exists('imagecreatefromstring') || !function_exists('imagewebp')) return null;
   $sourceImage = @imagecreatefromstring($imageData);
-  if (!$sourceImage) { return null; }
+  if (!$sourceImage) return null;
 
   $src_w = imagesx($sourceImage);
   $src_h = imagesy($sourceImage);
@@ -664,11 +700,9 @@ function process_image_to_webp($imageData, $target_width = 500, $quality = 75) {
 }
 
 function process_image_to_jpeg($imageData, $target_width = 500, $quality = 85) {
-  if (!$imageData || !function_exists('imagecreatefromstring') || !function_exists('imagejpeg')) {
-    return null;
-  }
+  if (!$imageData || !function_exists('imagecreatefromstring') || !function_exists('imagejpeg')) return null;
   $sourceImage = @imagecreatefromstring($imageData);
-  if (!$sourceImage) { return null; }
+  if (!$sourceImage) return null;
 
   $src_w = imagesx($sourceImage);
   $src_h = imagesy($sourceImage);
@@ -710,10 +744,10 @@ if (isset($_GET['action'])) {
 
     case 'get_session':
       if ($user_id) {
-        $stmt = $db->prepare("SELECT id, email, artist, verified, last_upload_date, daily_upload_count FROM users WHERE id = ?");
+        $stmt = $db->prepare("SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned FROM users WHERE id = ?");
         $stmt->execute([$user_id]);
         $user = $stmt->fetch();
-        if ($user) {
+        if ($user && empty($user['banned'])) {
           $today = date('Y-m-d');
           $uploads_today = 0;
           if ($user['last_upload_date'] === $today) {
@@ -763,10 +797,13 @@ if (isset($_GET['action'])) {
         http_response_code(400);
         send_json(['status' => 'error', 'message' => 'Email and password are required.']);
       }
-      $stmt = $db->prepare("SELECT * FROM users WHERE email = ?");
+      $stmt = $db->prepare("SELECT * FROM users WHERE email = ? AND email IS NOT NULL");
       $stmt->execute([$email]);
       $user = $stmt->fetch();
-      if ($user && password_verify($password, $user['password_hash'])) {
+      if ($user && $user['banned'] == 1) {
+        http_response_code(403);
+        send_json(['status' => 'error', 'message' => 'This account has been banned.']);
+      } elseif ($user && $user['password_hash'] !== null && password_verify($password, $user['password_hash'])) {
         $_SESSION['user_id'] = $user['id'];
         $_SESSION['user_artist'] = $user['artist'];
         unset($user['password_hash']);
@@ -868,6 +905,62 @@ if (isset($_GET['action'])) {
         }
       }
       exit;
+
+    case 'delete_account_all':
+      if (!$user_id) { http_response_code(403); exit; }
+      $stmt = $db->prepare("SELECT file FROM music WHERE user_id = ?");
+      $stmt->execute([$user_id]);
+      while ($row = $stmt->fetch()) { if ($row['file'] && file_exists($row['file'])) @unlink($row['file']); }
+      $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM users WHERE id = ?")->execute([$user_id]);
+      session_destroy();
+      send_json(['status' => 'success']);
+      break;
+
+    case 'delete_account_keep_data':
+      if (!$user_id) { http_response_code(403); exit; }
+      $raw_str = bin2hex(random_bytes(16));
+      $hash = password_hash($raw_str, PASSWORD_DEFAULT);
+      $final_key = $user_id . '-' . $raw_str;
+      $new_email = 'deleted_' . $user_id . '_' . time() . '@mail.com';
+      $new_artist = 'Anonymous User ' . $user_id;
+      $db->prepare("UPDATE users SET email = ?, artist = ?, password_hash = NULL, backup_key = ?, profile_picture = NULL WHERE id = ?")
+         ->execute([$new_email, $new_artist, $hash, $user_id]);
+      session_destroy();
+      send_json(['status' => 'success', 'backup_key' => $final_key]);
+      break;
+
+    case 'restore_account':
+      $data = json_decode(file_get_contents('php://input'), true);
+      $key_parts = explode('-', $data['backup_key'] ?? '');
+      if (count($key_parts) !== 2) {
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid key format.']);
+      }
+      $r_user_id = (int)$key_parts[0];
+      $r_str = $key_parts[1];
+      $stmt = $db->prepare("SELECT backup_key FROM users WHERE id = ? AND backup_key IS NOT NULL");
+      $stmt->execute([$r_user_id]);
+      $user_bk = $stmt->fetchColumn();
+      if ($user_bk && password_verify($r_str, $user_bk)) {
+        $n_email = filter_var($data['new_email'], FILTER_VALIDATE_EMAIL);
+        $n_artist = trim(htmlspecialchars($data['new_artist'] ?? '', ENT_QUOTES, 'UTF-8'));
+        $n_password = $data['new_password'];
+        if (!$n_email || empty($n_artist) || strlen($n_password) < 6) {
+          http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid input data.']);
+        }
+        $stmt2 = $db->prepare("SELECT id FROM users WHERE email = ? OR artist = ?");
+        $stmt2->execute([$n_email, $n_artist]);
+        if ($stmt2->fetch()) {
+          http_response_code(409); send_json(['status' => 'error', 'message' => 'Email or Artist already taken.']);
+        }
+        $hash = password_hash($n_password, PASSWORD_DEFAULT);
+        $db->prepare("UPDATE users SET email = ?, artist = ?, password_hash = ?, backup_key = NULL WHERE id = ?")
+           ->execute([$n_email, $n_artist, $hash, $r_user_id]);
+        send_json(['status' => 'success', 'message' => 'Account restored successfully. Please log in.']);
+      } else {
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or expired backup key.']);
+      }
+      break;
 
     case 'full_scan':
       perform_full_scan($db);
@@ -1084,9 +1177,9 @@ if (isset($_GET['action'])) {
 
       $discovery_songs_stmt = $db->prepare("
         SELECT {$song_fields} FROM music m
+        JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 15) r ON m.id = r.id
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = :fav_user_id
         " . ($user_id ? "WHERE m.id NOT IN (SELECT song_id FROM history WHERE user_id = :hist_user_id)" : "") . "
-        ORDER BY RANDOM() LIMIT 15
       ");
       $song_params = [':fav_user_id' => $user_id ? $user_id : 0];
       if ($user_id) {
@@ -1158,9 +1251,10 @@ if (isset($_GET['action'])) {
 
         $rec_followed_songs_stmt = $db->prepare("
           SELECT {$song_fields} FROM music m
+          JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 100) r ON m.id = r.id
           LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = :user_id
           WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id)
-          ORDER BY RANDOM() LIMIT 15
+          LIMIT 15
         ");
         $rec_followed_songs_stmt->execute([':user_id' => $user_id]);
         $rec_followed_songs = $rec_followed_songs_stmt->fetchAll();
@@ -1364,7 +1458,9 @@ if (isset($_GET['action'])) {
       $default_sort = 'artist_asc';
 
       switch ($view_type) {
-        case 'get_songs': break;
+        case 'get_songs':
+          $default_sort = 'id_desc';
+          break;
         case 'get_profile_songs':
           if (!$user_id) { send_json([]); }
           $conditions = "WHERE m.user_id = ?";
@@ -1409,11 +1505,13 @@ if (isset($_GET['action'])) {
         case 'mix_songs':
           if (strpos($param, 'mix_artist_') === 0) {
             $seed = base64_decode(substr($param, 11));
-            $conditions = "WHERE m.artist = ? OR m.artist IN (SELECT artist FROM music ORDER BY RANDOM() LIMIT 10)";
+            $sql = "SELECT m.id FROM music m JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 50) r ON m.id = r.id ";
+            $conditions = "WHERE m.artist = ? OR 1=1";
             $params[] = $seed;
           } elseif (strpos($param, 'mix_genre_') === 0) {
             $seed = base64_decode(substr($param, 10));
-            $conditions = "WHERE m.genre = ? OR m.genre IN (SELECT genre FROM music ORDER BY RANDOM() LIMIT 10)";
+            $sql = "SELECT m.id FROM music m JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 50) r ON m.id = r.id ";
+            $conditions = "WHERE m.genre = ? OR 1=1";
             $params[] = $seed;
           } else {
             $conditions = "";
@@ -1606,13 +1704,14 @@ if (isset($_GET['action'])) {
         if (strpos($mix_public_id, 'mix_artist_') === 0) {
           $seed_name = base64_decode(substr($mix_public_id, 11));
           $details['name'] = 'Mix - ' . $seed_name;
-          $img_stmt = $db->prepare("SELECT id FROM music WHERE artist = ? ORDER BY RANDOM() LIMIT 1");
+          $img_stmt = $db->prepare("SELECT id FROM music WHERE artist = ? LIMIT 1");
           $img_stmt->execute([$seed_name]);
           $details['image_url'] = '?action=get_image&id=' . ($img_stmt->fetchColumn() ?: 0);
           $stmt_songs = $db->prepare("
             SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
-            FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-            WHERE m.artist = ? OR m.artist IN (SELECT artist FROM music ORDER BY RANDOM() LIMIT 10)
+            FROM music m JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 50) r ON m.id = r.id
+            LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
+            WHERE m.artist = ? OR 1=1
             ORDER BY RANDOM() LIMIT 50
           ");
           $stmt_songs->execute([$user_id, $seed_name]);
@@ -1620,13 +1719,14 @@ if (isset($_GET['action'])) {
         } elseif (strpos($mix_public_id, 'mix_genre_') === 0) {
           $seed_name = base64_decode(substr($mix_public_id, 10));
           $details['name'] = 'Mix - ' . $seed_name;
-          $img_stmt = $db->prepare("SELECT id FROM music WHERE genre = ? ORDER BY RANDOM() LIMIT 1");
+          $img_stmt = $db->prepare("SELECT id FROM music WHERE genre = ? LIMIT 1");
           $img_stmt->execute([$seed_name]);
           $details['image_url'] = '?action=get_image&id=' . ($img_stmt->fetchColumn() ?: 0);
           $stmt_songs = $db->prepare("
             SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
-            FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-            WHERE m.genre = ? OR m.genre IN (SELECT genre FROM music ORDER BY RANDOM() LIMIT 10)
+            FROM music m JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 50) r ON m.id = r.id
+            LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
+            WHERE m.genre = ? OR 1=1
             ORDER BY RANDOM() LIMIT 50
           ");
           $stmt_songs->execute([$user_id, $seed_name]);
@@ -1634,7 +1734,8 @@ if (isset($_GET['action'])) {
         } else {
           $stmt_songs = $db->prepare("
             SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
-            FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
+            FROM music m JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 50) r ON m.id = r.id
+            LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
             ORDER BY RANDOM() LIMIT 50
           ");
           $stmt_songs->execute([$user_id]);
@@ -2130,9 +2231,10 @@ if (isset($_GET['action'])) {
       if ($top_artist) {
         $more_from_artist_stmt = $db->prepare("
           SELECT {$album_fields} FROM music m
+          JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 100) r ON m.id = r.id
           WHERE m.artist LIKE :artist_name AND m.album != 'Unknown Album'
           AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)
-          GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
+          GROUP BY m.album, m.user_id LIMIT 10
         ");
         $more_from_artist_stmt->execute([':user_id' => $user_id, ':artist_name' => '%' . $top_artist . '%']);
         $artist_albums = $more_from_artist_stmt->fetchAll();
@@ -2153,9 +2255,10 @@ if (isset($_GET['action'])) {
         $genre_placeholders = implode(',', array_fill(0, count($top_genres), '?'));
         $genre_mix_stmt = $db->prepare("
           SELECT {$song_fields} FROM music m
+          JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 100) r ON m.id = r.id
           LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE m.genre IN ({$genre_placeholders}) AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = ?)
-          ORDER BY RANDOM() LIMIT 15
+          LIMIT 15
         ");
         $genre_mix_stmt->execute(array_merge([$user_id], $top_genres, [$user_id]));
         $genre_songs = $genre_mix_stmt->fetchAll();
@@ -2191,9 +2294,10 @@ if (isset($_GET['action'])) {
 
       $discovery_songs_stmt = $db->prepare("
         SELECT {$song_fields} FROM music m
+        JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 100) r ON m.id = r.id
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = :user_id
         WHERE m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)
-        ORDER BY RANDOM() LIMIT 15
+        LIMIT 15
       ");
       $discovery_songs_stmt->execute([':user_id' => $user_id]);
       $discovery_songs = $discovery_songs_stmt->fetchAll();
@@ -2203,8 +2307,9 @@ if (isset($_GET['action'])) {
       
       $discovery_stmt = $db->prepare("
         SELECT {$album_fields} FROM music m
+        JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 100) r ON m.id = r.id
         WHERE m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id) AND m.album != 'Unknown Album'
-        GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
+        GROUP BY m.album, m.user_id LIMIT 10
       ");
       $discovery_stmt->execute([':user_id' => $user_id]);
       $discovery_albums = $discovery_stmt->fetchAll();
@@ -2215,10 +2320,11 @@ if (isset($_GET['action'])) {
       $rec_artists_stmt = $db->prepare("
         SELECT m.artist AS name, MAX(m.id) AS id
         FROM music m
+        JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 100) r ON m.id = r.id
         WHERE m.artist != 'Unknown Artist' AND m.artist != '' AND m.artist IS NOT NULL
         AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)
         GROUP BY m.artist
-        ORDER BY RANDOM() LIMIT 10
+        LIMIT 10
       ");
       $rec_artists_stmt->execute([':user_id' => $user_id]);
       $rec_artists_rows = $rec_artists_stmt->fetchAll();
@@ -2303,29 +2409,6 @@ if (isset($_GET['action'])) {
       $latest_followed_albums = $latest_followed_albums_stmt->fetchAll();
       if (count($latest_followed_albums) > 0) {
         $shelves[] = ['title' => 'From Your Artists: New Albums', 'type' => 'albums', 'items' => $latest_followed_albums];
-      }
-
-      $rec_followed_songs_stmt = $db->prepare("
-        SELECT {$song_fields} FROM music m
-        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = :user_id
-        WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id)
-        ORDER BY RANDOM() LIMIT 15
-      ");
-      $rec_followed_songs_stmt->execute([':user_id' => $user_id]);
-      $rec_followed_songs = $rec_followed_songs_stmt->fetchAll();
-      if (count($rec_followed_songs) > 0) {
-        $shelves[] = ['title' => 'Recommended Songs From Your Artists', 'type' => 'songs', 'items' => $rec_followed_songs];
-      }
-
-      $rec_followed_albums_stmt = $db->prepare("
-        SELECT {$album_fields} FROM music m
-        WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id) AND m.album != 'Unknown Album'
-        GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
-      ");
-      $rec_followed_albums_stmt->execute([':user_id' => $user_id]);
-      $rec_followed_albums = $rec_followed_albums_stmt->fetchAll();
-      if (count($rec_followed_albums) > 0) {
-        $shelves[] = ['title' => 'Recommended Albums From Your Artists', 'type' => 'albums', 'items' => $rec_followed_albums];
       }
 
       send_json(['shelves' => $shelves]);
@@ -3187,6 +3270,10 @@ function perform_full_scan($db) {
               <i class="bi bi-person-plus-fill"></i>
               <span>Register</span>
             </a>
+            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#restore-modal">
+              <i class="bi bi-key-fill"></i>
+              <span>Restore Account</span>
+            </a>
           </div>
           
           <div class="mt-auto">
@@ -3418,6 +3505,37 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+    <div class="modal fade" id="restore-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header border-0">
+            <h5 class="modal-title">Restore Account</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="restore-form">
+              <div class="mb-3">
+                <label for="restore-key" class="form-label">Backup Key</label>
+                <input type="text" class="form-control" id="restore-key" required>
+              </div>
+              <div class="mb-3">
+                <label for="restore-email" class="form-label">New Email address</label>
+                <input type="email" class="form-control" id="restore-email" required>
+              </div>
+              <div class="mb-3">
+                <label for="restore-artist" class="form-label">New Artist Name</label>
+                <input type="text" class="form-control" id="restore-artist" required>
+              </div>
+              <div class="mb-3">
+                <label for="restore-password" class="form-label">New Password</label>
+                <input type="password" class="form-control" id="restore-password" required minlength="6">
+              </div>
+              <button type="submit" class="btn btn-danger w-100">Restore</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="modal fade" id="settings-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
@@ -3453,6 +3571,10 @@ function perform_full_scan($db) {
               </div>
               <button type="submit" class="btn btn-danger w-100">Save Password</button>
             </form>
+            <hr class="text-secondary">
+            <h6 class="mt-4 text-danger">Data Management</h6>
+            <button type="button" class="btn btn-outline-danger w-100 mb-2" id="btn-delete-keep">Delete Account but Keep Data</button>
+            <button type="button" class="btn btn-danger w-100" id="btn-delete-all">Permanently Delete Account & Data</button>
           </div>
         </div>
       </div>
@@ -3535,7 +3657,7 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
-     <div class="modal fade" id="import-playlist-modal" tabindex="-1">
+    <div class="modal fade" id="import-playlist-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
           <div class="modal-header border-0">
@@ -3704,7 +3826,7 @@ function perform_full_scan($db) {
         <div class="modal-content" style="background-color: var(--ytm-bg);">
           <div class="modal-header border-0" style="background-color: var(--ytm-surface-2);">
             <h5 class="modal-title"><i class="bi bi-cloud-arrow-down-fill"></i> Playlist Downloader</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            <button type="button" class="btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body p-2 p-md-4">
             <div class="container-fluid mx-auto" style="max-width: 1000px;">
@@ -3844,7 +3966,7 @@ function perform_full_scan($db) {
         };
         
         const audio = new Audio();
-        let currentView = { type: 'get_songs', param: '', sort: 'artist_asc', filter_user_id: '' };
+        let currentView = { type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' };
         let currentUser = null;
         let currentSong = null;
         let queue = [];
@@ -3858,6 +3980,7 @@ function perform_full_scan($db) {
         let songIdForPlaylist = null;
         let contextMenuItemEl = null;
         let previousVolume = 1;
+        let cachedExploreData = null;
         
         const PAGE_SIZE = 25;
         let currentPage = 1;
@@ -3887,7 +4010,7 @@ function perform_full_scan($db) {
           }
         };
 
-        if (fullscreenBtn) {
+        if (fullscreenBtn)  {
           fullscreenBtn.addEventListener('click', (e) => {
             e.preventDefault();
             if (!document.fullscreenElement && !document.webkitFullscreenElement && !document.msFullscreenElement && !document.mozFullScreenElement) {
@@ -4092,7 +4215,7 @@ function perform_full_scan($db) {
               </ul>
               <div class="tab-content" id="artistTabsContent">
                 <div class="tab-pane fade show active" id="songs-pane" role="tabpanel"></div>
-                ${isUser ? `
+                                ${isUser ? `
                 <div class="tab-pane fade" id="playlists-pane" role="tabpanel">
                   ${hasPlaylists ? `
                   <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 row-cols-lg-5 row-cols-xl-6 g-4">
@@ -4632,9 +4755,11 @@ function perform_full_scan($db) {
           switch (currentView.type) {
             case 'get_songs':
               updateContentTitle('All Songs', false);
-              const exploreData = await fetchData(`?action=get_explore`);
-              if (exploreData && exploreData.shelves && exploreData.shelves.length > 0) {
-                renderRecommendations(exploreData);
+              if (!cachedExploreData) {
+                cachedExploreData = await fetchData(`?action=get_explore`);
+              }
+              if (cachedExploreData && cachedExploreData.shelves && cachedExploreData.shelves.length > 0) {
+                renderRecommendations(cachedExploreData);
               } else {
                 contentArea.innerHTML = '';
               }
@@ -5869,6 +5994,7 @@ function perform_full_scan($db) {
         
         const loginForm = document.getElementById('login-form');
         const registerForm = document.getElementById('register-form');
+        const restoreForm = document.getElementById('restore-form');
         const changeNameForm = document.getElementById('change-name-form');
         const changePwForm = document.getElementById('change-password-form');
         const profilePicForm = document.getElementById('profile-picture-form');
@@ -5877,6 +6003,8 @@ function perform_full_scan($db) {
         const importPlaylistForm = document.getElementById('import-playlist-form');
         const importFavoritesForm = document.getElementById('import-favorites-form');
         const editMetadataForm = document.getElementById('edit-metadata-form');
+        const btnDeleteKeep = document.getElementById('btn-delete-keep');
+        const btnDeleteAll = document.getElementById('btn-delete-all');
 
         loginForm.addEventListener('submit', async e => {
           e.preventDefault();
@@ -5890,6 +6018,7 @@ function perform_full_scan($db) {
             bootstrap.Modal.getInstance(document.getElementById('login-modal')).hide();
             loginForm.reset();
             showToast('Login successful!', 'success');
+            cachedExploreData = null;
             await checkSession();
             loadView(currentView);
           }
@@ -5910,6 +6039,25 @@ function perform_full_scan($db) {
             showToast(data.message, 'success');
           }
         });
+        
+        if (restoreForm) {
+          restoreForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const backup_key = document.getElementById('restore-key').value;
+            const new_email = document.getElementById('restore-email').value;
+            const new_artist = document.getElementById('restore-artist').value;
+            const new_password = document.getElementById('restore-password').value;
+            const data = await fetchData('?action=restore_account', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ backup_key, new_email, new_artist, new_password })
+            });
+            if (data && data.status === 'success') {
+              bootstrap.Modal.getInstance(document.getElementById('restore-modal')).hide();
+              restoreForm.reset();
+              showToast(data.message, 'success');
+            }
+          });
+        }
         
         createPlaylistForm.addEventListener('submit', async e => {
           e.preventDefault();
@@ -6030,8 +6178,9 @@ function perform_full_scan($db) {
         const handleLogout = async () => {
           await fetchData('?action=logout');
           currentUser = null;
+          cachedExploreData = null;
           updateUIForAuthState();
-          loadView({ type: 'get_songs', param: '', sort: 'artist_asc', filter_user_id: '' });
+          loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
         };
         
         document.getElementById('profile-dropdown-logout-desktop').addEventListener('click', handleLogout);
@@ -6090,6 +6239,39 @@ function perform_full_scan($db) {
             bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
           }
         });
+
+        if (btnDeleteKeep) {
+          btnDeleteKeep.addEventListener('click', async () => {
+            if (!confirm('Are you sure you want to delete your account but keep the data? A backup key will be downloaded.')) return;
+            const data = await fetchData('?action=delete_account_keep_data');
+            if (data && data.status === 'success') {
+              const blob = new Blob([data.backup_key], { type: 'text/plain' });
+              const a = document.createElement('a');
+              a.href = URL.createObjectURL(blob);
+              a.download = 'backup.txt';
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              showToast('Account deleted. Backup key downloaded.', 'success');
+              bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
+              await checkSession();
+              loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
+            }
+          });
+        }
+
+        if (btnDeleteAll) {
+          btnDeleteAll.addEventListener('click', async () => {
+            if (!confirm('Are you sure you want to permanently delete your account and ALL your data? This cannot be undone!')) return;
+            const data = await fetchData('?action=delete_account_all');
+            if (data && data.status === 'success') {
+              showToast('Account and data permanently deleted.', 'success');
+              bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
+              await checkSession();
+              loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
+            }
+          });
+        }
 
         const uploadLimitText = document.getElementById('upload-limit-text');
         const uploadRemainingText = document.getElementById('upload-remaining-text');
