@@ -1,6 +1,6 @@
 # PHP Music
 
-A simple, fast, and modern self-hosted music player built in PHP, with a clean UI, SQLite backend, and full PWA (Progressive Web App) features. Scan your music collection, play songs in your browser, manage favorites/playlists, upload and edit your own songs, view lyrics, and more—all in one lightweight app.
+A simple, fast, and modern self-hosted music player built in PHP, with a clean UI, SQLite backend, and full PWA (Progressive Web App) features. Scan your music collection, play songs in your browser, manage favorites/playlists, download entire playlists, upload and edit your own songs, view lyrics, and more—all in one lightweight app.
 
 ![1](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/1.png)
 ![2](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/2.png) 
@@ -28,17 +28,19 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 - ⚡ **PWA Support**: Install as an app on your phone or desktop. Works offline (caches static assets & some API). Manifest & service worker included.
 - 🚀 **No Database Setup**: Uses SQLite, auto-initialized on first run.
 - 👤 **User Accounts & Profiles**: Register/login, upload a custom profile picture, and view your personal statistics.
+- 🛡️ **Account Recovery**: Soft-delete your account while preserving data to generate a backup key, allowing you to restore your profile securely at a later time.
 - 👥 **Social Features**: Follow other artists or users and find them easily in your "Following" tab.
 - ☁️ **Upload Music**: Upload new songs (multi-file, genre auto-detected or custom). Each user can upload up to 10 songs per day (daily limit resets at midnight).
 - ✏️ **Edit Metadata**: Edit a song's Title, Artist, Album, Genre, Lyrics, and Cover Image directly from the context menu (for your own uploads or as admin).
+- ⬇️ **Downloader**: Built-in sequential downloader for batch-downloading entire playlists directly to your hard drive, or grabbing single tracks by ID.
 - 🗑️ **Delete & Download**: Delete or download your own uploaded songs directly from the UI/context menu.
 - 🔐 **Session Security**: All write actions require login. Uploads require account verification by an admin.
-- 🛠️ **Settings**: Change password and manage your account and profile picture.
-- 🏢 **Admin Panel**: Admin can verify/un-verify user accounts, view user stats (last upload, daily count), and manage verification for uploads.
+- 🛠️ **Settings & Cache**: Change password, manage your profile picture, toggle full-screen, or instantly clear the PWA app cache directly from the sidebar.
+- 🏢 **Admin Panel**: Admin can verify/un-verify users, ban/unban malicious accounts, view user stats (last upload, daily count), and wipe user data.
 - 🎶 **Playlists**: Create, manage, drag-to-reorder, import, export, and even copy other users' custom playlists.
 - 🔗 **Shareable Views**: Share direct links to songs, albums, artists, and playlists across social media platforms (Facebook, Twitter, WhatsApp, Telegram).
 - 🆘 **Full Library Scan**: If the library needs updating, a full scan can be performed to rebuild the database and verify sync with local files.
-- 📈 **Recommendations**: The "For You" tab generates personalized shelves based on your play history, top artists, top genres, and discovery algorithms.
+- 📈 **Recommendations & Auto-Mixes**: The "For You" tab generates personalized shelves based on your play history (logged after 30s), followed artists, top genres, and endless auto-generated mix playlists.
 
 ---
 
@@ -146,10 +148,12 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 - **Register/Login**: Create a user account for full features (upload, scan, delete, edit, favorites, playlists, following).
 - **Profile Picture**: Set or change your profile picture from the settings modal (accepts PNG, JPG, GIF).
 - **Account Verification**: After registering, your account must be verified by an admin before you can upload music. Unverified users can still scan, browse, and play music.
+- **Account Backup/Restore**: If you need to change your email or reset credentials safely, use "Delete Account but Keep Data" in Settings to receive a backup key. You can restore this key via the "Restore Account" modal.
 - **Upload Limit**: Each user can upload up to 10 songs per day (resets at midnight).
 - **Scan Library**: Click "Scan All" in the sidebar to index or refresh your library (synchronizes disk files with database).
 - **Browse**: Use the sidebar to view all songs, favorites, albums, artists, genres, or your own uploads.
 - **Playlists**: Create, edit, drag-to-reorder, import, export, and copy custom playlists. Add/remove songs easily.
+- **Playlist Downloader**: Open the "Downloader" tool from the sidebar, enter a Playlist ID, and sequentially batch-download every track in that playlist to your device.
 - **Following**: Follow your favorite artists and users to easily access their tracks.
 - **Search**: Use the search bar (desktop/mobile) to instantly find songs, albums, or artists.
 - **Play Music**: Click a song to play, or use the player controls at the bottom.
@@ -158,8 +162,8 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 - **Upload Music**: Click "Upload Song". You can upload multiple files at once. **Upload limit:** 10 songs per user per day (resets at midnight).
 - **Delete/Download**: Use the context menu on your uploads to delete or download the actual file.
 - **Share**: Click the "Share" button on albums, artists, playlists, or songs to get a direct, shareable link for social platforms.
-- **PWA**: Click "Install App" (sidebar) if your browser supports PWAs. Works offline for playback and browsing of cached assets.
-- **Recommendations**: Use the "For You" page for personalized recommendations (Recently Played, More from your top artists, Your Genre Mix, Discover New Songs, etc.).
+- **PWA & Cache Management**: Click "Install App" (sidebar) if your browser supports PWAs. Works offline for playback and browsing of cached assets. Use "Clear Cache" if you need to force a hard reset of the UI or Service Worker.
+- **Recommendations**: Use the "For You" page for personalized recommendations (Recently Played, More from your top artists, Your Genre Mix, Discover New Songs, Auto-Mixes, etc.).
 - **User Statistics**: Access your total uploads, favorites, playlists, and play counts from the "Statistics" option in the profile dropdown.
 
 ---
@@ -168,7 +172,10 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 
 - Go to `?access=admin` (e.g., `http://localhost:8000/?access=admin`)
 - Default Admin Password: `admin`
-- Admin can verify/un-verify user accounts, view user details (last upload date, daily count), and manage upload permissions.
+- **User Management**: View all users (paginated to 20 users per page), search by ID/Email/Artist, and filter by status.
+- **Verification**: Admin can verify/un-verify user accounts.
+- **Banning**: Suspend malicious users easily. Banned users are completely locked out of the app.
+- **Data Deletion**: Admins can permanently wipe a user and all of their uploaded files.
 - The default "Music Library" user operates as an admin context for files scanned directly from the disk.
 
 ---
@@ -181,11 +188,12 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 - Scanning uses getID3 for metadata and album art extraction, storing everything in `music.db` (SQLite).
 - Album art and profile pictures are extracted, resized, and converted to `.webp` on the fly to save space and bandwidth.
 - Playback runs via JavaScript and HTML5 `<audio>`, utilizing the Media Session API.
-- PWA support includes a generated web manifest and a dynamic service worker (`?pwa=manifest`, `?pwa=sw`) to handle offline caching.
+- PWA support includes a generated web manifest and a dynamic service worker (`?pwa=manifest`, `?pwa=sw`) to handle offline caching. IndexedDB is used for version tracking.
 - Uploads are safely stored in `/uploads/{artist_slug}/` directories.
 - Complete metadata modification is supported via the `edit_metadata` action which updates the database, and writes ID3 tags back into the file using getID3's writetags function.
 - Playlists and favorites support fluid drag-and-drop ordering powered by SortableJS, pushing positional arrays back to the server.
-- Play histories and view counts are continuously logged locally to generate personalized "For You" shelves.
+- Play histories and view counts are continuously logged locally (after 30 seconds of playback) to generate personalized "For You" shelves and track statistics.
+- A `follows` table tracks user-to-artist and user-to-user relationships.
 
 ---
 
@@ -204,7 +212,7 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 - Each user is securely sandboxed to their own uploads, favorites, playlists, and profile.
 - Users must be explicitly verified by an admin before they are allowed to upload music.
 - File types, image processing (only accepts standard images and converts to WebP/JPEG), and tag decoding use sanitized structures to mitigate basic injection attacks.
-- The Admin panel is strictly protected by a securely hashed password.
+- The Admin panel is strictly protected by a securely hashed password. Banned accounts are checked upon every login attempt.
 
 ---
 
