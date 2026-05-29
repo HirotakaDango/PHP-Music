@@ -249,8 +249,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
           <h1 class="content-title m-0">User Management</h1>
           <?php $search = $_GET['search'] ?? ''; ?>
-          <form method="GET" action="" class="d-flex w-100" style="max-width: 300px;">
+          <?php $sort_admin = $_GET['sort'] ?? 'newest'; ?>
+          <form method="GET" action="" class="d-flex w-100" style="max-width: 400px;">
             <input type="hidden" name="access" value="admin">
+            <select name="sort" class="form-select me-2" style="width: auto;">
+              <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest</option>
+              <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+              <option value="verified" <?php echo $sort_admin === 'verified' ? 'selected' : ''; ?>>Verified</option>
+              <option value="unverified" <?php echo $sort_admin === 'unverified' ? 'selected' : ''; ?>>Unverified</option>
+            </select>
             <input type="text" name="search" class="form-control me-2" placeholder="Search user..." value="<?php echo htmlspecialchars($search); ?>">
             <button type="submit" class="btn btn-danger"><i class="bi bi-search"></i></button>
           </form>
@@ -277,7 +284,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $total_users = $total_users_stmt->fetchColumn();
               $total_pages = ceil($total_users / ADMIN_PAGE_SIZE);
               
-              $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count FROM users $where ORDER BY id ASC LIMIT ? OFFSET ?";
+              $admin_sort_map = [
+                'newest' => 'ORDER BY id DESC',
+                'oldest' => 'ORDER BY id ASC',
+                'verified' => "ORDER BY verified DESC, id ASC",
+                'unverified' => "ORDER BY verified ASC, id ASC",
+              ];
+              $admin_order_by = $admin_sort_map[$sort_admin] ?? 'ORDER BY id DESC';
+              
+              $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count FROM users $where $admin_order_by LIMIT ? OFFSET ?";
               $stmt = $db->prepare($sql);
               $param_index = 1;
               if ($search !== '') {
@@ -309,7 +324,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="user-artist text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
               </div>
               <div class="user-item-action">
-                <form method="POST" action="?access=admin&page=<?php echo $page; ?>&search=<?php echo urlencode($search); ?>" class="d-inline">
+                <form method="POST" action="?access=admin&page=<?php echo $page; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>" class="d-inline">
                   <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
                   <button type="submit" name="toggle_verify" class="btn <?php echo $user['verified'] === 'yes' ? 'btn-warning' : 'btn-success'; ?>">
                     <?php echo $user['verified'] === 'yes' ? 'Un-verify' : 'Verify'; ?>
@@ -337,7 +352,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <nav class="mt-4" aria-label="User pagination">
             <ul class="pagination justify-content-center">
               <li class="page-item <?php echo ($page <= 1) ? 'disabled' : ''; ?>">
-                <a class="page-link" href="?access=admin&page=<?php echo $page - 1; ?>&search=<?php echo urlencode($search); ?>">Previous</a>
+                <a class="page-link" href="?access=admin&page=<?php echo $page - 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">Previous</a>
               </li>
               <?php
                 $start_page = max(1, $page - 1);
@@ -348,11 +363,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               ?>
               <?php for ($i = $start_page; $i <= $end_page; $i++): ?>
               <li class="page-item <?php echo ($page == $i) ? 'active' : ''; ?>">
-                <a class="page-link" href="?access=admin&page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>"><?php echo $i; ?></a>
+                <a class="page-link" href="?access=admin&page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>"><?php echo $i; ?></a>
               </li>
               <?php endfor; ?>
               <li class="page-item <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>">
-                <a class="page-link" href="?access=admin&page=<?php echo $page + 1; ?>&search=<?php echo urlencode($search); ?>">Next</a>
+                <a class="page-link" href="?access=admin&page=<?php echo $page + 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">Next</a>
               </li>
             </ul>
           </nav>
@@ -1061,9 +1076,115 @@ if (isset($_GET['action'])) {
         send_json(['status' => 'error', 'message' => 'You do not have permission to edit this song.']);
       }
       break;
+
+    case 'get_explore':
+      $shelves = [];
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
+
+      $discovery_songs_stmt = $db->prepare("
+        SELECT {$song_fields} FROM music m
+        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = :fav_user_id
+        " . ($user_id ? "WHERE m.id NOT IN (SELECT song_id FROM history WHERE user_id = :hist_user_id)" : "") . "
+        ORDER BY RANDOM() LIMIT 15
+      ");
+      $song_params = [':fav_user_id' => $user_id ? $user_id : 0];
+      if ($user_id) {
+        $song_params[':hist_user_id'] = $user_id;
+      }
+      $discovery_songs_stmt->execute($song_params);
+      $discovery_songs = $discovery_songs_stmt->fetchAll();
+      if (count($discovery_songs) > 0) {
+        $shelves[] = ['title' => 'Discover Songs', 'type' => 'songs', 'items' => $discovery_songs];
+      }
+      
+      $discovery_stmt = $db->prepare("
+        SELECT {$album_fields} FROM music m
+        WHERE m.album != 'Unknown Album' " . ($user_id ? "AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)" : "") . "
+        GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
+      ");
+      $album_params = [];
+      if ($user_id) {
+        $album_params[':user_id'] = $user_id;
+      }
+      $discovery_stmt->execute($album_params);
+      $discovery_albums = $discovery_stmt->fetchAll();
+      if (count($discovery_albums) > 0) {
+        $shelves[] = ['title' => 'Discover Albums', 'type' => 'albums', 'items' => $discovery_albums];
+      }
+
+      $rec_artists_stmt = $db->prepare("
+        SELECT m.artist AS name, MAX(m.id) AS id
+        FROM music m
+        WHERE m.artist != 'Unknown Artist' AND m.artist != '' AND m.artist IS NOT NULL
+        " . ($user_id ? "AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)" : "") . "
+        GROUP BY m.artist
+        ORDER BY RANDOM() LIMIT 10
+      ");
+      $artist_params = [];
+      if ($user_id) {
+        $artist_params[':user_id'] = $user_id;
+      }
+      $rec_artists_stmt->execute($artist_params);
+      $rec_artists_rows = $rec_artists_stmt->fetchAll();
+      $rec_artists = [];
+      $stmt_is_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
+      foreach ($rec_artists_rows as $da) {
+        $stmt_is_user->execute([$da['name']]);
+        $uid = $stmt_is_user->fetchColumn();
+        $rec_artists[] = [
+          'name' => $da['name'],
+          'id' => $uid ? $uid : $da['id'],
+          'is_user' => (bool)$uid
+        ];
+      }
+      if (count($rec_artists) > 0) {
+        $shelves[] = ['title' => 'Discover Artists', 'type' => 'artists', 'items' => $rec_artists];
+      }
+
+      if ($user_id) {
+        $freq_played_stmt = $db->prepare("
+          SELECT {$song_fields}
+          FROM play_counts pc JOIN music m ON pc.song_id = m.id
+          LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = :user_id
+          WHERE pc.user_id = :user_id
+          ORDER BY pc.play_count DESC LIMIT 15
+        ");
+        $freq_played_stmt->execute([':user_id' => $user_id]);
+        $freq_played_songs = $freq_played_stmt->fetchAll();
+        if (count($freq_played_songs) > 0) {
+          $shelves[] = ['title' => 'Frequently Played', 'type' => 'songs', 'items' => $freq_played_songs];
+        }
+
+        $rec_followed_songs_stmt = $db->prepare("
+          SELECT {$song_fields} FROM music m
+          LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = :user_id
+          WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id)
+          ORDER BY RANDOM() LIMIT 15
+        ");
+        $rec_followed_songs_stmt->execute([':user_id' => $user_id]);
+        $rec_followed_songs = $rec_followed_songs_stmt->fetchAll();
+        if (count($rec_followed_songs) > 0) {
+          $shelves[] = ['title' => 'Recommended Songs From Your Artists', 'type' => 'songs', 'items' => $rec_followed_songs];
+        }
+
+        $rec_followed_albums_stmt = $db->prepare("
+          SELECT {$album_fields} FROM music m
+          WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id) AND m.album != 'Unknown Album'
+          GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
+        ");
+        $rec_followed_albums_stmt->execute([':user_id' => $user_id]);
+        $rec_followed_albums = $rec_followed_albums_stmt->fetchAll();
+        if (count($rec_followed_albums) > 0) {
+          $shelves[] = ['title' => 'Recommended Albums From Your Artists', 'type' => 'albums', 'items' => $rec_followed_albums];
+        }
+      }
+
+      send_json(['shelves' => $shelves]);
+      break;
     
     case 'get_songs':
-      $sort_key = $_GET['sort'] ?? 'artist_asc';
+      $sort_key = $_GET['sort'] ?? 'id_desc';
       $sort_map = [
         'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
@@ -1072,7 +1193,7 @@ if (isset($_GET['action'])) {
         'year_asc' => 'ORDER BY m.year ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'id_desc' => 'ORDER BY m.id DESC'
       ];
-      $order_by = $sort_map[$sort_key] ?? $sort_map['artist_asc'];
+      $order_by = $sort_map[$sort_key] ?? $sort_map['id_desc'];
 
       $where_clauses = [];
       $params = [$user_id];
@@ -3953,7 +4074,7 @@ function perform_full_scan($db) {
                 ${downloadExportPlaylistZipButtonHTML}
               </div>
             </div>`;
-                    contentArea.insertAdjacentHTML('afterbegin', headerHTML);
+          contentArea.insertAdjacentHTML('afterbegin', headerHTML);
 
           if (type === 'artist') {
             const isUser = details.is_user;
@@ -4000,7 +4121,7 @@ function perform_full_scan($db) {
               sortable.destroy();
               sortable = null;
             }
-            if (!contentArea.querySelector('.view-details-header') && currentView.type !== 'get_favorites') {
+            if (!contentArea.querySelector('.view-details-header') && currentView.type !== 'get_favorites' && currentView.type !== 'get_songs') {
               contentArea.innerHTML = '';
             } else if (currentView.type === 'get_favorites' && !contentArea.querySelector('.song-list')) {
             }
@@ -4347,13 +4468,12 @@ function perform_full_scan($db) {
         };
         
         const setupSortOptions = (viewType) => {
-          const isSortable = ['get_songs', 'get_favorites', 'artist_songs', 'album_songs', 'genre_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
+          const isSortable = ['get_favorites', 'artist_songs', 'album_songs', 'genre_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
           
           if (isSortable) {
             let options = {};
             
             switch(viewType) {
-              case 'get_songs':
               case 'genre_songs':
                 options = {
                   'id_desc': 'Recently Added', 'artist_asc': 'Artist', 'title_asc': 'Title', 'album_asc': 'Album',
@@ -4511,9 +4631,36 @@ function perform_full_scan($db) {
           
           switch (currentView.type) {
             case 'get_songs':
-              updateContentTitle('All Songs');
+              updateContentTitle('All Songs', false);
+              const exploreData = await fetchData(`?action=get_explore`);
+              if (exploreData && exploreData.shelves && exploreData.shelves.length > 0) {
+                renderRecommendations(exploreData);
+              } else {
+                contentArea.innerHTML = '';
+              }
+              const allTracksHeader = `
+                <div class="d-flex justify-content-between align-items-center mt-5 mb-3 px-2">
+                  <h3 class="m-0 fw-bold">All Tracks</h3>
+                  <div class="d-flex align-items-center gap-2">
+                    <label for="sort-select-all" class="text-secondary small d-none d-sm-block">Sort by</label>
+                    <select id="sort-select-all" class="form-select form-select-sm" style="width: auto;">
+                      <option value="id_desc" ${currentView.sort === 'id_desc' ? 'selected' : ''}>Recently Added</option>
+                      <option value="artist_asc" ${currentView.sort === 'artist_asc' ? 'selected' : ''}>Artist</option>
+                      <option value="title_asc" ${currentView.sort === 'title_asc' ? 'selected' : ''}>Title</option>
+                      <option value="album_asc" ${currentView.sort === 'album_asc' ? 'selected' : ''}>Album</option>
+                      <option value="year_desc" ${currentView.sort === 'year_desc' ? 'selected' : ''}>Year (Newest)</option>
+                      <option value="year_asc" ${currentView.sort === 'year_asc' ? 'selected' : ''}>Year (Oldest)</option>
+                    </select>
+                  </div>
+                </div>
+              `;
+              contentArea.insertAdjacentHTML('beforeend', allTracksHeader);
+              document.getElementById('sort-select-all').addEventListener('change', (e) => {
+                loadView({ ...currentView, sort: e.target.value });
+              });
               data = await fetchData(`?action=get_songs&${pageParams.toString()}`);
-              renderSongs(data, false);
+              renderSongs(data, true);
+              document.getElementById('sort-controls').classList.add('d-none');
               break;
             case 'user_profile':
               updateContentTitle('', false);
