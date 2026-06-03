@@ -33,72 +33,72 @@ if (isset($_GET['pwa'])) {
     header('Content-Type: application/javascript; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     echo <<<SW
-    const CACHE_NAME = 'php-music-cache-v28';
-    const STATIC_ASSETS =[
-      './',
-      'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
-      'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css',
-      'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js',
-      'https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js',
-      'https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap',
-      'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/fonts/bootstrap-icons.woff2?v=1.11.3'
-    ];
+const CACHE_NAME = 'php-music-cache-v28';
+const STATIC_ASSETS =[
+  './',
+  'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
+  'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css',
+  'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js',
+  'https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js',
+  'https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap',
+  'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/fonts/bootstrap-icons.woff2?v=1.11.3'
+];
 
-    self.addEventListener('install', event => {
-      event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(STATIC_ASSETS)));
-    });
+self.addEventListener('install', event => {
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(STATIC_ASSETS)));
+});
 
-    self.addEventListener('activate', event => {
-      const cacheWhitelist = [CACHE_NAME];
-      event.waitUntil(
-        caches.keys().then(cacheNames => {
-          return Promise.all(
-            cacheNames.map(cacheName => {
-              if (cacheWhitelist.indexOf(cacheName) === -1) {
-                return caches.delete(cacheName);
-              }
-            })
-          );
+self.addEventListener('activate', event => {
+  const cacheWhitelist = [CACHE_NAME];
+  event.waitUntil(
+    caches.keys().then(cacheNames => {
+      return Promise.all(
+        cacheNames.map(cacheName => {
+          if (cacheWhitelist.indexOf(cacheName) === -1) {
+            return caches.delete(cacheName);
+          }
         })
       );
-    });
+    })
+  );
+});
 
-    self.addEventListener('fetch', event => {
-      const url = new URL(event.request.url);
-      const isApiCall = url.searchParams.has('action') || url.searchParams.has('share_type');
-      const isPwaCall = url.searchParams.has('pwa');
+self.addEventListener('fetch', event => {
+  const url = new URL(event.request.url);
+  const isApiCall = url.searchParams.has('action') || url.searchParams.has('share_type');
+  const isPwaCall = url.searchParams.has('pwa');
 
-      if (isApiCall || isPwaCall || event.request.headers.get('range')) {
-        event.respondWith(fetch(event.request));
-        return;
-      }
-      
-      if (event.request.mode === 'navigate' || url.pathname.endsWith('/')) {
-        event.respondWith(
-          fetch(event.request).then(networkResponse => {
-            return caches.open(CACHE_NAME).then(cache => {
-              cache.put(event.request, networkResponse.clone());
-              return networkResponse;
-            });
-          }).catch(() => {
-            return caches.match(event.request);
-          })
-        );
-        return;
-      }
-      
-      event.respondWith(
-        caches.match(event.request).then(response => {
-          return response || fetch(event.request).then(networkResponse => {
-            if (networkResponse && networkResponse.ok) {
-              const responseToCache = networkResponse.clone();
-              caches.open(CACHE_NAME).then(cache => cache.put(event.request, responseToCache));
-            }
-            return networkResponse;
-          });
-        })
-      );
-    });
+  if (isApiCall || isPwaCall || event.request.headers.get('range')) {
+    event.respondWith(fetch(event.request));
+    return;
+  }
+  
+  if (event.request.mode === 'navigate' || url.pathname.endsWith('/')) {
+    event.respondWith(
+      fetch(event.request).then(networkResponse => {
+        return caches.open(CACHE_NAME).then(cache => {
+          cache.put(event.request, networkResponse.clone());
+          return networkResponse;
+        });
+      }).catch(() => {
+        return caches.match(event.request);
+      })
+    );
+    return;
+  }
+  
+  event.respondWith(
+    caches.match(event.request).then(response => {
+      return response || fetch(event.request).then(networkResponse => {
+        if (networkResponse && networkResponse.ok) {
+          const responseToCache = networkResponse.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(event.request, responseToCache));
+        }
+        return networkResponse;
+      });
+    })
+  );
+});
 SW;
     exit;
   }
@@ -1232,7 +1232,7 @@ if (isset($_GET['action'])) {
         $album_params[':user_id'] = $user_id;
       }
       $discovery_stmt->execute($album_params);
-      $discovery_albums = $discovery_stmt->fetchAll();
+      $discovery_albums = $discovery_albums = $discovery_stmt->fetchAll();
       if (count($discovery_albums) > 0) {
         $shelves[] = ['title' => 'Discover Albums', 'type' => 'albums', 'items' => $discovery_albums];
       }
@@ -1845,8 +1845,8 @@ if (isset($_GET['action'])) {
       $user_artists = $stmt->fetchAll();
       
       foreach ($user_artists as $ua) {
-          $artists[] = ['name' => $ua['name'], 'id' => $ua['id'], 'is_user' => true];
-          $added_artists[strtolower($ua['name'])] = true;
+        $artists[] = ['name' => $ua['name'], 'id' => $ua['id'], 'is_user' => true];
+        $added_artists[strtolower($ua['name'])] = true;
       }
 
       $stmt = $db->prepare("SELECT DISTINCT artist, MAX(id) as id FROM music WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL GROUP BY artist LIMIT 15");
@@ -1854,32 +1854,32 @@ if (isset($_GET['action'])) {
       $music_artists = $stmt->fetchAll();
       
       foreach ($music_artists as $ma) {
-          $parts = preg_split('/\s*(?:\/|,|&)\s*/', $ma['artist']);
-          foreach ($parts as $p) {
-              $p = trim($p);
-              if ($p !== '' && stripos($p, $q) !== false && !isset($added_artists[strtolower($p)])) {
-                  $artists[] = ['name' => $p, 'id' => $ma['id'], 'is_user' => false];
-                  $added_artists[strtolower($p)] = true;
-              }
+        $parts = preg_split('/\s*(?:\/|,|&)\s*/', $ma['artist']);
+        foreach ($parts as $p) {
+          $p = trim($p);
+          if ($p !== '' && stripos($p, $q) !== false && !isset($added_artists[strtolower($p)])) {
+            $artists[] = ['name' => $p, 'id' => $ma['id'], 'is_user' => false];
+            $added_artists[strtolower($p)] = true;
           }
+        }
       }
       
       if (count($artists) > 0) {
-          $shelves[] = ['title' => 'Artists', 'type' => 'artists', 'items' => array_slice($artists, 0, 15)];
+        $shelves[] = ['title' => 'Artists', 'type' => 'artists', 'items' => array_slice($artists, 0, 15)];
       }
 
       $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album LIKE ? AND m.album != '' AND m.album IS NOT NULL GROUP BY m.album, m.user_id ORDER BY m.album ASC LIMIT 15");
       $stmt->execute([$query]);
       $albums = $stmt->fetchAll();
       if (count($albums) > 0) {
-          $shelves[] = ['title' => 'Albums', 'type' => 'albums', 'items' => $albums];
+        $shelves[] = ['title' => 'Albums', 'type' => 'albums', 'items' => $albums];
       }
 
       $stmt = $db->prepare("SELECT p.name, p.public_id, u.artist as creator, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id FROM playlists p JOIN users u ON p.user_id = u.id WHERE p.name LIKE ? ORDER BY p.name ASC LIMIT 15");
       $stmt->execute([$query]);
       $playlists = $stmt->fetchAll();
       if (count($playlists) > 0) {
-          $shelves[] = ['title' => 'Playlists', 'type' => 'playlists', 'items' => $playlists];
+        $shelves[] = ['title' => 'Playlists', 'type' => 'playlists', 'items' => $playlists];
       }
 
       $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
@@ -1887,7 +1887,7 @@ if (isset($_GET['action'])) {
       $stmt->execute([$user_id, $query, $query, $query]);
       $songs = $stmt->fetchAll();
       if (count($songs) > 0) {
-          $shelves[] = ['title' => 'Songs', 'type' => 'songs_list', 'items' => $songs];
+        $shelves[] = ['title' => 'Songs', 'type' => 'songs_list', 'items' => $songs];
       }
 
       send_json(['shelves' => $shelves]);
@@ -2001,6 +2001,10 @@ if (isset($_GET['action'])) {
       $order_by = $sort_map[$sort_key] ?? $sort_map['name_asc'];
       
       $is_added_sql = ", 0 as is_added";
+      if ($song_id !== '0') {
+        $sid = intval($song_id);
+        $is_added_sql = ", (SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END FROM playlist_songs WHERE playlist_id = p.id AND song_id = {$sid}) as is_added";
+      }
       
       $stmt = $db->prepare("
         SELECT p.id, p.name, p.public_id, COUNT(ps.song_id) as song_count,
@@ -2109,8 +2113,8 @@ if (isset($_GET['action'])) {
 
       $stmt_insert = $db->prepare("INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, sort_order) VALUES (?, ?, ?)");
       foreach($songs as $sid) {
-         $max_order++;
-         $stmt_insert->execute([$playlist_id, $sid, $max_order]);
+        $max_order++;
+        $stmt_insert->execute([$playlist_id, $sid, $max_order]);
       }
       send_json(['status' => 'success', 'message' => 'Added all songs to playlist.']);
       break;
@@ -2978,8 +2982,8 @@ function perform_full_scan($db) {
           z-index: 1010; padding-top: 1.5rem; padding-bottom: 1.5rem;
         }
         .song-item.history-item { grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px; }
-        .song-item { cursor: pointer; border-radius: 0.5em; }
       }
+      .song-item { cursor: pointer; border-radius: 0.5em; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
       .offcanvas-body .nav-link { padding: 0.75rem 1.5rem; }
       .sidebar .logo { font-size: 1.5rem; font-weight: 700; padding: 0 1.5rem 1.5rem 1.5rem; }
       .sidebar .logo span { color: var(--ytm-accent); }
@@ -3228,9 +3232,11 @@ function perform_full_scan($db) {
       .add-to-playlist-item:hover { background-color: var(--ytm-surface-2); }
       .song-artist:hover, .song-artist-name:hover { text-decoration: underline; }
       #multi-select-bar {
-        position: fixed; bottom: 90px; left: 0; right: 0; background: var(--ytm-surface-2);
-        border-top: 1px solid var(--ytm-accent); padding: 10px 20px; z-index: 1010;
-        display: flex; justify-content: space-between; align-items: center;
+        position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
+        background: var(--ytm-surface-2); border-radius: 50px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5); padding: 10px 20px; z-index: 1010;
+        display: flex; gap: 15px; align-items: center; justify-content: center;
+        width: max-content;
       }
     </style>
   </head>
@@ -3307,6 +3313,10 @@ function perform_full_scan($db) {
           
           <div class="mt-auto">
             <hr class="text-secondary">
+            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#how-to-use-modal">
+              <i class="bi bi-question-circle-fill"></i>
+              <span>How to use</span>
+            </a>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#playlist-downloader-modal">
               <i class="bi bi-cloud-arrow-down-fill"></i>
               <span>Downloader</span>
@@ -3387,12 +3397,68 @@ function perform_full_scan($db) {
         <div id="infinite-scroll-loader" class="loader d-none">Loading more...</div>
       </main>
     </div>
-    <div id="multi-select-bar" class="d-none">
-      <div><span id="multi-select-count">0</span> Selected</div>
-      <div class="d-flex gap-2">
-        <button class="btn btn-sm btn-danger" id="multi-add-playlist-btn">Add to Playlist</button>
-        <button class="btn btn-sm btn-outline-light" id="multi-cancel-btn">Cancel</button>
+    <div class="modal fade" id="how-to-use-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-info-circle-fill text-danger me-2"></i>Comprehensive User Guide</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-light" style="line-height: 1.6;">
+            
+            <h6 class="text-white mb-2"><i class="bi bi-play-circle-fill me-2"></i>1. Basic Playback & Navigation</h6>
+            <ul class="small mb-4">
+              <li class="mb-1"><strong>Play a Song:</strong> Simply click or tap on any song in the list to start playback immediately.</li>
+              <li class="mb-1"><strong>Player Controls:</strong> Use the bottom player bar to pause, play, shuffle, and toggle repeat modes (Repeat All, Repeat One, Repeat Off).</li>
+              <li class="mb-1"><strong>Seek Gestures:</strong> Click and hold (long press) the <strong>Next</strong> or <strong>Previous</strong> buttons to fast-forward or rewind the current track in 5-second increments.</li>
+              <li class="mb-1"><strong>Fullscreen Player:</strong> Click on the track artwork or title in the mobile player bar to open the expanded, fullscreen player view.</li>
+            </ul>
+
+            <h6 class="text-white mb-2"><i class="bi bi-ui-checks-grid me-2"></i>2. Multi-Select Mode</h6>
+            <ul class="small mb-4">
+              <li class="mb-1"><strong>Activation:</strong> Click and hold (long press) on any song row for exactly 1 second to enter multi-select mode.</li>
+              <li class="mb-1"><strong>Selecting:</strong> Once activated, tap any other songs to add or remove them from your selection. A floating action bar will appear at the bottom.</li>
+              <li class="mb-1"><strong>Bulk Actions:</strong> Use the floating bar to add all selected songs directly to a specific playlist or your favorites in one click.</li>
+              <li class="mb-1"><strong>Note:</strong> Drag-and-drop sorting is temporarily disabled while multi-select mode is active.</li>
+            </ul>
+
+            <h6 class="text-white mb-2"><i class="bi bi-three-dots-vertical me-2"></i>3. Context Menus & Actions</h6>
+            <ul class="small mb-4">
+              <li class="mb-1"><strong>Accessing:</strong> Click the three vertical dots <i class="bi bi-three-dots-vertical"></i> on the right side of any song or playlist.</li>
+              <li class="mb-1"><strong>Navigation:</strong> Instantly jump to the track's Artist or Album view.</li>
+              <li class="mb-1"><strong>Information:</strong> View deeply embedded Metadata (Bitrate, Duration, Year) or read the embedded Lyrics.</li>
+              <li class="mb-1"><strong>Sharing:</strong> Generate a shareable link to send specific songs, albums, or playlists to friends via WhatsApp, Telegram, or Twitter.</li>
+            </ul>
+
+            <h6 class="text-white mb-2"><i class="bi bi-sort-down me-2"></i>4. Custom Sorting & Ordering</h6>
+            <ul class="small mb-4">
+              <li class="mb-1"><strong>Drag and Drop:</strong> In your <em>Favorites</em> and <em>Playlists</em> (when sorted by "My Order"), click and drag a song to manually reposition it. The new order saves automatically.</li>
+              <li class="mb-1"><strong>Sort Dropdowns:</strong> Use the dropdown menu at the top right of most views to sort by Title (A-Z), Artist, Album, Year, or Recently Added.</li>
+            </ul>
+
+            <h6 class="text-white mb-2"><i class="bi bi-cloud-upload-fill me-2"></i>5. Uploading & Managing Music</h6>
+            <ul class="small mb-4">
+              <li class="mb-1"><strong>Verification:</strong> Only verified users can upload music. Admins manage verification via the Admin Panel.</li>
+              <li class="mb-1"><strong>Limits & Formats:</strong> You can upload up to 10 tracks per day. Supported formats include MP3, FLAC, M4A, WAV, and OGG.</li>
+              <li class="mb-1"><strong>Editing Metadata:</strong> Open the context menu on a song you uploaded and select "Edit Info". You can change the Title, Artist, Album, Genre, Lyrics, and even upload a new 1:1 Cover Art Image.</li>
+            </ul>
+
+            <h6 class="text-white mb-2"><i class="bi bi-box-arrow-down me-2"></i>6. Data Portability & Offline Usage</h6>
+            <ul class="small mb-4">
+              <li class="mb-1"><strong>Import/Export:</strong> Go to the Playlists or Favorites view and click the Export button to download a `.json` backup of your list. You can restore it anytime using the Import button.</li>
+              <li class="mb-1"><strong>Playlist Downloader:</strong> Open the Downloader tool from the sidebar, input a Playlist Public ID, and the app will sequentially download all MP3 files to your local device.</li>
+              <li class="mb-1"><strong>Install App (PWA):</strong> Click "Install App" in the sidebar to add PHP Music to your home screen. It will cache assets for much faster loading and a native app feel.</li>
+            </ul>
+
+          </div>
+        </div>
       </div>
+    </div>
+    <div id="multi-select-bar" class="d-none">
+      <span id="multi-select-count" class="badge bg-danger rounded-circle d-flex align-items-center justify-content-center" style="width: 24px; height: 24px;">0</span>
+      <button class="btn btn-sm btn-outline-light rounded-circle d-flex align-items-center justify-content-center" id="multi-cancel-btn" style="width: 36px; height: 36px;"><i class="bi bi-x-lg"></i></button>
+      <button class="btn btn-sm btn-outline-light rounded-circle d-flex align-items-center justify-content-center" id="multi-add-playlist-btn" style="width: 36px; height: 36px;"><i class="bi bi-music-note-list"></i></button>
+      <button class="btn btn-sm btn-outline-light rounded-circle d-flex align-items-center justify-content-center" id="multi-add-favorite-btn" style="width: 36px; height: 36px;"><i class="bi bi-heart-fill"></i></button>
     </div>
     <div class="player-bar d-none" id="player-bar">
       <div class="track-info d-none d-md-flex">
@@ -3830,7 +3896,7 @@ function perform_full_scan($db) {
             <p class="text-secondary text-center mb-4" id="share-modal-text">Share this with your friends!</p>
             <div class="d-flex justify-content-center gap-3 mb-4 fs-2">
               <a href="#" id="share-facebook" target="_blank" class="text-white"><i class="bi bi-facebook"></i></a>
-              <a href="#" id="share-twitter" target="_blank" class="text-white"><i class="bi bi-twitter-x"></i></a>
+                            <a href="#" id="share-twitter" target="_blank" class="text-white"><i class="bi bi-twitter-x"></i></a>
               <a href="#" id="share-whatsapp" target="_blank" class="text-white"><i class="bi bi-whatsapp"></i></a>
               <a href="#" id="share-telegram" target="_blank" class="text-white"><i class="bi bi-telegram"></i></a>
             </div>
@@ -4000,7 +4066,7 @@ function perform_full_scan($db) {
           volumeBtn: document.getElementById('volume-btn'),
           volumeSlider: document.getElementById('volume-slider'),
         };
-        
+
         const audio = new Audio();
         let currentView = { type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' };
         let currentUser = null;
@@ -4063,7 +4129,7 @@ function perform_full_scan($db) {
                 document.documentElement.webkitRequestFullscreen();
               } else if (document.documentElement.msRequestFullscreen) {
                 document.documentElement.msRequestFullscreen();
-              } else if (document.documentElement.mozRequestFullScreen) {
+              } else               if (document.documentElement.mozRequestFullScreen) {
                 document.documentElement.mozRequestFullScreen();
               }
             } else {
@@ -4183,10 +4249,12 @@ function perform_full_scan($db) {
           if (selectedSongs.size > 0) {
             multiSelectBar.classList.remove('d-none');
             multiSelectCount.textContent = selectedSongs.size;
+            if (sortable) sortable.option("disabled", true);
           } else {
             multiSelectBar.classList.add('d-none');
             multiSelectMode = false;
             document.querySelectorAll('.song-item.multi-selected').forEach(el => el.classList.remove('multi-selected'));
+            if (sortable) sortable.option("disabled", false);
           }
         };
 
@@ -4202,13 +4270,27 @@ function perform_full_scan($db) {
           updateMultiSelectUI();
         };
 
+        let isDragging = false;
         const startHold = (e) => {
+          if (!currentUser) return;
           const songItem = e.target.closest('.song-item');
-          if (!songItem) return;
+          if (!songItem || e.target.closest('.song-more')) return;
+          
+          isDragging = false;
           holdTimer = setTimeout(() => {
+            if (isDragging) return;
             multiSelectMode = true;
-            toggleSongSelection(songItem);
-          }, 600);
+            if (sortable) {
+              sortable.option("disabled", true);
+              document.dispatchEvent(new MouseEvent('mouseup'));
+              if (window.TouchEvent) {
+                document.dispatchEvent(new TouchEvent('touchend'));
+              }
+            }
+            if (!selectedSongs.has(songItem.dataset.songId)) {
+              toggleSongSelection(songItem);
+            }
+          }, 1000);
         };
 
         const endHold = () => {
@@ -4222,7 +4304,33 @@ function perform_full_scan($db) {
         contentArea.addEventListener('touchend', endHold);
         contentArea.addEventListener('touchcancel', endHold);
 
+        contentArea.addEventListener('contextmenu', (e) => {
+          if (e.target.closest('.song-item') || e.target.closest('.shelf-item')) {
+            e.preventDefault();
+          }
+        });
+
         document.getElementById('multi-cancel-btn').addEventListener('click', () => {
+          selectedSongs.clear();
+          updateMultiSelectUI();
+        });
+
+        document.getElementById('multi-add-favorite-btn').addEventListener('click', async () => {
+          if (!currentUser || selectedSongs.size === 0) return;
+          let added = 0;
+          for (let songId of selectedSongs) {
+            const songEl = document.querySelector(`.song-item[data-song-id="${songId}"]`);
+            if (songEl && songEl.dataset.isFavorite === '0') {
+              await fetchData('?action=toggle_favorite', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: songId })
+              });
+              songEl.dataset.isFavorite = '1';
+              added++;
+            }
+          }
+          showToast(`Added ${added} new songs to favorites!`, 'success');
           selectedSongs.clear();
           updateMultiSelectUI();
         });
@@ -4438,16 +4546,22 @@ function perform_full_scan($db) {
           const isSortableFavorites = currentView.type === 'get_favorites' && currentView.sort === 'manual_order';
           const isSortablePlaylist = currentView.type === 'playlist_songs' && currentView.sort === 'manual_order';
 
-          if ((isSortableFavorites || isSortablePlaylist) && !sortable && !multiSelectMode) {
+          if ((isSortableFavorites || isSortablePlaylist) && !sortable) {
             sortable = Sortable.create(songList, {
               animation: 150,
               ghostClass: 'ghost',
-              delay: 200,
-              delayOnTouchOnly: true,
+              delay: 250,
+              delayOnTouchOnly: false,
+              disabled: multiSelectMode,
               scroll: mainContent,
               scrollSensitivity: 60,
               scrollSpeed: 10,
+              onStart: function() {
+                isDragging = true;
+                if (holdTimer) clearTimeout(holdTimer);
+              },
               onEnd: async (evt) => {
+                isDragging = false;
                 const songItems = Array.from(songList.querySelectorAll('.song-item'));
                 const newOrderIds = songItems.map(item => item.dataset.songId);
                 
@@ -5916,7 +6030,7 @@ function perform_full_scan($db) {
                           <span class="text-truncate fw-medium">${p.name}</span>
                           <span class="small ${p.is_added ? 'text-white-50' : 'text-secondary'}">${p.song_count} songs</span>
                         </div>
-                        ${p.is_added ? '<i class="bi bi-check-circle-fill fs-5"></i>' : '<i class="bi bi-plus-circle fs-5"></i>'}
+                        ${p.is_added ? '<span class="badge bg-success">Already Added</span>' : '<i class="bi bi-plus-circle fs-5"></i>'}
                       </button>
                     `).join('')}
                   </div>
