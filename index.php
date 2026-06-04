@@ -2486,56 +2486,35 @@ if (isset($_GET['action'])) {
 
     case 'import_favorites':
       if (!$user_id) { http_response_code(403); exit; }
-      if (!isset($_FILES['favorites_file'])) { http_response_code(400); send_json(['status' => 'error', 'message' => 'No file uploaded.']); }
-      
-      $file = $_FILES['favorites_file'];
-      if ($file['error'] !== UPLOAD_ERR_OK) { http_response_code(400); send_json(['status' => 'error', 'message' => 'Upload error: ' . $file['error']]); }
-      $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-      if ($file['type'] !== 'application/json' && $ext !== 'json') { http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid file type. Only JSON is allowed.']); }
-      
-      $json_content = file_get_contents($file['tmp_name']);
-      $import_data = json_decode($json_content, true);
-
+      $import_data = json_decode(file_get_contents('php://input'), true);
       if (json_last_error() !== JSON_ERROR_NONE || !isset($import_data['songs']) || !is_array($import_data['songs'])) {
         http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or malformed JSON file.']);
       }
 
       $db->beginTransaction();
       try {
-        $stmt_find_exact = $db->prepare("SELECT id FROM music WHERE title = ? AND artist = ? LIMIT 1");
-        $stmt_find_fallback = $db->prepare("SELECT id FROM music WHERE file LIKE ? OR file LIKE ? LIMIT 1");
-        $stmt_insert_song = $db->prepare("INSERT OR IGNORE INTO favorites (user_id, song_id, sort_order) VALUES (?, ?, ?)");
+        $stmt_find = $db->prepare("SELECT id FROM music WHERE (title = ? AND artist = ?) OR file LIKE ? LIMIT 1");
+        $stmt_insert = $db->prepare("INSERT OR IGNORE INTO favorites (user_id, song_id, sort_order) VALUES (?, ?, ?)");
         
         $stmt_order = $db->prepare("SELECT MAX(sort_order) FROM favorites WHERE user_id = ?");
         $stmt_order->execute([$user_id]);
         $order = (int)$stmt_order->fetchColumn();
-        
+
         $song_count = 0;
         foreach ($import_data['songs'] as $song) {
-          $found = null;
-          if (is_array($song)) {
-            $title = $song['title'] ?? '';
-            $artist = $song['artist'] ?? '';
-            $filename = basename(str_replace('\\', '/', $song['filename'] ?? ''));
-
-            if ($title && $artist) {
-              $stmt_find_exact->execute([$title, $artist]);
-              $found = $stmt_find_exact->fetch();
-            }
-            if (!$found && $filename) {
-              $stmt_find_fallback->execute(['%/' . $filename, '%\\' . $filename]);
-              $found = $stmt_find_fallback->fetch();
-            }
-          } else {
-            $filename = basename(str_replace('\\', '/', $song));
-            $stmt_find_fallback->execute(['%/' . $filename, '%\\' . $filename]);
-            $found = $stmt_find_fallback->fetch();
-          }
-
-          if ($found) {
+          $title = is_array($song) ? ($song['title'] ?? '') : '';
+          $artist = is_array($song) ? ($song['artist'] ?? '') : '';
+          $filename = basename(str_replace('\\', '/', is_array($song) ? ($song['filename'] ?? '') : $song));
+          
+          $stmt_find->execute([$title, $artist, '%' . $filename]);
+          $found_id = $stmt_find->fetchColumn();
+          
+          if ($found_id) {
             $order++;
-            $stmt_insert_song->execute([$user_id, $found['id'], $order]);
-            $song_count++;
+            $stmt_insert->execute([$user_id, $found_id, $order]);
+            if ($stmt_insert->rowCount() > 0) {
+              $song_count++;
+            }
           }
         }
         $db->commit();
@@ -2585,16 +2564,7 @@ if (isset($_GET['action'])) {
 
     case 'import_playlist':
       if (!$user_id) { http_response_code(403); exit; }
-      if (!isset($_FILES['playlist_file'])) { http_response_code(400); send_json(['status' => 'error', 'message' => 'No file uploaded.']); }
-      
-      $file = $_FILES['playlist_file'];
-      if ($file['error'] !== UPLOAD_ERR_OK) { http_response_code(400); send_json(['status' => 'error', 'message' => 'Upload error: ' . $file['error']]); }
-      $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-      if ($file['type'] !== 'application/json' && $ext !== 'json') { http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid file type. Only JSON is allowed.']); }
-      
-      $json_content = file_get_contents($file['tmp_name']);
-      $import_data = json_decode($json_content, true);
-
+      $import_data = json_decode(file_get_contents('php://input'), true);
       if (json_last_error() !== JSON_ERROR_NONE || !isset($import_data['name']) || !isset($import_data['songs']) || !is_array($import_data['songs'])) {
         http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or malformed JSON file.']);
       }
@@ -2606,36 +2576,25 @@ if (isset($_GET['action'])) {
         $stmt_create->execute([$user_id, $import_data['name'], $public_id]);
         $playlist_id = $db->lastInsertId();
 
-        $stmt_find_exact = $db->prepare("SELECT id FROM music WHERE title = ? AND artist = ? LIMIT 1");
-        $stmt_find_fallback = $db->prepare("SELECT id FROM music WHERE file LIKE ? OR file LIKE ? LIMIT 1");
-        $stmt_insert_song = $db->prepare("INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, sort_order) VALUES (?, ?, ?)");
+        $stmt_find = $db->prepare("SELECT id FROM music WHERE (title = ? AND artist = ?) OR file LIKE ? LIMIT 1");
+        $stmt_insert = $db->prepare("INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, sort_order) VALUES (?, ?, ?)");
         
         $song_count = 0;
         $order = 0;
         foreach ($import_data['songs'] as $song) {
-          $found = null;
-          if (is_array($song)) {
-            $title = $song['title'] ?? '';
-            $artist = $song['artist'] ?? '';
-            $filename = basename(str_replace('\\', '/', $song['filename'] ?? ''));
-
-            if ($title && $artist) {
-              $stmt_find_exact->execute([$title, $artist]);
-              $found = $stmt_find_exact->fetch();
+          $title = is_array($song) ? ($song['title'] ?? '') : '';
+          $artist = is_array($song) ? ($song['artist'] ?? '') : '';
+          $filename = basename(str_replace('\\', '/', is_array($song) ? ($song['filename'] ?? '') : $song));
+          
+          $stmt_find->execute([$title, $artist, '%' . $filename]);
+          $found_id = $stmt_find->fetchColumn();
+          
+          if ($found_id) {
+            $stmt_insert->execute([$playlist_id, $found_id, $order]);
+            if ($stmt_insert->rowCount() > 0) {
+              $order++;
+              $song_count++;
             }
-            if (!$found && $filename) {
-              $stmt_find_fallback->execute(['%/' . $filename, '%\\' . $filename]);
-              $found = $stmt_find_fallback->fetch();
-            }
-          } else {
-            $filename = basename(str_replace('\\', '/', $song));
-            $stmt_find_fallback->execute(['%/' . $filename, '%\\' . $filename]);
-            $found = $stmt_find_fallback->fetch();
-          }
-
-          if ($found) {
-            $stmt_insert_song->execute([$playlist_id, $found['id'], $order++]);
-            $song_count++;
           }
         }
         $db->commit();
@@ -3397,6 +3356,7 @@ function perform_full_scan($db) {
         <div id="infinite-scroll-loader" class="loader d-none">Loading more...</div>
       </main>
     </div>
+
     <div class="modal fade" id="how-to-use-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
@@ -3450,10 +3410,63 @@ function perform_full_scan($db) {
               <li class="mb-1"><strong>Install App (PWA):</strong> Click "Install App" in the sidebar to add PHP Music to your home screen. It will cache assets for much faster loading and a native app feel.</li>
             </ul>
 
+            <h6 class="text-white mb-2"><i class="bi bi-shield-exclamation me-2"></i>7. Disclaimers & Legal</h6>
+            <ul class="small mb-4 text-white">
+              <li class="mb-1"><strong>Copyright Responsibility:</strong> Users are solely responsible for the audio files they upload. Ensure you have the explicit right or permission to use, stream, and distribute the content.</li>
+              <li class="mb-1"><strong>Personal Use Only:</strong> Features like the Playlist Downloader and streaming are intended strictly for personal, private, and non-commercial use.</li>
+              <li class="mb-1"><strong>Data Integrity:</strong> While we offer robust backup features via JSON export/import, this application and its services are provided "as-is" without any warranties. Please keep secure local copies of your original music files.</li>
+              <li class="mb-1"><strong>Content Moderation:</strong> Administrators reserve the right to indefinitely ban accounts, remove files, or delete metadata that violates copyright laws, platform terms, or community guidelines without prior notice.</li>
+            </ul>
+
+            <h6 class="text-white mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-danger me-2" viewBox="0 0 16 16"><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/></svg>8. Interface Icons & Buttons Dictionary
+            </h6>
+            <ul class="small mb-0 text-white" style="list-style: none; padding-left: 0;">
+              <li class="mb-3 d-flex align-items-start">
+                <span style="min-width: 45px;" class="text-white text-center me-2">
+                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/></svg> / 
+                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/></svg>
+                </span>
+                <span><strong>Play / Pause:</strong> Tap to start or pause the currently selected audio track.</span>
+              </li>
+              <li class="mb-3 d-flex align-items-start">
+                <span style="min-width: 45px;" class="text-white text-center me-2">
+                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M4 4a.5.5 0 0 1 1 0v3.248l6.267-3.636c.54-.313 1.233.066 1.233.696v7.384c0 .63-.692 1.01-1.233.696L5 8.752V12a.5.5 0 0 1-1 0V4z"/></svg> / 
+                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M12.5 4a.5.5 0 0 0-1 0v3.248L5.233 3.612C4.693 3.3 4 3.678 4 4.308v7.384c0 .63.692 1.01 1.233.696L11.5 8.752V12a.5.5 0 0 0 1 0V4z"/></svg>
+                </span>
+                <span><strong>Previous / Next:</strong> Skip backward or forward in the queue. Press and hold to rewind/fast-forward the current song.</span>
+              </li>
+              <li class="mb-3 d-flex align-items-start">
+                <span style="min-width: 45px;" class="text-white text-center me-2">
+                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M0 3.5A.5.5 0 0 1 .5 3H1c2.202 0 3.827 1.24 4.874 2.418.49.552.865 1.102 1.126 1.532.26-.43.636-.98 1.126-1.532C9.173 4.24 10.798 3 13 3v1c-1.798 0-3.173 1.01-4.126 2.082A9.624 9.624 0 0 0 7.556 8a9.624 9.624 0 0 0 1.317 1.918C9.828 10.99 11.204 12 13 12v1c-2.202 0-3.827-1.24-4.874-2.418A10.595 10.595 0 0 1 7 9.05c-.26.43-.636.98-1.126 1.532C4.827 11.76 3.202 13 1 13H.5a.5.5 0 0 1 0-1H1c1.798 0 3.173-1.01 4.126-2.082A9.624 9.624 0 0 0 6.444 8a9.624 9.624 0 0 0-1.317-1.918C4.172 5.01 2.796 4 1 4H.5a.5.5 0 0 1-.5-.5z"/><path d="M13 5.466V1.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384l-2.36 1.966a.25.25 0 0 1-.41-.192zm0 9v-3.932a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384l-2.36 1.966a.25.25 0 0 1-.41-.192z"/></svg>
+                </span>
+                <span><strong>Shuffle:</strong> Mixes up the current play queue in a random order.</span>
+              </li>
+              <li class="mb-3 d-flex align-items-start">
+                <span style="min-width: 45px;" class="text-white text-center me-2">
+                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M11 5.466V4H5a4 4 0 0 0-3.584 5.777.5.5 0 1 1-.896.446A5 5 0 0 1 5 3h6V1.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384l-2.36 1.966a.25.25 0 0 1-.41-.192Zm3.81.086a.5.5 0 0 1 .67.225A5 5 0 0 1 11 13H5v1.466a.25.25 0 0 1-.41.192l-2.36-1.966a.25.25 0 0 1 0-.384l2.36-1.966a.25.25 0 0 1 .41.192V12h6a4 4 0 0 0 3.585-5.777.5.5 0 0 1 .225-.67Z"/></svg>
+                </span>
+                <span><strong>Repeat:</strong> Toggles between Repeat Off, Repeat All, and Repeat One.</span>
+              </li>
+              <li class="mb-3 d-flex align-items-start">
+                <span style="min-width: 45px;" class="text-white text-center me-2">
+                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/></svg>
+                </span>
+                <span><strong>Context Menu (More):</strong> Opens advanced options like Sharing, Lyrics, Metadata, and adding to playlists.</span>
+              </li>
+              <li class="mb-3 d-flex align-items-start">
+                <span style="min-width: 45px;" class="text-white text-center me-2">
+                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="m8 2.748-.717-.737C5.6.281 2.514.878 1.4 3.053c-.523 1.023-.641 2.5.314 4.385.92 1.815 2.834 3.989 6.286 6.357 3.452-2.368 5.365-4.542 6.286-6.357.955-1.886.838-3.362.314-4.385C13.486.878 10.4.28 8.717 2.01zM8 15C-7.333 4.868 3.279-3.04 7.824 1.143q.09.083.176.171a3 3 0 0 1 .176-.17C12.72-3.042 23.333 4.867 8 15"/></svg>
+                </span>
+                <span><strong>Favorite:</strong> Toggles saving a song to your personal Favorites library.</span>
+              </li>
+            </ul>
+
           </div>
         </div>
       </div>
     </div>
+
     <div id="multi-select-bar" class="d-none">
       <span id="multi-select-count" class="badge bg-danger rounded-circle d-flex align-items-center justify-content-center" style="width: 24px; height: 24px;">0</span>
       <button class="btn btn-sm btn-outline-light rounded-circle d-flex align-items-center justify-content-center" id="multi-cancel-btn" style="width: 36px; height: 36px;"><i class="bi bi-x-lg"></i></button>
@@ -4546,7 +4559,12 @@ function perform_full_scan($db) {
           const isSortableFavorites = currentView.type === 'get_favorites' && currentView.sort === 'manual_order';
           const isSortablePlaylist = currentView.type === 'playlist_songs' && currentView.sort === 'manual_order';
 
-          if ((isSortableFavorites || isSortablePlaylist) && !sortable) {
+          if (sortable) {
+            sortable.destroy();
+            sortable = null;
+          }
+
+          if (isSortableFavorites || isSortablePlaylist) {
             sortable = Sortable.create(songList, {
               animation: 150,
               ghostClass: 'ghost',
@@ -6355,40 +6373,52 @@ function perform_full_scan($db) {
           }
         });
         
-        editPlaylistForm.addEventListener('submit', async e => {
-          e.preventDefault();
-          const publicId = document.getElementById('edit-playlist-id-input').value;
-          const name = document.getElementById('edit-playlist-name-input').value;
-          const data = await fetchData('?action=edit_playlist', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ public_id: publicId, name: name })
-          });
-          if (data && data.status === 'success') {
-            editPlaylistModal.hide();
-            showToast(data.message, 'success');
-            if (currentView.type === 'get_user_playlists') {
-              loadView(currentView);
-            }
-          }
-        });
-
         importPlaylistForm.addEventListener('submit', async e => {
           e.preventDefault();
           const fileInput = document.getElementById('import-playlist-file');
           if (fileInput.files.length === 0) return;
-          const formData = new FormData();
-          formData.append('playlist_file', fileInput.files[0]);
-
-          const result = await fetch('?action=import_playlist', { method: 'POST', body: formData }).then(res => res.json());
           
-          if (result) {
-            showToast(result.message, result.status);
-            if (result.status === 'success') {
-              importPlaylistModal.hide();
-              importPlaylistForm.reset();
-              loadView({type: 'get_user_playlists', sort: 'name_asc'});
+          const file = fileInput.files[0];
+          const reader = new FileReader();
+          
+          reader.onload = async (event) => {
+            try {
+              const importData = JSON.parse(event.target.result);
+              if (!importData.name || !importData.songs || !Array.isArray(importData.songs)) {
+                showToast('Invalid JSON format.', 'error');
+                return;
+              }
+              
+              const btn = importPlaylistForm.querySelector('button[type="submit"]');
+              const originalText = btn.innerHTML;
+              btn.disabled = true;
+              btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Scanning Library...';
+              
+              const response = await fetch('?action=import_playlist', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(importData)
+              });
+              
+              const result = await response.json();
+              if (result) {
+                showToast(result.message, result.status);
+                if (result.status === 'success') {
+                  importPlaylistModal.hide();
+                  importPlaylistForm.reset();
+                  loadView(currentView);
+                }
+              }
+              btn.disabled = false;
+              btn.innerHTML = originalText;
+            } catch (err) {
+              showToast('Failed to parse JSON or import.', 'error');
+              const btn = importPlaylistForm.querySelector('button[type="submit"]');
+              btn.disabled = false;
+              btn.textContent = 'Import';
             }
-          }
+          };
+          reader.readAsText(file);
         });
 
         if (importFavoritesForm) {
@@ -6396,19 +6426,48 @@ function perform_full_scan($db) {
             e.preventDefault();
             const fileInput = document.getElementById('import-favorites-file');
             if (fileInput.files.length === 0) return;
-            const formData = new FormData();
-            formData.append('favorites_file', fileInput.files[0]);
-
-            const result = await fetch('?action=import_favorites', { method: 'POST', body: formData }).then(res => res.json());
             
-            if (result) {
-              showToast(result.message, result.status);
-              if (result.status === 'success') {
-                importFavoritesModal.hide();
-                importFavoritesForm.reset();
-                loadView({ type: 'get_favorites', param: '', sort: 'manual_order', filter_user_id: '' });
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+            
+            reader.onload = async (event) => {
+              try {
+                const importData = JSON.parse(event.target.result);
+                if (!importData.songs || !Array.isArray(importData.songs)) {
+                  showToast('Invalid JSON format.', 'error');
+                  return;
+                }
+                
+                const btn = importFavoritesForm.querySelector('button[type="submit"]');
+                const originalText = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Scanning Library...';
+                
+                const response = await fetch('?action=import_favorites', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(importData)
+                });
+                
+                const result = await response.json();
+                if (result) {
+                  showToast(result.message, result.status);
+                  if (result.status === 'success') {
+                    importFavoritesModal.hide();
+                    importFavoritesForm.reset();
+                    loadView(currentView);
+                  }
+                }
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+              } catch (err) {
+                showToast('Failed to parse JSON or import.', 'error');
+                const btn = importFavoritesForm.querySelector('button[type="submit"]');
+                btn.disabled = false;
+                btn.textContent = 'Import';
               }
-            }
+            };
+            reader.readAsText(file);
           });
         }
 
