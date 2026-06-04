@@ -4284,18 +4284,24 @@ function perform_full_scan($db) {
         };
 
         let isDragging = false;
+        let startX = 0, startY = 0;
+
         const startHold = (e) => {
           if (!currentUser) return;
           const songItem = e.target.closest('.song-item');
           if (!songItem || e.target.closest('.song-more')) return;
           
           isDragging = false;
+          if (e.touches && e.touches.length > 0) {
+            startX = e.touches[0].clientX;
+            startY = e.touches[0].clientY;
+          }
+          
           holdTimer = setTimeout(() => {
             if (isDragging) return;
             multiSelectMode = true;
             if (sortable) {
               sortable.option("disabled", true);
-              document.dispatchEvent(new MouseEvent('mouseup'));
               if (window.TouchEvent) {
                 document.dispatchEvent(new TouchEvent('touchend'));
               }
@@ -4306,20 +4312,38 @@ function perform_full_scan($db) {
           }, 1000);
         };
 
+        const moveHold = (e) => {
+          if (holdTimer && e.touches && e.touches.length > 0) {
+            const dx = Math.abs(e.touches[0].clientX - startX);
+            const dy = Math.abs(e.touches[0].clientY - startY);
+            if (dx > 10 || dy > 10) {
+              isDragging = true;
+              clearTimeout(holdTimer);
+            }
+          }
+        };
+
         const endHold = () => {
           if (holdTimer) clearTimeout(holdTimer);
         };
 
-        contentArea.addEventListener('mousedown', startHold);
         contentArea.addEventListener('touchstart', startHold, {passive: true});
-        contentArea.addEventListener('mouseup', endHold);
-        contentArea.addEventListener('mouseleave', endHold);
+        contentArea.addEventListener('touchmove', moveHold, {passive: true});
         contentArea.addEventListener('touchend', endHold);
         contentArea.addEventListener('touchcancel', endHold);
 
         contentArea.addEventListener('contextmenu', (e) => {
-          if (e.target.closest('.song-item') || e.target.closest('.shelf-item')) {
+          const songItem = e.target.closest('.song-item');
+          const moreBtn = e.target.closest('.song-more');
+          if (songItem || e.target.closest('.shelf-item')) {
             e.preventDefault();
+            if (songItem && !moreBtn && currentUser) {
+              if (!multiSelectMode) {
+                multiSelectMode = true;
+                if (sortable) sortable.option("disabled", true);
+              }
+              toggleSongSelection(songItem);
+            }
           }
         });
 
