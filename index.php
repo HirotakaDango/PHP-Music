@@ -2488,12 +2488,13 @@ if (isset($_GET['action'])) {
       if (!$user_id) { http_response_code(403); exit; }
       $import_data = json_decode(file_get_contents('php://input'), true);
       if (json_last_error() !== JSON_ERROR_NONE || !isset($import_data['songs']) || !is_array($import_data['songs'])) {
-        http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or malformed JSON file.']);
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or malformed JSON payload.']);
       }
 
       $db->beginTransaction();
       try {
-        $stmt_find = $db->prepare("SELECT id FROM music WHERE (title = ? AND artist = ?) OR file LIKE ? LIMIT 1");
+        $stmt_ta = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE LIMIT 1");
+        $stmt_file = $db->prepare("SELECT id FROM music WHERE file LIKE ? OR file LIKE ? LIMIT 1");
         $stmt_insert = $db->prepare("INSERT OR IGNORE INTO favorites (user_id, song_id, sort_order) VALUES (?, ?, ?)");
         
         $stmt_order = $db->prepare("SELECT MAX(sort_order) FROM favorites WHERE user_id = ?");
@@ -2502,12 +2503,25 @@ if (isset($_GET['action'])) {
 
         $song_count = 0;
         foreach ($import_data['songs'] as $song) {
-          $title = is_array($song) ? ($song['title'] ?? '') : '';
-          $artist = is_array($song) ? ($song['artist'] ?? '') : '';
+          $title = is_array($song) ? trim($song['title'] ?? '') : '';
+          $artist = is_array($song) ? trim($song['artist'] ?? '') : '';
           $filename = basename(str_replace('\\', '/', is_array($song) ? ($song['filename'] ?? '') : $song));
           
-          $stmt_find->execute([$title, $artist, '%' . $filename]);
-          $found_id = $stmt_find->fetchColumn();
+          $found_id = null;
+          
+          if ($title !== '' && $artist !== '') {
+            $stmt_ta->execute([$title, $artist]);
+            $found_id = $stmt_ta->fetchColumn();
+          }
+          
+          if (!$found_id && $filename !== '') {
+            $stmt_file->execute(['%/' . $filename, '%\\' . $filename]);
+            $found_id = $stmt_file->fetchColumn();
+            if (!$found_id) {
+              $stmt_file->execute(['%' . $filename, '%' . $filename]);
+              $found_id = $stmt_file->fetchColumn();
+            }
+          }
           
           if ($found_id) {
             $order++;
@@ -2576,18 +2590,32 @@ if (isset($_GET['action'])) {
         $stmt_create->execute([$user_id, $import_data['name'], $public_id]);
         $playlist_id = $db->lastInsertId();
 
-        $stmt_find = $db->prepare("SELECT id FROM music WHERE (title = ? AND artist = ?) OR file LIKE ? LIMIT 1");
+        $stmt_ta = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE LIMIT 1");
+        $stmt_file = $db->prepare("SELECT id FROM music WHERE file LIKE ? OR file LIKE ? LIMIT 1");
         $stmt_insert = $db->prepare("INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, sort_order) VALUES (?, ?, ?)");
         
         $song_count = 0;
         $order = 0;
         foreach ($import_data['songs'] as $song) {
-          $title = is_array($song) ? ($song['title'] ?? '') : '';
-          $artist = is_array($song) ? ($song['artist'] ?? '') : '';
+          $title = is_array($song) ? trim($song['title'] ?? '') : '';
+          $artist = is_array($song) ? trim($song['artist'] ?? '') : '';
           $filename = basename(str_replace('\\', '/', is_array($song) ? ($song['filename'] ?? '') : $song));
           
-          $stmt_find->execute([$title, $artist, '%' . $filename]);
-          $found_id = $stmt_find->fetchColumn();
+          $found_id = null;
+          
+          if ($title !== '' && $artist !== '') {
+            $stmt_ta->execute([$title, $artist]);
+            $found_id = $stmt_ta->fetchColumn();
+          }
+          
+          if (!$found_id && $filename !== '') {
+            $stmt_file->execute(['%/' . $filename, '%\\' . $filename]);
+            $found_id = $stmt_file->fetchColumn();
+            if (!$found_id) {
+              $stmt_file->execute(['%' . $filename, '%' . $filename]);
+              $found_id = $stmt_file->fetchColumn();
+            }
+          }
           
           if ($found_id) {
             $stmt_insert->execute([$playlist_id, $found_id, $order]);
