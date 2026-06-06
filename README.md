@@ -12,7 +12,8 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 
 ## Demo
 
-[Try it here on phpmusic.rf.gd](http://phpmusic.rf.gd/)
+[Try demo 1 here on phpmusic.rf.gd](http://phpmusic.rf.gd)
+[Try demo 2 here on https://phpmusic--relinktrees.replit.app](https://phpmusic--relinktrees.replit.app)
 
 ---
 
