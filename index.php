@@ -4611,21 +4611,16 @@ function perform_full_scan($db) {
           const isSortableFavorites = currentView.type === 'get_favorites' && currentView.sort === 'manual_order';
           const isSortablePlaylist = currentView.type === 'playlist_songs' && currentView.sort === 'manual_order';
 
-          if (sortable) {
-            sortable.destroy();
-            sortable = null;
-          }
-
-          if (isSortableFavorites || isSortablePlaylist) {
+          if ((isSortableFavorites || isSortablePlaylist) && !sortable) {
             sortable = Sortable.create(songList, {
               animation: 150,
               ghostClass: 'ghost',
               delay: 250,
               delayOnTouchOnly: false,
               disabled: multiSelectMode,
-              scroll: mainContent,
-              scrollSensitivity: 60,
-              scrollSpeed: 10,
+              scroll: document.getElementById('main-content'),
+              scrollSensitivity: 150,
+              scrollSpeed: 30,
               onStart: function() {
                 isDragging = true;
                 if (holdTimer) clearTimeout(holdTimer);
@@ -5045,6 +5040,9 @@ function perform_full_scan($db) {
         };
 
         const loadView = async (viewConfig) => {
+          selectedSongs.clear();
+          updateMultiSelectUI();
+          
           mainContent.scrollTop = 0;
           currentPage = 1;
           allContentloaded = false;
@@ -5838,6 +5836,17 @@ function perform_full_scan($db) {
         
         contentArea.addEventListener('click', async e => {
           const target = e.target;
+
+          if (multiSelectMode) {
+            const songItem = target.closest('.song-item');
+            if (songItem) {
+              e.preventDefault();
+              e.stopPropagation();
+              toggleSongSelection(songItem);
+              return;
+            }
+          }
+          
           const followBtn = target.closest('.follow-btn');
           if (followBtn) {
             e.stopPropagation();
@@ -6028,12 +6037,6 @@ function perform_full_scan($db) {
 
           const songItem = target.closest('.song-item, .shelf-item[data-song-id]');
           if (songItem) {
-            if (multiSelectMode && songItem.classList.contains('song-item')) {
-              e.preventDefault();
-              e.stopPropagation();
-              toggleSongSelection(songItem);
-              return;
-            }
             const songId = parseInt(songItem.dataset.songId);
             setQueueAndPlay(songId);
           }
