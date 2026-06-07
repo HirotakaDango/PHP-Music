@@ -2675,13 +2675,30 @@ if (isset($_GET['action'])) {
 }
 
 function perform_full_scan($db) {
+  $start_time = microtime(true);
   ini_set('memory_limit', '512M');
   error_reporting(E_ALL & ~E_DEPRECATED);
   ini_set('display_errors', 1);
 
-  header('Content-Type: text/plain; charset=utf-8');
+  header('Content-Type: text/html; charset=utf-8');
   ob_implicit_flush();
 
+  echo "<style>
+    body { 
+      color: #e0e0e0; /* Light gray/white text */
+      background-color: #030303; 
+      font-family: Consolas, 'Courier New', monospace; /* Terminal font */
+      padding: 10px;
+      margin: 0;
+    }
+    pre { 
+      white-space: pre-wrap; /* Forces long lines to wrap */
+      word-wrap: break-word; 
+      font-family: inherit;
+    }
+  </style>";
+  
+  echo "<pre>";
   echo "PHP Music Library - Full Scan\n";
   echo "===================================\n\n";
 
@@ -2747,11 +2764,15 @@ function perform_full_scan($db) {
 
   $files_to_process = $files_to_add + $files_to_update;
   if (empty($files_to_process) && empty($files_to_delete)) {
-    die("Scan complete. No changes detected.\n");
+    die("Scan complete. No changes detected.\n</pre>");
   }
 
   echo "Step 6: Processing changes...\n";
+  
   $getID3 = new getID3;
+  $getID3->option_md5_data = false;
+  $getID3->option_md5_data_source = false;
+
   $insert_stmt = $db->prepare("INSERT OR REPLACE INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   $delete_stmt = $db->prepare("DELETE FROM music WHERE file = ?");
   $find_user_stmt = $db->prepare("SELECT id FROM users WHERE artist = ?");
@@ -2764,8 +2785,15 @@ function perform_full_scan($db) {
   $db->beginTransaction();
   try {
     foreach ($files_to_process as $filePath => $mtime) {
+      if ((microtime(true) - $start_time) > 45) {
+        $db->commit();
+        echo "\nTime limit approaching. Pausing to prevent timeout...\n";
+        echo "Auto-resuming in 1 second...\n";
+        echo "<script>setTimeout(() => window.location.reload(), 1000);</script></pre>";
+        exit;
+      }
+
       $processed_count++;
-      @set_time_limit(30);
       echo "[$processed_count/$total_to_process] Processing: " . basename($filePath) . "\n";
       
       try {
@@ -2819,25 +2847,20 @@ function perform_full_scan($db) {
 
       unset($info);
       unset($webp_image_data);
-
-      if ($processed_count % 50 === 0) {
-        $db->commit();
-        $db->beginTransaction();
-        $getID3 = new getID3;
-        gc_collect_cycles();
-      }
     }
 
     foreach ($files_to_delete as $filePath => $mtime) {
+      if ((microtime(true) - $start_time) > 45) {
+        $db->commit();
+        echo "\nTime limit approaching. Pausing to prevent timeout...\n";
+        echo "Auto-resuming in 1 second...\n";
+        echo "<script>setTimeout(() => window.location.reload(), 1000);</script></pre>";
+        exit;
+      }
+
       $processed_count++;
       echo "[$processed_count/$total_to_process] Deleting: " . basename($filePath) . "\n";
       $delete_stmt->execute([$filePath]);
-
-      if ($processed_count % 50 === 0) {
-        $db->commit();
-        $db->beginTransaction();
-        gc_collect_cycles();
-      }
     }
     
     $db->commit();
@@ -2845,14 +2868,15 @@ function perform_full_scan($db) {
     if ($db->inTransaction()) {
       $db->rollBack();
     }
-    die("\nERROR: An exception occurred during database operations: " . $e->getMessage() . "\nProcess aborted.\n");
+    die("\nERROR: An exception occurred during database operations: " . $e->getMessage() . "\nProcess aborted.\n</pre>");
   }
 
   echo "\n=======================\n";
   echo "Scan completed successfully!\n";
-  echo "Total files processed: $processed_count\n";
+  echo "Total files processed: $processed_count\n</pre>";
 }
 ?>
+
 <!DOCTYPE html>
 <html lang="en">
   <head>
