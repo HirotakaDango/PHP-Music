@@ -128,6 +128,16 @@ function get_db() {
     $db->exec("PRAGMA temp_store=MEMORY;");
     $db->exec("PRAGMA mmap_size=30000000000;");
     $db->exec("PRAGMA foreign_keys=ON;");
+    
+    $db->sqliteCreateFunction('match_artist', function($artist_field, $search_name) {
+        if ($artist_field === null) return 0;
+        $parts = preg_split('/\s*(?:\/|,|&)\s*/', $artist_field);
+        foreach ($parts as $part) {
+            if (strcasecmp($part, $search_name) === 0) return 1;
+        }
+        return 0;
+    }, 2);
+
     return $db;
   } catch (PDOException $e) {
     die("Database connection failed: " . $e->getMessage());
@@ -1324,8 +1334,8 @@ if (isset($_GET['action'])) {
       $params = [$user_id];
 
       if (!empty($_GET['artist'])) {
-        $where_clauses[] = 'm.artist LIKE ?';
-        $params[] = '%' . $_GET['artist'] . '%';
+        $where_clauses[] = 'match_artist(m.artist, ?) = 1';
+        $params[] = $_GET['artist'];
       }
       if (!empty($_GET['album'])) {
         $where_clauses[] = 'm.album = ?';
@@ -1513,8 +1523,8 @@ if (isset($_GET['action'])) {
           $default_sort = 'history_desc';
           break;
         case 'artist_songs':
-          $conditions = "WHERE m.artist LIKE ?";
-          $params[] = '%' . $param . '%';
+          $conditions = "WHERE match_artist(m.artist, ?) = 1";
+          $params[] = $param;
           $default_sort = 'album_asc';
           break;
         case 'album_songs':
@@ -1746,8 +1756,8 @@ if (isset($_GET['action'])) {
         $user_params = [];
         
         if ($field === 'artist') {
-          $field_cond = "m.artist LIKE ?";
-          $user_params[] = '%' . $name . '%';
+          $field_cond = "match_artist(m.artist, ?) = 1";
+          $user_params[] = $name;
         } else {
           $field_cond = "m.{$field} = ?";
           $user_params[] = $name;
@@ -2255,11 +2265,11 @@ if (isset($_GET['action'])) {
         $more_from_artist_stmt = $db->prepare("
           SELECT {$album_fields} FROM music m
           JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 100) r ON m.id = r.id
-          WHERE m.artist LIKE :artist_name AND m.album != 'Unknown Album'
+          WHERE match_artist(m.artist, :artist_name) = 1 AND m.album != 'Unknown Album'
           AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)
           GROUP BY m.album, m.user_id LIMIT 10
         ");
-        $more_from_artist_stmt->execute([':user_id' => $user_id, ':artist_name' => '%' . $top_artist . '%']);
+        $more_from_artist_stmt->execute([':user_id' => $user_id, ':artist_name' => $top_artist]);
         $artist_albums = $more_from_artist_stmt->fetchAll();
         if (count($artist_albums) > 0) {
           $shelves[] = ['title' => 'More from ' . $top_artist, 'type' => 'albums', 'items' => $artist_albums, 'connected_view' => 'artist_songs', 'param' => urlencode($top_artist)];
