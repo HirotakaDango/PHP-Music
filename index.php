@@ -2469,7 +2469,7 @@ if (isset($_GET['action'])) {
     case 'export_favorites':
       if (!$user_id) { http_response_code(403); exit; }
       $stmt = $db->prepare("
-        SELECT m.file, m.title, m.artist FROM favorites f
+        SELECT m.file, m.title, m.artist, m.album FROM favorites f
         JOIN music m ON f.song_id = m.id 
         WHERE f.user_id = ?
         ORDER BY f.sort_order ASC
@@ -2482,6 +2482,7 @@ if (isset($_GET['action'])) {
         return [
           'title' => $row['title'],
           'artist' => $row['artist'],
+          'album' => $row['album'],
           'filename' => basename(str_replace('\\', '/', $row['file']))
         ];
       }, $rows);
@@ -2505,7 +2506,10 @@ if (isset($_GET['action'])) {
 
       $db->beginTransaction();
       try {
+        $stmt_taa = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE AND album = ? COLLATE NOCASE LIMIT 1");
         $stmt_ta = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE LIMIT 1");
+        $stmt_t_artist_match = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND match_artist(artist, ?) = 1 LIMIT 1");
+        $stmt_ta_like = $db->prepare("SELECT id FROM music WHERE title LIKE ? COLLATE NOCASE AND artist LIKE ? COLLATE NOCASE LIMIT 1");
         $stmt_file = $db->prepare("SELECT id FROM music WHERE file LIKE ? OR file LIKE ? LIMIT 1");
         $stmt_insert = $db->prepare("INSERT OR IGNORE INTO favorites (user_id, song_id, sort_order) VALUES (?, ?, ?)");
         
@@ -2517,13 +2521,28 @@ if (isset($_GET['action'])) {
         foreach ($import_data['songs'] as $song) {
           $title = is_array($song) ? trim($song['title'] ?? '') : '';
           $artist = is_array($song) ? trim($song['artist'] ?? '') : '';
+          $album = is_array($song) ? trim($song['album'] ?? '') : '';
           $filename = basename(str_replace('\\', '/', is_array($song) ? ($song['filename'] ?? '') : $song));
           
           $found_id = null;
           
           if ($title !== '' && $artist !== '') {
-            $stmt_ta->execute([$title, $artist]);
-            $found_id = $stmt_ta->fetchColumn();
+            if ($album !== '') {
+              $stmt_taa->execute([$title, $artist, $album]);
+              $found_id = $stmt_taa->fetchColumn();
+            }
+            if (!$found_id) {
+              $stmt_ta->execute([$title, $artist]);
+              $found_id = $stmt_ta->fetchColumn();
+            }
+            if (!$found_id) {
+              $stmt_t_artist_match->execute([$title, $artist]);
+              $found_id = $stmt_t_artist_match->fetchColumn();
+            }
+            if (!$found_id) {
+              $stmt_ta_like->execute(['%' . $title . '%', '%' . $artist . '%']);
+              $found_id = $stmt_ta_like->fetchColumn();
+            }
           }
           
           if (!$found_id && $filename !== '') {
@@ -2558,7 +2577,7 @@ if (isset($_GET['action'])) {
       if (empty($public_id)) { http_response_code(400); exit; }
 
       $stmt = $db->prepare("
-        SELECT p.name, m.file, m.title, m.artist FROM playlists p 
+        SELECT p.name, m.file, m.title, m.artist, m.album FROM playlists p 
         JOIN playlist_songs ps ON p.id = ps.playlist_id 
         JOIN music m ON ps.song_id = m.id 
         WHERE p.public_id = ? AND p.user_id = ?
@@ -2574,6 +2593,7 @@ if (isset($_GET['action'])) {
         return [
           'title' => $row['title'],
           'artist' => $row['artist'],
+          'album' => $row['album'],
           'filename' => basename(str_replace('\\', '/', $row['file']))
         ];
       }, $rows);
@@ -2602,7 +2622,10 @@ if (isset($_GET['action'])) {
         $stmt_create->execute([$user_id, $import_data['name'], $public_id]);
         $playlist_id = $db->lastInsertId();
 
+        $stmt_taa = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE AND album = ? COLLATE NOCASE LIMIT 1");
         $stmt_ta = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE LIMIT 1");
+        $stmt_t_artist_match = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND match_artist(artist, ?) = 1 LIMIT 1");
+        $stmt_ta_like = $db->prepare("SELECT id FROM music WHERE title LIKE ? COLLATE NOCASE AND artist LIKE ? COLLATE NOCASE LIMIT 1");
         $stmt_file = $db->prepare("SELECT id FROM music WHERE file LIKE ? OR file LIKE ? LIMIT 1");
         $stmt_insert = $db->prepare("INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, sort_order) VALUES (?, ?, ?)");
         
@@ -2611,13 +2634,28 @@ if (isset($_GET['action'])) {
         foreach ($import_data['songs'] as $song) {
           $title = is_array($song) ? trim($song['title'] ?? '') : '';
           $artist = is_array($song) ? trim($song['artist'] ?? '') : '';
+          $album = is_array($song) ? trim($song['album'] ?? '') : '';
           $filename = basename(str_replace('\\', '/', is_array($song) ? ($song['filename'] ?? '') : $song));
           
           $found_id = null;
           
           if ($title !== '' && $artist !== '') {
-            $stmt_ta->execute([$title, $artist]);
-            $found_id = $stmt_ta->fetchColumn();
+            if ($album !== '') {
+              $stmt_taa->execute([$title, $artist, $album]);
+              $found_id = $stmt_taa->fetchColumn();
+            }
+            if (!$found_id) {
+              $stmt_ta->execute([$title, $artist]);
+              $found_id = $stmt_ta->fetchColumn();
+            }
+            if (!$found_id) {
+              $stmt_t_artist_match->execute([$title, $artist]);
+              $found_id = $stmt_t_artist_match->fetchColumn();
+            }
+            if (!$found_id) {
+              $stmt_ta_like->execute(['%' . $title . '%', '%' . $artist . '%']);
+              $found_id = $stmt_ta_like->fetchColumn();
+            }
           }
           
           if (!$found_id && $filename !== '') {
