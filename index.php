@@ -1202,6 +1202,8 @@ if (isset($_GET['action'])) {
             ];
           }
           $tagwriter->WriteTags();
+          $new_mtime = filemtime($song['file']);
+          $db->prepare("UPDATE music SET last_modified = ? WHERE id = ?")->execute([$new_mtime, $song_id]);
         }
 
         send_json(['status' => 'success', 'message' => 'Metadata updated successfully.']);
@@ -2693,16 +2695,17 @@ function perform_full_scan($db) {
   header('Content-Type: text/html; charset=utf-8');
   ob_implicit_flush();
 
+  // Add CLI styling with text wrapping
   echo "<style>
     body { 
-      color: #e0e0e0; /* Light gray/white text */
+      color: #e0e0e0; 
       background-color: #030303; 
-      font-family: Consolas, 'Courier New', monospace; /* Terminal font */
+      font-family: Consolas, 'Courier New', monospace; 
       padding: 10px;
       margin: 0;
     }
     pre { 
-      white-space: pre-wrap; /* Forces long lines to wrap */
+      white-space: pre-wrap; 
       word-wrap: break-word; 
       font-family: inherit;
     }
@@ -2783,8 +2786,11 @@ function perform_full_scan($db) {
   $getID3->option_md5_data = false;
   $getID3->option_md5_data_source = false;
 
-  $insert_stmt = $db->prepare("INSERT OR REPLACE INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  // Use SAFE INSERT and UPDATE statements instead of destructive INSERT OR REPLACE
+  $insert_stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  $update_stmt = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, image = COALESCE(?, image), last_modified = ? WHERE file = ?");
   $delete_stmt = $db->prepare("DELETE FROM music WHERE file = ?");
+  
   $find_user_stmt = $db->prepare("SELECT id FROM users WHERE artist = ?");
   $check_email_stmt = $db->prepare("SELECT id FROM users WHERE email = ?");
   $insert_user_stmt = $db->prepare("INSERT INTO users (email, artist, password_hash, verified) VALUES (?, ?, ?, 'no')");
@@ -2820,37 +2826,44 @@ function perform_full_scan($db) {
         $raw_image_data = $info['comments']['picture'][0]['data'] ?? null;
         $webp_image_data = process_image_to_webp($raw_image_data);
         
-        $file_user_id = $library_user_id;
+        $is_update = isset($db_files[$filePath]);
 
-        $main_artist = trim(preg_split('/\s*(?:\/|,|&)\s*/', $artist_tag)[0]);
+        if ($is_update) {
+            // Safely update existing record (preserves lyrics, playlists, and IDs!)
+            $update_stmt->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime, $filePath]);
+        } else {
+            // Assign new files
+            $file_user_id = $library_user_id;
+            $main_artist = trim(preg_split('/\s*(?:\/|,|&)\s*/', $artist_tag)[0]);
 
-        if ($main_artist !== 'Unknown Artist' && !empty($main_artist)) {
-          $find_user_stmt->execute([$main_artist]);
-          $found_user_id = $find_user_stmt->fetchColumn();
-          if ($found_user_id) {
-            $file_user_id = $found_user_id;
-          } else {
-            echo " -> New artist found: '{$main_artist}'. Creating account.\n";
-            $sanitized_artist_base = sanitize_for_path($main_artist);
-            $password = $sanitized_artist_base;
-            $hash = password_hash($password, PASSWORD_DEFAULT);
-            
-            $email = $sanitized_artist_base . '@mail.com';
-            $counter = 1;
-            while (true) {
-              $check_email_stmt->execute([$email]);
-              if (!$check_email_stmt->fetch()) break;
-              $counter++;
-              $email = $sanitized_artist_base . $counter . '@mail.com';
+            if ($main_artist !== 'Unknown Artist' && !empty($main_artist)) {
+              $find_user_stmt->execute([$main_artist]);
+              $found_user_id = $find_user_stmt->fetchColumn();
+              if ($found_user_id) {
+                $file_user_id = $found_user_id;
+              } else {
+                echo " -> New artist found: '{$main_artist}'. Creating account.\n";
+                $sanitized_artist_base = sanitize_for_path($main_artist);
+                $password = $sanitized_artist_base;
+                $hash = password_hash($password, PASSWORD_DEFAULT);
+                
+                $email = $sanitized_artist_base . '@mail.com';
+                $counter = 1;
+                while (true) {
+                  $check_email_stmt->execute([$email]);
+                  if (!$check_email_stmt->fetch()) break;
+                  $counter++;
+                  $email = $sanitized_artist_base . $counter . '@mail.com';
+                }
+                
+                $insert_user_stmt->execute([$email, $main_artist, $hash]);
+                $file_user_id = $db->lastInsertId();
+                echo " -> Account created with ID: {$file_user_id}, Email: {$email}\n";
+              }
             }
-            
-            $insert_user_stmt->execute([$email, $main_artist, $hash]);
-            $file_user_id = $db->lastInsertId();
-            echo " -> Account created with ID: {$file_user_id}, Email: {$email}\n";
-          }
+            $insert_stmt->execute([$file_user_id, $filePath, $title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime]);
         }
 
-        $insert_stmt->execute([$file_user_id, $filePath, $title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime]);
       } catch (Exception $file_exception) {
         echo " -> Error processing " . basename($filePath) . ": " . $file_exception->getMessage() . "\n";
       }
@@ -3258,6 +3271,27 @@ function perform_full_scan($db) {
         box-shadow: 0 4px 12px rgba(0,0,0,0.5); padding: 10px 20px; z-index: 1010;
         display: flex; gap: 15px; align-items: center; justify-content: center;
         width: max-content;
+      }
+      #synced-lyrics-container {
+        text-align: center;
+        padding: 50% 0;
+        transition: all 0.3s ease;
+      }
+      .lyric-line {
+        font-size: 1.25rem;
+        color: var(--ytm-secondary-text);
+        margin-bottom: 0.75rem;
+        transition: color 0.3s, transform 0.3s, font-weight 0.3s;
+        cursor: pointer;
+        min-height: 1.5rem;
+      }
+      .lyric-line:hover {
+        color: #ffffff;
+      }
+      .lyric-line.active {
+        color: var(--ytm-accent);
+        transform: scale(1.15);
+        font-weight: 700;
       }
     </style>
   </head>
@@ -4159,6 +4193,9 @@ function perform_full_scan($db) {
         let contextMenuItemEl = null;
         let previousVolume = 1;
         let cachedExploreData = null;
+        let currentLrcData = null;
+        let currentLrcSongId = null;
+        let currentLyricIndex = -1;
         
         let holdTimer;
         let multiSelectMode = false;
@@ -4232,6 +4269,27 @@ function perform_full_scan($db) {
           const sec = Math.floor(seconds % 60).toString().padStart(2, '0');
           return `${min}:${sec}`;
         };
+        
+        const parseLRC = (lrc) => {
+          if (!lrc) return [];
+          const lines = lrc.split('\n');
+          const parsed = [];
+          const timeReg = /\[\d{2,}:\d{2}(?:\.\d{1,3})?\]/g;
+          for (let line of lines) {
+            const times = line.match(timeReg);
+            if (times) {
+              const text = line.replace(timeReg, '').trim();
+              times.forEach(t => {
+                const min = parseInt(t.slice(1, 3));
+                const sec = parseFloat(t.slice(4, -1));
+                parsed.push({ time: min * 60 + sec, text: text || '♪' });
+              });
+            }
+          }
+          return parsed.sort((a, b) => a.time - b.time);
+        };
+        
+        const escapeHTML = str => str.replace(/[&<>'"]/g, tag => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[tag]));
         
         const timeAgo = (isoString) => {
           if (!isoString) return '';
@@ -6217,14 +6275,28 @@ function perform_full_scan($db) {
               if (lyricsSongData) {
                 const lyricsTitleEl = document.getElementById('lyrics-modal-title');
                 const lyricsBodyEl = document.getElementById('lyrics-modal-body');
+                
                 if (lyricsTitleEl) lyricsTitleEl.textContent = lyricsSongData.title;
+                
                 if (lyricsBodyEl) {
-                  lyricsBodyEl.innerHTML = lyricsSongData.lyrics ? `<pre style="white-space: pre-wrap; font-family: 'Roboto', sans-serif;">${lyricsSongData.lyrics}</pre>` : '<p class="text-center text-secondary">No lyrics available.</p>';
+                  const lrcData = parseLRC(lyricsSongData.lyrics);
+                  if (lrcData.length > 0) {
+                    currentLrcData = lrcData;
+                    currentLrcSongId = parseInt(id);
+                    currentLyricIndex = -1;
+                    
+                    lyricsBodyEl.innerHTML = `<div id="synced-lyrics-container">` + 
+                      lrcData.map((line, idx) => `<div class="lyric-line" data-index="${idx}" data-time="${line.time}">${escapeHTML(line.text)}</div>`).join('') +
+                      `</div>`;
+                  } else {
+                    currentLrcData = null;
+                    currentLrcSongId = null;
+                    lyricsBodyEl.innerHTML = lyricsSongData.lyrics ? `<pre style="white-space: pre-wrap; font-family: 'Roboto', sans-serif;">${escapeHTML(lyricsSongData.lyrics)}</pre>` : '<p class="text-center text-secondary">No lyrics available.</p>';
+                  }
                 }
                 const lyricsModalEl = document.getElementById('lyrics-modal');
                 if (lyricsModalEl) {
-                  const lyricsModal = bootstrap.Modal.getOrCreateInstance(lyricsModalEl);
-                  lyricsModal.show();
+                  bootstrap.Modal.getOrCreateInstance(lyricsModalEl).show();
                 }
               }
               break;
@@ -6246,6 +6318,16 @@ function perform_full_scan($db) {
               break;
           }
         });
+        
+        const lyricsModalBody = document.getElementById('lyrics-modal-body');
+        if (lyricsModalBody) {
+          lyricsModalBody.addEventListener('click', (e) => {
+            const line = e.target.closest('.lyric-line');
+            if (line && currentSong && currentSong.id === currentLrcSongId && audio) {
+              audio.currentTime = parseFloat(line.dataset.time);
+            }
+          });
+        }
 
         if (genresModalBody) {
           genresModalBody.addEventListener('click', e => {
@@ -6305,6 +6387,32 @@ function perform_full_scan($db) {
           if (currentSong && !currentSong.logged && currentTime >= PLAY_LOG_THRESHOLD) {
             logPlay(currentSong.id);
             currentSong.logged = true;
+          }
+
+          const lyricsModalEl = document.getElementById('lyrics-modal');
+          if (currentLrcData && currentSong && currentSong.id === currentLrcSongId && lyricsModalEl && lyricsModalEl.classList.contains('show')) {
+            let activeIndex = -1;
+            for (let i = 0; i < currentLrcData.length; i++) {
+              if (currentTime >= currentLrcData[i].time - 0.3) {
+                activeIndex = i;
+              } else {
+                break;
+              }
+            }
+
+            if (activeIndex !== -1 && currentLyricIndex !== activeIndex) {
+              currentLyricIndex = activeIndex;
+              const container = document.getElementById('synced-lyrics-container');
+              if (container) {
+                const lines = container.querySelectorAll('.lyric-line');
+                lines.forEach(l => l.classList.remove('active'));
+                const activeLine = lines[activeIndex];
+                if (activeLine) {
+                  activeLine.classList.add('active');
+                  activeLine.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+              }
+            }
           }
         });
 
