@@ -25,7 +25,7 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 - 📚 **Library Management**: Browse by songs, artists, albums, genres, or favorites. Instant search included.
 - ❤️ **Favorites**: Mark/unmark songs as favorites. Drag to reorder in the "Favorites" view. Import/export your favorites as JSON.
 - 🔊 **Player**: Play, pause, next/prev, repeat, shuffle, seek, volume control, and cover art display. In-browser playback via HTML5 `<audio>`. Media Session API support for background media controls.
-- 🖼️ **Album Art & Lyrics**: Displays embedded images as `.webp` (SVG fallback if missing) and allows viewing or adding song lyrics.
+- 🖼️ **Album Art & Lyrics**: Displays embedded images as `.webp` (SVG fallback if missing) and allows viewing or adding song lyrics (supports synchronized LRC format).
 - 📱 **Responsive UI**: Mobile-optimized, fast, and touch-friendly with infinite scrolling.
 - ⚡ **PWA Support**: Install as an app on your phone or desktop. Works offline (caches static assets & some API). Manifest & service worker included.
 - 🚀 **No Database Setup**: Uses SQLite, auto-initialized on first run.
@@ -161,6 +161,9 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 - **Play Music**: Click a song to play, or use the player controls at the bottom.
 - **Favorites**: Click the heart icon to add/remove from favorites. Drag to reorder in "Favorites" view. Export or import your favorites at any time.
 - **Edit Metadata & Lyrics**: Right-click (or tap "..." on mobile) a song and choose "Edit Info" (your own uploads or as admin) to change Title, Artist, Album, Genre, Lyrics, and Cover Art. You can also view lyrics via "Show Lyrics" or check file details via "View Metadata".
+  - **Adding Synchronized Lyrics (LRC):** When adding timestamps, ensure there is a space between the timestamp and the lyric text so the code parses it correctly.
+    - ✅ **Correct:** `[00:15.30] Never gonna give you up`
+    - ❌ **Incorrect:** `[00:15.30]Never gonna give you up`
 - **Upload Music**: Click "Upload Song". You can upload multiple files at once. **Upload limit:** 10 songs per user per day (resets at midnight).
 - **Delete/Download**: Use the context menu on your uploads to delete or download the actual file.
 - **Share**: Click the "Share" button on albums, artists, playlists, or songs to get a direct, shareable link for social platforms.
