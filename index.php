@@ -3732,19 +3732,43 @@ function perform_full_scan($db) {
             </button>
           </div>
           <div class="modal-body d-flex h-100 overflow-hidden pt-1 gap-4 align-items-center">
+            
             <div class="w-50 d-flex flex-column align-items-center justify-content-center h-100">
-              <img src="" id="desktop-player-modal-art" class="rounded-4 shadow-lg" style="width: 100%; max-width: 60vh; aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
-            </div>
-            <div class="w-50 d-flex flex-column h-100 py-3 pe-4">
-              <div class="flex-grow-1 overflow-auto mb-4 p-4 rounded-4 text-center position-relative fs-4" style="background-color: var(--ytm-surface-2);" id="desktop-player-modal-lyrics-container">
-                 <div id="desktop-synced-lyrics" style="padding: 20% 0; transition: all 0.3s ease;">
-                 </div>
+              <img src="" id="desktop-player-modal-art" class="rounded shadow-lg" style="width: 100%; max-width: 60vh; aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
+              <div class="mb-3 text-center mt-4 w-100 px-4">
+                <h3 id="desktop-player-modal-title" class="fw-bold mb-1 text-truncate" style="max-width: 100%;">Song Title</h3>
+                <p id="desktop-player-modal-artist" class="text-secondary mb-0 text-truncate" style="cursor: pointer; max-width: 100%;">Artist Name</p>
               </div>
-              <div class="mt-auto">
-                <div class="mb-3 text-center">
-                  <h3 id="desktop-player-modal-title" class="fw-bold mb-1 text-truncate">Song Title</h3>
-                  <p id="desktop-player-modal-artist" class="text-secondary mb-0 text-truncate" style="cursor: pointer;">Artist Name</p>
+            </div>
+
+            <div class="w-50 d-flex flex-column h-100 py-3 pe-4">
+              
+              <ul class="nav nav-tabs border-secondary mb-3" id="dp-tabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link active" id="dp-queue-tab" data-bs-toggle="tab" data-bs-target="#dp-queue-pane" type="button" role="tab">Up Next</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link" id="dp-lyrics-tab" data-bs-toggle="tab" data-bs-target="#dp-lyrics-pane" type="button" role="tab">Lyrics</button>
+                </li>
+              </ul>
+              
+              <div class="tab-content flex-grow-1 overflow-hidden d-flex flex-column mb-4 rounded" style="background-color: var(--ytm-surface);" id="dp-tabs-content">
+                
+                <div class="tab-pane fade show active h-100 overflow-auto" id="dp-queue-pane" role="tabpanel">
+                   <div id="desktop-player-queue-list" class="p-2">
+                     <!-- Populated dynamically by JS -->
+                   </div>
                 </div>
+
+                <div class="tab-pane fade h-100 overflow-hidden text-center position-relative fs-4" id="dp-lyrics-pane" role="tabpanel">
+                   <div class="h-100 overflow-auto p-4" id="desktop-player-modal-lyrics-container">
+                     <div id="desktop-synced-lyrics" style="padding: 20% 0; transition: all 0.3s ease;"></div>
+                   </div>
+                </div>
+
+              </div>
+              
+              <div class="mt-auto">
                 <div class="d-flex align-items-center gap-3 mb-4">
                   <span id="desktop-player-modal-current-time" class="small text-secondary">0:00</span>
                   <div class="progress-bar-container flex-grow-1" id="desktop-player-modal-progress-container">
@@ -3761,6 +3785,7 @@ function perform_full_scan($db) {
                   <button class="player-btn" id="desktop-player-modal-repeat-btn" title="Repeat"><i class="bi bi-repeat"></i></button>
                 </div>
               </div>
+
             </div>
           </div>
         </div>
@@ -4306,12 +4331,84 @@ function perform_full_scan($db) {
           }
         };
 
+        const renderDesktopQueue = () => {
+          const queueContainer = document.getElementById('desktop-player-queue-list');
+          if (!queueContainer) return;
+          
+          const mainSongList = document.querySelector('#content-area .song-list') || 
+                               document.querySelector('#songs-pane .song-list') || 
+                               document.querySelector('#search-songs-pane .song-list');
+          
+          if (mainSongList) {
+            queueContainer.innerHTML = '';
+            const clone = mainSongList.cloneNode(true);
+            clone.classList.remove('sortable');
+            queueContainer.appendChild(clone);
+            
+            if (currentSong) {
+              const active = queueContainer.querySelector(`.song-item[data-song-id="${currentSong.id}"]`);
+              if (active) {
+                 setTimeout(() => {
+                   active.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                 }, 100);
+              }
+            }
+          } else {
+            queueContainer.innerHTML = '<div class="p-4 text-center text-secondary">Queue not available.</div>';
+          }
+        };
+
         const playerArtDesktop = document.getElementById('player-art-desktop');
         if (playerArtDesktop) {
           playerArtDesktop.addEventListener('click', () => {
             if (currentSong && desktopPlayerModal) {
               renderDesktopLyrics();
+              renderDesktopQueue();
               desktopPlayerModal.show();
+            }
+          });
+        }
+
+        const desktopQueueList = document.getElementById('desktop-player-queue-list');
+        if (desktopQueueList) {
+          desktopQueueList.addEventListener('click', e => {
+            
+            const moreBtn = e.target.closest('.more-btn');
+            if (moreBtn) {
+              e.preventDefault(); e.stopPropagation();
+              showSongItemContextMenu(moreBtn);
+              return;
+            }
+            
+            const songArtistEl = e.target.closest('.song-artist, .song-artist-name');
+            if (songArtistEl) {
+               e.stopPropagation();
+               if (desktopPlayerModal) desktopPlayerModal.hide();
+               const artistRaw = songArtistEl.dataset.artist ? decodeURIComponent(songArtistEl.dataset.artist) : songArtistEl.textContent.trim();
+               const userId = songArtistEl.dataset.userid || '';
+               loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId });
+               return;
+            }
+
+            const songAlbumEl = e.target.closest('.song-album');
+            if (songAlbumEl) {
+               e.stopPropagation();
+               if (desktopPlayerModal) desktopPlayerModal.hide();
+               const songItem = e.target.closest('.song-item');
+               loadView({ type: 'album_songs', param: songAlbumEl.dataset.album, sort: 'title_asc', filter_user_id: songItem ? songItem.dataset.userid || songItem.dataset.songUserId || '' : '' });
+               return;
+            }
+
+            const songItem = e.target.closest('.song-item');
+            if (songItem) {
+              const songId = parseInt(songItem.dataset.songId);
+              const idx = queue.findIndex(id => id === songId);
+              if (idx !== -1) {
+                 queueIndex = idx;
+                 playSongById(songId);
+              } else {
+                 setQueueAndPlay(songId);
+              }
             }
           });
         }
@@ -4849,6 +4946,11 @@ function perform_full_scan($db) {
           `}).join('');
           
           songList.insertAdjacentHTML('beforeend', songsHTML);
+
+          const modalQueueList = document.querySelector('#desktop-player-queue-list .song-list');
+          if (modalQueueList && append) {
+            modalQueueList.insertAdjacentHTML('beforeend', songsHTML);
+          }
 
           const isSortableFavorites = currentView.type === 'get_favorites' && currentView.sort === 'manual_order';
           const isSortablePlaylist = currentView.type === 'playlist_songs' && currentView.sort === 'manual_order';
@@ -5523,6 +5625,10 @@ function perform_full_scan($db) {
 
           if (typeof renderDesktopLyrics === 'function' && desktopPlayerModalEl && desktopPlayerModalEl.classList.contains('show')) {
             renderDesktopLyrics();
+            
+            // Autoscrolls the queue pane to the new active song
+            const activeInModal = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
+            if (activeInModal) activeInModal.scrollIntoView({ behavior: 'smooth', block: 'center' });
           }
         };
 
@@ -6036,7 +6142,7 @@ function perform_full_scan($db) {
         }
 
         const closeOpenModals = () => {
-          [playerModalEl, genresModalEl, artistsModalEl].forEach(el => {
+          [playerModalEl, genresModalEl, artistsModalEl, document.getElementById('desktop-player-modal')].forEach(el => {
             if (!el) return;
             const instance = bootstrap.Modal.getInstance(el);
             if (instance && instance._isShown) instance.hide();
@@ -6611,6 +6717,15 @@ function perform_full_scan($db) {
             loadMoreContent();
           }
         });
+
+        const dpQueuePane = document.getElementById('dp-queue-pane');
+        if (dpQueuePane) {
+          dpQueuePane.addEventListener('scroll', () => {
+            if (dpQueuePane.scrollTop + dpQueuePane.clientHeight >= dpQueuePane.scrollHeight - 300) {
+              loadMoreContent();
+            }
+          });
+        }
 
         window.addEventListener('beforeinstallprompt', (e) => {
           e.preventDefault();
