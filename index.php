@@ -3743,7 +3743,7 @@ function perform_full_scan($db) {
 
             <div class="w-50 d-flex flex-column h-100 py-3 pe-4">
               
-              <ul class="nav nav-tabs border-secondary mb-3" id="dp-tabs" role="tablist">
+              <ul class="nav nav-tabs border-secondary d-flex align-items-center justify-content-center border-0" id="dp-tabs" role="tablist">
                 <li class="nav-item" role="presentation">
                   <button class="nav-link active" id="dp-queue-tab" data-bs-toggle="tab" data-bs-target="#dp-queue-pane" type="button" role="tab">Up Next</button>
                 </li>
