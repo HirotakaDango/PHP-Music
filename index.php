@@ -1996,7 +1996,7 @@ if (isset($_GET['action'])) {
         echo $image_data;
       } else {
         header('Content-Type: image/svg+xml');
-        echo '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" fill="#404040" class="bi bi-music-note" viewBox="0 0 16 16"><path d="M9 13c0 1.105-1.12 2-2.5 2S4 14.105 4 13s1.12-2 2.5-2 2.5.895 2.5 2"/><path fill-rule="evenodd" d="M9 3v10H8V3h1z"/><path d="M8 2.82a1 1 0 0 1 .804-.98l3-.6A1 1 0 0 1 13 2.22V4L8 5V2.82z"/></svg>';
+        echo '<svg xmlns="http://www.w3.org/2000/svg" fill="#404040" class="bi bi-music-note" viewBox="-4 -4 24 24"><path d="M9 13c0 1.105-1.12 2-2.5 2S4 14.105 4 13s1.12-2 2.5-2 2.5.895 2.5 2"/><path fill-rule="evenodd" d="M9 3v10H8V3h1z"/><path d="M8 2.82a1 1 0 0 1 .804-.98l3-.6A1 1 0 0 1 13 2.22V4L8 5V2.82z"/></svg>';
       }
       exit;
 
@@ -3722,8 +3722,8 @@ function perform_full_scan($db) {
 
     <div class="modal fade" id="desktop-player-modal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-fullscreen">
-        <div class="modal-content" style="background-color: var(--ytm-bg); color: var(--ytm-primary-text);">L
-          <div class="modal-header player-modal-header px-4 pt-4 border-0">
+        <div class="modal-content" style="background-color: var(--ytm-bg); color: var(--ytm-primary-text);">
+          <div class="modal-header player-modal-header py-0 px-4 border-0">
             <button type="button" class="btn player-btn text-white" data-bs-dismiss="modal" aria-label="Close">
               <i class="bi bi-chevron-down fs-2"></i>
             </button>
@@ -3731,12 +3731,12 @@ function perform_full_scan($db) {
               <i class="bi bi-three-dots-vertical fs-3"></i>
             </button>
           </div>
-          <div class="modal-body d-flex h-100 overflow-hidden p-4 gap-4 align-items-center">
+          <div class="modal-body d-flex h-100 overflow-hidden pt-1 gap-4 align-items-center">
             <div class="w-50 d-flex flex-column align-items-center justify-content-center h-100">
-              <img src="" id="desktop-player-modal-art" class="img-fluid rounded shadow-lg" style="max-height: 80vh; aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
+              <img src="" id="desktop-player-modal-art" class="rounded-4 shadow-lg" style="width: 100%; max-width: 60vh; aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
             </div>
             <div class="w-50 d-flex flex-column h-100 py-3 pe-4">
-              <div class="flex-grow-1 overflow-auto mb-4 p-4 rounded text-center position-relative fs-4" style="background-color: var(--ytm-surface-2);" id="desktop-player-modal-lyrics-container">
+              <div class="flex-grow-1 overflow-auto mb-4 p-4 rounded-4 text-center position-relative fs-4" style="background-color: var(--ytm-surface-2);" id="desktop-player-modal-lyrics-container">
                  <div id="desktop-synced-lyrics" style="padding: 20% 0; transition: all 0.3s ease;">
                  </div>
               </div>
