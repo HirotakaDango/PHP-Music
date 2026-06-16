@@ -3312,7 +3312,7 @@ function perform_full_scan($db) {
       }
       #synced-lyrics-container {
         text-align: center;
-        padding: 50% 0;
+        padding: 40% 0;
         transition: all 0.3s ease;
       }
       .lyric-line {
@@ -3330,6 +3330,22 @@ function perform_full_scan($db) {
         color: var(--ytm-accent);
         transform: scale(1.15);
         font-weight: 700;
+      }
+      @media (min-width: 768px) {
+        #player-art-desktop {
+          cursor: pointer;
+          transition: transform 0.2s;
+        }
+        #player-art-desktop:hover {
+          transform: scale(1.05);
+        }
+      }
+      #desktop-player-modal-lyrics-container::-webkit-scrollbar {
+        width: 6px;
+      }
+      #desktop-player-modal-lyrics-container::-webkit-scrollbar-thumb {
+        background: var(--ytm-surface);
+        border-radius: 3px;
       }
     </style>
   </head>
@@ -3699,6 +3715,53 @@ function perform_full_scan($db) {
             </div>
              <div class="player-modal-extra-controls">
              </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="desktop-player-modal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-fullscreen">
+        <div class="modal-content" style="background-color: var(--ytm-bg); color: var(--ytm-primary-text);">L
+          <div class="modal-header player-modal-header px-4 pt-4 border-0">
+            <button type="button" class="btn player-btn text-white" data-bs-dismiss="modal" aria-label="Close">
+              <i class="bi bi-chevron-down fs-2"></i>
+            </button>
+            <button type="button" class="btn player-btn text-white" id="desktop-player-modal-more-btn" title="More">
+              <i class="bi bi-three-dots-vertical fs-3"></i>
+            </button>
+          </div>
+          <div class="modal-body d-flex h-100 overflow-hidden p-4 gap-4 align-items-center">
+            <div class="w-50 d-flex flex-column align-items-center justify-content-center h-100">
+              <img src="" id="desktop-player-modal-art" class="img-fluid rounded shadow-lg" style="max-height: 80vh; aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
+            </div>
+            <div class="w-50 d-flex flex-column h-100 py-3 pe-4">
+              <div class="flex-grow-1 overflow-auto mb-4 p-4 rounded text-center position-relative fs-4" style="background-color: var(--ytm-surface-2);" id="desktop-player-modal-lyrics-container">
+                 <div id="desktop-synced-lyrics" style="padding: 20% 0; transition: all 0.3s ease;">
+                 </div>
+              </div>
+              <div class="mt-auto">
+                <div class="mb-3 text-center">
+                  <h3 id="desktop-player-modal-title" class="fw-bold mb-1 text-truncate">Song Title</h3>
+                  <p id="desktop-player-modal-artist" class="text-secondary mb-0 text-truncate" style="cursor: pointer;">Artist Name</p>
+                </div>
+                <div class="d-flex align-items-center gap-3 mb-4">
+                  <span id="desktop-player-modal-current-time" class="small text-secondary">0:00</span>
+                  <div class="progress-bar-container flex-grow-1" id="desktop-player-modal-progress-container">
+                    <div class="progress-bar-bg"></div>
+                    <div class="progress-bar-fg" id="desktop-player-modal-progress-bar"></div>
+                  </div>
+                  <span id="desktop-player-modal-time-left" class="small text-secondary">0:00</span>
+                </div>
+                <div class="d-flex justify-content-center align-items-center gap-4">
+                  <button class="player-btn" id="desktop-player-modal-shuffle-btn" title="Shuffle"><i class="bi bi-shuffle"></i></button>
+                  <button class="player-btn fs-2" id="desktop-player-modal-prev-btn" title="Previous"><i class="bi bi-skip-start-fill"></i></button>
+                  <button class="player-btn play-btn" id="desktop-player-modal-play-pause-btn" title="Play" style="width: 70px; height: 70px;"><i class="bi bi-play-fill" style="font-size: 3.5rem;"></i></button>
+                  <button class="player-btn fs-2" id="desktop-player-modal-next-btn" title="Next"><i class="bi bi-skip-end-fill"></i></button>
+                  <button class="player-btn" id="desktop-player-modal-repeat-btn" title="Repeat"><i class="bi bi-repeat"></i></button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -4197,22 +4260,71 @@ function perform_full_scan($db) {
         const profilePicturePreview = document.getElementById('profile-picture-preview');
 
         const playerElements = {
-          art: [document.getElementById('player-art-desktop'), document.getElementById('player-art-mobile'), document.getElementById('player-modal-art')],
-          title: [document.getElementById('player-title-desktop'), document.getElementById('player-title-mobile'), document.getElementById('player-modal-title')],
-          artist: [document.getElementById('player-artist-desktop'), document.getElementById('player-artist-mobile'), document.getElementById('player-modal-artist')],
-          currentTime: [document.getElementById('current-time'), document.getElementById('player-modal-current-time')],
-          timeLeft: [document.getElementById('time-left'), document.getElementById('player-modal-time-left')],
-          progress: [document.getElementById('progress-bar'), document.getElementById('player-modal-progress-bar')],
-          progressContainer: [document.getElementById('progress-container'), document.getElementById('player-modal-progress-container')],
-          playPauseBtn: [document.getElementById('play-pause-btn-desktop'), document.getElementById('play-pause-btn-mobile'), document.getElementById('player-modal-play-pause-btn')],
-          prevBtn: [document.getElementById('prev-btn-desktop'), document.getElementById('prev-btn-mobile'), document.getElementById('player-modal-prev-btn')],
-          nextBtn: [document.getElementById('next-btn-desktop'), document.getElementById('next-btn-mobile'), document.getElementById('player-modal-next-btn')],
-          shuffleBtn: [document.getElementById('shuffle-btn-desktop'), document.getElementById('shuffle-btn-mobile'), document.getElementById('player-modal-shuffle-btn')],
-          repeatBtn: [document.getElementById('repeat-btn-desktop'), document.getElementById('repeat-btn-mobile'), document.getElementById('player-modal-repeat-btn')],
-          moreBtn: [document.getElementById('player-more-btn-desktop'), document.getElementById('player-more-btn-mobile'), document.getElementById('player-modal-more-btn')],
+          art: [document.getElementById('player-art-desktop'), document.getElementById('player-art-mobile'), document.getElementById('player-modal-art'), document.getElementById('desktop-player-modal-art')],
+          title: [document.getElementById('player-title-desktop'), document.getElementById('player-title-mobile'), document.getElementById('player-modal-title'), document.getElementById('desktop-player-modal-title')],
+          artist: [document.getElementById('player-artist-desktop'), document.getElementById('player-artist-mobile'), document.getElementById('player-modal-artist'), document.getElementById('desktop-player-modal-artist')],
+          currentTime: [document.getElementById('current-time'), document.getElementById('player-modal-current-time'), document.getElementById('desktop-player-modal-current-time')],
+          timeLeft: [document.getElementById('time-left'), document.getElementById('player-modal-time-left'), document.getElementById('desktop-player-modal-time-left')],
+          progress: [document.getElementById('progress-bar'), document.getElementById('player-modal-progress-bar'), document.getElementById('desktop-player-modal-progress-bar')],
+          progressContainer: [document.getElementById('progress-container'), document.getElementById('player-modal-progress-container'), document.getElementById('desktop-player-modal-progress-container')],
+          playPauseBtn: [document.getElementById('play-pause-btn-desktop'), document.getElementById('play-pause-btn-mobile'), document.getElementById('player-modal-play-pause-btn'), document.getElementById('desktop-player-modal-play-pause-btn')],
+          prevBtn: [document.getElementById('prev-btn-desktop'), document.getElementById('prev-btn-mobile'), document.getElementById('player-modal-prev-btn'), document.getElementById('desktop-player-modal-prev-btn')],
+          nextBtn: [document.getElementById('next-btn-desktop'), document.getElementById('next-btn-mobile'), document.getElementById('player-modal-next-btn'), document.getElementById('desktop-player-modal-next-btn')],
+          shuffleBtn: [document.getElementById('shuffle-btn-desktop'), document.getElementById('shuffle-btn-mobile'), document.getElementById('player-modal-shuffle-btn'), document.getElementById('desktop-player-modal-shuffle-btn')],
+          repeatBtn: [document.getElementById('repeat-btn-desktop'), document.getElementById('repeat-btn-mobile'), document.getElementById('player-modal-repeat-btn'), document.getElementById('desktop-player-modal-repeat-btn')],
+          moreBtn: [document.getElementById('player-more-btn-desktop'), document.getElementById('player-more-btn-mobile'), document.getElementById('player-modal-more-btn'), document.getElementById('desktop-player-modal-more-btn')],
           volumeBtn: document.getElementById('volume-btn'),
           volumeSlider: document.getElementById('volume-slider'),
         };
+        
+        const desktopPlayerModalEl = document.getElementById('desktop-player-modal');
+        const desktopPlayerModal = desktopPlayerModalEl ? new bootstrap.Modal(desktopPlayerModalEl) : null;
+        
+        const renderDesktopLyrics = () => {
+          const lyricsContainer = document.getElementById('desktop-synced-lyrics');
+          if (!lyricsContainer || !currentSong) return;
+
+          if (currentSong.lyrics) {
+            const lrcData = parseLRC(currentSong.lyrics);
+            if (lrcData.length > 0) {
+              currentLrcData = lrcData;
+              currentLrcSongId = currentSong.id;
+              currentLyricIndex = -1;
+              
+              lyricsContainer.innerHTML = lrcData.map((line, idx) => 
+                `<div class="lyric-line" data-index="${idx}" data-time="${line.time}">${escapeHTML(line.text)}</div>`
+              ).join('');
+            } else {
+              currentLrcData = null;
+              currentLrcSongId = null;
+              lyricsContainer.innerHTML = `<pre style="white-space: pre-wrap; font-family: 'Roboto', sans-serif;">${escapeHTML(currentSong.lyrics)}</pre>`;
+            }
+          } else {
+            currentLrcData = null;
+            currentLrcSongId = null;
+            lyricsContainer.innerHTML = '<p class="text-center text-secondary">No lyrics available.</p>';
+          }
+        };
+
+        const playerArtDesktop = document.getElementById('player-art-desktop');
+        if (playerArtDesktop) {
+          playerArtDesktop.addEventListener('click', () => {
+            if (currentSong && desktopPlayerModal) {
+              renderDesktopLyrics();
+              desktopPlayerModal.show();
+            }
+          });
+        }
+
+        const desktopLyricsContainer = document.getElementById('desktop-player-modal-lyrics-container');
+        if (desktopLyricsContainer) {
+          desktopLyricsContainer.addEventListener('click', (e) => {
+            const line = e.target.closest('.lyric-line');
+            if (line && currentSong && currentSong.id === currentLrcSongId && audio) {
+              audio.currentTime = parseFloat(line.dataset.time);
+            }
+          });
+        }
 
         const audio = new Audio();
         let currentView = { type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' };
@@ -5408,6 +5520,10 @@ function perform_full_scan($db) {
           
           document.querySelectorAll('.song-item.now-playing').forEach(el => el.classList.remove('now-playing'));
           document.querySelectorAll(`.song-item[data-song-id="${currentSong.id}"]`).forEach(el => el.classList.add('now-playing'));
+
+          if (typeof renderDesktopLyrics === 'function' && desktopPlayerModalEl && desktopPlayerModalEl.classList.contains('show')) {
+            renderDesktopLyrics();
+          }
         };
 
         const updatePlayPauseIcons = () => {
@@ -6428,7 +6544,10 @@ function perform_full_scan($db) {
           }
 
           const lyricsModalEl = document.getElementById('lyrics-modal');
-          if (currentLrcData && currentSong && currentSong.id === currentLrcSongId && lyricsModalEl && lyricsModalEl.classList.contains('show')) {
+          const isMobileLyricsOpen = lyricsModalEl && lyricsModalEl.classList.contains('show');
+          const isDesktopLyricsOpen = desktopPlayerModalEl && desktopPlayerModalEl.classList.contains('show');
+
+          if (currentLrcData && currentSong && currentSong.id === currentLrcSongId && (isMobileLyricsOpen || isDesktopLyricsOpen)) {
             let activeIndex = -1;
             for (let i = 0; i < currentLrcData.length; i++) {
               if (currentTime >= currentLrcData[i].time - 0.3) {
@@ -6440,14 +6559,30 @@ function perform_full_scan($db) {
 
             if (activeIndex !== -1 && currentLyricIndex !== activeIndex) {
               currentLyricIndex = activeIndex;
-              const container = document.getElementById('synced-lyrics-container');
-              if (container) {
-                const lines = container.querySelectorAll('.lyric-line');
-                lines.forEach(l => l.classList.remove('active'));
-                const activeLine = lines[activeIndex];
-                if (activeLine) {
-                  activeLine.classList.add('active');
-                  activeLine.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              
+              if (isMobileLyricsOpen) {
+                const container = document.getElementById('synced-lyrics-container');
+                if (container) {
+                  const lines = container.querySelectorAll('.lyric-line');
+                  lines.forEach(l => l.classList.remove('active'));
+                  const activeLine = lines[activeIndex];
+                  if (activeLine) {
+                    activeLine.classList.add('active');
+                    activeLine.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }
+                }
+              }
+
+              if (isDesktopLyricsOpen) {
+                const container = document.getElementById('desktop-synced-lyrics');
+                if (container) {
+                  const lines = container.querySelectorAll('.lyric-line');
+                  lines.forEach(l => l.classList.remove('active'));
+                  const activeLine = lines[activeIndex];
+                  if (activeLine) {
+                    activeLine.classList.add('active');
+                    activeLine.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }
                 }
               }
             }
