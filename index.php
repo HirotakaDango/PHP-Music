@@ -6931,13 +6931,13 @@ function perform_full_scan($db) {
               }
               try {
                 docPipWindow = await window.documentPictureInPicture.requestWindow({
-                  width: 410,
+                  width: 395,
                   height: 780
                 });
 
                 docPipWindow.addEventListener('resize', () => {
-                  if (docPipWindow.innerWidth !== 410 || docPipWindow.innerHeight !== 780) {
-                    docPipWindow.resizeTo(410, 780);
+                  if (docPipWindow.innerWidth !== 395 || docPipWindow.innerHeight !== 780) {
+                    docPipWindow.resizeTo(395, 780);
                   }
                 });
 
