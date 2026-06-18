@@ -5523,7 +5523,17 @@ function perform_full_scan($db) {
           }
         };
 
-        const loadView = async (viewConfig) => {
+        const loadView = async (viewConfig, pushHistory = true) => {
+          if (pushHistory) {
+            const isSameView = currentView.type === viewConfig.type &&
+                               currentView.param === viewConfig.param &&
+                               currentView.sort === viewConfig.sort &&
+                               currentView.filter_user_id === viewConfig.filter_user_id;
+            if (!isSameView) {
+              history.pushState({ viewConfig }, "");
+            }
+          }
+
           selectedSongs.clear();
           updateMultiSelectUI();
           
@@ -8184,11 +8194,24 @@ function perform_full_scan($db) {
           await checkSession();
 
           if (window.initialView) {
-            loadView(window.initialView);
+            history.replaceState({ viewConfig: window.initialView }, "");
+            loadView(window.initialView, false);
           } else {
-            loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
+            const defaultView = { type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' };
+            history.replaceState({ viewConfig: defaultView }, "");
+            loadView(defaultView, false);
           }
         };
+
+        window.addEventListener('popstate', (e) => {
+          if (e.state && e.state.viewConfig) {
+            // Load the previous view without pushing it to history again
+            loadView(e.state.viewConfig, false);
+          } else {
+            // Fallback to Home if state is lost
+            loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' }, false);
+          }
+        });
 
         init();
       });
