@@ -1893,6 +1893,27 @@ if (isset($_GET['action'])) {
       $query = '%' . $q . '%';
       $shelves = [];
 
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $stmt_top = $db->prepare("
+        SELECT {$song_fields} FROM music m 
+        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? 
+        WHERE m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ? 
+        ORDER BY 
+          CASE 
+            WHEN m.title LIKE ? THEN 1 
+            WHEN m.artist LIKE ? THEN 2 
+            WHEN m.album LIKE ? THEN 3 
+            ELSE 4 
+          END ASC, m.id DESC 
+        LIMIT 1
+      ");
+      $stmt_top->execute([$user_id, $query, $query, $query, $q, $q, $q]);
+      $top_result = $stmt_top->fetch();
+      
+      if ($top_result) {
+        $shelves[] = ['title' => 'Top Result', 'type' => 'top_result', 'items' => [$top_result]];
+      }
+
       $artists = [];
       $added_artists = [];
       
@@ -2777,7 +2798,6 @@ function perform_full_scan($db) {
   header('Content-Type: text/html; charset=utf-8');
   ob_implicit_flush();
 
-  // Add CLI styling with text wrapping
   echo "<style>
     body { 
       color: #e0e0e0; 
@@ -2868,7 +2888,6 @@ function perform_full_scan($db) {
   $getID3->option_md5_data = false;
   $getID3->option_md5_data_source = false;
 
-  // Use SAFE INSERT and UPDATE statements instead of destructive INSERT OR REPLACE
   $insert_stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   $update_stmt = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, image = COALESCE(?, image), last_modified = ? WHERE file = ?");
   $delete_stmt = $db->prepare("DELETE FROM music WHERE file = ?");
@@ -2911,10 +2930,8 @@ function perform_full_scan($db) {
         $is_update = isset($db_files[$filePath]);
 
         if ($is_update) {
-            // Safely update existing record (preserves lyrics, playlists, and IDs!)
             $update_stmt->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime, $filePath]);
         } else {
-            // Assign new files
             $file_user_id = $library_user_id;
             $main_artist = trim(preg_split('/\s*(?:\/|,|&)\s*/', $artist_tag)[0]);
 
@@ -3122,14 +3139,15 @@ function perform_full_scan($db) {
       .search-bar.input-group { width: auto; min-width: 250px; }
       .search-bar.input-group .form-control {
         background-color: var(--ytm-surface-2); border: 1px solid #404040;
-        border-right: none; color: var(--ytm-primary-text); border-radius: 50px 0 0 50px;
-        height: 40px; box-shadow: none; padding-left: 1rem;
+        border-right: none; color: var(--ytm-primary-text); border-radius: 50px 0 0 50px !important;
+        height: 40px; box-shadow: none; padding-left: 1.25rem;
       }
       .search-bar.input-group .form-control:focus { border-color: #666; }
       .search-bar.input-group .form-control::placeholder { color: var(--ytm-secondary-text); }
       .search-bar.input-group .btn {
         background-color: var(--ytm-surface-2); border: 1px solid #404040;
-        color: var(--ytm-secondary-text); border-radius: 0 50px 50px 0; z-index: 5;
+        color: var(--ytm-secondary-text); border-radius: 0 50px 50px 0 !important; z-index: 5;
+        padding-right: 1.25rem;
       }
       .search-bar.input-group .btn:hover { background-color: #383838; color: var(--ytm-primary-text); }
       .content-title { font-size: 2rem; font-weight: 700; margin-bottom: 0; }
@@ -3391,6 +3409,14 @@ function perform_full_scan($db) {
         background: var(--ytm-surface);
         border-radius: 3px;
       }
+      .search-dropdown { position: absolute; top: 100%; left: 0; right: 0; background-color: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 0 0 8px 8px; z-index: 2000; max-height: 450px; overflow-y: auto; margin-top: 2px; padding: 0.5rem 0; box-shadow: 0 10px 25px rgba(0,0,0,0.9); }
+      .search-dropdown-item { padding: 0.5rem 1rem; cursor: pointer; display: flex; align-items: center; gap: 1rem; color: var(--ytm-primary-text); text-decoration: none; transition: background 0.2s; }
+      .search-dropdown-item:hover, .search-dropdown-item.active { background-color: #404040; }
+      .search-dropdown-img { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; background-color: var(--ytm-surface); flex-shrink: 0; }
+      .search-dropdown-text { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+      .search-dropdown-title { font-size: 0.95rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; }
+      .search-dropdown-subtitle { font-size: 0.8rem; color: var(--ytm-secondary-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .search-dropdown-header { padding: 0.25rem 1rem; font-size: 0.75rem; text-transform: uppercase; color: var(--ytm-secondary-text); font-weight: bold; margin-top: 0.5rem; margin-bottom: 0.25rem;}
     </style>
   </head>
   <body class="logged-out">
@@ -3509,9 +3535,10 @@ function perform_full_scan($db) {
           <button class="header-btn" type="button" data-bs-toggle="offcanvas" data-bs-target="#main-nav-offcanvas" aria-controls="main-nav-offcanvas">
             <i class="bi bi-list"></i>
           </button>
-          <div class="input-group search-bar flex-grow-1">
+          <div class="input-group search-bar flex-grow-1 position-relative">
             <input type="text" class="form-control" id="search-input-mobile" placeholder="Search your music" aria-label="Search your music">
             <button class="btn" type="button" id="search-btn-mobile"><i class="bi bi-search"></i></button>
+            <div id="search-dropdown-mobile" class="search-dropdown d-none"></div>
           </div>
           <div class="dropdown logged-in-only">
             <img src="" class="profile-picture" id="profile-picture-header-mobile" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
@@ -3535,9 +3562,10 @@ function perform_full_scan($db) {
                 <i class="bi bi-trash"></i> Clear History
               </button>
             </div>
-            <div class="input-group search-bar d-none d-md-flex">
+            <div class="input-group search-bar d-none d-md-flex position-relative">
               <input type="text" class="form-control" id="search-input-desktop" placeholder="Search..." aria-label="Search...">
               <button class="btn" type="button" id="search-btn-desktop"><i class="bi bi-search"></i></button>
+              <div id="search-dropdown-desktop" class="search-dropdown d-none"></div>
             </div>
             <div class="dropdown logged-in-only d-none d-md-block">
               <img src="" class="profile-picture" id="profile-picture-header-desktop" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
@@ -5196,6 +5224,27 @@ function perform_full_scan($db) {
 
           data.shelves.forEach(shelf => {
             let itemsHTML = '';
+
+            if (shelf.type === 'top_result') {
+              const song = shelf.items[0];
+              const shelfHTML = `
+                <div class="recommendation-shelf mb-4">
+                  <div class="shelf-header">
+                    <h3 class="shelf-title">${shelf.title}</h3>
+                  </div>
+                  <div class="card bg-transparent border-secondary d-flex flex-row align-items-center p-3 top-result-card" data-song-id="${song.id}" style="border-radius: 12px; cursor: pointer; max-width: 600px; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'">
+                    <img src="?action=get_image&id=${song.id}" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+                    <div class="d-flex flex-column justify-content-center overflow-hidden w-100">
+                      <h4 class="text-white text-truncate mb-1 fw-bold">${escapeHTML(song.title)}</h4>
+                      <p class="text-secondary text-truncate mb-0">Song • ${escapeHTML(song.artist)}</p>
+                    </div>
+                    <button class="btn btn-danger rounded-circle ms-auto me-2 d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; flex-shrink: 0;"><i class="bi bi-play-fill fs-3"></i></button>
+                  </div>
+                </div>
+              `;
+              contentArea.insertAdjacentHTML('beforeend', shelfHTML);
+              return;
+            }
             
             if (shelf.type === 'songs_list') {
               const shelfHTML = `
@@ -5735,7 +5784,7 @@ function perform_full_scan($db) {
 
           if (pipCtx) {
             const img = new Image();
-            img.crossOrigin = 'anonymous'; // Prevent security error
+            img.crossOrigin = 'anonymous';
             img.onload = () => {
               pipCtx.clearRect(0, 0, 500, 500);
               pipCtx.drawImage(img, 0, 0, 500, 500);
@@ -5758,7 +5807,7 @@ function perform_full_scan($db) {
               const safeArtist = currentSong.artist.length > 35 ? currentSong.artist.substring(0, 32) + '...' : currentSong.artist;
               pipCtx.fillText(safeArtist, 20, 480);
               
-              pipVideo.play().catch(()=>{}); // Keep video alive
+              pipVideo.play().catch(()=>{});
             };
             img.src = imageUrl;
           }
@@ -6081,34 +6130,29 @@ function perform_full_scan($db) {
         const setQueueAndPlay = async (startId, view) => {
           const contextView = view || currentView;
           if (contextView.type === 'get_recommendations' || contextView.type === 'search') {
-            const allShelfSongs = [...document.querySelectorAll('.shelf-item[data-song-id], .song-item[data-song-id]')];
+            const allShelfSongs = [...document.querySelectorAll('.shelf-item[data-song-id], .song-item[data-song-id], .top-result-card[data-song-id]')];
             const allSongIds = allShelfSongs.map(item => parseInt(item.dataset.songId));
             originalQueue = [...new Set(allSongIds)];
           } else {
             let viewTypeForIds = contextView.type;
-            if (contextView.type === 'user_profile') {
-              viewTypeForIds = 'get_profile_songs';
-            }
+            if (contextView.type === 'user_profile') viewTypeForIds = 'get_profile_songs';
             const allIds = await fetchData('?action=get_view_ids', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                view_type: viewTypeForIds,
-                param: contextView.param,
-                sort: contextView.sort,
-                filter_user_id: contextView.filter_user_id || ''
-              })
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ view_type: viewTypeForIds, param: contextView.param, sort: contextView.sort, filter_user_id: contextView.filter_user_id || '' })
             });
-            if (!allIds || allIds.length === 0) { return; }
+            if (!allIds || allIds.length === 0) return;
             originalQueue = allIds;
           }
           
           queue = [...originalQueue];
-          if (isShuffle) { 
-            isShuffle = false; toggleShuffle();
-          }
+          if (isShuffle) { isShuffle = false; toggleShuffle(); }
+          
           queueIndex = queue.findIndex(id => id === startId);
-          if (queueIndex === -1) { return; }
+          if (queueIndex === -1) { 
+            queue.unshift(startId);
+            originalQueue = [...queue];
+            queueIndex = 0;
+          }
           playSongById(startId);
         };
 
@@ -6193,13 +6237,139 @@ function perform_full_scan($db) {
 
         const performSearch = (query) => {
           if (query.trim() !== '') {
+            document.getElementById('search-dropdown-desktop').classList.add('d-none');
+            document.getElementById('search-dropdown-mobile').classList.add('d-none');
+            searchInputDesktop.value = query;
+            searchInputMobile.value = query;
             loadView({ type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '' });
           }
         };
-        searchInputDesktop.addEventListener('keyup', (e) => { if (e.key === 'Enter') performSearch(e.target.value); });
-        searchInputMobile.addEventListener('keyup', (e) => { if (e.key === 'Enter') performSearch(e.target.value); });
-        searchBtnDesktop.addEventListener('click', () => performSearch(searchInputDesktop.value));
-        searchBtnMobile.addEventListener('click', () => performSearch(searchInputMobile.value));
+
+        const renderSearchDropdown = (dropdownEl, data) => {
+          dropdownEl.innerHTML = '';
+          if (!data || !data.shelves || data.shelves.length === 0) {
+            dropdownEl.innerHTML = '<div class="p-3 text-secondary text-center small">No results found</div>';
+            dropdownEl.classList.remove('d-none');
+            return;
+          }
+
+          let html = '';
+          data.shelves.forEach(shelf => {
+            if (shelf.type === 'top_result') {
+                const song = shelf.items[0];
+                html += `<div class="search-dropdown-header text-danger">Top Result</div>
+                  <div class="search-dropdown-item top-result-item" data-id="${song.id}">
+                    <img src="?action=get_image&id=${song.id}" class="search-dropdown-img" style="width: 50px; height: 50px; border-radius: 50%;">
+                    <div class="search-dropdown-text">
+                      <div class="search-dropdown-title fw-bold" style="font-size: 1rem;">${escapeHTML(song.title)}</div>
+                      <div class="search-dropdown-subtitle">Song • ${escapeHTML(song.artist)}</div>
+                    </div>
+                  </div>`;
+            } else if (shelf.type === 'songs_list') {
+              html += `<div class="search-dropdown-header">Songs</div>`;
+              shelf.items.slice(0, 4).forEach(song => {
+                html += `<div class="search-dropdown-item song-dropdown-item" data-id="${song.id}">
+                    <img src="?action=get_image&id=${song.id}" class="search-dropdown-img">
+                    <div class="search-dropdown-text">
+                      <div class="search-dropdown-title">${escapeHTML(song.title)}</div>
+                      <div class="search-dropdown-subtitle">${escapeHTML(song.artist)}</div>
+                    </div>
+                  </div>`;
+              });
+            } else if (shelf.type === 'artists') {
+              html += `<div class="search-dropdown-header">Artists</div>`;
+              shelf.items.slice(0, 3).forEach(artist => {
+                const img = artist.is_user ? `?action=get_profile_picture&id=${artist.id}` : `?action=get_image&id=${artist.id || 0}`;
+                html += `<div class="search-dropdown-item artist-dropdown-item" data-artist="${encodeURIComponent(artist.name)}" data-userid="${artist.id || ''}">
+                    <img src="${img}" class="search-dropdown-img" style="border-radius: 50%;">
+                    <div class="search-dropdown-text">
+                      <div class="search-dropdown-title">${escapeHTML(artist.name)}</div>
+                      <div class="search-dropdown-subtitle">Artist</div>
+                    </div>
+                  </div>`;
+              });
+            } else if (shelf.type === 'albums') {
+              html += `<div class="search-dropdown-header">Albums</div>`;
+              shelf.items.slice(0, 2).forEach(album => {
+                html += `<div class="search-dropdown-item album-dropdown-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
+                    <img src="?action=get_image&id=${album.id || 0}" class="search-dropdown-img">
+                    <div class="search-dropdown-text">
+                      <div class="search-dropdown-title">${escapeHTML(album.album)}</div>
+                      <div class="search-dropdown-subtitle">${escapeHTML(album.artist)}</div>
+                    </div>
+                  </div>`;
+              });
+            }
+          });
+          
+          dropdownEl.innerHTML = html;
+          dropdownEl.classList.remove('d-none');
+        };
+
+        let searchTimeout;
+        const liveSearchHandler = (e) => {
+          clearTimeout(searchTimeout);
+          const query = e.target.value;
+          const isDesktop = e.target === searchInputDesktop;
+          const targetDropdown = isDesktop ? document.getElementById('search-dropdown-desktop') : document.getElementById('search-dropdown-mobile');
+          
+          if (isDesktop) searchInputMobile.value = query;
+          else searchInputDesktop.value = query;
+
+          if (query.trim() === '') {
+            targetDropdown.classList.add('d-none');
+            if (currentView.type === 'search') loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
+            return;
+          }
+
+          searchTimeout = setTimeout(async () => {
+            const data = await fetchData(`?action=search&q=${encodeURIComponent(query.trim())}`);
+            
+            renderSearchDropdown(targetDropdown, data);
+            
+            currentView = { type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '' };
+            updateContentTitle(`Search: "${query.trim()}"`);
+            renderRecommendations(data);
+            allContentloaded = true;
+          }, 350);
+        };
+
+        searchInputDesktop.addEventListener('input', liveSearchHandler);
+        searchInputMobile.addEventListener('input', liveSearchHandler);
+
+        const instantSearchHandler = (e) => { 
+          if (e.key === 'Enter') {
+            clearTimeout(searchTimeout);
+            performSearch(e.target.value);
+            e.target.blur(); 
+          }
+        };
+        
+        searchInputDesktop.addEventListener('keyup', instantSearchHandler);
+        searchInputMobile.addEventListener('keyup', instantSearchHandler);
+        searchBtnDesktop.addEventListener('click', () => { clearTimeout(searchTimeout); performSearch(searchInputDesktop.value); });
+        searchBtnMobile.addEventListener('click', () => { clearTimeout(searchTimeout); performSearch(searchInputMobile.value); });
+
+        document.addEventListener('click', e => {
+          if (!e.target.closest('.search-bar')) {
+            document.getElementById('search-dropdown-desktop').classList.add('d-none');
+            document.getElementById('search-dropdown-mobile').classList.add('d-none');
+          }
+
+          const dropItem = e.target.closest('.search-dropdown-item');
+          if (dropItem) {
+            document.getElementById('search-dropdown-desktop').classList.add('d-none');
+            document.getElementById('search-dropdown-mobile').classList.add('d-none');
+
+            if (dropItem.classList.contains('song-dropdown-item') || dropItem.classList.contains('top-result-item')) {
+              setQueueAndPlay(parseInt(dropItem.dataset.id));
+            } else if (dropItem.classList.contains('artist-dropdown-item')) {
+              loadView({ type: 'artist_songs', param: dropItem.dataset.artist, sort: 'album_asc', filter_user_id: dropItem.dataset.userid });
+            } else if (dropItem.classList.contains('album-dropdown-item')) {
+              loadView({ type: 'album_songs', param: dropItem.dataset.album, sort: 'title_asc', filter_user_id: dropItem.dataset.userid });
+            }
+          }
+        });
 
         sortSelect.addEventListener('change', (e) => {
           loadView({ ...currentView, sort: e.target.value });
@@ -6502,10 +6672,11 @@ function perform_full_scan($db) {
               param = cardEl.dataset.mix;
               sort = 'manual_order';
             }
+            
             if (viewType) {
               loadView({ type: viewType, param: param, sort: sort, filter_user_id: filterUserId });
+              return;
             }
-            return;
           }
           const seeAllButton = target.closest('.shelf-header button');
           if (seeAllButton) {
@@ -6521,7 +6692,7 @@ function perform_full_scan($db) {
             return;
           }
 
-          const songItem = target.closest('.song-item, .shelf-item[data-song-id]');
+          const songItem = target.closest('.song-item, .shelf-item[data-song-id], .top-result-card');
           if (songItem) {
             const songId = parseInt(songItem.dataset.songId);
             setQueueAndPlay(songId);
