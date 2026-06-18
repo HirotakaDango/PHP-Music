@@ -5725,6 +5725,10 @@ function perform_full_scan($db) {
             if (activeInModal) activeInModal.scrollIntoView({ behavior: 'smooth', block: 'center' });
           }
 
+          if (typeof window.renderPipLyrics === 'function') {
+            window.renderPipLyrics();
+          }
+
           if (pipCtx) {
             const img = new Image();
             img.crossOrigin = 'anonymous'; // Prevent security error
@@ -6927,13 +6931,13 @@ function perform_full_scan($db) {
               }
               try {
                 docPipWindow = await window.documentPictureInPicture.requestWindow({
-                  width: 350,
-                  height: 550
+                  width: 410,
+                  height: 780
                 });
 
                 docPipWindow.addEventListener('resize', () => {
-                  if (docPipWindow.innerWidth !== 350 || docPipWindow.innerHeight !== 550) {
-                    docPipWindow.resizeTo(350, 550);
+                  if (docPipWindow.innerWidth !== 410 || docPipWindow.innerHeight !== 780) {
+                    docPipWindow.resizeTo(410, 780);
                   }
                 });
 
@@ -6964,70 +6968,120 @@ function perform_full_scan($db) {
                   .player-btn { transition: color 0.2s, transform 0.1s; display: flex; align-items: center; justify-content: center; cursor: pointer; }
                   .player-btn:hover { color: var(--ytm-primary-text) !important; }
                   .play-btn:hover { transform: scale(1.1); background-color: #383838 !important; }
+                  .progress-bar-fg::after { display: none !important; }
                   .progress-bar-container:hover .progress-bar-fg { background-color: var(--ytm-accent) !important; }
                   .progress-bar-container:hover .slide-range::-webkit-slider-thumb { opacity: 1; }
                   .progress-bar-container:hover .slide-range::-moz-range-thumb { opacity: 1; }
                   .title, .artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
                   .player-btn.active { color: var(--ytm-accent) !important; }
-                  .slide-range {
-                    -webkit-appearance: none; appearance: none; width: 100%; background: transparent; height: 14px; position: absolute; top: 0; left: 0; z-index: 10; margin: 0; cursor: pointer; outline: none;
-                  }
+                  
+                  /* PiP Tabs & Lyrics */
+                  .pip-tabs { display: flex; border-bottom: 1px solid var(--ytm-surface-2); }
+                  .pip-tab-btn { flex: 1; background: none; border: none; color: var(--ytm-secondary-text); padding: 1rem; cursor: pointer; font-weight: 500; font-size: 1rem; transition: color 0.2s; border-bottom: 2px solid transparent; }
+                  .pip-tab-btn:hover { color: var(--ytm-primary-text); }
+                  .pip-tab-btn.active { color: var(--ytm-primary-text); border-bottom-color: var(--ytm-accent); }
+                  .pip-pane { display: none; flex-direction: column; height: calc(100vh - 54px); }
+                  .pip-pane.active { display: flex; }
+                  #pip-lyrics-container { flex-grow: 1; overflow-y: auto; text-align: center; padding: 1rem 1rem 50% 1rem; scrollbar-width: none; }
+                  #pip-lyrics-container::-webkit-scrollbar { display: none; }
+                  .pip-lyric-line { font-size: 1.15rem; color: var(--ytm-secondary-text); margin-bottom: 0.75rem; transition: all 0.3s ease; cursor: pointer; min-height: 1.5rem; }
+                  .pip-lyric-line:hover { color: #ffffff; }
+                  .pip-lyric-line.active { color: var(--ytm-accent); transform: scale(1.1); font-weight: 700; }
+                  
+                  .slide-range { -webkit-appearance: none; appearance: none; width: 100%; background: transparent; height: 14px; position: absolute; top: 0; left: 0; z-index: 10; margin: 0; cursor: pointer; outline: none; }
                   .slide-range::-webkit-slider-runnable-track { -webkit-appearance: none; background: transparent; border: none; height: 14px; }
                   .slide-range::-moz-range-track { background: transparent; border: none; height: 14px; }
-                  .slide-range::-webkit-slider-thumb {
-                    -webkit-appearance: none; appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; margin-top: 1px; opacity: 0; transition: opacity 0.2s; box-shadow: 0 0 4px rgba(0,0,0,0.5);
-                  }
-                  .slide-range::-moz-range-thumb {
-                    appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; opacity: 0; transition: opacity 0.2s; border: none; box-shadow: 0 0 4px rgba(0,0,0,0.5);
-                  }
-                  @keyframes spinner-border {
-                    to { transform: rotate(360deg); }
-                  }
-                  .spinner-border {
-                    display: inline-block;
-                    width: 32px !important;
-                    height: 32px !important;
-                    vertical-align: -0.125em;
-                    border: 4px solid currentColor !important;
-                    border-right-color: transparent !important;
-                    border-radius: 50%;
-                    box-sizing: border-box;
-                    background-color: transparent;
-                    animation: 0.75s linear infinite spinner-border;
-                  }
+                  .slide-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; margin-top: 1px; opacity: 0; transition: opacity 0.2s; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
+                  .slide-range::-moz-range-thumb { appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; opacity: 0; transition: opacity 0.2s; border: none; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
                   .text-secondary { color: var(--ytm-secondary-text) !important; }
                 `;
                 docPipWindow.document.head.appendChild(extraStyle);
 
                 docPipWindow.document.body.innerHTML = `
-                  <div class="player-modal-body" style="height: 100vh; display: flex; flex-direction: column; justify-content: space-evenly; padding: 1.5rem 2rem;">
-                    <div class="player-modal-art-wrapper" style="flex-grow: 1; display: flex; align-items: center; justify-content: center; margin-bottom: 2rem;">
-                      <img src="" id="pip-art" alt="Album Art" style="width: 100%; max-width: 400px; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                  <div style="display: flex; flex-direction: column; background: var(--ytm-bg); height: 100vh;">
+                    <div class="pip-tabs">
+                      <button class="pip-tab-btn active" id="pip-tab-player">Player</button>
+                      <button class="pip-tab-btn" id="pip-tab-lyrics">Lyrics</button>
                     </div>
-                    <div class="player-modal-track-info" style="text-align: left; margin-bottom: 1rem;">
-                      <h3 id="pip-title" class="title text-truncate" style="font-weight: 700; font-size: 1.5rem; margin-bottom: 0;">Song Title</h3>
-                      <p id="pip-artist" class="artist text-truncate" style="color: var(--ytm-secondary-text); font-size: 1rem; margin-bottom: 0;">Artist Name</p>
-                    </div>
-                    <div class="player-modal-progress" style="width: 100%; margin-bottom: 1rem;">
-                      <div class="progress-bar-container" id="pip-progress-container" style="height: 14px; border-radius: 2px; position: relative; margin-bottom: 0.2em;">
-                        <div class="progress-bar-bg" style="height: 4px; background-color: #404040; border-radius: 2px; position: absolute; top: 5px; left: 0; right: 0; pointer-events: none;"></div>
-                        <div class="progress-bar-fg" id="pip-progress-bar" style="height: 4px; background-color: var(--ytm-primary-text); border-radius: 2px; width: 0%; position: absolute; top: 5px; left: 0; pointer-events: none;"></div>
-                        <input type="range" id="pip-seek-slider" class="slide-range" min="0" max="100" value="0" step="0.1">
+                    
+                    <div class="pip-pane active" id="pip-pane-player" style="padding: 1rem 2rem 1.5rem 2rem; justify-content: space-evenly;">
+                      <div class="player-modal-art-wrapper" style="flex-grow: 1; display: flex; align-items: center; justify-content: center; margin-bottom: 2rem;">
+                        <img src="" id="pip-art" alt="Album Art" style="width: 100%; max-width: 400px; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
                       </div>
-                      <div class="time-stamps" style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--ytm-secondary-text); margin-top: 0.5rem;">
-                        <span id="pip-current-time">0:00</span>
-                        <span id="pip-time-left">0:00</span>
+                      <div class="player-modal-track-info" style="text-align: left; margin-bottom: 1rem;">
+                        <h3 id="pip-title" class="title text-truncate" style="font-weight: 700; font-size: 1.5rem; margin-bottom: 0;">Song Title</h3>
+                        <p id="pip-artist" class="artist text-truncate" style="color: var(--ytm-secondary-text); font-size: 1rem; margin-bottom: 0;">Artist Name</p>
+                      </div>
+                      <div class="player-modal-progress" style="width: 100%; margin-bottom: 1rem;">
+                        <div class="progress-bar-container" id="pip-progress-container" style="height: 14px; border-radius: 2px; position: relative; margin-bottom: 0.2em;">
+                          <div class="progress-bar-bg" style="height: 4px; background-color: #404040; border-radius: 2px; position: absolute; top: 5px; left: 0; right: 0; pointer-events: none;"></div>
+                          <div class="progress-bar-fg" id="pip-progress-bar" style="height: 4px; background-color: var(--ytm-primary-text); border-radius: 2px; width: 0%; position: absolute; top: 5px; left: 0; pointer-events: none;"></div>
+                          <input type="range" id="pip-seek-slider" class="slide-range" min="0" max="100" value="0" step="0.1">
+                        </div>
+                        <div class="time-stamps" style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--ytm-secondary-text); margin-top: 0.5rem;">
+                          <span id="pip-current-time">0:00</span>
+                          <span id="pip-time-left">0:00</span>
+                        </div>
+                      </div>
+                      <div class="player-modal-controls" style="display: flex; justify-content: space-between; align-items: center; margin: 0 auto; width: 100%; max-width: 400px;">
+                        <button class="player-btn" id="pip-shuffle-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
+                        <button class="player-btn" id="pip-prev-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
+                        <button class="player-btn play-btn" id="pip-play-pause-btn" style="background: var(--ytm-surface); border: none; color: var(--ytm-primary-text); font-size: 3.5rem; width: 70px; height: 70px; border-radius: 50%;"></button>
+                        <button class="player-btn" id="pip-next-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
+                        <button class="player-btn" id="pip-repeat-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
                       </div>
                     </div>
-                    <div class="player-modal-controls" style="display: flex; justify-content: space-between; align-items: center; margin: 0 auto; width: 100%; max-width: 400px;">
-                      <button class="player-btn" id="pip-shuffle-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
-                      <button class="player-btn" id="pip-prev-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
-                      <button class="player-btn play-btn" id="pip-play-pause-btn" style="background: var(--ytm-surface); border: none; color: var(--ytm-primary-text); font-size: 3.5rem; width: 70px; height: 70px; border-radius: 50%;"></button>
-                      <button class="player-btn" id="pip-next-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
-                      <button class="player-btn" id="pip-repeat-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
+                    
+                    <div class="pip-pane" id="pip-pane-lyrics">
+                      <div id="pip-lyrics-container"></div>
                     </div>
                   </div>
                 `;
+
+                const pipTabPlayer = docPipWindow.document.getElementById('pip-tab-player');
+                const pipTabLyrics = docPipWindow.document.getElementById('pip-tab-lyrics');
+                const pipPanePlayer = docPipWindow.document.getElementById('pip-pane-player');
+                const pipPaneLyrics = docPipWindow.document.getElementById('pip-pane-lyrics');
+                
+                pipTabPlayer.addEventListener('click', () => {
+                  pipTabPlayer.classList.add('active'); pipTabLyrics.classList.remove('active');
+                  pipPanePlayer.classList.add('active'); pipPaneLyrics.classList.remove('active');
+                });
+                
+                pipTabLyrics.addEventListener('click', () => {
+                  pipTabLyrics.classList.add('active'); pipTabPlayer.classList.remove('active');
+                  pipPaneLyrics.classList.add('active'); pipPanePlayer.classList.remove('active');
+                  const activeLine = pipPaneLyrics.querySelector('.pip-lyric-line.active');
+                  if (activeLine) activeLine.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                });
+
+                window.renderPipLyrics = () => {
+                  if (!docPipWindow) return;
+                  const container = docPipWindow.document.getElementById('pip-lyrics-container');
+                  if (!container || !currentSong) return;
+                  
+                  if (currentSong.lyrics) {
+                    const lrcData = parseLRC(currentSong.lyrics);
+                    if (lrcData.length > 0) {
+                      currentLrcData = lrcData;
+                      currentLrcSongId = currentSong.id;
+                      currentLyricIndex = -1;
+                      container.innerHTML = lrcData.map((line, idx) => 
+                        `<div class="pip-lyric-line" data-index="${idx}" data-time="${line.time}">${escapeHTML(line.text)}</div>`
+                      ).join('');
+                      
+                      container.querySelectorAll('.pip-lyric-line').forEach(line => {
+                        line.addEventListener('click', (e) => {
+                          if (isFinite(audio.duration)) audio.currentTime = parseFloat(e.target.dataset.time);
+                        });
+                      });
+                    } else {
+                      container.innerHTML = `<pre style="white-space: pre-wrap; font-family: 'Roboto', sans-serif; font-size: 1rem; color: var(--ytm-secondary-text); padding: 1rem;">${escapeHTML(currentSong.lyrics)}</pre>`;
+                    }
+                  } else {
+                    container.innerHTML = '<p style="color: var(--ytm-secondary-text); margin-top: 2rem;">No lyrics available.</p>';
+                  }
+                };
 
                 const pipEls = {
                   art: docPipWindow.document.getElementById('pip-art'),
