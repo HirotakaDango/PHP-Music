@@ -3442,6 +3442,10 @@ function perform_full_scan($db) {
               <i class="bi bi-cloud-arrow-down-fill"></i>
               <span>Install App</span>
             </a>
+            <a href="#" class="nav-link" id="check-update-btn">
+              <i class="bi bi-arrow-clockwise"></i>
+              <span>Check Update</span>
+            </a>
             <a href="#" class="nav-link" id="clear-cache-btn">
               <i class="bi bi-eraser-fill"></i>
               <span>Clear Cache</span>
@@ -3672,6 +3676,7 @@ function perform_full_scan($db) {
             <input type="range" class="form-range" id="volume-slider" min="0" max="1" step="0.01" value="1">
           </div>
         </div>
+        <button class="player-btn ms-2" id="pip-btn-desktop" title="Mini Player"><i class="bi bi-pip"></i></button>
         <button class="player-btn" id="player-more-btn-desktop" title="More"><i class="bi bi-three-dots-vertical"></i></button>
       </div>
     </div>
@@ -4157,6 +4162,20 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+    
+    <div class="modal fade" id="update-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface);">
+          <div class="modal-header border-0">
+            <h5 class="modal-title"><i class="bi bi-arrow-clockwise"></i> Check for Updates</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-center" id="update-modal-body">
+            <!-- Dynamic Content populated by JS -->
+          </div>
+        </div>
+      </div>
+    </div>
 
     <div class="modal fade" id="playlist-downloader-modal" tabindex="-1">
       <div class="modal-dialog modal-fullscreen">
@@ -4242,6 +4261,28 @@ function perform_full_scan($db) {
         const playerBar = document.getElementById('player-bar');
         const infiniteScrollLoader = document.getElementById('infinite-scroll-loader');
         const installPwaBtn = document.getElementById('install-pwa-btn');
+        const checkUpdateBtn = document.getElementById('check-update-btn');
+        const updateModalEl = document.getElementById('update-modal');
+        const updateModal = updateModalEl ? new bootstrap.Modal(updateModalEl) : null;
+        const updateModalBody = document.getElementById('update-modal-body');
+
+        const pipBtnDesktop = document.getElementById('pip-btn-desktop');
+        
+        const pipCanvas = document.createElement('canvas');
+        pipCanvas.width = 500;
+        pipCanvas.height = 500;
+        const pipCtx = pipCanvas.getContext('2d', { willReadFrequently: true });
+        const pipVideo = document.createElement('video');
+        pipVideo.muted = true;
+        pipVideo.playsInline = true;
+        try {
+          if (pipCanvas.captureStream) {
+            pipVideo.srcObject = pipCanvas.captureStream(1);
+          } else if (pipBtnDesktop) {
+            pipBtnDesktop.style.display = 'none';
+          }
+        } catch(e) {}
+        
         const clearCacheBtn = document.getElementById('clear-cache-btn');
         const fullscreenBtn = document.getElementById('fullscreen-btn');
         const fullScanModalEl = document.getElementById('full-scan-modal');
@@ -5639,6 +5680,36 @@ function perform_full_scan($db) {
             const activeInModal = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
             if (activeInModal) activeInModal.scrollIntoView({ behavior: 'smooth', block: 'center' });
           }
+
+          if (pipCtx) {
+            const img = new Image();
+            img.crossOrigin = 'anonymous'; // Prevent security error
+            img.onload = () => {
+              pipCtx.clearRect(0, 0, 500, 500);
+              pipCtx.drawImage(img, 0, 0, 500, 500);
+              
+              const gradient = pipCtx.createLinearGradient(0, 350, 0, 500);
+              gradient.addColorStop(0, 'transparent');
+              gradient.addColorStop(1, 'rgba(0,0,0,0.9)');
+              pipCtx.fillStyle = gradient;
+              pipCtx.fillRect(0, 350, 500, 150);
+              
+              pipCtx.fillStyle = '#ffffff';
+              pipCtx.font = 'bold 28px sans-serif';
+              pipCtx.shadowColor = "rgba(0,0,0,0.8)";
+              pipCtx.shadowBlur = 4;
+              const safeTitle = currentSong.title.length > 28 ? currentSong.title.substring(0, 25) + '...' : currentSong.title;
+              pipCtx.fillText(safeTitle, 20, 450);
+              
+              pipCtx.fillStyle = '#cccccc';
+              pipCtx.font = '22px sans-serif';
+              const safeArtist = currentSong.artist.length > 35 ? currentSong.artist.substring(0, 32) + '...' : currentSong.artist;
+              pipCtx.fillText(safeArtist, 20, 480);
+              
+              pipVideo.play().catch(()=>{}); // Keep video alive
+            };
+            img.src = imageUrl;
+          }
         };
 
         const updatePlayPauseIcons = (isBuffering = false) => {
@@ -6753,6 +6824,282 @@ function perform_full_scan($db) {
             deferredInstallPrompt.prompt();
             await deferredInstallPrompt.userChoice;
             deferredInstallPrompt = null;
+          });
+        }
+        
+        if (checkUpdateBtn) {
+          checkUpdateBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            hideMobileSidebar();
+
+            if (updateModal && updateModalBody) {
+              updateModalBody.innerHTML = `
+                <div class="spinner-border text-secondary" role="status" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                <p class="mt-3 text-secondary">Checking GitHub for the latest version...</p>
+              `;
+              updateModal.show();
+              
+              try {
+                const repoApi = await fetch('https://api.github.com/repos/HirotakaDango/PHP-Music', { cache: 'no-store' });
+                if (!repoApi.ok) throw new Error('API limit reached');
+                const repoInfo = await repoApi.json();
+                
+                const rawUrl = `https://raw.githubusercontent.com/HirotakaDango/PHP-Music/${repoInfo.default_branch || 'main'}/index.php`;
+                const response = await fetch(rawUrl, { cache: 'no-store' });
+                const text = await response.text();
+                
+                const match = text.match(/define\('APP_VERSION',\s*'([^']+)'\)/);
+                if (match && match[1]) {
+                  const latestVersion = parseFloat(match[1]);
+                  const currentVersion = parseFloat('<?php echo APP_VERSION; ?>');
+                  
+                  if (latestVersion > currentVersion) {
+                    updateModalBody.innerHTML = `
+                      <i class="bi bi-info-circle-fill text-success" style="font-size: 3.5rem;"></i>
+                      <h4 class="mt-3">Update Available!</h4>
+                      <p class="text-secondary mb-4">Version <strong>${latestVersion}</strong> is available. You are currently on v${currentVersion}.</p>
+                      <a href="https://github.com/HirotakaDango/PHP-Music" target="_blank" class="btn btn-success w-100"><i class="bi bi-github"></i> Download Latest Version</a>
+                    `;
+                  } else {
+                    updateModalBody.innerHTML = `
+                      <i class="bi bi-check-circle-fill text-success" style="font-size: 3.5rem;"></i>
+                      <h4 class="mt-3">You're up to date!</h4>
+                      <p class="text-secondary mb-0">You are running the latest code (v${currentVersion}).</p>
+                    `;
+                  }
+                } else {
+                  throw new Error('Parse failed.');
+                }
+              } catch (error) {
+                updateModalBody.innerHTML = `
+                  <i class="bi bi-x-circle-fill text-danger" style="font-size: 3.5rem;"></i>
+                  <h4 class="mt-3">Check Failed</h4>
+                  <p class="text-secondary mb-0">Could not connect to GitHub. Please check your internet connection.</p>
+                `;
+              }
+            }
+          });
+        }
+
+        let docPipWindow = null;
+
+        if (pipBtnDesktop) {
+          pipBtnDesktop.addEventListener('click', async () => {
+            if ('documentPictureInPicture' in window) {
+              if (docPipWindow) {
+                docPipWindow.close();
+                return;
+              }
+              try {
+                docPipWindow = await window.documentPictureInPicture.requestWindow({
+                  width: 350,
+                  height: 550
+                });
+
+                [...document.styleSheets].forEach(styleSheet => {
+                  try {
+                    const cssRules = [...styleSheet.cssRules].map(rule => rule.cssText).join('');
+                    const style = document.createElement('style');
+                    style.textContent = cssRules;
+                    docPipWindow.document.head.appendChild(style);
+                  } catch (e) {
+                    if (styleSheet.href) {
+                      const link = document.createElement('link');
+                      link.rel = 'stylesheet';
+                      link.href = styleSheet.href;
+                      docPipWindow.document.head.appendChild(link);
+                    }
+                  }
+                });
+
+                const extraStyle = document.createElement('style');
+                extraStyle.textContent = `
+                  body { margin: 0; font-family: 'Roboto', sans-serif; background: var(--ytm-bg); color: var(--ytm-primary-text); overflow: hidden; }
+                  .player-btn { transition: color 0.2s, transform 0.1s; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+                  .player-btn:hover { color: var(--ytm-primary-text) !important; }
+                  .play-btn:hover { transform: scale(1.1); background-color: #383838 !important; }
+                  .progress-bar-container:hover .progress-bar-fg { background-color: var(--ytm-accent) !important; }
+                  .progress-bar-container:hover .slide-range::-webkit-slider-thumb { opacity: 1; }
+                  .progress-bar-container:hover .slide-range::-moz-range-thumb { opacity: 1; }
+                  .title, .artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+                  .player-btn.active { color: var(--ytm-accent) !important; }
+                  .slide-range {
+                    -webkit-appearance: none; appearance: none; width: 100%; background: transparent; height: 14px; position: absolute; top: 0; left: 0; z-index: 10; margin: 0; cursor: pointer; outline: none;
+                  }
+                  .slide-range::-webkit-slider-runnable-track { -webkit-appearance: none; background: transparent; border: none; height: 14px; }
+                  .slide-range::-moz-range-track { background: transparent; border: none; height: 14px; }
+                  .slide-range::-webkit-slider-thumb {
+                    -webkit-appearance: none; appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; margin-top: 1px; opacity: 0; transition: opacity 0.2s; box-shadow: 0 0 4px rgba(0,0,0,0.5);
+                  }
+                  .slide-range::-moz-range-thumb {
+                    appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; opacity: 0; transition: opacity 0.2s; border: none; box-shadow: 0 0 4px rgba(0,0,0,0.5);
+                  }
+                  @keyframes spinner-border {
+                    to { transform: rotate(360deg); }
+                  }
+                  .spinner-border {
+                    display: inline-block;
+                    width: 32px !important;
+                    height: 32px !important;
+                    vertical-align: -0.125em;
+                    border: 4px solid currentColor !important;
+                    border-right-color: transparent !important;
+                    border-radius: 50%;
+                    box-sizing: border-box;
+                    background-color: transparent;
+                    animation: 0.75s linear infinite spinner-border;
+                  }
+                  .text-secondary { color: var(--ytm-secondary-text) !important; }
+                `;
+                docPipWindow.document.head.appendChild(extraStyle);
+
+                docPipWindow.document.body.innerHTML = `
+                  <div class="player-modal-body" style="height: 100vh; display: flex; flex-direction: column; justify-content: space-evenly; padding: 1.5rem 2rem;">
+                    <div class="player-modal-art-wrapper" style="flex-grow: 1; display: flex; align-items: center; justify-content: center; margin-bottom: 2rem;">
+                      <img src="" id="pip-art" alt="Album Art" style="width: 100%; max-width: 400px; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                    </div>
+                    <div class="player-modal-track-info" style="text-align: left; margin-bottom: 1rem;">
+                      <h3 id="pip-title" class="title text-truncate" style="font-weight: 700; font-size: 1.5rem; margin-bottom: 0;">Song Title</h3>
+                      <p id="pip-artist" class="artist text-truncate" style="color: var(--ytm-secondary-text); font-size: 1rem; margin-bottom: 0;">Artist Name</p>
+                    </div>
+                    <div class="player-modal-progress" style="width: 100%; margin-bottom: 1rem;">
+                      <div class="progress-bar-container" id="pip-progress-container" style="height: 14px; border-radius: 2px; position: relative; margin-bottom: 0.2em;">
+                        <div class="progress-bar-bg" style="height: 4px; background-color: #404040; border-radius: 2px; position: absolute; top: 5px; left: 0; right: 0; pointer-events: none;"></div>
+                        <div class="progress-bar-fg" id="pip-progress-bar" style="height: 4px; background-color: var(--ytm-primary-text); border-radius: 2px; width: 0%; position: absolute; top: 5px; left: 0; pointer-events: none;"></div>
+                        <input type="range" id="pip-seek-slider" class="slide-range" min="0" max="100" value="0" step="0.1">
+                      </div>
+                      <div class="time-stamps" style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--ytm-secondary-text); margin-top: 0.5rem;">
+                        <span id="pip-current-time">0:00</span>
+                        <span id="pip-time-left">0:00</span>
+                      </div>
+                    </div>
+                    <div class="player-modal-controls" style="display: flex; justify-content: space-between; align-items: center; margin: 0 auto; width: 100%; max-width: 400px;">
+                      <button class="player-btn" id="pip-shuffle-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
+                      <button class="player-btn" id="pip-prev-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
+                      <button class="player-btn play-btn" id="pip-play-pause-btn" style="background: var(--ytm-surface); border: none; color: var(--ytm-primary-text); font-size: 3.5rem; width: 70px; height: 70px; border-radius: 50%;"></button>
+                      <button class="player-btn" id="pip-next-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
+                      <button class="player-btn" id="pip-repeat-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
+                    </div>
+                  </div>
+                `;
+
+                const pipEls = {
+                  art: docPipWindow.document.getElementById('pip-art'),
+                  title: docPipWindow.document.getElementById('pip-title'),
+                  artist: docPipWindow.document.getElementById('pip-artist'),
+                  currentTime: docPipWindow.document.getElementById('pip-current-time'),
+                  timeLeft: docPipWindow.document.getElementById('pip-time-left'),
+                  progress: docPipWindow.document.getElementById('pip-progress-bar'),
+                  progressContainer: docPipWindow.document.getElementById('pip-progress-container'),
+                  seekSlider: docPipWindow.document.getElementById('pip-seek-slider'),
+                  playPauseBtn: docPipWindow.document.getElementById('pip-play-pause-btn'),
+                  prevBtn: docPipWindow.document.getElementById('pip-prev-btn'),
+                  nextBtn: docPipWindow.document.getElementById('pip-next-btn'),
+                  shuffleBtn: docPipWindow.document.getElementById('pip-shuffle-btn'),
+                  repeatBtn: docPipWindow.document.getElementById('pip-repeat-btn')
+                };
+
+                playerElements.art.push(pipEls.art);
+                playerElements.title.push(pipEls.title);
+                playerElements.artist.push(pipEls.artist);
+                playerElements.currentTime.push(pipEls.currentTime);
+                playerElements.timeLeft.push(pipEls.timeLeft);
+                playerElements.progress.push(pipEls.progress);
+                playerElements.progressContainer.push(pipEls.progressContainer);
+                playerElements.playPauseBtn.push(pipEls.playPauseBtn);
+                playerElements.prevBtn.push(pipEls.prevBtn);
+                playerElements.nextBtn.push(pipEls.nextBtn);
+                playerElements.shuffleBtn.push(pipEls.shuffleBtn);
+                playerElements.repeatBtn.push(pipEls.repeatBtn);
+
+                pipEls.playPauseBtn.addEventListener('click', togglePlayPause);
+                setupHoldToSkip([pipEls.prevBtn], 'prev', playPrev);
+                setupHoldToSkip([pipEls.nextBtn], 'next', playNext);
+                pipEls.shuffleBtn.addEventListener('click', toggleShuffle);
+                pipEls.repeatBtn.addEventListener('click', () => {
+                  repeatMode = (repeatMode === 'none') ? 'all' : (repeatMode === 'all') ? 'one' : 'none';
+                  updateRepeatIcons();
+                });
+
+                let isSeekingPip = false;
+                pipEls.seekSlider.addEventListener('input', (e) => {
+                  isSeekingPip = true;
+                  const percent = e.target.value;
+                  pipEls.progress.style.width = `${percent}%`;
+                  if (isFinite(audio.duration)) {
+                    pipEls.currentTime.textContent = formatTime((percent / 100) * audio.duration);
+                  }
+                });
+                pipEls.seekSlider.addEventListener('change', (e) => {
+                  if (isFinite(audio.duration)) {
+                    audio.currentTime = (e.target.value / 100) * audio.duration;
+                  }
+                  isSeekingPip = false;
+                });
+
+                const updateSliderPip = () => {
+                  if (!isSeekingPip && docPipWindow && isFinite(audio.duration)) {
+                    const percent = (audio.currentTime / audio.duration) * 100;
+                    pipEls.seekSlider.value = percent;
+                  }
+                };
+                audio.addEventListener('timeupdate', updateSliderPip);
+
+                pipBtnDesktop.classList.add('active');
+
+                docPipWindow.addEventListener('pagehide', () => {
+                  audio.removeEventListener('timeupdate', updateSliderPip);
+                  playerElements.art = playerElements.art.filter(el => el !== pipEls.art);
+                  playerElements.title = playerElements.title.filter(el => el !== pipEls.title);
+                  playerElements.artist = playerElements.artist.filter(el => el !== pipEls.artist);
+                  playerElements.currentTime = playerElements.currentTime.filter(el => el !== pipEls.currentTime);
+                  playerElements.timeLeft = playerElements.timeLeft.filter(el => el !== pipEls.timeLeft);
+                  playerElements.progress = playerElements.progress.filter(el => el !== pipEls.progress);
+                  playerElements.progressContainer = playerElements.progressContainer.filter(el => el !== pipEls.progressContainer);
+                  playerElements.playPauseBtn = playerElements.playPauseBtn.filter(el => el !== pipEls.playPauseBtn);
+                  playerElements.prevBtn = playerElements.prevBtn.filter(el => el !== pipEls.prevBtn);
+                  playerElements.nextBtn = playerElements.nextBtn.filter(el => el !== pipEls.nextBtn);
+                  playerElements.shuffleBtn = playerElements.shuffleBtn.filter(el => el !== pipEls.shuffleBtn);
+                  playerElements.repeatBtn = playerElements.repeatBtn.filter(el => el !== pipEls.repeatBtn);
+                  
+                  docPipWindow = null;
+                  pipBtnDesktop.classList.remove('active');
+                });
+
+                pipEls.prevBtn.innerHTML = ICONS.prev;
+                pipEls.nextBtn.innerHTML = ICONS.next;
+                pipEls.shuffleBtn.innerHTML = ICONS.shuffle;
+                
+                updatePlayerUI();
+                updatePlayPauseIcons();
+                updateRepeatIcons();
+                updateShuffleButtons();
+
+              } catch (err) {
+                console.error("Doc PiP failed, falling back to video PiP", err);
+                fallbackVideoPip();
+              }
+            } else {
+              fallbackVideoPip();
+            }
+          });
+
+          function fallbackVideoPip() {
+            if (document.pictureInPictureElement) {
+              document.exitPictureInPicture().catch(()=>{});
+            } else {
+              pipVideo.play().then(() => {
+                pipVideo.requestPictureInPicture().catch((err) => {
+                  console.error("PiP failed", err);
+                  showToast("Picture-in-Picture is not supported by your browser or was blocked.", "error");
+                });
+              }).catch(console.error);
+            }
+          }
+          
+          pipVideo.addEventListener('enterpictureinpicture', () => pipBtnDesktop.classList.add('active'));
+          pipVideo.addEventListener('leavepictureinpicture', () => {
+             if(!docPipWindow) pipBtnDesktop.classList.remove('active');
           });
         }
 
