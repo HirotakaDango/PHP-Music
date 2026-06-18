@@ -4335,26 +4335,30 @@ function perform_full_scan($db) {
           const queueContainer = document.getElementById('desktop-player-queue-list');
           if (!queueContainer) return;
           
-          const mainSongList = document.querySelector('#content-area .song-list') || 
-                               document.querySelector('#songs-pane .song-list') || 
-                               document.querySelector('#search-songs-pane .song-list');
-          
-          if (mainSongList) {
-            queueContainer.innerHTML = '';
-            const clone = mainSongList.cloneNode(true);
-            clone.classList.remove('sortable');
-            queueContainer.appendChild(clone);
+          if (queueDirty) {
+            const mainSongList = document.querySelector('#content-area .song-list') || 
+                                 document.querySelector('#songs-pane .song-list') || 
+                                 document.querySelector('#search-songs-pane .song-list');
             
-            if (currentSong) {
-              const active = queueContainer.querySelector(`.song-item[data-song-id="${currentSong.id}"]`);
-              if (active) {
-                 setTimeout(() => {
-                   active.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                 }, 100);
-              }
+            if (mainSongList) {
+              queueContainer.innerHTML = '';
+              const clone = mainSongList.cloneNode(true);
+              clone.classList.remove('sortable');
+              queueContainer.appendChild(clone);
+              
+              queueDirty = false;
+            } else {
+              queueContainer.innerHTML = '<div class="p-4 text-center text-secondary">Queue not available.</div>';
             }
-          } else {
-            queueContainer.innerHTML = '<div class="p-4 text-center text-secondary">Queue not available.</div>';
+          }
+          
+          if (currentSong) {
+            const active = queueContainer.querySelector(`.song-item[data-song-id="${currentSong.id}"]`);
+            if (active) {
+               setTimeout(() => {
+                 active.scrollIntoView({ behavior: 'smooth', block: 'center' });
+               }, 100);
+            }
           }
         };
 
@@ -4433,6 +4437,7 @@ function perform_full_scan($db) {
         let isPlaying = false;
         let isShuffle = false;
         let repeatMode = 'none';
+        let queueDirty = true;
         let deferredInstallPrompt = null;
         let sortable = null;
         let songIdForPlaylist = null;
@@ -4469,6 +4474,7 @@ function perform_full_scan($db) {
           volumeUp: `<i class="bi bi-volume-up-fill"></i>`,
           volumeDown: `<i class="bi bi-volume-down-fill"></i>`,
           volumeMute: `<i class="bi bi-volume-mute-fill"></i>`,
+          spinner: `<div class="spinner-border text-secondary" style="width: 1.5rem; height: 1.5rem; border-width: 0.2em;" role="status"></div>`,
         };
 
         const updateFullscreenIcon = () => {
@@ -5387,6 +5393,10 @@ function perform_full_scan($db) {
           selectedSongs.clear();
           updateMultiSelectUI();
           
+          queueDirty = true;
+          const modalQueueList = document.getElementById('desktop-player-queue-list');
+          if (modalQueueList) modalQueueList.innerHTML = '';
+          
           mainContent.scrollTop = 0;
           currentPage = 1;
           allContentloaded = false;
@@ -5626,14 +5636,15 @@ function perform_full_scan($db) {
           if (typeof renderDesktopLyrics === 'function' && desktopPlayerModalEl && desktopPlayerModalEl.classList.contains('show')) {
             renderDesktopLyrics();
             
-            // Autoscrolls the queue pane to the new active song
             const activeInModal = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
             if (activeInModal) activeInModal.scrollIntoView({ behavior: 'smooth', block: 'center' });
           }
         };
 
-        const updatePlayPauseIcons = () => {
-          const icon = isPlaying ? ICONS.pause : ICONS.play;
+        const updatePlayPauseIcons = (isBuffering = false) => {
+          let icon = isPlaying ? ICONS.pause : ICONS.play;
+          if (isBuffering) icon = ICONS.spinner;
+          
           playerElements.playPauseBtn.forEach(btn => {
             btn.innerHTML = icon;
             btn.title = isPlaying ? "Pause" : "Play";
@@ -7464,24 +7475,30 @@ function perform_full_scan($db) {
           
           audio.preload = 'auto';
           
-          audio.addEventListener('stalled', () => {
-            if (isPlaying && audio.readyState < 3) {
-              const currentPos = audio.currentTime;
-              audio.load();
-              audio.currentTime = currentPos;
-              audio.play();
-            }
+          audio.addEventListener('waiting', () => {
+            if (isPlaying) updatePlayPauseIcons(true); 
           });
-          
+
+          audio.addEventListener('playing', () => {
+            updatePlayPauseIcons(false); 
+          });
+
+          audio.addEventListener('canplay', () => {
+            if (isPlaying) updatePlayPauseIcons(false);
+          });
+
           audio.addEventListener('error', (e) => {
-            console.error('Audio playback error or interrupted stream:', e);
-            if (isPlaying && currentSong) {
+            console.error('Audio playback error:', e);
+            if (audio.error && audio.error.code === 2 && isPlaying && currentSong) {
+              updatePlayPauseIcons(true); 
               const currentPos = audio.currentTime;
               setTimeout(() => {
                 audio.load();
                 audio.currentTime = currentPos;
-                audio.play();
-              }, 1500);
+                audio.play().catch(() => updatePlayPauseIcons(false));
+              }, 3000);
+            } else {
+              updatePlayPauseIcons(false);
             }
           });
 
