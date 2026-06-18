@@ -1,4 +1,7 @@
 <?php
+if (isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip')) {
+  ob_start('ob_gzhandler');
+}
 error_reporting(E_ALL & ~E_DEPRECATED);
 
 if (isset($_GET['pwa'])) {
@@ -118,16 +121,14 @@ define('ADMIN_PASSWORD_HASH', password_hash(ADMIN_PASSWORD, PASSWORD_DEFAULT));
 define('DAILY_UPLOAD_LIMIT', 10);
 
 function get_db() {
+  static $db = null;
+  if ($db !== null) return $db; 
+  
   try {
     $db = new PDO('sqlite:' . DB_FILE, null, null, [PDO::ATTR_TIMEOUT => 30]);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-    $db->exec("PRAGMA journal_mode=WAL;");
-    $db->exec("PRAGMA synchronous=NORMAL;");
-    $db->exec("PRAGMA cache_size=-64000;");
-    $db->exec("PRAGMA temp_store=MEMORY;");
-    $db->exec("PRAGMA mmap_size=30000000000;");
-    $db->exec("PRAGMA foreign_keys=ON;");
+    $db->exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-64000; PRAGMA temp_store=MEMORY; PRAGMA mmap_size=30000000000; PRAGMA foreign_keys=ON;");
     
     $db->sqliteCreateFunction('match_artist', function($artist_field, $search_name) {
         if ($artist_field === null) return 0;
@@ -765,7 +766,11 @@ function process_image_to_jpeg($imageData, $target_width = 500, $quality = 85) {
 if (isset($_GET['action'])) {
   $action = $_GET['action'];
   $db = get_db();
-  init_db($db);
+  
+  if (!isset($_SESSION['db_initialized'])) {
+    init_db($db);
+    $_SESSION['db_initialized'] = true;
+  }
 
   header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
   header('Pragma: no-cache');
@@ -777,6 +782,45 @@ if (isset($_GET['action'])) {
   $limit_clause = " LIMIT " . PAGE_SIZE . " OFFSET " . $offset;
 
   switch ($action) {
+    case 'check_update_code':
+      error_reporting(0);
+      $remote_url = "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/main/index.php";
+      $remote_code = false;
+      
+      if (function_exists('curl_version')) {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $remote_url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+        curl_setopt($ch, CURLOPT_USERAGENT, 'PHP-Music-Update-Checker');
+        curl_setopt($ch, CURLOPT_TIMEOUT, 3);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        $remote_code = curl_exec($ch);
+        curl_close($ch);
+      } 
+      
+      if (!$remote_code) {
+        $context = stream_context_create(['http' => ['timeout' => 3, 'header' => "User-Agent: PHP-Music-Update-Checker\r\n"]]);
+        $remote_code = @file_get_contents($remote_url, false, $context);
+      }
+      
+      if (!$remote_code) {
+        send_json(['status' => 'error', 'message' => 'Could not connect to GitHub. Check your server firewall or internet.']);
+      }
+      
+      $local_code = @file_get_contents(__FILE__);
+      
+      $remote_normalized = str_replace(["\r\n", "\r"], "\n", trim($remote_code));
+      $local_normalized = str_replace(["\r\n", "\r"], "\n", trim($local_code));
+      
+      $is_matching = hash_equals(hash('sha256', $remote_normalized), hash('sha256', $local_normalized));
+      
+      while (ob_get_level() > 0) { @ob_end_clean(); }
+      send_json([
+        'status' => 'success',
+        'update_available' => !$is_matching
+      ]);
+      break;
+
     case 'get_app_icon':
       header('Content-Type: image/svg+xml');
       $size = intval($_GET['size'] ?? 192);
@@ -6119,7 +6163,7 @@ function perform_full_scan($db) {
         };
         
         allNavLinks.forEach(link => {
-          if (link.getAttribute('data-bs-toggle') === 'modal' || link.id === 'logout-btn' || link.id === 'clear-cache-btn' || link.id === 'fullscreen-btn' || link.id === 'install-pwa-btn') return;
+          if (link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn'].includes(link.id)) return;
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
@@ -6835,46 +6879,37 @@ function perform_full_scan($db) {
             if (updateModal && updateModalBody) {
               updateModalBody.innerHTML = `
                 <div class="spinner-border text-secondary" role="status" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
-                <p class="mt-3 text-secondary">Checking GitHub for the latest version...</p>
+                <p class="mt-3 text-secondary">Analyzing and comparing entire codebase...</p>
               `;
               updateModal.show();
               
               try {
-                const repoApi = await fetch('https://api.github.com/repos/HirotakaDango/PHP-Music', { cache: 'no-store' });
-                if (!repoApi.ok) throw new Error('API limit reached');
-                const repoInfo = await repoApi.json();
+                const response = await fetch('?action=check_update_code', { cache: 'no-store' });
+                const result = await response.json();
                 
-                const rawUrl = `https://raw.githubusercontent.com/HirotakaDango/PHP-Music/${repoInfo.default_branch || 'main'}/index.php`;
-                const response = await fetch(rawUrl, { cache: 'no-store' });
-                const text = await response.text();
-                
-                const match = text.match(/define\('APP_VERSION',\s*'([^']+)'\)/);
-                if (match && match[1]) {
-                  const latestVersion = parseFloat(match[1]);
-                  const currentVersion = parseFloat('<?php echo APP_VERSION; ?>');
-                  
-                  if (latestVersion > currentVersion) {
+                if (result.status === 'success') {
+                  if (result.update_available) {
                     updateModalBody.innerHTML = `
-                      <i class="bi bi-info-circle-fill text-success" style="font-size: 3.5rem;"></i>
-                      <h4 class="mt-3">Update Available!</h4>
-                      <p class="text-secondary mb-4">Version <strong>${latestVersion}</strong> is available. You are currently on v${currentVersion}.</p>
-                      <a href="https://github.com/HirotakaDango/PHP-Music" target="_blank" class="btn btn-success w-100"><i class="bi bi-github"></i> Download Latest Version</a>
+                      <i class="bi bi-info-circle-fill text-warning" style="font-size: 3.5rem;"></i>
+                      <h4 class="mt-3">Code Modification Detected!</h4>
+                      <p class="text-secondary mb-4">Your current code does not strictly match the latest source code on GitHub.</p>
+                      <a href="https://github.com/HirotakaDango/PHP-Music" target="_blank" class="btn btn-warning w-100"><i class="bi bi-github"></i> Download Latest Code</a>
                     `;
                   } else {
                     updateModalBody.innerHTML = `
                       <i class="bi bi-check-circle-fill text-success" style="font-size: 3.5rem;"></i>
-                      <h4 class="mt-3">You're up to date!</h4>
-                      <p class="text-secondary mb-0">You are running the latest code (v${currentVersion}).</p>
+                      <h4 class="mt-3">Code is Identical!</h4>
+                      <p class="text-secondary mb-0">Your codebase perfectly matches the latest version on GitHub.</p>
                     `;
                   }
                 } else {
-                  throw new Error('Parse failed.');
+                  throw new Error(result.message || 'Check failed.');
                 }
               } catch (error) {
                 updateModalBody.innerHTML = `
                   <i class="bi bi-x-circle-fill text-danger" style="font-size: 3.5rem;"></i>
-                  <h4 class="mt-3">Check Failed</h4>
-                  <p class="text-secondary mb-0">Could not connect to GitHub. Please check your internet connection.</p>
+                  <h4 class="mt-3">Comparison Failed</h4>
+                  <p class="text-secondary mb-0">${error.message}</p>
                 `;
               }
             }
@@ -6896,6 +6931,12 @@ function perform_full_scan($db) {
                   height: 550
                 });
 
+                docPipWindow.addEventListener('resize', () => {
+                  if (docPipWindow.innerWidth !== 350 || docPipWindow.innerHeight !== 550) {
+                    docPipWindow.resizeTo(350, 550);
+                  }
+                });
+
                 [...document.styleSheets].forEach(styleSheet => {
                   try {
                     const cssRules = [...styleSheet.cssRules].map(rule => rule.cssText).join('');
@@ -6911,6 +6952,11 @@ function perform_full_scan($db) {
                     }
                   }
                 });
+
+                const iconLink = document.createElement('link');
+                iconLink.rel = 'stylesheet';
+                iconLink.href = 'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css';
+                docPipWindow.document.head.appendChild(iconLink);
 
                 const extraStyle = document.createElement('style');
                 extraStyle.textContent = `
