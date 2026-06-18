@@ -6974,8 +6974,6 @@ function perform_full_scan($db) {
                   .progress-bar-container:hover .slide-range::-moz-range-thumb { opacity: 1; }
                   .title, .artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
                   .player-btn.active { color: var(--ytm-accent) !important; }
-                  
-                  /* PiP Tabs & Lyrics */
                   .pip-tabs { display: flex; border-bottom: 1px solid var(--ytm-surface-2); }
                   .pip-tab-btn { flex: 1; background: none; border: none; color: var(--ytm-secondary-text); padding: 1rem; cursor: pointer; font-weight: 500; font-size: 1rem; transition: color 0.2s; border-bottom: 2px solid transparent; }
                   .pip-tab-btn:hover { color: var(--ytm-primary-text); }
@@ -6993,6 +6991,22 @@ function perform_full_scan($db) {
                   .slide-range::-moz-range-track { background: transparent; border: none; height: 14px; }
                   .slide-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; margin-top: 1px; opacity: 0; transition: opacity 0.2s; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
                   .slide-range::-moz-range-thumb { appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; opacity: 0; transition: opacity 0.2s; border: none; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
+                  
+                  @keyframes spinner-border {
+                    to { transform: rotate(360deg); }
+                  }
+                  .spinner-border {
+                    display: inline-block;
+                    width: 32px !important;
+                    height: 32px !important;
+                    vertical-align: -0.125em;
+                    border: 4px solid currentColor !important;
+                    border-right-color: transparent !important;
+                    border-radius: 50%;
+                    box-sizing: border-box;
+                    background-color: transparent;
+                    animation: 0.75s linear infinite spinner-border;
+                  }
                   .text-secondary { color: var(--ytm-secondary-text) !important; }
                 `;
                 docPipWindow.document.head.appendChild(extraStyle);
@@ -7119,6 +7133,33 @@ function perform_full_scan($db) {
                 pipEls.repeatBtn.addEventListener('click', () => {
                   repeatMode = (repeatMode === 'none') ? 'all' : (repeatMode === 'all') ? 'one' : 'none';
                   updateRepeatIcons();
+                });
+
+                pipEls.artist.style.cursor = 'pointer';
+                pipEls.artist.addEventListener('mouseenter', () => pipEls.artist.style.textDecoration = 'underline');
+                pipEls.artist.addEventListener('mouseleave', () => pipEls.artist.style.textDecoration = 'none');
+                
+                pipEls.artist.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  if (!currentSong) return;
+                  
+                  const artistRaw = currentSong.artist;
+                  const userId = currentSong.user_id || '';
+                  const artistsList = artistRaw.split(/\s*(?:,|&|\/)\s*/).filter(a => a.trim() !== '');
+                  
+                  if (artistsList.length > 1) {
+                    if (artistsModalBody) {
+                      artistsModalBody.innerHTML = `
+                        <div class="list-group list-group-flush rounded">
+                          ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userId}">${a}</button>`).join('')}
+                        </div>
+                      `;
+                      if (artistsModal) artistsModal.show();
+                    }
+                  } else {
+                    closeOpenModals();
+                    loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId });
+                  }
                 });
 
                 let isSeekingPip = false;
