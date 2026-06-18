@@ -5710,8 +5710,12 @@ function perform_full_scan($db) {
           playerElements.art.forEach(el => el.src = imageUrl);
           playerElements.title.forEach(el => el.textContent = currentSong.title);
           playerElements.artist.forEach(el => el.textContent = currentSong.artist);
-
           document.title = `${currentSong.title} • ${currentSong.artist}`;
+          
+          if (docPipWindow) {
+            docPipWindow.document.title = `${currentSong.title} • ${currentSong.artist}`;
+          }
+
           updatePlayPauseIcons();
           updateFavoriteIcons(currentSong.is_favorite == 1);
           
