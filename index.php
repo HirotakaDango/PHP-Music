@@ -2834,6 +2834,8 @@ function perform_full_scan($db) {
   }
 
   echo "Step 1: Database ready.\n\n";
+  
+  init_db($db);
 
   echo "Step 2: Verifying 'Music Library' user...\n";
   $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
