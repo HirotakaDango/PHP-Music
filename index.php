@@ -562,7 +562,20 @@ function init_db($db) {
     if (!in_array('profile_picture_type', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_picture_type TEXT;");
     if (!in_array('backup_key', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN backup_key TEXT;");
     if (!in_array('banned', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0;");
+    if (!in_array('settings', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN settings TEXT;");
   }
+
+  $db->exec("
+    CREATE TABLE IF NOT EXISTS user_song_settings (
+      user_id INTEGER NOT NULL,
+      song_id INTEGER NOT NULL,
+      volume_multiplier REAL DEFAULT 1.0,
+      eq_bands TEXT,
+      PRIMARY KEY (user_id, song_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+    );
+  ");
 
   $music_columns = $db->query("PRAGMA table_info(music);")->fetchAll(PDO::FETCH_COLUMN, 1);
   $music_table_exists = !empty($music_columns);
@@ -789,8 +802,8 @@ if (isset($_GET['action'])) {
     $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;");
   } catch(Exception $e) {}
   
+  init_db($db); // Force the database upgrade
   if (!isset($_SESSION['db_initialized'])) {
-    init_db($db);
     $_SESSION['db_initialized'] = true;
   }
 
@@ -920,7 +933,7 @@ if (isset($_GET['action'])) {
 
     case 'get_session':
       if ($user_id) {
-        $stmt = $db->prepare("SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned FROM users WHERE id = ?");
+        $stmt = $db->prepare("SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned, settings FROM users WHERE id = ?");
         $stmt->execute([$user_id]);
         $user = $stmt->fetch();
         if ($user && empty($user['banned'])) {
@@ -1268,6 +1281,70 @@ if (isset($_GET['action'])) {
         send_json(['status' => 'error', 'message' => 'File not found.']);
       }
       break;
+
+    case 'download_cover':
+      $song_id = intval($_GET['id'] ?? 0);
+      $stmt = $db->prepare("SELECT file, title, artist, album FROM music WHERE id = ?");
+      $stmt->execute([$song_id]);
+      $song = $stmt->fetch();
+
+      if ($song && file_exists($song['file'])) {
+        $getID3 = new getID3;
+        $info = $getID3->analyze($song['file']);
+        getid3_lib::CopyTagsToComments($info);
+
+        if (!empty($info['comments']['picture'][0]['data'])) {
+          $raw_img = $info['comments']['picture'][0]['data'];
+          $mime = $info['comments']['picture'][0]['image_mime'] ?? 'image/jpeg';
+          
+          $src_img = @imagecreatefromstring($raw_img);
+          if ($src_img) {
+            while (ob_get_level() > 0) { @ob_end_clean(); }
+
+            $width = imagesx($src_img);
+            $height = imagesy($src_img);
+            $min_dim = min($width, $height);
+            $src_x = (int)(($width - $min_dim) / 2);
+            $src_y = (int)(($height - $min_dim) / 2);
+            
+            $cropped_img = imagecreatetruecolor($min_dim, $min_dim);
+            
+            if ($mime === 'image/png') {
+              imagealphablending($cropped_img, false);
+              imagesavealpha($cropped_img, true);
+            }
+            
+            // Copy without resizing to retain 100% original resolution
+            imagecopy($cropped_img, $src_img, 0, 0, $src_x, $src_y, $min_dim, $min_dim);
+            
+            $album_name = trim($song['album'] ?? '');
+            if (empty($album_name) || $album_name === 'Unknown Album') {
+              $dl_name = trim(($song['title'] ?? '') . (($song['artist'] && $song['title']) ? ' - ' : '') . ($song['artist'] ?? ''));
+            } else {
+              $dl_name = $album_name;
+            }
+            $dl_name = $dl_name ? preg_replace('/[^\p{L}\p{N}\s\.\-\(\)]/u', '_', $dl_name) . '_Cover' : 'cover';
+            $ext = ($mime === 'image/png') ? 'png' : 'jpg';
+            $encoded = rawurlencode($dl_name . '.' . $ext);
+            
+            header('Content-Type: ' . $mime);
+            header("Content-Disposition: attachment; filename=\"cover." . $ext . "\"; filename*=UTF-8''" . $encoded);
+            
+            if ($mime === 'image/png') {
+              imagepng($cropped_img);
+            } else {
+              imagejpeg($cropped_img, null, 100); // 100 quality for original fidelity
+            }
+            
+            imagedestroy($src_img);
+            imagedestroy($cropped_img);
+            exit;
+          }
+        }
+      }
+      http_response_code(404);
+      echo "Cover image not found in the original file.";
+      exit;
 
     case 'edit_metadata':
       if (!$user_id) { http_response_code(403); exit; }
@@ -1777,8 +1854,8 @@ if (isset($_GET['action'])) {
       break;
     
     case 'get_genres':
-      $stmt = $db->query("SELECT DISTINCT genre FROM music WHERE genre != '' AND genre IS NOT NULL ORDER BY genre COLLATE NOCASE" . $limit_clause);
-      send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
+      $stmt = $db->query("SELECT genre as name, MAX(id) as id FROM music WHERE genre != '' AND genre IS NOT NULL GROUP BY genre ORDER BY genre COLLATE NOCASE" . $limit_clause);
+      send_json($stmt->fetchAll());
       break;
     
     case 'get_all_genres':
@@ -2063,14 +2140,52 @@ if (isset($_GET['action'])) {
 
     case 'get_song_data':
       $id = intval($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id = ?");
-      $stmt->execute([$user_id, $id]);
+      $stmt = $db->prepare("
+        SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, 
+        CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
+        uss.volume_multiplier, uss.eq_bands
+        FROM music m 
+        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
+        LEFT JOIN user_song_settings uss ON m.id = uss.song_id AND uss.user_id = ?
+        WHERE m.id = ?
+      ");
+      $stmt->execute([$user_id, $user_id, $id]);
       $song = $stmt->fetch();
       if ($song) {
         $song['stream_url'] = '?action=get_stream&id=' . $song['id'];
         $song['image_url'] = '?action=get_image&id=' . $song['id'];
+        if ($song['eq_bands']) $song['eq_bands'] = json_decode($song['eq_bands'], true);
       }
       send_json($song);
+      break;
+
+    case 'save_global_settings':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $settings_json = json_encode($data['settings']);
+      $db->prepare("UPDATE users SET settings = ? WHERE id = ?")->execute([$settings_json, $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'save_song_settings':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $s_id = (int)$data['song_id'];
+      $vol = (float)$data['volume'];
+      $eq = json_encode($data['eq']);
+      $db->prepare("
+        REPLACE INTO user_song_settings (user_id, song_id, volume_multiplier, eq_bands) 
+        VALUES (?, ?, ?, ?)
+      ")->execute([$user_id, $s_id, $vol, $eq]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'reset_song_settings':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $s_id = (int)$data['song_id'];
+      $db->prepare("DELETE FROM user_song_settings WHERE user_id = ? AND song_id = ?")->execute([$user_id, $s_id]);
+      send_json(['status' => 'success']);
       break;
 
     case 'get_stream':
@@ -3693,7 +3808,7 @@ function perform_full_scan($db) {
             <div id="search-dropdown-mobile" class="search-dropdown d-none"></div>
           </div>
           <div class="dropdown logged-in-only">
-            <img src="" class="profile-picture" id="profile-picture-header-mobile" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
+            <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-mobile" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
               <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-mobile"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
               <li><a class="dropdown-item" href="#" id="sleep-timer-btn-mobile"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
@@ -3721,7 +3836,7 @@ function perform_full_scan($db) {
               <div id="search-dropdown-desktop" class="search-dropdown d-none"></div>
             </div>
             <div class="dropdown logged-in-only d-none d-md-block">
-              <img src="" class="profile-picture" id="profile-picture-header-desktop" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
+              <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-desktop" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
               <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
                 <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
                 <li><a class="dropdown-item" href="#" id="sleep-timer-btn-desktop"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
@@ -3855,7 +3970,7 @@ function perform_full_scan($db) {
     </div>
     <div class="player-bar d-none" id="player-bar">
       <div class="track-info d-none d-md-flex">
-        <img src="" alt="Album Art" class="track-info-art" id="player-art-desktop">
+        <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art" class="track-info-art" id="player-art-desktop">
         <div class="track-info-text">
           <div class="title" id="player-title-desktop">Song Title</div>
           <div class="artist" id="player-artist-desktop">Artist Name</div>
@@ -3863,7 +3978,7 @@ function perform_full_scan($db) {
       </div>
       <div class="player-controls">
         <div class="track-info d-md-none">
-          <img src="" alt="Album Art" class="track-info-art" id="player-art-mobile">
+          <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art" class="track-info-art" id="player-art-mobile">
           <div class="track-info-text">
             <div class="title" id="player-title-mobile">Song Title</div>
             <div class="artist" id="player-artist-mobile">Artist Name</div>
@@ -3930,7 +4045,7 @@ function perform_full_scan($db) {
               <div class="h-100 w-100 overflow-auto p-4 d-flex flex-column justify-content-evenly">
                 
                 <div class="d-flex justify-content-center align-items-center" style="flex-grow: 1; margin-bottom: 2rem;">
-                  <img src="" id="player-modal-art" alt="Album Art" style="width: 100%; max-width: 400px; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                  <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="player-modal-art" alt="Album Art" style="width: 100%; max-width: 400px; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
                 </div>
                 
                 <div class="text-start mb-3">
@@ -3982,7 +4097,7 @@ function perform_full_scan($db) {
           <div class="modal-body d-flex h-100 overflow-hidden pt-1 gap-4 align-items-center">
             
             <div class="w-50 d-flex flex-column align-items-center justify-content-center h-100">
-              <img src="" id="desktop-player-modal-art" class="rounded shadow-lg" style="width: 100%; max-width: 60vh; aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
+              <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="desktop-player-modal-art" class="rounded shadow-lg" style="width: 100%; max-width: 60vh; aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
               <div class="mb-3 text-center mt-4 w-100 px-4">
                 <h3 id="desktop-player-modal-title" class="fw-bold mb-1 text-truncate" style="max-width: 100%;">Song Title</h3>
                 <p id="desktop-player-modal-artist" class="text-secondary mb-0 text-truncate" style="cursor: pointer; max-width: 100%;">Artist Name</p>
@@ -4131,7 +4246,7 @@ function perform_full_scan($db) {
           <div class="modal-body">
             <h6>Profile Picture</h6>
             <form id="profile-picture-form" class="mb-4 text-center">
-                <img src="" id="profile-picture-preview" class="profile-picture-lg mb-3" alt="Profile Picture Preview">
+                <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="profile-picture-preview" class="profile-picture-lg mb-3" alt="Profile Picture Preview">
                 <div class="mb-3">
                     <label for="profile-picture-input" class="form-label">Upload new picture</label>
                     <input class="form-control" type="file" id="profile-picture-input" accept="image/png, image/jpeg, image/gif">
@@ -4158,6 +4273,13 @@ function perform_full_scan($db) {
             </form>
             <hr class="text-secondary">
             <h6 class="mt-4"><i class="bi bi-sliders me-2"></i>Audio Enhancements</h6>
+            <div class="mb-3">
+              <label class="form-label d-flex justify-content-between">
+                <span>Global Volume Multiplier</span>
+                <span id="global-vol-val">1.0x</span>
+              </label>
+              <input type="range" class="form-range" id="global-vol-slider" min="0" max="3" step="0.1" value="1">
+            </div>
             <div class="form-check form-switch mb-3">
               <input class="form-check-input" type="checkbox" id="toggle-normalization" checked>
               <label class="form-check-label" for="toggle-normalization">Volume Normalization (AGC)</label>
@@ -4366,7 +4488,7 @@ function perform_full_scan($db) {
             <form id="edit-metadata-form" enctype="multipart/form-data">
               <input type="hidden" id="edit-metadata-id">
               <div class="mb-3 text-center">
-                <img id="edit-metadata-cover-preview" src="" class="img-thumbnail bg-transparent border-secondary mb-2" style="width: 150px; height: 150px; object-fit: cover; border-radius: 8px;">
+                <img id="edit-metadata-cover-preview" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="img-thumbnail bg-transparent border-secondary mb-2" style="width: 150px; height: 150px; object-fit: cover; border-radius: 8px;">
                 <input type="file" class="form-control form-control-sm" id="edit-metadata-cover" accept="image/*">
                 <small class="text-secondary d-block mt-1">Upload a new cover image (1:1 crop)</small>
               </div>
@@ -4517,6 +4639,48 @@ function perform_full_scan($db) {
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="modal fade" id="song-audio-settings-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
+          <div class="modal-header border-0 pb-0">
+            <h5 class="modal-title w-100 text-center text-white">Audio Settings for <br><small id="sas-song-title" class="text-secondary"></small></h5>
+            <button type="button" class="btn-close btn-close-white position-absolute end-0 me-3" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-white">
+            <input type="hidden" id="sas-song-id">
+            
+            <div class="mb-4">
+              <label class="form-label d-flex justify-content-between">
+                <span>Song Volume Multiplier</span>
+                <span id="sas-vol-val">1.0x</span>
+              </label>
+              <input type="range" class="form-range" id="sas-vol-slider" min="0" max="3" step="0.1" value="1">
+              <small class="text-secondary d-block mt-1">Adjust if this specific song is too quiet or loud compared to others.</small>
+            </div>
+            
+            <div class="mb-3">
+              <label class="form-label">Per-Song Equalizer</label>
+              <div class="d-flex justify-content-between text-center small text-secondary">
+                 <span>60Hz</span><span>230Hz</span><span>910Hz</span><span>3.6kHz</span><span>14kHz</span>
+              </div>
+              <div class="d-flex justify-content-between mt-2 mb-4">
+                 <input type="range" class="form-range sas-eq-band" data-band="0" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
+                 <input type="range" class="form-range sas-eq-band" data-band="1" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
+                 <input type="range" class="form-range sas-eq-band" data-band="2" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
+                 <input type="range" class="form-range sas-eq-band" data-band="3" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
+                 <input type="range" class="form-range sas-eq-band" data-band="4" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
+              </div>
+            </div>
+
+            <div class="d-flex gap-2">
+              <button type="button" class="btn btn-outline-secondary w-50" id="sas-reset-btn">Reset to Global</button>
+              <button type="button" class="btn btn-danger w-50" id="sas-save-btn">Save to Song</button>
             </div>
           </div>
         </div>
@@ -4805,11 +4969,26 @@ function perform_full_scan($db) {
         const audio = new Audio();
         const audioB = new Audio();
         
-        let audioCtx, sourceA, sourceB, gainA, gainB, compressor;
+        let audioCtx, sourceA, sourceB, gainA, gainB, perSongGain, compressor;
         let eqBands = [];
         let enableNormalization = true;
         let isEQEnabled = false;
+        let globalVolumeMultiplier = 1.0;
+        let globalEQBands = [0, 0, 0, 0, 0];
         let crossfadeDuration = 3.0;
+        let settingsSaveTimeout = null;
+
+        const saveGlobalAudioSettings = () => {
+          if (!currentUser) return;
+          clearTimeout(settingsSaveTimeout);
+          settingsSaveTimeout = setTimeout(() => {
+            const settings = { enableNormalization, isEQEnabled, globalVolumeMultiplier, globalEQBands };
+            fetchData('?action=save_global_settings', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ settings })
+            });
+          }, 1000);
+        };
 
         const initWebAudio = () => {
           if (audioCtx) return;
@@ -4841,20 +5020,78 @@ function perform_full_scan($db) {
           sourceB = audioCtx.createMediaElementSource(audioB);
           gainA = audioCtx.createGain();
           gainB = audioCtx.createGain();
+          perSongGain = audioCtx.createGain();
+          perSongGain.gain.value = 1;
           
           sourceA.connect(gainA);
           sourceB.connect(gainB);
-          gainA.connect(eqBands[0]);
-          gainB.connect(eqBands[0]);
+          gainA.connect(perSongGain);
+          gainB.connect(perSongGain);
+          perSongGain.connect(eqBands[0]);
           
           toggleAudioEnhancements();
+        };
+
+        const applyAudioSettings = () => {
+          if (!audioCtx || !currentSong) return;
+          
+          let targetVol = globalVolumeMultiplier;
+          let targetEQ = [...globalEQBands];
+
+          // Override with database song settings if they exist
+          if (currentSong.volume_multiplier !== null && currentSong.volume_multiplier !== undefined) {
+             targetVol = parseFloat(currentSong.volume_multiplier);
+          }
+          if (currentSong.eq_bands && Array.isArray(currentSong.eq_bands)) {
+             targetEQ = currentSong.eq_bands;
+          } else if (!isEQEnabled) {
+             targetEQ = [0, 0, 0, 0, 0];
+          }
+
+          if (perSongGain) {
+            perSongGain.gain.setTargetAtTime(targetVol, audioCtx.currentTime, 0.1);
+          }
+          eqBands.forEach((band, i) => {
+            band.gain.setTargetAtTime(targetEQ[i] || 0, audioCtx.currentTime, 0.1);
+          });
         };
 
         const toggleAudioEnhancements = () => {
           if (!audioCtx) return;
           compressor.ratio.value = enableNormalization ? 12 : 1; 
-          eqBands.forEach(band => { if (!isEQEnabled) band.gain.value = 0; });
+          applyAudioSettings();
         };
+
+        // UI Event Listeners for Global Audio Settings
+        document.getElementById('global-vol-slider').addEventListener('input', (e) => {
+          globalVolumeMultiplier = parseFloat(e.target.value);
+          document.getElementById('global-vol-val').textContent = globalVolumeMultiplier + 'x';
+          applyAudioSettings();
+          saveGlobalAudioSettings();
+        });
+
+        document.getElementById('toggle-normalization').addEventListener('change', (e) => {
+          enableNormalization = e.target.checked;
+          toggleAudioEnhancements();
+          saveGlobalAudioSettings();
+        });
+
+        document.getElementById('toggle-eq').addEventListener('change', (e) => {
+          isEQEnabled = e.target.checked;
+          document.getElementById('eq-sliders').classList.toggle('d-none', !isEQEnabled);
+          toggleAudioEnhancements();
+          saveGlobalAudioSettings();
+        });
+
+        document.querySelectorAll('#eq-sliders .eq-band').forEach(slider => {
+          slider.addEventListener('input', (e) => {
+            if (!audioCtx) initWebAudio();
+            const bandIndex = parseInt(e.target.dataset.band);
+            globalEQBands[bandIndex] = parseFloat(e.target.value);
+            applyAudioSettings();
+            saveGlobalAudioSettings();
+          });
+        });
 
         document.body.addEventListener('click', initWebAudio, { once: true });
         let currentView = { type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' };
@@ -4864,8 +5101,8 @@ function perform_full_scan($db) {
         let originalQueue = [];
         let queueIndex = -1;
         let isPlaying = false;
-        let isShuffle = false;
-        let repeatMode = 'none';
+        let isShuffle = localStorage.getItem('isShuffle') === 'true';
+        let repeatMode = localStorage.getItem('repeatMode') || 'none';
         let queueDirty = true;
         let deferredInstallPrompt = null;
         let sortable = null;
@@ -5507,6 +5744,13 @@ function perform_full_scan($db) {
                 dataType = 'playlist';
                 dataValue = item.public_id;
                 publicId = item.public_id;
+              } else if (type === 'get_genres') {
+                name = item.name;
+                subtext = null;
+                imageId = item.id;
+                dataType = 'genre';
+                dataValue = name;
+                publicId = '';
               } else {
                 name = item.name || item;
                 subtext = null;
@@ -5523,7 +5767,7 @@ function perform_full_scan($db) {
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>` : '';
 
-              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists' || type === 'get_following') {
+              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists' || type === 'get_following' || type === 'get_genres') {
                 return `<div class="col">
                   <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
                     ${moreButton}
@@ -6084,6 +6328,7 @@ function perform_full_scan($db) {
           
           initWebAudio();
           if (audioCtx.state === 'suspended') audioCtx.resume();
+          applyAudioSettings(currentSong.id);
 
           if (isPlaying && audio.currentTime > 0 && !audio.paused) {
             audioB.src = audio.src;
@@ -6401,8 +6646,10 @@ function perform_full_scan($db) {
             <li class="context-menu-item" data-action="go_album" data-name="${encodeURIComponent(album)}" data-userid="${songUserId}"><i class="bi bi-disc-fill"></i> Go to Album</li>
             <li class="context-menu-item" data-action="show_all_genres"><i class="bi bi-tags-fill"></i> View All Genres</li>
             <li class="context-menu-item" data-action="download_song" data-id="${songId}"><i class="bi bi-download"></i> Download Song</li>
+            <li class="context-menu-item" data-action="download_cover" data-id="${songId}"><i class="bi bi-image"></i> Download Cover Art</li>
             <li class="context-menu-item" data-action="show_metadata" data-id="${songId}"><i class="bi bi-file-earmark-music"></i> View Metadata</li>
             <li class="context-menu-item" data-action="show_lyrics" data-id="${songId}"><i class="bi bi-music-note-list"></i> Show Lyrics</li>
+            <li class="context-menu-item" data-action="song_audio_settings" data-id="${songId}" data-title="${encodeURIComponent(title || '')}"><i class="bi bi-sliders"></i> Audio Settings (This Song)</li>
             `;
           
           if (currentUser) {
@@ -6528,6 +6775,7 @@ function perform_full_scan($db) {
             queueIndex = queue.findIndex(id => id === currentSongId);
           }
           updateShuffleButtons();
+          localStorage.setItem('isShuffle', isShuffle);
           showToast(isShuffle ? 'Shuffle enabled' : 'Shuffle disabled', 'info');
         };
 
@@ -6818,6 +7066,7 @@ function perform_full_scan($db) {
         playerElements.shuffleBtn.forEach(btn => btn.addEventListener('click', toggleShuffle));
         playerElements.repeatBtn.forEach(btn => btn.addEventListener('click', () => {
           repeatMode = (repeatMode === 'none') ? 'all' : (repeatMode === 'all') ? 'one' : 'none';
+          localStorage.setItem('repeatMode', repeatMode);
           updateRepeatIcons();
         }));
         
@@ -7369,8 +7618,40 @@ function perform_full_scan($db) {
                 }
               }
               break;
+            case 'song_audio_settings':
+              const sasModalEl = document.getElementById('song-audio-settings-modal');
+              if (sasModalEl) {
+                document.getElementById('sas-song-id').value = id;
+                document.getElementById('sas-song-title').textContent = decodeURIComponent(title || '');
+                
+                const sasVolSlider = document.getElementById('sas-vol-slider');
+                const sasVolVal = document.getElementById('sas-vol-val');
+                const sasEqBands = document.querySelectorAll('.sas-eq-band');
+                
+                // Fetch fresh config from globalSongCache or currentSong
+                let targetVol = globalVolumeMultiplier;
+                let targetEQ = [0,0,0,0,0];
+                const activeSongData = globalSongCache[id] || (currentSong && currentSong.id == id ? currentSong : null);
+
+                if (activeSongData && activeSongData.volume_multiplier !== undefined && activeSongData.volume_multiplier !== null) {
+                  targetVol = parseFloat(activeSongData.volume_multiplier);
+                }
+                if (activeSongData && activeSongData.eq_bands && Array.isArray(activeSongData.eq_bands)) {
+                  targetEQ = activeSongData.eq_bands;
+                }
+
+                sasVolSlider.value = targetVol;
+                sasVolVal.textContent = sasVolSlider.value + 'x';
+                sasEqBands.forEach((band, i) => band.value = targetEQ[i] !== undefined ? targetEQ[i] : 0);
+                
+                bootstrap.Modal.getOrCreateInstance(sasModalEl).show();
+              }
+              break;
             case 'download_song':
               window.location.href = `?action=download_song&id=${id}`;
+              break;
+            case 'download_cover':
+              window.location.href = `?action=download_cover&id=${id}`;
               break;
             case 'delete_song':
               if (confirm('Are you sure you want to delete this song? This cannot be undone.')) {
@@ -7708,7 +7989,7 @@ function perform_full_scan($db) {
                     
                     <div class="pip-pane active" id="pip-pane-player" style="padding: 1rem 2rem 1.5rem 2rem; justify-content: space-evenly;">
                       <div class="player-modal-art-wrapper" style="flex-grow: 1; display: flex; align-items: center; justify-content: center; margin-bottom: 2rem;">
-                        <img src="" id="pip-art" alt="Album Art" style="width: 100%; max-width: 400px; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                        <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="pip-art" alt="Album Art" style="width: 100%; max-width: 400px; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
                       </div>
                       <div class="player-modal-track-info" style="text-align: left; margin-bottom: 1rem;">
                         <h3 id="pip-title" class="title text-truncate" style="font-weight: 700; font-size: 1.5rem; margin-bottom: 0;">Song Title</h3>
@@ -8185,6 +8466,87 @@ function perform_full_scan($db) {
           }
         }
         
+        const sasVolSlider = document.getElementById('sas-vol-slider');
+        const sasVolVal = document.getElementById('sas-vol-val');
+        
+        if (sasVolSlider) {
+          sasVolSlider.addEventListener('input', e => {
+            sasVolVal.textContent = e.target.value + 'x';
+            const activeId = document.getElementById('sas-song-id').value;
+            if (currentSong && currentSong.id == activeId && perSongGain) {
+                perSongGain.gain.setTargetAtTime(parseFloat(e.target.value), audioCtx.currentTime, 0.1);
+            }
+          });
+        }
+        
+        document.querySelectorAll('.sas-eq-band').forEach(slider => {
+          slider.addEventListener('input', e => {
+            const activeId = document.getElementById('sas-song-id').value;
+            if (currentSong && currentSong.id == activeId && audioCtx) {
+              const bandIndex = parseInt(e.target.dataset.band);
+              eqBands[bandIndex].gain.setTargetAtTime(parseFloat(e.target.value), audioCtx.currentTime, 0.1);
+            }
+          });
+        });
+
+        const sasSaveBtn = document.getElementById('sas-save-btn');
+        if (sasSaveBtn) {
+          sasSaveBtn.addEventListener('click', async () => {
+            const songId = document.getElementById('sas-song-id').value;
+            const vol = parseFloat(document.getElementById('sas-vol-slider').value);
+            const eqs = Array.from(document.querySelectorAll('.sas-eq-band')).map(s => parseFloat(s.value));
+            
+            const result = await fetchData('?action=save_song_settings', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ song_id: songId, volume: vol, eq: eqs })
+            });
+
+            if (result && result.status === 'success') {
+              showToast('Song audio settings saved to database', 'success');
+              
+              if (globalSongCache[songId]) {
+                 globalSongCache[songId].volume_multiplier = vol;
+                 globalSongCache[songId].eq_bands = eqs;
+              }
+              if (currentSong && currentSong.id == songId) {
+                 currentSong.volume_multiplier = vol;
+                 currentSong.eq_bands = eqs;
+                 applyAudioSettings();
+              }
+              
+              bootstrap.Modal.getOrCreateInstance(document.getElementById('song-audio-settings-modal')).hide();
+            }
+          });
+        }
+
+        const sasResetBtn = document.getElementById('sas-reset-btn');
+        if (sasResetBtn) {
+          sasResetBtn.addEventListener('click', async () => {
+            const songId = document.getElementById('sas-song-id').value;
+            
+            const result = await fetchData('?action=reset_song_settings', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ song_id: songId })
+            });
+
+            if (result && result.status === 'success') {
+              showToast('Song audio settings reset to global default', 'success');
+              
+              if (globalSongCache[songId]) {
+                 globalSongCache[songId].volume_multiplier = null;
+                 globalSongCache[songId].eq_bands = null;
+              }
+              if (currentSong && currentSong.id == songId) {
+                 currentSong.volume_multiplier = null;
+                 currentSong.eq_bands = null;
+                 applyAudioSettings();
+              }
+
+              bootstrap.Modal.getOrCreateInstance(document.getElementById('song-audio-settings-modal')).hide();
+            }
+          });
+        }
+
         const handleLogout = async () => {
           await fetchData('?action=logout');
           currentUser = null;
@@ -8284,8 +8646,10 @@ function perform_full_scan($db) {
         document.querySelectorAll('.eq-band').forEach(slider => {
           slider.addEventListener('input', (e) => {
             if (!audioCtx) initWebAudio();
-            const bandIndex = parseInt(e.target.dataset.band);
-            eqBands[bandIndex].gain.value = parseFloat(e.target.value);
+            if (!currentSong || !localStorage.getItem(`song_settings_${currentSong.id}`)) {
+                const bandIndex = parseInt(e.target.dataset.band);
+                eqBands[bandIndex].gain.value = parseFloat(e.target.value);
+            }
           });
         });
 
@@ -8653,6 +9017,24 @@ function perform_full_scan($db) {
           const data = await fetchData('?action=get_session');
           if (data && data.status === 'loggedin') {
             currentUser = data.user;
+            if (currentUser.settings) {
+              try {
+                const s = JSON.parse(currentUser.settings);
+                enableNormalization = s.enableNormalization !== undefined ? s.enableNormalization : true;
+                isEQEnabled = s.isEQEnabled !== undefined ? s.isEQEnabled : false;
+                globalVolumeMultiplier = s.globalVolumeMultiplier !== undefined ? s.globalVolumeMultiplier : 1.0;
+                globalEQBands = s.globalEQBands || [0, 0, 0, 0, 0];
+                
+                document.getElementById('toggle-normalization').checked = enableNormalization;
+                document.getElementById('toggle-eq').checked = isEQEnabled;
+                document.getElementById('eq-sliders').classList.toggle('d-none', !isEQEnabled);
+                document.getElementById('global-vol-slider').value = globalVolumeMultiplier;
+                document.getElementById('global-vol-val').textContent = globalVolumeMultiplier + 'x';
+                
+                const eqSliders = document.querySelectorAll('#eq-sliders .eq-band');
+                globalEQBands.forEach((val, i) => { if (eqSliders[i]) eqSliders[i].value = val; });
+              } catch(e){}
+            }
             const newNameInput = document.getElementById('new-name');
             if (newNameInput) newNameInput.value = currentUser.artist;
             if (uploadLimitText) uploadLimitText.textContent = data.upload_limit;
