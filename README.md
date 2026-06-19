@@ -24,9 +24,14 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 - 🏷️ **Automatic Metadata**: Uses [getID3](https://github.com/JamesHeinrich/getID3) to extract artist, album, year, genre, and cover images.
 - 📚 **Library Management**: Browse by songs, artists, albums, genres, or favorites. Instant search included.
 - ❤️ **Favorites**: Mark/unmark songs as favorites. Drag to reorder in the "Favorites" view. Import/export your favorites as JSON.
-- 🔊 **Player**: Play, pause, next/prev, repeat, shuffle, seek, volume control, and cover art display. In-browser playback via HTML5 `<audio>`. Media Session API support for background media controls.
-- 🖼️ **Album Art & Lyrics**: Displays embedded images as `.webp` (SVG fallback if missing) and allows viewing or adding song lyrics (supports synchronized LRC format).
-- 📱 **Responsive UI**: Mobile-optimized, fast, and touch-friendly with infinite scrolling.
+- 🔊 **Player Controls**: Play, pause, next/prev, repeat, shuffle, seek, volume control, and cover art display. Media Session API support for background media controls.
+- 🎚️ **Advanced Audio Engine**: Features a built-in, togglable 5-band Graphic Equalizer (60Hz, 230Hz, 910Hz, 3.6kHz, 14kHz) with independent frequency adjustments, plus automatic, real-time Volume Normalization (AGC) using Web Audio API dynamics compression to keep varying song volumes level.
+- 🔄 **Gapless Playback & Crossfading**: Seamless track transitions via a dual HTML5 audio node system. Crossfades outgoing and incoming tracks automatically over an adjustable 3-second transition period.
+- 🔀 **Dynamic Queue Management**: YouTube Music-style "Up Next" dynamic queue. Context menus allow you to choose "Play Next" or "Add to Queue" for any song. Both desktop and mobile player modals feature a dedicated "Up Next" queue tab with chunked, on-demand infinite scrolling.
+- 📡 **Infinite Autoplay (Station Mode)**: When your active play queue is exhausted, the app automatically transitions to Station Mode—fetching and appending 15 similar tracks based on the artist and genre of your last seed song.
+- 👥 **Secure Collaborative Playlists**: Invite specific users by email or exact display name to edit a playlist. View who contributed each track directly in the playlist view (displays *"Added by [User]"*). Toggling a playlist back to private automatically purges all collaborators and their access.
+- ⏳ **Sleep Timer**: Schedule music playback to automatically pause after a specified duration (accessible from user dropdown menus on desktop and mobile).
+- 📱 **Responsive UI**: Mobile-optimized, fast, and touch-friendly. Mobile player modal features dual tabs for Player and Up Next Queue layout.
 - ⚡ **PWA Support**: Install as an app on your phone or desktop. Works offline (caches static assets & some API). Manifest & service worker included.
 - 🚀 **No Database Setup**: Uses SQLite, auto-initialized on first run.
 - 👤 **User Accounts & Profiles**: Register/login, upload a custom profile picture, and view your personal statistics.
@@ -154,12 +159,15 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 - **Upload Limit**: Each user can upload up to 10 songs per day (resets at midnight).
 - **Scan Library**: Click "Scan All" in the sidebar to index or refresh your library (synchronizes disk files with database).
 - **Browse**: Use the sidebar to view all songs, favorites, albums, artists, genres, or your own uploads.
+- **Audio Enhancements**: Toggle volume normalization (Automatic Gain Control) or enable the 5-band Equalizer sliders inside the Settings panel to sculpt your sound.
 - **Playlists**: Create, edit, drag-to-reorder, import, export, and copy custom playlists. Add/remove songs easily.
+- **Manage Collaborators**: Toggle your playlist to Collaborative. From the playlist's 3-dot context menu, select "Manage Collaborators" to invite other users to contribute tracks by entering their exact username or email address. 
 - **Playlist Downloader**: Open the "Downloader" tool from the sidebar, enter a Playlist ID, and sequentially batch-download every track in that playlist to your device.
 - **Following**: Follow your favorite artists and users to easily access their tracks.
 - **Search**: Use the search bar (desktop/mobile) to instantly find songs, albums, or artists.
 - **Play Music**: Click a song to play, or use the player controls at the bottom.
 - **Favorites**: Click the heart icon to add/remove from favorites. Drag to reorder in "Favorites" view. Export or import your favorites at any time.
+- **Sleep Timer**: Click "Sleep Timer" in the user profile dropdown (desktop or mobile) and specify a countdown in minutes to automatically pause playback.
 - **Edit Metadata & Lyrics**: Right-click (or tap "..." on mobile) a song and choose "Edit Info" (your own uploads or as admin) to change Title, Artist, Album, Genre, Lyrics, and Cover Art. You can also view lyrics via "Show Lyrics" or check file details via "View Metadata".
   - **Adding Synchronized Lyrics (LRC):** When adding timestamps, ensure there is a space between the timestamp and the lyric text so the code parses it correctly.
     - ✅ **Correct:** `[00:15.30] Never gonna give you up`
@@ -190,13 +198,14 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 - **index.php** is both the backend API (`?action=...`) and the single-page frontend application.
 - User authentication is session-based (server-side PHP sessions) with secure password hashing.
 - User uploads are separated—each user can only manage and edit their own uploads.
-- Scanning uses getID3 for metadata and album art extraction, storing everything in `music.db` (SQLite).
+- Playback runs via an advanced dual HTML5 `<audio>` engine and Web Audio API routing `(Source -> Gain Node -> 5-Band EQ Filters -> Dynamics Compressor -> Destination)` for gapless crossfading and real-time audio enhancements, utilizing the Media Session API.
+- Scanning uses getID3 for database indexing, storing everything in `music.db` (SQLite).
 - Album art and profile pictures are extracted, resized, and converted to `.webp` on the fly to save space and bandwidth.
-- Playback runs via JavaScript and HTML5 `<audio>`, utilizing the Media Session API.
 - PWA support includes a generated web manifest and a dynamic service worker (`?pwa=manifest`, `?pwa=sw`) to handle offline caching. IndexedDB is used for version tracking.
 - Uploads are safely stored in `/uploads/{artist_slug}/` directories.
 - Complete metadata modification is supported via the `edit_metadata` action which updates the database, and writes ID3 tags back into the file using getID3's writetags function.
 - Playlists and favorites support fluid drag-and-drop ordering powered by SortableJS, pushing positional arrays back to the server.
+- Collaborative playlists track individual song contributions via an `added_by` column on the `playlist_songs` table, and authenticate editor permissions securely using a `playlist_collaborators` lookup.
 - Play histories and view counts are continuously logged locally (after 30 seconds of playback) to generate personalized "For You" shelves and track statistics.
 - A `follows` table tracks user-to-artist and user-to-user relationships.
 
@@ -233,4 +242,3 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 ---
 
 Enjoy your self-hosted PHP music player!  
-Contributions and feedback are always welcome.
