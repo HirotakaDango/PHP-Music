@@ -6649,10 +6649,10 @@ function perform_full_scan($db) {
             <li class="context-menu-item" data-action="download_cover" data-id="${songId}"><i class="bi bi-image"></i> Download Cover Art</li>
             <li class="context-menu-item" data-action="show_metadata" data-id="${songId}"><i class="bi bi-file-earmark-music"></i> View Metadata</li>
             <li class="context-menu-item" data-action="show_lyrics" data-id="${songId}"><i class="bi bi-music-note-list"></i> Show Lyrics</li>
-            <li class="context-menu-item" data-action="song_audio_settings" data-id="${songId}" data-title="${encodeURIComponent(title || '')}"><i class="bi bi-sliders"></i> Audio Settings (This Song)</li>
             `;
           
           if (currentUser) {
+            menuItems += `<li class="context-menu-item" data-action="song_audio_settings" data-id="${songId}" data-title="${encodeURIComponent(title || '')}"><i class="bi bi-sliders"></i> Audio Settings (This Song)</li>`;
             const favText = is_favorite ? "Remove from Favorites" : "Add to Favorites";
             const favIcon = is_favorite ? ICONS.heartFill : ICONS.heart;
             menuItems += `<hr class="dropdown-divider bg-secondary mx-2 my-1">`;
