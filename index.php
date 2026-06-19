@@ -131,12 +131,13 @@ function get_db() {
     $db->exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-64000; PRAGMA temp_store=MEMORY; PRAGMA mmap_size=30000000000; PRAGMA foreign_keys=ON;");
     
     $db->sqliteCreateFunction('match_artist', function($artist_field, $search_name) {
-        if ($artist_field === null) return 0;
-        $parts = preg_split('/\s*(?:\/|,|&)\s*/', $artist_field);
-        foreach ($parts as $part) {
-            if (strcasecmp($part, $search_name) === 0) return 1;
-        }
-        return 0;
+      if ($artist_field === null) return 0;
+      $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $artist_field);
+      if (!is_array($parts)) $parts = [$artist_field]; // Fallback to prevent crash
+      foreach ($parts as $part) {
+        if (strcasecmp(trim($part), trim($search_name)) === 0) return 1;
+      }
+      return 0;
     }, 2);
 
     return $db;
@@ -1094,7 +1095,7 @@ if (isset($_GET['action'])) {
         getid3_lib::CopyTagsToComments($info);
 
         $artist = trim($info['comments']['artist'][0] ?? 'Unknown Artist');
-        $main_artist = trim(preg_split('/\s*(?:\/|,|&)\s*/', $artist)[0]);
+        $main_artist = trim(preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $artist)[0]);
         if (empty($main_artist)) $main_artist = 'Unknown Artist';
         
         $artist_path = sanitize_for_path($main_artist);
@@ -1650,7 +1651,7 @@ if (isset($_GET['action'])) {
       $rows = $stmt->fetchAll();
       $artists = [];
       foreach ($rows as $row) {
-        $parts = preg_split('/\s*(?:\/|,|&)\s*/', $row['artist']);
+        $parts = preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
         foreach ($parts as $part) {
           $p = trim($part);
           if ($p !== '') {
@@ -1931,7 +1932,7 @@ if (isset($_GET['action'])) {
       $music_artists = $stmt->fetchAll();
       
       foreach ($music_artists as $ma) {
-        $parts = preg_split('/\s*(?:\/|,|&)\s*/', $ma['artist']);
+        $parts = preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $ma['artist']);
         foreach ($parts as $p) {
           $p = trim($p);
           if ($p !== '' && stripos($p, $q) !== false && !isset($added_artists[strtolower($p)])) {
@@ -2810,9 +2811,20 @@ function perform_full_scan($db) {
       white-space: pre-wrap; 
       word-wrap: break-word; 
       font-family: inherit;
+      margin-top: 75px;
     }
+    #header-wrap { position: fixed; top: 0; left: 0; right: 0; background: #121212; border-bottom: 1px solid #333; z-index: 10; }
+    #prog-wrap { padding: 12px 15px 5px 15px; display: flex; align-items: center; }
+    #prog-track { flex-grow: 1; background: #000; height: 12px; border-radius: 6px; overflow: hidden; margin-right: 15px; }
+    #prog-bar { width: 0%; height: 100%; background: #ff0000; transition: width 0.1s; }
+    #prog-txt { font-weight: bold; min-width: 45px; text-align: right; font-size: 14px;}
+    #warning-txt { padding: 0 15px 12px 15px; color: #ffc107; font-size: 12px; font-weight: bold; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
   </style>";
   
+  echo "<div id='header-wrap'>
+          <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
+          <div id='warning-txt'>⚠️ Please wait and don't close this modal, the process can take very long!</div>
+        </div>";
   echo "<pre>";
   echo "PHP Music Library - Full Scan\n";
   echo "===================================\n\n";
@@ -2911,7 +2923,13 @@ function perform_full_scan($db) {
       }
 
       $processed_count++;
-      echo "[$processed_count/$total_to_process] Processing: " . basename($filePath) . "\n";
+      $percent = floor(($processed_count / $total_to_process) * 100);
+      echo sprintf("[%3d%%] [%d/%d] Processing: %s\n", $percent, $processed_count, $total_to_process, basename($filePath));
+      
+      if (!isset($last_percent) || $percent > $last_percent) {
+        echo "<script>document.getElementById('prog-bar').style.width = '{$percent}%'; document.getElementById('prog-txt').innerText = '{$percent}%'; window.scrollTo(0, document.body.scrollHeight);</script>";
+        $last_percent = $percent;
+      }
       
       try {
         $info = $getID3->analyze($filePath);
@@ -2933,7 +2951,7 @@ function perform_full_scan($db) {
             $update_stmt->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime, $filePath]);
         } else {
             $file_user_id = $library_user_id;
-            $main_artist = trim(preg_split('/\s*(?:\/|,|&)\s*/', $artist_tag)[0]);
+            $main_artist = trim(preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $artist_tag)[0]);
 
             if ($main_artist !== 'Unknown Artist' && !empty($main_artist)) {
               $find_user_stmt->execute([$main_artist]);
@@ -2981,7 +2999,13 @@ function perform_full_scan($db) {
       }
 
       $processed_count++;
-      echo "[$processed_count/$total_to_process] Deleting: " . basename($filePath) . "\n";
+      $percent = floor(($processed_count / $total_to_process) * 100);
+      echo sprintf("[%3d%%] [%d/%d] Deleting: %s\n", $percent, $processed_count, $total_to_process, basename($filePath));
+      
+      if (!isset($last_percent) || $percent > $last_percent) {
+        echo "<script>document.getElementById('prog-bar').style.width = '{$percent}%'; document.getElementById('prog-txt').innerText = '{$percent}%'; window.scrollTo(0, document.body.scrollHeight);</script>";
+        $last_percent = $percent;
+      }
       $delete_stmt->execute([$filePath]);
     }
     
@@ -5007,8 +5031,18 @@ function perform_full_scan($db) {
           let targetContainer = document.getElementById('songs-pane') || contentArea;
 
           if (!songs || songs.length === 0) {
-            if (!append) {
-              targetContainer.insertAdjacentHTML('beforeend', `<div class="text-center p-5 text-secondary">No songs found.</div>`);
+            if (currentPage === 1) {
+              if (currentView.type === 'get_songs') {
+                targetContainer.innerHTML = `
+                  <div class="d-flex flex-column align-items-center justify-content-center text-secondary w-100" style="height: 60vh;">
+                    <i class="bi bi-music-note-beamed mb-3" style="font-size: 5rem; opacity: 0.3;"></i>
+                    <h3 class="fw-bold text-white">No songs detected, scan first</h3>
+                    <p class="text-secondary mt-2">Open the sidebar menu and select <strong><i class="bi bi-hdd-stack-fill"></i> Scan All</strong></p>
+                  </div>
+                `;
+              } else {
+                targetContainer.insertAdjacentHTML('beforeend', `<div class="text-center p-5 text-secondary">No songs found.</div>`);
+              }
             }
             allContentloaded = true;
             hideLoader();
@@ -6139,10 +6173,12 @@ function perform_full_scan($db) {
 
         const setQueueAndPlay = async (startId, view) => {
           const contextView = view || currentView;
+          let fetchedQueue = [];
+          
           if (contextView.type === 'get_recommendations' || contextView.type === 'search') {
             const allShelfSongs = [...document.querySelectorAll('.shelf-item[data-song-id], .song-item[data-song-id], .top-result-card[data-song-id]')];
             const allSongIds = allShelfSongs.map(item => parseInt(item.dataset.songId));
-            originalQueue = [...new Set(allSongIds)];
+            fetchedQueue = [...new Set(allSongIds)];
           } else {
             let viewTypeForIds = contextView.type;
             if (contextView.type === 'user_profile') viewTypeForIds = 'get_profile_songs';
@@ -6150,11 +6186,19 @@ function perform_full_scan($db) {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ view_type: viewTypeForIds, param: contextView.param, sort: contextView.sort, filter_user_id: contextView.filter_user_id || '' })
             });
-            if (!allIds || allIds.length === 0) return;
-            originalQueue = allIds;
+            
+            if (allIds && allIds.length > 0) {
+                fetchedQueue = allIds.map(id => parseInt(id));
+            }
           }
           
+          if (!fetchedQueue || fetchedQueue.length === 0) {
+            fetchedQueue = [startId];
+          }
+          
+          originalQueue = fetchedQueue;
           queue = [...originalQueue];
+          
           if (isShuffle) { isShuffle = false; toggleShuffle(); }
           
           queueIndex = queue.findIndex(id => id === startId);
@@ -6469,7 +6513,7 @@ function perform_full_scan($db) {
             if (!currentSong) return;
             const artistRaw = currentSong.artist;
             const userId = currentSong.user_id || '';
-            const artistsList = artistRaw.split(/\s*(?:,|&|\/)\s*/).filter(a => a.trim() !== '');
+            const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
             if (artistsList.length > 1) {
               if (artistsModalBody) {
                 artistsModalBody.innerHTML = `
