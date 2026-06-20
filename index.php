@@ -1786,7 +1786,7 @@ if (isset($_GET['action'])) {
           $default_sort = 'history_desc';
           break;
         case 'get_trending':
-          $sql = "SELECT pc.song_id as id FROM play_counts pc JOIN music m ON pc.song_id = m.id ";
+          $sql = "SELECT m.id FROM music m LEFT JOIN (SELECT song_id, SUM(play_count) as total_plays FROM play_counts GROUP BY song_id) pc ON m.id = pc.song_id ";
           $conditions = "WHERE 1=1";
           $default_sort = 'trending';
           break;
@@ -1851,7 +1851,7 @@ if (isset($_GET['action'])) {
         'year_desc' => 'ORDER BY m.year DESC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'year_asc' => 'ORDER BY m.year ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'history_desc' => 'ORDER BY MAX(h.played_at) DESC',
-        'trending' => 'GROUP BY pc.song_id ORDER BY SUM(pc.play_count) DESC LIMIT 100',
+        'trending' => 'ORDER BY COALESCE(pc.total_plays, 0) DESC, m.id DESC LIMIT 100',
         'random' => 'ORDER BY RANDOM()',
       ];
       if ($view_type === 'get_favorites') {
@@ -2610,11 +2610,14 @@ if (isset($_GET['action'])) {
       $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
       $stmt = $db->prepare("
         SELECT {$song_fields}
-        FROM play_counts pc
-        JOIN music m ON pc.song_id = m.id
+        FROM music m
+        LEFT JOIN (
+            SELECT song_id, SUM(play_count) as total_plays 
+            FROM play_counts 
+            GROUP BY song_id
+        ) pc ON m.id = pc.song_id
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-        GROUP BY pc.song_id
-        ORDER BY SUM(pc.play_count) DESC
+        ORDER BY COALESCE(pc.total_plays, 0) DESC, m.id DESC
         LIMIT ? OFFSET ?
       ");
       $stmt->bindValue(1, $user_id ? $user_id : 0, PDO::PARAM_INT);
