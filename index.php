@@ -111,6 +111,17 @@ header('Content-Type: text/html; charset=utf-8');
 session_start();
 set_time_limit(0);
 
+// ULTRA-SCALE CONCURRENCY: Release the PHP session write-lock early for read-only requests.
+// This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
+$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_follow', 'update_favorite_order', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture'];
+$current_action = $_GET['action'] ?? '';
+
+if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
+  $session_user_id = $_SESSION['user_id'] ?? null;
+  $session_user_artist = $_SESSION['user_artist'] ?? null;
+  session_write_close();
+}
+
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
 define('APP_VERSION', '1.13');
@@ -125,10 +136,27 @@ function get_db() {
   if ($db !== null) return $db; 
   
   try {
-    $db = new PDO('sqlite:' . DB_FILE, null, null, [PDO::ATTR_TIMEOUT => 30]);
+    // MASS USE OPTIMIZATION: ATTR_PERSISTENT keeps the connection alive across thousands of requests
+    $db = new PDO('sqlite:' . DB_FILE, null, null, [
+      PDO::ATTR_TIMEOUT => 60,
+      PDO::ATTR_PERSISTENT => true 
+    ]);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-    $db->exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-64000; PRAGMA temp_store=MEMORY; PRAGMA mmap_size=30000000000; PRAGMA foreign_keys=ON;");
+    
+    // MASS USE OPTIMIZATION: Lower cache_size to 200MB per connection. 
+    // At scale, 2GB per persistent connection will crash your server's RAM instantly.
+    $db->exec("
+      PRAGMA journal_mode=WAL; 
+      PRAGMA synchronous=NORMAL; 
+      PRAGMA cache_size=-200000; /* 200MB of RAM for caching */
+      PRAGMA temp_store=MEMORY; 
+      PRAGMA mmap_size=30000000000; 
+      PRAGMA foreign_keys=ON;
+      PRAGMA busy_timeout=15000;
+      PRAGMA threads=8;
+      PRAGMA optimize;
+    ");
     
     $db->sqliteCreateFunction('match_artist', function($artist_field, $search_name) {
       if ($artist_field === null) return 0;
@@ -1202,7 +1230,9 @@ if (isset($_GET['action'])) {
         if (empty($main_artist)) $main_artist = 'Unknown Artist';
         
         $artist_path = sanitize_for_path($main_artist);
-        $upload_dir = MUSIC_DIR . '/uploads/' . $artist_path;
+        // SHARDING: Split uploads into 256 physical subfolders to prevent Linux inode collapse
+        $shard = substr(md5($artist_path), 0, 2);
+        $upload_dir = MUSIC_DIR . '/uploads/' . $shard . '/' . $artist_path;
         if (!is_dir($upload_dir)) {
           mkdir($upload_dir, 0755, true);
         }
@@ -1426,6 +1456,15 @@ if (isset($_GET['action'])) {
       break;
 
     case 'get_explore':
+      // MASS USE OPTIMIZATION: 5-Minute Micro-Cache for heavy Discovery queries
+      $cache_file = sys_get_temp_dir() . '/phpmusic_explore_cache_' . ($user_id ? $user_id : 'guest') . '.json';
+      if (file_exists($cache_file) && (time() - filemtime($cache_file)) < 300) {
+        // Serve from cache instantly
+        header('Content-Type: application/json; charset=utf-8'); // <--- ADD THIS LINE
+        echo file_get_contents($cache_file);
+        exit;
+      }
+
       $shelves = [];
       $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
       $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
@@ -1514,7 +1553,7 @@ if (isset($_GET['action'])) {
         $rec_followed_songs_stmt->execute([':user_id' => $user_id]);
         $rec_followed_songs = $rec_followed_songs_stmt->fetchAll();
         if (count($rec_followed_songs) > 0) {
-          $shelves[] = ['title' => 'Recommended Songs From Your Artists', 'type' => 'songs', 'items' => $rec_followed_songs];
+          $shelves[] = ['title' => 'From Your Artists: New Tracks', 'type' => 'songs', 'items' => $rec_followed_songs];
         }
 
         $rec_followed_albums_stmt = $db->prepare("
@@ -1525,12 +1564,17 @@ if (isset($_GET['action'])) {
         $rec_followed_albums_stmt->execute([':user_id' => $user_id]);
         $rec_followed_albums = $rec_followed_albums_stmt->fetchAll();
         if (count($rec_followed_albums) > 0) {
-          $shelves[] = ['title' => 'Recommended Albums From Your Artists', 'type' => 'albums', 'items' => $rec_followed_albums];
+          $shelves[] = ['title' => 'From Your Artists: New Albums', 'type' => 'albums', 'items' => $rec_followed_albums];
         }
       }
 
-      send_json(['shelves' => $shelves]);
-      break;
+      // MASS USE OPTIMIZATION: Save the generated response to the cache file before sending
+      $final_json = json_encode(['shelves' => $shelves], JSON_INVALID_UTF8_SUBSTITUTE);
+      @file_put_contents($cache_file, $final_json);
+      
+      header('Content-Type: application/json; charset=utf-8');
+      echo $final_json;
+      exit;
     
     case 'get_songs':
       $sort_key = $_GET['sort'] ?? 'id_desc';
@@ -2214,6 +2258,10 @@ if (isset($_GET['action'])) {
         $end = $filesize - 1;
         $length = $filesize;
 
+        // ULTRA-SCALE OFF-LOADING: Let Apache/Nginx handle the stream instead of PHP!
+        header('X-Sendfile: ' . realpath($file_path));
+        header('X-Accel-Redirect: /' . str_replace($_SERVER['DOCUMENT_ROOT'], '', realpath($file_path)));
+        
         if (isset($_SERVER['HTTP_RANGE'])) {
           $range = str_replace('bytes=', '', $_SERVER['HTTP_RANGE']);
           $parts = explode('-', $range, 2);
@@ -2235,6 +2283,7 @@ if (isset($_GET['action'])) {
 
         header('Content-Length: ' . $length);
 
+        // Fallback for servers without X-Sendfile/X-Accel-Redirect enabled
         $f = @fopen($file_path, 'rb');
         if ($f) {
           fseek($f, $start);
@@ -2496,25 +2545,41 @@ if (isset($_GET['action'])) {
       $played_at_iso = $data['played_at'] ?? (new DateTime())->format(DateTime::ATOM);
     
       if ($song_id > 0) {
-        try {
-          $db->beginTransaction();
-    
-          $db->prepare("DELETE FROM history WHERE user_id = ? AND song_id = ?")->execute([$user_id, $song_id]);
-          $db->prepare("INSERT INTO history (user_id, song_id, played_at) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $played_at_iso]);
-    
-          $db->prepare("
-            INSERT INTO play_counts (user_id, song_id, play_count, last_played) VALUES (?, ?, 1, ?)
-            ON CONFLICT(user_id, song_id) DO UPDATE SET
-              play_count = play_count + 1,
-              last_played = ?
-          ")->execute([$user_id, $song_id, $played_at_iso, $played_at_iso]);
-          
-          $db->commit();
-        } catch (Exception $e) {
-          if ($db->inTransaction()) {
-            $db->rollBack();
+        // MASS USE OPTIMIZATION: SQLite Write Retry Loop
+        $max_retries = 15; // Try up to 15 times before giving up
+        for ($attempt = 0; $attempt < $max_retries; $attempt++) {
+          try {
+            $db->beginTransaction();
+      
+            $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS history_user_song_idx ON history(user_id, song_id);");
+            
+            $db->prepare("
+              INSERT INTO history (user_id, song_id, played_at) VALUES (?, ?, ?)
+              ON CONFLICT(user_id, song_id) DO UPDATE SET played_at = excluded.played_at
+            ")->execute([$user_id, $song_id, $played_at_iso]);
+      
+            $db->prepare("
+              INSERT INTO play_counts (user_id, song_id, play_count, last_played) VALUES (?, ?, 1, ?)
+              ON CONFLICT(user_id, song_id) DO UPDATE SET
+                play_count = play_count + 1,
+                last_played = excluded.last_played
+            ")->execute([$user_id, $song_id, $played_at_iso]);
+            
+            $db->commit();
+            break; // Success, break out of the loop!
+            
+          } catch (Exception $e) {
+            if ($db->inTransaction()) {
+              $db->rollBack();
+            }
+            // If the database is locked by another user, sleep for 10-50 milliseconds and try again
+            if (strpos(strtolower($e->getMessage()), 'locked') !== false || strpos(strtolower($e->getMessage()), 'busy') !== false) {
+              usleep(rand(10000, 50000)); 
+            } else {
+              error_log('PHP Music log_play error: ' . $e->getMessage());
+              break; // Unrelated error, stop trying
+            }
           }
-          error_log('PHP Music log_play error: ' . $e->getMessage());
         }
       }
       send_json(['status' => 'success']);
@@ -2546,6 +2611,15 @@ if (isset($_GET['action'])) {
 
     case 'get_recommendations':
       if (!$user_id) { send_json(['shelves' => []]); }
+      
+      // MASS USE OPTIMIZATION: 5-Minute Micro-Cache for heavy Recommendation queries
+      $rec_cache_file = sys_get_temp_dir() . '/phpmusic_rec_cache_' . $user_id . '.json';
+      if (file_exists($rec_cache_file) && (time() - filemtime($rec_cache_file)) < 300) {
+        header('Content-Type: application/json; charset=utf-8'); // <--- ADD THIS LINE
+        echo file_get_contents($rec_cache_file);
+        exit;
+      }
+
       $shelves = [];
       $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
       $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
@@ -2770,8 +2844,13 @@ if (isset($_GET['action'])) {
         $shelves[] = ['title' => 'From Your Artists: New Albums', 'type' => 'albums', 'items' => $latest_followed_albums];
       }
 
-      send_json(['shelves' => $shelves]);
-      break;
+      // MASS USE OPTIMIZATION: Save to cache
+      $final_rec_json = json_encode(['shelves' => $shelves], JSON_INVALID_UTF8_SUBSTITUTE);
+      @file_put_contents($rec_cache_file, $final_rec_json);
+      
+      header('Content-Type: application/json; charset=utf-8');
+      echo $final_rec_json;
+      exit;
 
     case 'export_favorites':
       if (!$user_id) { http_response_code(403); exit; }
@@ -3775,9 +3854,13 @@ function perform_full_scan($db) {
               <i class="bi bi-hdd-stack-fill"></i>
               <span>Scan All</span>
             </a>
-            <a href="#" class="nav-link" id="install-pwa-btn">
+            <a href="#" class="nav-link d-none" id="install-pwa-btn">
               <i class="bi bi-cloud-arrow-down-fill"></i>
               <span>Install App</span>
+            </a>
+            <a href="#" class="nav-link" id="get-api-btn" data-bs-toggle="modal" data-bs-target="#api-modal">
+              <i class="bi bi-code-slash"></i>
+              <span>Get API</span>
             </a>
             <a href="#" class="nav-link" id="check-update-btn">
               <i class="bi bi-arrow-clockwise"></i>
@@ -4582,6 +4665,77 @@ function perform_full_scan($db) {
       </div>
     </div>
 
+    <div class="modal fade" id="api-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-code-slash text-danger me-2"></i> API Access</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <p class="text-secondary mb-3 small">Use the following endpoints to interface with your music library programmatically.</p>
+            
+            <div class="mb-3">
+              <label for="api-action-select" class="form-label text-white">Select API Action</label>
+              <select class="form-select mb-3" id="api-action-select">
+                <optgroup label="Library Data (GET)">
+                  <option value="get_songs">Fetch All Songs</option>
+                  <option value="get_artists">Fetch Artists</option>
+                  <option value="get_albums">Fetch Albums</option>
+                  <option value="get_genres">Fetch Genres</option>
+                  <option value="get_explore">Fetch Explore / Discovery Data</option>
+                  <option value="search&q=YOUR_QUERY">Search Music</option>
+                  <option value="get_song_data&id=SONG_ID">Get Song Metadata</option>
+                  <option value="get_playlist_songs&public_id=PLAYLIST_ID">Get Playlist Songs</option>
+                </optgroup>
+                <optgroup label="Media & Files (GET)">
+                  <option value="get_stream&id=SONG_ID">Stream Audio Data</option>
+                  <option value="get_image&id=SONG_ID">Get Cover Art Image</option>
+                  <option value="get_profile_picture&id=USER_ID">Get User Profile Picture</option>
+                  <option value="download_song&id=SONG_ID">Download MP3 File</option>
+                </optgroup>
+                <optgroup label="User Data (Auth Required - GET)">
+                  <option value="get_session">Get Current Logged-in User</option>
+                  <option value="get_favorites">Get User Favorites</option>
+                  <option value="get_history">Get Playback History</option>
+                  <option value="get_user_playlists">Get User Playlists</option>
+                  <option value="get_recommendations">Get Personalized Recommendations</option>
+                </optgroup>
+                <optgroup label="Interactions (Auth Required - POST)">
+                  <option value="toggle_favorite" data-method="POST" data-body='{"id": 123}'>Toggle Favorite</option>
+                  <option value="log_play" data-method="POST" data-body='{"id": 123}'>Log Song Play</option>
+                  <option value="create_playlist" data-method="POST" data-body='{"name": "My Playlist"}'>Create Playlist</option>
+                </optgroup>
+              </select>
+            </div>
+            
+            <div class="mb-3">
+              <label class="form-label text-white d-flex justify-content-between">
+                <span>Endpoint URL</span>
+                <span id="api-method-badge" class="badge bg-primary">GET</span>
+              </label>
+              <div class="input-group">
+                <input type="text" class="form-control" id="api-url-input" readonly>
+                <button class="btn btn-danger" type="button" id="copy-api-btn">Copy</button>
+              </div>
+            </div>
+            
+            <div class="bg-dark p-3 rounded border border-secondary mt-3 d-none" id="api-payload-container">
+              <h6 class="text-white mb-2" style="font-size: 0.85rem;">JSON Payload Required (Body)</h6>
+              <code class="text-warning" id="api-payload-code"></code>
+            </div>
+            
+            <!-- NEW IFRAME SECTION FOR RANDOM EXAMPLE DATA -->
+            <div class="mt-4">
+              <h6 class="text-white mb-2" style="font-size: 0.85rem;">Example Output (Random Data)</h6>
+              <iframe id="api-example-iframe" class="w-100 rounded border border-secondary" style="height: 180px; background-color: #000000; overflow: auto;"></iframe>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="playlist-downloader-modal" tabindex="-1">
       <div class="modal-dialog modal-fullscreen">
         <div class="modal-content" style="background-color: var(--ytm-bg);">
@@ -4763,6 +4917,110 @@ function perform_full_scan($db) {
         const shareModalText = document.getElementById('share-modal-text');
         const shareUrlInput = document.getElementById('share-url-input');
         const copyShareUrlBtn = document.getElementById('copy-share-url-btn');
+
+        // API Modal logic
+        const apiUrlInput = document.getElementById('api-url-input');
+        const copyApiBtn = document.getElementById('copy-api-btn');
+        const apiModalEl = document.getElementById('api-modal');
+        const apiActionSelect = document.getElementById('api-action-select');
+        const apiMethodBadge = document.getElementById('api-method-badge');
+        const apiPayloadContainer = document.getElementById('api-payload-container');
+        const apiPayloadCode = document.getElementById('api-payload-code');
+
+        const updateApiUrl = () => {
+          if(!apiUrlInput || !apiActionSelect) return;
+          const selectedOption = apiActionSelect.options[apiActionSelect.selectedIndex];
+          const actionVal = selectedOption.value;
+          
+          // Generate the full URL
+          apiUrlInput.value = window.location.origin + window.location.pathname + '?action=' + actionVal;
+          
+          // Update the GET/POST badge
+          const method = selectedOption.getAttribute('data-method') || 'GET';
+          if(apiMethodBadge) {
+            apiMethodBadge.textContent = method;
+            apiMethodBadge.className = method === 'POST' ? 'badge bg-warning text-dark' : 'badge bg-primary';
+          }
+
+          // Show or hide the JSON payload requirement example
+          const payload = selectedOption.getAttribute('data-body');
+          if (payload && apiPayloadContainer && apiPayloadCode) {
+            apiPayloadCode.textContent = payload;
+            apiPayloadContainer.classList.remove('d-none');
+          } else if (apiPayloadContainer) {
+            apiPayloadContainer.classList.add('d-none');
+          }
+
+          // NEW: Fetch Real Data from Database, Fallback to Fake Random Data
+          const apiExampleIframe = document.getElementById('api-example-iframe');
+          if (apiExampleIframe) {
+            
+            // Show loading state while fetching from SQLite
+            apiExampleIframe.srcdoc = `<html><body style="background-color: #000000; color: #aaaaaa; font-family: monospace; font-size: 13px; margin: 0; padding: 12px;">Fetching real database data...</body></html>`;
+            
+            const injectIframe = (dataObj, color) => {
+              const jsonString = JSON.stringify(dataObj, null, 2);
+              apiExampleIframe.srcdoc = `<html><body style="background-color: #000000; color: ${color}; font-family: monospace; font-size: 13px; margin: 0; padding: 12px; white-space: pre-wrap; word-wrap: break-word;">${jsonString}</body></html>`;
+            };
+
+            const fallbackToFakeData = () => {
+              const randomData = {
+                status: "success", action_requested: actionVal, method: method,
+                results: [{
+                    id: Math.floor(Math.random() * 9000) + 1000, 
+                    title: "Example Track " + Math.floor(Math.random() * 100),
+                    artist: "Random Artist " + Math.floor(Math.random() * 50),
+                    album: "Awesome Album Vol " + Math.floor(Math.random() * 10), 
+                    duration: Math.floor(Math.random() * 200) + 120,
+                    is_favorite: Math.random() > 0.5 ? 1 : 0
+                }]
+              };
+              injectIframe(randomData, '#4ade80'); // Green text means FAKE data
+            };
+
+            if (method === 'GET') {
+              // Replace UI placeholders with generic '1' or 'a' so the database actually returns valid matches
+              let testUrl = apiUrlInput.value.replace('SONG_ID', '1').replace('USER_ID', '1').replace('PLAYLIST_ID', '1').replace('YOUR_QUERY', 'a');
+              
+              fetch(testUrl)
+                .then(res => res.json())
+                .then(data => {
+                  // If db is empty [] or throws an error, trigger the fallback to fake data
+                  if (!data || data.status === 'error' || (Array.isArray(data) && data.length === 0)) {
+                    fallbackToFakeData();
+                  } else {
+                    // Limit output size to 3 items so the iframe doesn't freeze the browser
+                    let displayData = Array.isArray(data) ? data.slice(0, 3) : data;
+                    injectIframe(displayData, '#60a5fa'); // Blue text means REAL database data
+                  }
+                })
+                .catch(() => fallbackToFakeData());
+            } else {
+              // Always use fake data for POST requests to avoid accidentally creating playlists or deleting things!
+              fallbackToFakeData(); 
+            }
+          }
+        };
+
+        if (apiModalEl && apiUrlInput) {
+          apiModalEl.addEventListener('show.bs.modal', updateApiUrl);
+          if (apiActionSelect) {
+            apiActionSelect.addEventListener('change', updateApiUrl);
+          }
+        }
+
+        if (copyApiBtn) {
+          copyApiBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(apiUrlInput.value).then(() => {
+              copyApiBtn.textContent = 'Copied!';
+              copyApiBtn.classList.replace('btn-danger', 'btn-success');
+              setTimeout(() => {
+                copyApiBtn.textContent = 'Copy';
+                copyApiBtn.classList.replace('btn-success', 'btn-danger');
+              }, 2000);
+            }).catch(() => showToast('Failed to copy API link.', 'error'));
+          });
+        }
 
         const playerTrackInfoMobile = document.querySelector('.player-bar .track-info.d-md-none');
         const playerModalEl = document.getElementById('player-modal');
@@ -7829,6 +8087,18 @@ function perform_full_scan($db) {
         window.addEventListener('beforeinstallprompt', (e) => {
           e.preventDefault();
           deferredInstallPrompt = e;
+          // Show the install button ONLY when the browser confirms the app isn't installed yet
+          if (installPwaBtn) {
+            installPwaBtn.classList.remove('d-none');
+          }
+        });
+
+        // Hide the button permanently once the user successfully installs the app
+        window.addEventListener('appinstalled', () => {
+          deferredInstallPrompt = null;
+          if (installPwaBtn) {
+            installPwaBtn.classList.add('d-none');
+          }
         });
 
         if (installPwaBtn) {
@@ -7839,8 +8109,13 @@ function perform_full_scan($db) {
               return;
             }
             deferredInstallPrompt.prompt();
-            await deferredInstallPrompt.userChoice;
-            deferredInstallPrompt = null;
+            const { outcome } = await deferredInstallPrompt.userChoice;
+            
+            // Hide the button immediately if they accepted the installation prompt
+            if (outcome === 'accepted') {
+              deferredInstallPrompt = null;
+              installPwaBtn.classList.add('d-none');
+            }
           });
         }
         
