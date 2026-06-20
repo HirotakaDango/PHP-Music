@@ -1785,6 +1785,11 @@ if (isset($_GET['action'])) {
           $params[] = $user_id;
           $default_sort = 'history_desc';
           break;
+        case 'get_trending':
+          $sql = "SELECT pc.song_id as id FROM play_counts pc JOIN music m ON pc.song_id = m.id ";
+          $conditions = "WHERE 1=1";
+          $default_sort = 'trending';
+          break;
         case 'artist_songs':
           $conditions = "WHERE match_artist(m.artist, ?) = 1";
           $params[] = $param;
@@ -1794,6 +1799,11 @@ if (isset($_GET['action'])) {
           $conditions = "WHERE m.album = ?";
           $params[] = $param;
           $default_sort = 'title_asc';
+          break;
+        case 'year_songs':
+          $conditions = "WHERE m.year = ?";
+          $params[] = $param;
+          $default_sort = 'artist_asc';
           break;
         case 'genre_songs':
           $conditions = "WHERE m.genre = ?";
@@ -1841,6 +1851,7 @@ if (isset($_GET['action'])) {
         'year_desc' => 'ORDER BY m.year DESC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'year_asc' => 'ORDER BY m.year ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'history_desc' => 'ORDER BY MAX(h.played_at) DESC',
+        'trending' => 'GROUP BY pc.song_id ORDER BY SUM(pc.play_count) DESC LIMIT 100',
         'random' => 'ORDER BY RANDOM()',
       ];
       if ($view_type === 'get_favorites') {
@@ -1904,6 +1915,11 @@ if (isset($_GET['action'])) {
     
     case 'get_genres':
       $stmt = $db->query("SELECT genre as name, MAX(id) as id FROM music WHERE genre != '' AND genre IS NOT NULL GROUP BY genre ORDER BY genre COLLATE NOCASE" . $limit_clause);
+      send_json($stmt->fetchAll());
+      break;
+    
+    case 'get_years':
+      $stmt = $db->query("SELECT year as name, MAX(id) as id FROM music WHERE year > 0 AND year IS NOT NULL GROUP BY year ORDER BY year DESC" . $limit_clause);
       send_json($stmt->fetchAll());
       break;
     
@@ -2011,7 +2027,7 @@ if (isset($_GET['action'])) {
           foreach($songs as $s) { $details['total_duration'] += $s['duration']; }
           $details['song_count'] = count($songs);
         }
-      } elseif (in_array($type, ['artist', 'album', 'genre'])) {
+      } elseif (in_array($type, ['artist', 'album', 'genre', 'year'])) {
         if (empty($name)) { http_response_code(400); exit; }
         $field = $type;
         $filter_user_id = $_GET['filter_user_id'] ?? '';
@@ -2590,6 +2606,24 @@ if (isset($_GET['action'])) {
       send_json(['status' => 'success']);
       break;
       
+    case 'get_trending':
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $stmt = $db->prepare("
+        SELECT {$song_fields}
+        FROM play_counts pc
+        JOIN music m ON pc.song_id = m.id
+        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
+        GROUP BY pc.song_id
+        ORDER BY SUM(pc.play_count) DESC
+        LIMIT ? OFFSET ?
+      ");
+      $stmt->bindValue(1, $user_id ? $user_id : 0, PDO::PARAM_INT);
+      $stmt->bindValue(2, (int)PAGE_SIZE, PDO::PARAM_INT);
+      $stmt->bindValue(3, (int)$offset, PDO::PARAM_INT);
+      $stmt->execute();
+      send_json($stmt->fetchAll());
+      break; 
+    
     case 'get_history':
       if (!$user_id) { send_json([]); }
       $stmt = $db->prepare("
@@ -3796,6 +3830,14 @@ function perform_full_scan($db) {
           <a href="#" class="nav-link" data-view="get_genres">
             <i class="bi bi-tags-fill"></i>
             <span>Genres</span>
+          </a>
+          <a href="#" class="nav-link" data-view="get_years">
+            <i class="bi bi-calendar-event-fill"></i>
+            <span>Years</span>
+          </a>
+          <a href="#" class="nav-link" data-view="get_trending">
+            <i class="bi bi-graph-up-arrow"></i>
+            <span>Top 100 Trending</span>
           </a>
 
           <hr class="text-secondary">
@@ -5903,11 +5945,6 @@ function perform_full_scan($db) {
           
           songList.insertAdjacentHTML('beforeend', songsHTML);
 
-          const modalQueueList = document.querySelector('#desktop-player-queue-list .song-list');
-          if (modalQueueList && append) {
-            modalQueueList.insertAdjacentHTML('beforeend', songsHTML);
-          }
-
           const isSortableFavorites = currentView.type === 'get_favorites' && currentView.sort === 'manual_order';
           const isSortablePlaylist = currentView.type === 'playlist_songs' && currentView.sort === 'manual_order';
 
@@ -6008,11 +6045,11 @@ function perform_full_scan($db) {
                 dataType = 'playlist';
                 dataValue = item.public_id;
                 publicId = item.public_id;
-              } else if (type === 'get_genres') {
+              } else if (type === 'get_genres' || type === 'get_years') {
                 name = item.name;
                 subtext = null;
                 imageId = item.id;
-                dataType = 'genre';
+                dataType = type === 'get_years' ? 'year' : 'genre';
                 dataValue = name;
                 publicId = '';
               } else {
@@ -6031,7 +6068,7 @@ function perform_full_scan($db) {
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>` : '';
 
-              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists' || type === 'get_following' || type === 'get_genres') {
+              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists' || type === 'get_following' || type === 'get_genres' || type === 'get_years') {
                 return `<div class="col">
                   <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
                     ${moreButton}
@@ -6221,13 +6258,14 @@ function perform_full_scan($db) {
         };
         
         const setupSortOptions = (viewType) => {
-          const isSortable = ['get_favorites', 'artist_songs', 'album_songs', 'genre_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
+          const isSortable = ['get_favorites', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
           
           if (isSortable) {
             let options = {};
             
             switch(viewType) {
               case 'genre_songs':
+              case 'year_songs':
                 options = {
                   'id_desc': 'Recently Added', 'artist_asc': 'Artist', 'title_asc': 'Title', 'album_asc': 'Album',
                   'year_desc': 'Year (Newest)', 'year_asc': 'Year (Oldest)'
@@ -6292,6 +6330,12 @@ function perform_full_scan($db) {
           showLoader(false);
           
           currentPage++;
+          if (currentView.type === 'get_trending' && currentPage > 4) {
+            allContentloaded = true;
+            isLoadingMore = false;
+            hideLoader();
+            return;
+          }
           let data;
           const { type, param, sort, filter_user_id } = currentView;
 
@@ -6304,6 +6348,7 @@ function perform_full_scan($db) {
             case 'get_songs':
             case 'get_favorites':
             case 'get_history':
+            case 'get_trending':
               data = await fetchData(`?action=${type}&${params.toString()}`);
               renderSongs(data, true);
               break;
@@ -6317,6 +6362,7 @@ function perform_full_scan($db) {
             case 'artist_songs':
             case 'album_songs':
             case 'genre_songs':
+            case 'year_songs':
               const filterType = type.split('_')[0];
               const viewData = await fetchData(`?action=get_view_data&type=${filterType}&name=${param}&${params.toString()}`);
               if (viewData && viewData.songs) {
@@ -6335,6 +6381,7 @@ function perform_full_scan($db) {
             case 'get_albums':
             case 'get_artists':
             case 'get_genres':
+            case 'get_years':
             case 'get_user_playlists':
             case 'get_following':
               data = await fetchData(`?action=${type}&${params.toString()}`);
@@ -6359,6 +6406,7 @@ function perform_full_scan($db) {
             case 'artist_songs': activeLink = document.querySelector('.nav-link[data-view="get_artists"]'); break;
             case 'album_songs': activeLink = document.querySelector('.nav-link[data-view="get_albums"]'); break;
             case 'genre_songs': activeLink = document.querySelector('.nav-link[data-view="get_genres"]'); break;
+            case 'year_songs': activeLink = document.querySelector('.nav-link[data-view="get_years"]'); break;
             case 'playlist_songs': activeLink = document.querySelector('.nav-link[data-view="get_user_playlists"]'); break;
             default: activeLink = document.querySelector(`.nav-link[data-view="${viewType}"]`);
           }
@@ -6380,12 +6428,6 @@ function perform_full_scan($db) {
 
           selectedSongs.clear();
           updateMultiSelectUI();
-          
-          queueDirty = true;
-          const modalQueueListD = document.getElementById('desktop-player-queue-list');
-          if (modalQueueListD) modalQueueListD.innerHTML = '';
-          const modalQueueListM = document.getElementById('mobile-player-queue-list');
-          if (modalQueueListM) modalQueueListM.innerHTML = '';
           
           mainContent.scrollTop = 0;
           currentPage = 1;
@@ -6480,6 +6522,11 @@ function perform_full_scan($db) {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your history.</div>`;
               }
               break;
+            case 'get_trending':
+              updateContentTitle('Top 100 Trending');
+              data = await fetchData(`?action=get_trending&${pageParams.toString()}`);
+              renderSongs(data, false);
+              break;
             case 'get_following':
               updateContentTitle('Following', !!currentUser);
               if (currentUser) {
@@ -6503,6 +6550,7 @@ function perform_full_scan($db) {
             case 'get_albums':
             case 'get_artists':
             case 'get_genres':
+            case 'get_years':
             case 'get_user_playlists':
               let title = currentView.type.replace('get_', '');
               title = title.charAt(0).toUpperCase() + title.slice(1);
@@ -6515,6 +6563,7 @@ function perform_full_scan($db) {
             case 'artist_songs':
             case 'album_songs':
             case 'genre_songs':
+            case 'year_songs':
             case 'playlist_songs':
             case 'mix_songs':
               const type = currentView.type.split('_')[0];
@@ -7595,6 +7644,10 @@ function perform_full_scan($db) {
             } else if (cardEl.dataset.genre) {
               viewType = 'genre_songs';
               param = cardEl.dataset.genre;
+              sort = 'artist_asc';
+            } else if (cardEl.dataset.year) {
+              viewType = 'year_songs';
+              param = cardEl.dataset.year;
               sort = 'artist_asc';
             } else if (cardEl.dataset.playlist) {
               viewType = 'playlist_songs';
