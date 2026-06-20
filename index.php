@@ -1250,8 +1250,11 @@ if (isset($_GET['action'])) {
           $raw_image_data = isset($info['comments']['picture'][0]['data']) ? $info['comments']['picture'][0]['data'] : null;
           $webp_image_data = process_image_to_webp($raw_image_data);
 
+          $filePath = str_replace('\\', '/', $filePath); // Normalize slashes
+          $actual_mtime = filemtime($filePath); // Get exact OS file modification time
+          
           $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-          $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, time()]);
+          $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $actual_mtime]);
 
           $new_count = ($user_data['last_upload_date'] === $today) ? $daily_upload_count + 1 : 1;
           $update_stmt = $db->prepare("UPDATE users SET daily_upload_count = ?, last_upload_date = ? WHERE id = ?");
@@ -1430,7 +1433,8 @@ if (isset($_GET['action'])) {
             'title' => [htmlspecialchars_decode($new_title, ENT_QUOTES)],
             'artist' => [htmlspecialchars_decode($new_artist, ENT_QUOTES)],
             'album' => [htmlspecialchars_decode($new_album, ENT_QUOTES)],
-            'genre' => [htmlspecialchars_decode($new_genre, ENT_QUOTES)]
+            'genre' => [htmlspecialchars_decode($new_genre, ENT_QUOTES)],
+            'unsynchronised_lyric' => [htmlspecialchars_decode($new_lyrics, ENT_QUOTES)] // <-- ADD LYRICS
           ];
 
           if ($jpeg_data) {
@@ -1444,6 +1448,7 @@ if (isset($_GET['action'])) {
             ];
           }
           $tagwriter->WriteTags();
+          clearstatcache(true, $song['file']);
           $new_mtime = filemtime($song['file']);
           $db->prepare("UPDATE music SET last_modified = ? WHERE id = ?")->execute([$new_mtime, $song_id]);
         }
@@ -3166,6 +3171,7 @@ function perform_full_scan($db) {
   echo "'Music Library' user ID: {$library_user_id}\n\n";
 
   echo "Step 3: Fetching existing music records from database...\n";
+  $db->exec("UPDATE music SET file = REPLACE(file, '\\', '/')"); 
   $stmt = $db->query("SELECT file, last_modified FROM music");
   $db_files = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
   echo "Found " . count($db_files) . " records in the database.\n\n";
@@ -3187,7 +3193,7 @@ function perform_full_scan($db) {
       if ($file->isDir()) {
         continue;
       }
-      $filePath = $file->getRealPath();
+      $filePath = str_replace('\\', '/', $file->getRealPath()); // Normalize slashes
       if (preg_match('/\.(mp3|m4a|flac|ogg|wav)$/i', $filePath)) {
         $files_on_disk[$filePath] = $file->getMTime();
       }
