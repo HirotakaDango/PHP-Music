@@ -175,7 +175,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '1.13');
+define('APP_VERSION', '3.6');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -4118,7 +4118,7 @@ function perform_full_scan($db) {
             </a>
             <a href="#" class="nav-link" data-view="get_offline_songs">
               <i class="bi bi-cloud-arrow-down-fill"></i>
-              <span>Offline Music</span>
+              <span>Offline Library</span>
             </a>
             <a href="#" class="nav-link" data-view="get_following">
               <i class="bi bi-person-lines-fill"></i>
@@ -4832,7 +4832,7 @@ function perform_full_scan($db) {
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
           <div class="modal-header border-0">
-            <h5 class="modal-title">Import Offline Music</h5>
+            <h5 class="modal-title">Import Offline Library</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body">
