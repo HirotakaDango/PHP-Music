@@ -3642,6 +3642,7 @@ function perform_full_scan($db) {
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css" />
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
     <?php echo $initialViewJS; ?>
     <style>
@@ -4010,8 +4011,10 @@ function perform_full_scan($db) {
       #sleep-timer-bubble { position: fixed; top: 80px; right: 20px; background: rgba(30, 30, 30, 0.9); backdrop-filter: blur(10px); border: 1px solid var(--ytm-surface-2); border-radius: 50px; padding: 8px 16px; z-index: 1060; display: flex; align-items: center; gap: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); cursor: grab; user-select: none; touch-action: none; }
       #sleep-timer-bubble:active { cursor: grabbing; }
       #sleep-timer-bubble .time { font-weight: bold; font-family: monospace; font-size: 1.1rem; color: #fff; }
-      #sleep-timer-bubble .cancel-btn { background: none; border: none; color: var(--ytm-secondary-text); padding: 0; font-size: 1.2rem; display: flex; align-items: center; }
-      #sleep-timer-bubble .cancel-btn:hover { color: var(--ytm-accent); }
+      #sleep-timer-bubble .action-btn { background: none; border: none; padding: 0; font-size: 1.2rem; display: flex; align-items: center; transition: color 0.2s; }
+      #sleep-timer-bubble .action-btn:hover { color: var(--ytm-primary-text) !important; }
+      #sleep-timer-bubble #sleep-timer-cancel-btn:hover { color: var(--ytm-accent) !important; }
+      #sleep-timer-bubble #sleep-timer-wake-btn.active { color: var(--ytm-accent) !important; } }
     </style>
   </head>
   <body class="logged-out">
@@ -4407,11 +4410,11 @@ function perform_full_scan($db) {
                 </div>
                 
                 <div class="d-flex justify-content-between align-items-center w-100 mx-auto" style="max-width: 400px;">
-                  <button class="player-btn text-white fs-2" id="player-modal-shuffle-btn"><i class="bi bi-shuffle"></i></button>
+                  <button class="player-btn fs-2" id="player-modal-shuffle-btn"><i class="bi bi-shuffle"></i></button>
                   <button class="player-btn text-white fs-1" id="player-modal-prev-btn"><i class="bi bi-skip-start-fill"></i></button>
                   <button class="player-btn play-btn bg-white text-dark rounded-circle d-flex align-items-center justify-content-center" id="player-modal-play-pause-btn" style="width: 70px; height: 70px;"><i class="bi bi-play-fill fs-1"></i></button>
                   <button class="player-btn text-white fs-1" id="player-modal-next-btn"><i class="bi bi-skip-end-fill"></i></button>
-                  <button class="player-btn text-white fs-2" id="player-modal-repeat-btn"><i class="bi bi-repeat"></i></button>
+                  <button class="player-btn fs-2" id="player-modal-repeat-btn"><i class="bi bi-repeat"></i></button>
                 </div>
                 
               </div>
@@ -4590,12 +4593,17 @@ function perform_full_scan($db) {
           <div class="modal-body">
             <h6>Profile Picture</h6>
             <form id="profile-picture-form" class="mb-4 text-center">
-                <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="profile-picture-preview" class="profile-picture-lg mb-3" alt="Profile Picture Preview">
+                <div style="max-width: 300px; margin: 0 auto;" class="mb-3">
+                    <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="profile-picture-preview" class="profile-picture-lg" style="width: 100%; display: block; max-width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;" alt="Profile Picture Preview">
+                </div>
                 <div class="mb-3">
                     <label for="profile-picture-input" class="form-label">Upload new picture</label>
                     <input class="form-control" type="file" id="profile-picture-input" accept="image/png, image/jpeg, image/gif">
                 </div>
-                <button type="submit" class="btn btn-danger w-100">Save Picture</button>
+                <button type="submit" class="btn btn-danger w-100" id="profile-picture-submit-btn">Save Picture</button>
+                <div class="progress mt-3 d-none" id="profile-pic-progress-container" style="height: 15px;">
+                  <div id="profile-pic-progress" class="progress-bar progress-bar-striped progress-bar-animated bg-danger" role="progressbar" style="width: 0%;">0%</div>
+                </div>
             </form>
             <hr class="text-secondary">
             <h6 class="mt-4">Change Display Name</h6>
@@ -4851,7 +4859,9 @@ function perform_full_scan($db) {
             <form id="edit-metadata-form" enctype="multipart/form-data">
               <input type="hidden" id="edit-metadata-id">
               <div class="mb-3 text-center">
-                <img id="edit-metadata-cover-preview" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="img-thumbnail bg-transparent border-secondary mb-2" style="width: 150px; height: 150px; object-fit: cover; border-radius: 8px;">
+                <div style="max-width: 300px; margin: 0 auto;" class="mb-2">
+                   <img id="edit-metadata-cover-preview" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="img-thumbnail bg-transparent border-secondary" style="width: 100%; display: block; max-width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;">
+                </div>
                 <input type="file" class="form-control form-control-sm" id="edit-metadata-cover" accept="image/*">
                 <small class="text-secondary d-block mt-1">Upload a new cover image (1:1 crop)</small>
               </div>
@@ -4875,7 +4885,10 @@ function perform_full_scan($db) {
                 <label class="form-label">Lyrics</label>
                 <textarea class="form-control" id="edit-metadata-lyrics" rows="4"></textarea>
               </div>
-              <button type="submit" class="btn btn-danger w-100">Save Changes</button>
+              <button type="submit" class="btn btn-danger w-100" id="edit-metadata-submit-btn">Save Changes</button>
+              <div class="progress mt-3 d-none" id="metadata-progress-container" style="height: 15px;">
+                <div id="metadata-progress" class="progress-bar progress-bar-striped progress-bar-animated bg-danger" role="progressbar" style="width: 0%;">0%</div>
+              </div>
             </form>
           </div>
         </div>
@@ -5124,11 +5137,14 @@ function perform_full_scan($db) {
     <div id="sleep-timer-bubble" class="d-none">
       <i class="bi bi-moon-stars-fill text-info"></i>
       <span class="time" id="sleep-timer-countdown">00:00</span>
-      <button class="cancel-btn" id="sleep-timer-cancel-btn"><i class="bi bi-x-circle-fill"></i></button>
+      <button class="action-btn text-secondary" id="sleep-timer-wake-btn" title="Toggle Screen Awake"><i class="bi bi-display"></i></button>
+      <button class="action-btn text-secondary" id="sleep-timer-cancel-btn" title="Cancel Timer"><i class="bi bi-x-circle-fill"></i></button>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nosleep/0.12.0/NoSleep.min.js"></script>
     <script>
       document.addEventListener('DOMContentLoaded', () => {
         'use strict';
@@ -5664,6 +5680,8 @@ function perform_full_scan($db) {
         let isQueueLoading = false;
         let sleepTimerInterval = null;
         let sleepTimerEndTime = 0;
+        let wakeLockSentinel = null;
+        let sleepTimerKeepAwake = false;
         
         let holdTimer;
         let multiSelectMode = false;
@@ -8372,6 +8390,12 @@ function perform_full_scan($db) {
               document.getElementById('edit-metadata-artist').value = songArtist;
               document.getElementById('edit-metadata-album').value = decodeURIComponent(album || '');
               document.getElementById('edit-metadata-genre').value = decodeURIComponent(genre || '');
+              
+              if (typeof metadataCropper !== 'undefined' && metadataCropper) {
+                metadataCropper.destroy();
+                metadataCropper = null;
+              }
+              
               document.getElementById('edit-metadata-cover-preview').src = `?action=get_image&id=${id}&v=${Date.now()}`;
               document.getElementById('edit-metadata-cover').value = '';
               const metaSongDataToEdit = await fetchData(`?action=get_song_data&id=${id}`);
@@ -9303,9 +9327,21 @@ function perform_full_scan($db) {
           });
         }
 
+        let metadataCropper = null;
+
         if (editMetadataForm) {
           editMetadataForm.addEventListener('submit', async e => {
             e.preventDefault();
+            
+            const submitBtn = document.getElementById('edit-metadata-submit-btn');
+            const progContainer = document.getElementById('metadata-progress-container');
+            const progBar = document.getElementById('metadata-progress');
+            
+            submitBtn.disabled = true;
+            progContainer.classList.remove('d-none');
+            progBar.style.width = '0%';
+            progBar.textContent = '0%';
+
             const formData = new FormData();
             formData.append('id', document.getElementById('edit-metadata-id').value);
             formData.append('title', document.getElementById('edit-metadata-title').value);
@@ -9313,21 +9349,57 @@ function perform_full_scan($db) {
             formData.append('album', document.getElementById('edit-metadata-album').value);
             formData.append('genre', document.getElementById('edit-metadata-genre').value);
             formData.append('lyrics', document.getElementById('edit-metadata-lyrics').value);
-            
-            const coverInput = document.getElementById('edit-metadata-cover');
-            if (coverInput && coverInput.files.length > 0) {
-              formData.append('cover_image', coverInput.files[0]);
-            }
-            
-            const result = await fetchData('?action=edit_metadata', {
-              method: 'POST',
-              body: formData
-            });
-            
-            if (result && result.status === 'success') {
-              showToast(result.message, 'success');
-              if (editMetadataModal) editMetadataModal.hide();
-              loadView(currentView);
+
+            const doMetadataUpload = () => {
+              const xhr = new XMLHttpRequest();
+              xhr.open('POST', '?action=edit_metadata', true);
+              xhr.upload.onprogress = (evt) => {
+                if (evt.lengthComputable) {
+                  const pct = Math.round((evt.loaded / evt.total) * 100);
+                  progBar.style.width = pct + '%';
+                  progBar.textContent = pct + '%';
+                }
+              };
+              xhr.onload = () => {
+                submitBtn.disabled = false;
+                progContainer.classList.add('d-none');
+                if (xhr.status === 200) {
+                  try {
+                    const result = JSON.parse(xhr.responseText);
+                    if (result && result.status === 'success') {
+                      showToast(result.message, 'success');
+                      if (metadataCropper) { metadataCropper.destroy(); metadataCropper = null; }
+                      if (editMetadataModal) editMetadataModal.hide();
+                      loadView(currentView);
+                    } else {
+                      showToast(result.message || 'Upload failed', 'error');
+                    }
+                  } catch(err) {
+                    showToast('Invalid server response.', 'error');
+                  }
+                } else {
+                  showToast('Upload error', 'error');
+                }
+              };
+              xhr.onerror = () => {
+                submitBtn.disabled = false;
+                progContainer.classList.add('d-none');
+                showToast('Network error during upload', 'error');
+              };
+              xhr.send(formData);
+            };
+
+            if (metadataCropper) {
+              metadataCropper.getCroppedCanvas({ width: 600, height: 600 }).toBlob(blob => {
+                formData.append('cover_image', blob, 'cover.jpg');
+                doMetadataUpload();
+              }, 'image/jpeg', 0.85);
+            } else {
+              const coverInput = document.getElementById('edit-metadata-cover');
+              if (coverInput && coverInput.files.length > 0) {
+                formData.append('cover_image', coverInput.files[0]);
+              }
+              doMetadataUpload();
             }
           });
 
@@ -9337,7 +9409,16 @@ function perform_full_scan($db) {
               if (this.files && this.files[0]) {
                 const reader = new FileReader();
                 reader.onload = e => {
-                  document.getElementById('edit-metadata-cover-preview').src = e.target.result;
+                  const preview = document.getElementById('edit-metadata-cover-preview');
+                  preview.src = e.target.result;
+                  if (metadataCropper) metadataCropper.destroy();
+                  metadataCropper = new Cropper(preview, {
+                    aspectRatio: 1,
+                    viewMode: 1,
+                    autoCropArea: 1,
+                    dragMode: 'move',
+                    background: false
+                  });
                 };
                 reader.readAsDataURL(this.files[0]);
               }
@@ -9442,11 +9523,51 @@ function perform_full_scan($db) {
         const sleepTimerBubble = document.getElementById('sleep-timer-bubble');
         const sleepTimerCountdown = document.getElementById('sleep-timer-countdown');
         const sleepTimerCancelBtn = document.getElementById('sleep-timer-cancel-btn');
+        const sleepTimerWakeBtn = document.getElementById('sleep-timer-wake-btn');
+
+        let noSleep = new NoSleep();
+
+        const releaseWakeLock = () => {
+          if (sleepTimerKeepAwake) {
+            noSleep.disable();
+            sleepTimerKeepAwake = false;
+            if (sleepTimerWakeBtn) {
+              sleepTimerWakeBtn.classList.remove('active');
+              sleepTimerWakeBtn.innerHTML = '<i class="bi bi-display"></i>';
+            }
+          }
+        };
+
+        const toggleWakeLock = async (e) => {
+          if (e) e.stopPropagation();
+          
+          if (sleepTimerKeepAwake) {
+            releaseWakeLock();
+            showToast('Screen wake lock disabled.', 'info');
+          } else {
+            try {
+              noSleep.enable();
+              sleepTimerKeepAwake = true;
+              if (sleepTimerWakeBtn) {
+                sleepTimerWakeBtn.classList.add('active');
+                sleepTimerWakeBtn.innerHTML = '<i class="bi bi-display-fill"></i>';
+              }
+              showToast('Screen will stay awake.', 'success');
+            } catch (err) {
+              showToast("Failed to acquire screen wake lock.", "error");
+            }
+          }
+        };
+
+        if (sleepTimerWakeBtn) {
+          sleepTimerWakeBtn.addEventListener('click', toggleWakeLock);
+        }
 
         const cancelSleepTimer = () => {
           if (sleepTimerInterval) clearInterval(sleepTimerInterval);
           sleepTimerInterval = null;
           sleepTimerBubble.classList.add('d-none');
+          releaseWakeLock();
           showToast('Sleep timer canceled.', 'info');
         };
 
@@ -9464,6 +9585,8 @@ function perform_full_scan($db) {
           }
           const mins = prompt("Stop playing after how many minutes?", "30");
           if (mins && !isNaN(mins) && parseInt(mins) > 0) {
+            releaseWakeLock();
+
             const ms = parseInt(mins) * 60000;
             sleepTimerEndTime = Date.now() + ms;
             
@@ -9474,6 +9597,7 @@ function perform_full_scan($db) {
                 clearInterval(sleepTimerInterval);
                 sleepTimerInterval = null;
                 sleepTimerBubble.classList.add('d-none');
+                releaseWakeLock();
                 if (isPlaying) togglePlayPause();
                 showToast('Sleep timer reached. Playback paused.', 'info');
                 return;
@@ -9496,7 +9620,7 @@ function perform_full_scan($db) {
         let bubbleOffsetX, bubbleOffsetY;
 
         const startDragBubble = (e) => {
-          if (e.target.closest('.cancel-btn')) return;
+          if (e.target.closest('.action-btn')) return;
           isDraggingBubble = true;
           const clientX = e.touches ? e.touches[0].clientX : e.clientX;
           const clientY = e.touches ? e.touches[0].clientY : e.clientY;
@@ -9572,25 +9696,94 @@ function perform_full_scan($db) {
           }
         });
         
+        let profileCropper = null;
+        const profilePicInput = document.getElementById('profile-picture-input');
+        const profilePicPreview = document.getElementById('profile-picture-preview');
+        
+        if (profilePicInput) {
+          profilePicInput.addEventListener('change', function(e) {
+            if (this.files && this.files[0]) {
+              const reader = new FileReader();
+              reader.onload = e => {
+                profilePicPreview.src = e.target.result;
+                if (profileCropper) profileCropper.destroy();
+                profileCropper = new Cropper(profilePicPreview, {
+                  aspectRatio: 1,
+                  viewMode: 1,
+                  autoCropArea: 1,
+                  dragMode: 'move',
+                  background: false
+                });
+              };
+              reader.readAsDataURL(this.files[0]);
+            }
+          });
+        }
+
         profilePicForm.addEventListener('submit', async e => {
           e.preventDefault();
-          const fileInput = document.getElementById('profile-picture-input');
-          if (fileInput.files.length === 0) {
+          if (profilePicInput.files.length === 0 && !profileCropper) {
             showToast('Please select an image file.', 'error');
             return;
           }
-          const formData = new FormData();
-          formData.append('profile_picture', fileInput.files[0]);
 
-          const result = await fetchData('?action=upload_profile_picture', {
-            method: 'POST',
-            body: formData
-          });
+          const submitBtn = document.getElementById('profile-picture-submit-btn');
+          const progContainer = document.getElementById('profile-pic-progress-container');
+          const progBar = document.getElementById('profile-pic-progress');
+          
+          submitBtn.disabled = true;
+          progContainer.classList.remove('d-none');
+          progBar.style.width = '0%';
+          progBar.textContent = '0%';
 
-          if (result && result.status === 'success') {
-            showToast(result.message, 'success');
-            await checkSession();
-            bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
+          const doUpload = (blob) => {
+            const formData = new FormData();
+            formData.append('profile_picture', blob, 'profile.jpg');
+
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '?action=upload_profile_picture', true);
+            xhr.upload.onprogress = (evt) => {
+              if (evt.lengthComputable) {
+                const pct = Math.round((evt.loaded / evt.total) * 100);
+                progBar.style.width = pct + '%';
+                progBar.textContent = pct + '%';
+              }
+            };
+            xhr.onload = async () => {
+              submitBtn.disabled = false;
+              progContainer.classList.add('d-none');
+              if (xhr.status === 200) {
+                try {
+                  const result = JSON.parse(xhr.responseText);
+                  if (result.status === 'success') {
+                    showToast(result.message, 'success');
+                    if (profileCropper) { profileCropper.destroy(); profileCropper = null; }
+                    await checkSession();
+                    bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
+                  } else {
+                    showToast(result.message || 'Upload failed', 'error');
+                  }
+                } catch(err) {
+                  showToast('Invalid server response.', 'error');
+                }
+              } else {
+                showToast('Upload error', 'error');
+              }
+            };
+            xhr.onerror = () => {
+              submitBtn.disabled = false;
+              progContainer.classList.add('d-none');
+              showToast('Network error during upload', 'error');
+            };
+            xhr.send(formData);
+          };
+
+          if (profileCropper) {
+            profileCropper.getCroppedCanvas({ width: 500, height: 500 }).toBlob(blob => {
+              doUpload(blob);
+            }, 'image/jpeg', 0.85);
+          } else {
+             doUpload(profilePicInput.files[0]);
           }
         });
 
