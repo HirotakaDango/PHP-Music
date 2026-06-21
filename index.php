@@ -3672,7 +3672,9 @@ function perform_full_scan($db) {
             if ('caches' in window) {
               const names = await caches.keys();
               for (let name of names) {
-                caches.delete(name);
+                if (name !== 'php-music-offline') {
+                  caches.delete(name);
+                }
               }
             }
           }
@@ -5503,6 +5505,27 @@ function perform_full_scan($db) {
           
           renderedQueueCount += nextChunkIds.length;
           isQueueLoading = false;
+
+          // Verify cache and show warning indicator for missing offline files in Up Next
+          if (currentView.type === 'get_offline_songs' || !navigator.onLine) {
+            caches.open('php-music-offline').then(cache => {
+              const addedItems = document.querySelectorAll('#desktop-player-queue-list .song-item:not(.queue-cache-checked), #mobile-player-queue-list .song-item:not(.queue-cache-checked)');
+              addedItems.forEach(async item => {
+                item.classList.add('queue-cache-checked');
+                const sid = item.dataset.songId;
+                const req = await cache.match(`?action=get_stream&id=${sid}`, { ignoreSearch: false, ignoreVary: true });
+                if (!req) {
+                  item.classList.add('offline-missing');
+                  item.style.transition = 'opacity 0.3s ease';
+                  item.style.opacity = '0.4';
+                  const titleWrapper = item.querySelector('.song-title-wrapper');
+                  if (titleWrapper && !titleWrapper.querySelector('.offline-missing-icon')) {
+                     titleWrapper.insertAdjacentHTML('beforeend', ' <i class="bi bi-cloud-slash-fill text-warning offline-missing-icon" title="Not cached for offline." style="font-size: 0.85rem; cursor: help;"></i>');
+                  }
+                }
+              });
+            });
+          }
           
           // Focus the playing song if it was a total reset
           if (reset && currentSong) {
@@ -6268,7 +6291,7 @@ function perform_full_scan($db) {
               addedItems.forEach(async item => {
                 item.classList.add('cache-checked');
                 const sid = item.dataset.songId;
-                const req = await cache.match(`?action=get_stream&id=${sid}`);
+                const req = await cache.match(`?action=get_stream&id=${sid}`, { ignoreSearch: false, ignoreVary: true });
                 if (!req) {
                   item.classList.add('offline-missing');
                   item.style.opacity = '0.4';
@@ -9176,7 +9199,11 @@ function perform_full_scan($db) {
             } catch (err) {}
             if ('caches' in window) {
               const keys = await caches.keys();
-              await Promise.all(keys.map(key => caches.delete(key)));
+              await Promise.all(keys.map(key => {
+                if (key !== 'php-music-offline') {
+                  return caches.delete(key);
+                }
+              }));
             }
             if ('serviceWorker' in navigator) {
               const registrations = await navigator.serviceWorker.getRegistrations();
