@@ -36,7 +36,7 @@ if (isset($_GET['pwa'])) {
     header('Content-Type: application/javascript; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     echo <<<SW
-const CACHE_NAME = 'php-music-cache-v28';
+const CACHE_NAME = 'php-music-cache-v29';
 const STATIC_ASSETS =[
   './',
   'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
@@ -57,7 +57,7 @@ self.addEventListener('activate', event => {
     caches.keys().then(cacheNames => {
       return Promise.all(
         cacheNames.map(cacheName => {
-          if (cacheWhitelist.indexOf(cacheName) === -1) {
+          if (cacheWhitelist.indexOf(cacheName) === -1 && cacheName !== 'php-music-offline' && cacheName !== 'php-music-api-cache') {
             return caches.delete(cacheName);
           }
         })
@@ -68,10 +68,56 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
-  const isApiCall = url.searchParams.has('action') || url.searchParams.has('share_type');
-  const isPwaCall = url.searchParams.has('pwa');
+  const isStream = url.searchParams.get('action') === 'get_stream';
+  
+  if (isStream) {
+    event.respondWith(
+      caches.match(event.request.url).then(async cachedResponse => {
+        if (cachedResponse) {
+          const rangeHeader = event.request.headers.get('range');
+          if (!rangeHeader) return cachedResponse;
+          
+          const buffer = await cachedResponse.clone().arrayBuffer();
+          const bytes = rangeHeader.match(/bytes=(\d+)-(\d+)?/);
+          const start = Number(bytes[1]);
+          const end = bytes[2] ? Number(bytes[2]) : buffer.byteLength - 1;
+          
+          const chunk = buffer.slice(start, end + 1);
+          return new Response(chunk, {
+            status: 206,
+            statusText: 'Partial Content',
+            headers: {
+              'Content-Range': `bytes \${start}-\${end}/\${buffer.byteLength}`,
+              'Content-Length': chunk.byteLength,
+              'Content-Type': cachedResponse.headers.get('Content-Type') || 'audio/mpeg',
+              'Accept-Ranges': 'bytes'
+            }
+          });
+        }
+        return fetch(event.request);
+      })
+    );
+    return;
+  }
 
-  if (isApiCall || isPwaCall || event.request.headers.get('range')) {
+  const isApiCall = url.searchParams.has('action') || url.searchParams.has('share_type');
+  if (isApiCall) {
+    event.respondWith(
+      fetch(event.request).then(response => {
+        if (event.request.method === 'GET' && response.ok) {
+          const clone = response.clone();
+          caches.open('php-music-api-cache').then(cache => cache.put(event.request, clone));
+        }
+        return response;
+      }).catch(() => {
+        return caches.match(event.request);
+      })
+    );
+    return;
+  }
+
+  const isPwaCall = url.searchParams.has('pwa');
+  if (isPwaCall || event.request.headers.get('range')) {
     event.respondWith(fetch(event.request));
     return;
   }
@@ -108,12 +154,17 @@ SW;
 }
 
 header('Content-Type: text/html; charset=utf-8');
-session_start();
+ini_set('session.gc_maxlifetime', 31536000); // 1 year
+ini_set('session.cookie_lifetime', 31536000);
+session_start([
+  'cookie_lifetime' => 31536000,
+  'gc_maxlifetime' => 31536000,
+]);
 set_time_limit(0);
 
 // ULTRA-SCALE CONCURRENCY: Release the PHP session write-lock early for read-only requests.
 // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
-$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_follow', 'update_favorite_order', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture'];
+$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture'];
 $current_action = $_GET['action'] ?? '';
 
 if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
@@ -631,6 +682,17 @@ function init_db($db) {
     if (!in_array('lyrics', $music_columns)) $db->exec("ALTER TABLE music ADD COLUMN lyrics TEXT;");
   }
   
+  $db->exec("
+    CREATE TABLE IF NOT EXISTS offline_songs (
+      user_id INTEGER NOT NULL,
+      song_id INTEGER NOT NULL,
+      sort_order INTEGER,
+      PRIMARY KEY (user_id, song_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+    );
+  ");
+  $db->exec("CREATE INDEX IF NOT EXISTS offline_user_id_idx ON offline_songs(user_id);");
   $db->exec("
     CREATE TABLE IF NOT EXISTS favorites (
       user_id INTEGER NOT NULL,
@@ -1637,6 +1699,133 @@ if (isset($_GET['action'])) {
       send_json($stmt->fetchAll());
       break;
 
+    case 'get_offline_ids':
+      if (!$user_id) { send_json([]); }
+      $stmt = $db->prepare("SELECT song_id FROM offline_songs WHERE user_id = ?");
+      $stmt->execute([$user_id]);
+      send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
+      break;
+
+    case 'get_offline_songs':
+      if (!$user_id) { send_json([]); }
+      $sort_key = $_GET['sort'] ?? 'manual_order';
+      $sort_map = [
+        'manual_order' => 'ORDER BY os.sort_order ASC',
+        'added_newest' => 'ORDER BY os.sort_order DESC',
+        'added_oldest' => 'ORDER BY os.sort_order ASC',
+        'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
+        'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
+        'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
+      ];
+      $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE os.user_id = ? " . $order_by . $limit_clause);
+      $stmt->execute([$user_id, $user_id]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'toggle_offline':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $song_id = intval($data['id']);
+      $stmt = $db->prepare("SELECT song_id FROM offline_songs WHERE user_id = ? AND song_id = ?");
+      $stmt->execute([$user_id, $song_id]);
+      if ($stmt->fetch()) {
+        $db->prepare("DELETE FROM offline_songs WHERE user_id = ? AND song_id = ?")->execute([$user_id, $song_id]);
+        send_json(['status' => 'removed', 'is_offline' => false]);
+      } else {
+        $stmt = $db->prepare("SELECT MAX(sort_order) as max_order FROM offline_songs WHERE user_id = ?");
+        $stmt->execute([$user_id]);
+        $max_order = $stmt->fetchColumn() ?? 0;
+        $db->prepare("INSERT INTO offline_songs (user_id, song_id, sort_order) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $max_order + 1]);
+        send_json(['status' => 'added', 'is_offline' => true]);
+      }
+      break;
+
+    case 'update_offline_order':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $ordered_ids = $data['ids'];
+      $db->beginTransaction();
+      try {
+        foreach ($ordered_ids as $index => $song_id) {
+          $db->prepare("UPDATE offline_songs SET sort_order = ? WHERE user_id = ? AND song_id = ?")
+             ->execute([$index, $user_id, $song_id]);
+        }
+        $db->commit();
+        send_json(['status' => 'success']);
+      } catch (Exception $e) {
+        $db->rollBack();
+        http_response_code(500);
+        send_json(['status' => 'error', 'message' => 'Failed to update order.']);
+      }
+      break;
+      
+    case 'export_offline':
+      if (!$user_id) { http_response_code(403); exit; }
+      $stmt = $db->prepare("SELECT m.file, m.title, m.artist, m.album FROM offline_songs os JOIN music m ON os.song_id = m.id WHERE os.user_id = ? ORDER BY os.sort_order ASC");
+      $stmt->execute([$user_id]);
+      $rows = $stmt->fetchAll();
+      if (empty($rows)) { http_response_code(404); exit; }
+
+      $song_data = array_map(function($row) { return ['title' => $row['title'], 'artist' => $row['artist'], 'album' => $row['album'], 'filename' => basename(str_replace('\\', '/', $row['file']))]; }, $rows);
+      $export_data = ['name' => 'Offline Music', 'songs' => $song_data];
+      
+      header('Content-Type: application/json');
+      header('Content-Disposition: attachment; filename="offline_music.json"');
+      echo json_encode($export_data, JSON_PRETTY_PRINT);
+      exit;
+
+    case 'import_offline':
+      if (!$user_id) { http_response_code(403); exit; }
+      $import_data = json_decode(file_get_contents('php://input'), true);
+      if (json_last_error() !== JSON_ERROR_NONE || !isset($import_data['songs']) || !is_array($import_data['songs'])) {
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or malformed JSON payload.']);
+      }
+
+      $db->beginTransaction();
+      try {
+        $stmt_taa = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE AND album = ? COLLATE NOCASE LIMIT 1");
+        $stmt_ta = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE LIMIT 1");
+        $stmt_t_artist_match = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND match_artist(artist, ?) = 1 LIMIT 1");
+        $stmt_ta_like = $db->prepare("SELECT id FROM music WHERE title LIKE ? COLLATE NOCASE AND artist LIKE ? COLLATE NOCASE LIMIT 1");
+        $stmt_file = $db->prepare("SELECT id FROM music WHERE file LIKE ? OR file LIKE ? LIMIT 1");
+        $stmt_insert = $db->prepare("INSERT OR IGNORE INTO offline_songs (user_id, song_id, sort_order) VALUES (?, ?, ?)");
+        
+        $stmt_order = $db->prepare("SELECT MAX(sort_order) FROM offline_songs WHERE user_id = ?");
+        $stmt_order->execute([$user_id]);
+        $order = (int)$stmt_order->fetchColumn();
+
+        $song_count = 0;
+        foreach ($import_data['songs'] as $song) {
+          $title = is_array($song) ? trim($song['title'] ?? '') : '';
+          $artist = is_array($song) ? trim($song['artist'] ?? '') : '';
+          $album = is_array($song) ? trim($song['album'] ?? '') : '';
+          $filename = basename(str_replace('\\', '/', is_array($song) ? ($song['filename'] ?? '') : $song));
+          
+          $found_id = null;
+          if ($title !== '' && $artist !== '') {
+            if ($album !== '') { $stmt_taa->execute([$title, $artist, $album]); $found_id = $stmt_taa->fetchColumn(); }
+            if (!$found_id) { $stmt_ta->execute([$title, $artist]); $found_id = $stmt_ta->fetchColumn(); }
+            if (!$found_id) { $stmt_t_artist_match->execute([$title, $artist]); $found_id = $stmt_t_artist_match->fetchColumn(); }
+            if (!$found_id) { $stmt_ta_like->execute(['%' . $title . '%', '%' . $artist . '%']); $found_id = $stmt_ta_like->fetchColumn(); }
+          }
+          if (!$found_id && $filename !== '') {
+            $stmt_file->execute(['%/' . $filename, '%\\' . $filename]); $found_id = $stmt_file->fetchColumn();
+            if (!$found_id) { $stmt_file->execute(['%' . $filename, '%' . $filename]); $found_id = $stmt_file->fetchColumn(); }
+          }
+          if ($found_id) {
+            $order++; $stmt_insert->execute([$user_id, $found_id, $order]);
+            if ($stmt_insert->rowCount() > 0) $song_count++;
+          }
+        }
+        $db->commit();
+        send_json(['status' => 'success', 'message' => "Offline list imported with {$song_count} songs."]);
+      } catch (Exception $e) {
+        $db->rollBack();
+        http_response_code(500); send_json(['status' => 'error', 'message' => 'Database error during import.']);
+      }
+      break;
+
     case 'get_favorites':
       if (!$user_id) { send_json([]); }
       $sort_key = $_GET['sort'] ?? 'manual_order';
@@ -1778,6 +1967,13 @@ if (isset($_GET['action'])) {
           $params[] = $user_id;
           $default_sort = 'manual_order';
           break;
+        case 'get_offline_songs':
+          if (!$user_id) { send_json([]); }
+          $sql = "SELECT m.id FROM music m JOIN offline_songs os ON m.id = os.song_id ";
+          $conditions = "WHERE os.user_id = ?";
+          $params[] = $user_id;
+          $default_sort = 'manual_order';
+          break;
         case 'get_history':
           if (!$user_id) { send_json([]); }
           $sql = "SELECT m.id FROM music m JOIN history h ON m.id = h.song_id ";
@@ -1858,6 +2054,10 @@ if (isset($_GET['action'])) {
         $sort_map['manual_order'] = 'ORDER BY f.sort_order ASC';
         $sort_map['added_newest'] = 'ORDER BY f.sort_order DESC';
         $sort_map['added_oldest'] = 'ORDER BY f.sort_order ASC';
+      } elseif ($view_type === 'get_offline_songs') {
+        $sort_map['manual_order'] = 'ORDER BY os.sort_order ASC';
+        $sort_map['added_newest'] = 'ORDER BY os.sort_order DESC';
+        $sort_map['added_oldest'] = 'ORDER BY os.sort_order ASC';
       } elseif ($view_type === 'playlist_songs') {
         $sort_map['manual_order'] = 'ORDER BY ps.sort_order ASC';
         $sort_map['added_newest'] = 'ORDER BY ps.added_at DESC';
@@ -3866,6 +4066,10 @@ function perform_full_scan($db) {
               <i class="bi bi-music-note-beamed"></i>
               <span>Playlists</span>
             </a>
+            <a href="#" class="nav-link" data-view="get_offline_songs">
+              <i class="bi bi-cloud-arrow-down-fill"></i>
+              <span>Offline Music</span>
+            </a>
             <a href="#" class="nav-link" data-view="get_following">
               <i class="bi bi-person-lines-fill"></i>
               <span>Following</span>
@@ -4550,6 +4754,25 @@ function perform_full_scan($db) {
               <div class="mb-3">
                 <label for="import-playlist-file" class="form-label">Select JSON file</label>
                 <input type="file" class="form-control" id="import-playlist-file" accept="application/json,.json" required>
+              </div>
+              <button type="submit" class="btn btn-danger w-100">Import</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal fade" id="import-offline-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header border-0">
+            <h5 class="modal-title">Import Offline Music</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="import-offline-form">
+              <div class="mb-3">
+                <label for="import-offline-file" class="form-label">Select JSON file</label>
+                <input type="file" class="form-control" id="import-offline-file" accept="application/json,.json" required>
               </div>
               <button type="submit" class="btn btn-danger w-100">Import</button>
             </form>
@@ -5424,6 +5647,7 @@ function perform_full_scan($db) {
         let currentLrcSongId = null;
         let currentLyricIndex = -1;
         let globalSongCache = {};
+        let offlineSongsSet = new Set();
         let renderedQueueCount = 0;
         let isQueueLoading = false;
         let sleepTimerTimeout = null;
@@ -5947,11 +6171,32 @@ function perform_full_scan($db) {
           `}).join('');
           
           songList.insertAdjacentHTML('beforeend', songsHTML);
+          
+          // Verify cache and show warning indicator for missing offline files
+          if (currentView.type === 'get_offline_songs') {
+            caches.open('php-music-offline').then(cache => {
+              const addedItems = songList.querySelectorAll('.song-item:not(.cache-checked)');
+              addedItems.forEach(async item => {
+                item.classList.add('cache-checked');
+                const sid = item.dataset.songId;
+                const req = await cache.match(`?action=get_stream&id=${sid}`);
+                if (!req) {
+                  item.classList.add('offline-missing');
+                  item.style.opacity = '0.4';
+                  const titleWrapper = item.querySelector('.song-title-wrapper');
+                  if (titleWrapper && !titleWrapper.querySelector('.offline-missing-icon')) {
+                     titleWrapper.insertAdjacentHTML('beforeend', ' <i class="bi bi-cloud-slash-fill text-warning offline-missing-icon" title="Not fully cached. Please Re-download." style="font-size: 0.85rem; cursor: help;"></i>');
+                  }
+                }
+              });
+            });
+          }
 
           const isSortableFavorites = currentView.type === 'get_favorites' && currentView.sort === 'manual_order';
           const isSortablePlaylist = currentView.type === 'playlist_songs' && currentView.sort === 'manual_order';
+          const isSortableOffline = currentView.type === 'get_offline_songs' && currentView.sort === 'manual_order';
 
-          if ((isSortableFavorites || isSortablePlaylist) && !sortable) {
+          if ((isSortableFavorites || isSortablePlaylist || isSortableOffline) && !sortable) {
             sortable = Sortable.create(songList, {
               animation: 150,
               ghostClass: 'ghost',
@@ -5970,7 +6215,10 @@ function perform_full_scan($db) {
                 const songItems = Array.from(songList.querySelectorAll('.song-item'));
                 const newOrderIds = songItems.map(item => item.dataset.songId);
                 
-                const action = isSortableFavorites ? 'update_favorite_order' : 'update_playlist_order';
+                let action = 'update_playlist_order';
+                if (isSortableFavorites) action = 'update_favorite_order';
+                else if (isSortableOffline) action = 'update_offline_order';
+
                 const body = { 
                   ids: newOrderIds,
                   ...(isSortablePlaylist && { playlist_public_id: decodeURIComponent(currentView.param) })
@@ -6261,7 +6509,7 @@ function perform_full_scan($db) {
         };
         
         const setupSortOptions = (viewType) => {
-          const isSortable = ['get_favorites', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
+          const isSortable = ['get_favorites', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
           
           if (isSortable) {
             let options = {};
@@ -6285,6 +6533,7 @@ function perform_full_scan($db) {
                   'year_desc': 'Year (Newest)', 'year_asc': 'Year (Oldest)'};
                   break;
               case 'get_favorites':
+              case 'get_offline_songs':
               case 'playlist_songs':
                 options = { 
                   'manual_order': 'My Order', 'added_newest': 'Added Newest', 'added_oldest': 'Added Oldest',
@@ -6327,7 +6576,7 @@ function perform_full_scan($db) {
 
         const loadMoreContent = async () => {
           if (isLoadingMore || allContentloaded || currentView.type === 'search') return;
-          if (!currentUser && (currentView.type === 'get_favorites' || currentView.type === 'get_history' || currentView.type === 'get_following')) return;
+          if (!currentUser && (currentView.type === 'get_favorites' || currentView.type === 'get_offline_songs' || currentView.type === 'get_history' || currentView.type === 'get_following')) return;
           
           isLoadingMore = true;
           showLoader(false);
@@ -6350,6 +6599,7 @@ function perform_full_scan($db) {
           switch (type) {
             case 'get_songs':
             case 'get_favorites':
+            case 'get_offline_songs':
             case 'get_history':
             case 'get_trending':
               data = await fetchData(`?action=${type}&${params.toString()}`);
@@ -6432,6 +6682,11 @@ function perform_full_scan($db) {
           selectedSongs.clear();
           updateMultiSelectUI();
           
+          if (sortable) {
+            sortable.destroy();
+            sortable = null;
+          }
+          
           mainContent.scrollTop = 0;
           currentPage = 1;
           allContentloaded = false;
@@ -6502,6 +6757,19 @@ function perform_full_scan($db) {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your statistics.</div>`;
               }
               allContentloaded = true;
+              break;
+            case 'get_offline_songs':
+              updateContentTitle('Offline Music', !!currentUser);
+              if (currentUser) {
+                contentArea.innerHTML = `<div class="p-3 d-flex gap-2">
+                  <a href="?action=export_offline" class="btn btn-outline-light" id="export-offline-btn"><i class="bi bi-box-arrow-up"></i> Export Offline</a>
+                  <button class="btn btn-outline-light" id="import-offline-btn"><i class="bi bi-box-arrow-in-down"></i> Import Offline</button>
+                </div>`;
+                data = await fetchData(`?action=get_offline_songs&${pageParams.toString()}`);
+                renderSongs(data, true);
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your offline music.</div>`;
+              }
               break;
             case 'get_favorites':
               updateContentTitle('Favorites', !!currentUser);
@@ -6951,12 +7219,17 @@ function perform_full_scan($db) {
             return;
           }
           contextMenuItemEl = buttonEl;
-          const { id: songId, title, artist, album, genre, user_id: songUserId, is_favorite } = songData;
+          const { id: songId, title, artist, album, genre, user_id: songUserId, is_favorite, is_offline_missing } = songData;
           
-          let menuItems = `
-            <li class="context-menu-item" data-action="play_next" data-id="${songId}"><i class="bi bi-skip-end-fill"></i> Play Next</li>
-            <li class="context-menu-item" data-action="add_to_queue" data-id="${songId}"><i class="bi bi-list-ul"></i> Add to Queue</li>
-            <hr class="dropdown-divider bg-secondary mx-2 my-1">
+          let menuItems = '';
+          if (!is_offline_missing) {
+            menuItems += `
+              <li class="context-menu-item" data-action="play_next" data-id="${songId}"><i class="bi bi-skip-end-fill"></i> Play Next</li>
+              <li class="context-menu-item" data-action="add_to_queue" data-id="${songId}"><i class="bi bi-list-ul"></i> Add to Queue</li>
+              <hr class="dropdown-divider bg-secondary mx-2 my-1">`;
+          }
+          
+          menuItems += `
             <li class="context-menu-item" data-action="share_song" data-id="${songId}" data-name="${encodeURIComponent(title)}"><i class="bi bi-share-fill"></i> Share Song</li>
             <li class="context-menu-item" data-action="go_artist" data-name="${encodeURIComponent(artist)}" data-userid="${songUserId}"><i class="bi bi-person-fill"></i> Go to Artist</li>
             <li class="context-menu-item" data-action="go_album" data-name="${encodeURIComponent(album)}" data-userid="${songUserId}"><i class="bi bi-disc-fill"></i> Go to Album</li>
@@ -6971,8 +7244,15 @@ function perform_full_scan($db) {
             menuItems += `<li class="context-menu-item" data-action="song_audio_settings" data-id="${songId}" data-title="${encodeURIComponent(title || '')}"><i class="bi bi-sliders"></i> Audio Settings (This Song)</li>`;
             const favText = is_favorite ? "Remove from Favorites" : "Add to Favorites";
             const favIcon = is_favorite ? ICONS.heartFill : ICONS.heart;
+            const offText = offlineSongsSet.has(songId) ? "Remove from Offline" : "Make Available Offline";
+            const offIcon = offlineSongsSet.has(songId) ? '<i class="bi bi-cloud-check-fill text-success"></i>' : '<i class="bi bi-cloud-arrow-down"></i>';
             menuItems += `<hr class="dropdown-divider bg-secondary mx-2 my-1">`;
             menuItems += `<li class="context-menu-item" data-action="toggle_favorite" data-id="${songId}">${favIcon} ${favText}</li>`;
+            menuItems += `<li class="context-menu-item" data-action="toggle_offline" data-id="${songId}">${offIcon} ${offText}</li>`;
+            if (offlineSongsSet.has(songId)) {
+              menuItems += `<li class="context-menu-item" data-action="save_to_device" data-id="${songId}" data-title="${encodeURIComponent(title)}"><i class="bi bi-device-hdd text-info"></i> Save File to Device</li>`;
+              menuItems += `<li class="context-menu-item" data-action="recache_offline" data-id="${songId}"><i class="bi bi-arrow-repeat text-warning"></i> Re-download Cache</li>`;
+            }
             menuItems += `<li class="context-menu-item" data-action="add_to_playlist" data-id="${songId}"><i class="bi bi-plus-lg"></i> Add to Playlist</li>`;
             if (currentView.type === 'playlist_songs') {
               menuItems += `<li class="context-menu-item text-danger" data-action="remove_from_playlist" data-id="${songId}"><i class="bi bi-x-circle-fill"></i> Remove from Playlist</li>`;
@@ -7003,6 +7283,7 @@ function perform_full_scan($db) {
 
           const songData = {
             id: parseInt(songItem.dataset.songId),
+            is_offline_missing: songItem.classList.contains('offline-missing'),
             is_favorite: songItem.dataset.isFavorite === '1',
             title: songItem.dataset.songTitle,
             artist: songItem.dataset.songArtist,
@@ -7201,7 +7482,7 @@ function perform_full_scan($db) {
             
             const viewType = navLink.dataset.view;
             let sort = 'artist_asc';
-            if (['get_favorites', 'playlist_songs'].includes(viewType)) sort = 'manual_order';
+            if (['get_favorites', 'playlist_songs', 'get_offline_songs'].includes(viewType)) sort = 'manual_order';
             if (viewType === 'get_user_playlists') sort = 'modified_desc';
             if (viewType === 'get_albums') sort = 'album_asc';
             if (viewType === 'get_artists') sort = 'name_asc';
@@ -7589,6 +7870,12 @@ function perform_full_scan($db) {
           if (exportFavoritesBtn) {
             return;
           }
+          const importOfflineBtn = target.closest('#import-offline-btn');
+          if (importOfflineBtn) {
+            const importOfflineModalEl = document.getElementById('import-offline-modal');
+            if (importOfflineModalEl) bootstrap.Modal.getOrCreateInstance(importOfflineModalEl).show();
+            return;
+          }
           const importFavoritesBtn = target.closest('#import-favorites-btn');
           if (importFavoritesBtn) {
             importFavoritesModal.show();
@@ -7673,7 +7960,8 @@ function perform_full_scan($db) {
             const viewType = seeAllButton.dataset.view;
             const viewParam = seeAllButton.dataset.viewParam;
             let sort = 'artist_asc';
-            if (viewType === 'get_favorites' || viewType === 'get_user_playlists') sort = 'manual_order';
+            if (['get_favorites', 'get_offline_songs', 'playlist_songs'].includes(viewType)) sort = 'manual_order';
+            if (viewType === 'get_user_playlists') sort = 'modified_desc';
             if (viewType === 'get_history') sort = 'history_desc';
             if (viewType === 'artist_songs') sort = 'album_asc';
 
@@ -7683,6 +7971,10 @@ function perform_full_scan($db) {
 
           const songItem = target.closest('.song-item, .shelf-item[data-song-id], .top-result-card');
           if (songItem) {
+            if (songItem.classList.contains('offline-missing')) {
+              showToast('This song is not cached for offline listening. Please open the menu and Re-download it.', 'error');
+              return;
+            }
             const songId = parseInt(songItem.dataset.songId);
             setQueueAndPlay(songId);
           }
@@ -7753,6 +8045,188 @@ function perform_full_scan($db) {
               break;
             case 'toggle_favorite':
               toggleFavorite(parseInt(id));
+              break;
+            case 'toggle_offline':
+              const offRes = await fetchData('?action=toggle_offline', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: parseInt(id) })
+              });
+              if (offRes) {
+                if (offRes.status === 'added') {
+                  offlineSongsSet.add(parseInt(id));
+                  
+                  let tc = document.querySelector('.toast-container');
+                  if (!tc) {
+                    tc = document.createElement('div');
+                    tc.className = 'toast-container position-fixed bottom-0 end-0 p-3';
+                    tc.style.zIndex = "1100";
+                    document.body.appendChild(tc);
+                  }
+                  
+                  const progressToast = document.createElement('div');
+                  progressToast.className = 'toast align-items-center text-white bg-info border-0 show';
+                  progressToast.innerHTML = `<div class="d-flex"><div class="toast-body" id="offline-progress-${id}">Caching song (0%)...</div></div>`;
+                  tc.appendChild(progressToast);
+
+                  try {
+                    const cache = await caches.open('php-music-offline');
+                    await cache.add(`?action=get_image&id=${id}`);
+                    await cache.add(`?action=get_song_data&id=${id}`);
+
+                    const response = await fetch(`?action=get_stream&id=${id}`);
+                    const contentLength = response.headers.get('content-length');
+                    
+                    if (!contentLength) {
+                      await cache.put(`?action=get_stream&id=${id}`, response.clone());
+                    } else {
+                      const total = parseInt(contentLength, 10);
+                      let loaded = 0;
+                      const reader = response.body.getReader();
+                      const stream = new ReadableStream({
+                        async start(controller) {
+                          while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            loaded += value.length;
+                            const pct = Math.round((loaded / total) * 100);
+                            const pctText = document.getElementById(`offline-progress-${id}`);
+                            if(pctText) pctText.innerText = `Caching song (${pct}%)...`;
+                            controller.enqueue(value);
+                          }
+                          controller.close();
+                        }
+                      });
+                      const newResponse = new Response(stream, {
+                        headers: response.headers,
+                        status: response.status,
+                        statusText: response.statusText
+                      });
+                      await cache.put(`?action=get_stream&id=${id}`, newResponse);
+                    }
+                    
+                    progressToast.classList.replace('bg-info', 'bg-success');
+                    document.getElementById(`offline-progress-${id}`).innerText = 'Song is now available offline!';
+                    setTimeout(() => progressToast.remove(), 3000);
+                    
+                  } catch(e) {
+                    console.error(e);
+                    progressToast.classList.replace('bg-info', 'bg-danger');
+                    document.getElementById(`offline-progress-${id}`).innerText = 'Failed to cache completely.';
+                    setTimeout(() => progressToast.remove(), 3000);
+                    offlineSongsSet.delete(parseInt(id));
+                    fetchData('?action=toggle_offline', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: parseInt(id) }) });
+                  }
+                } else {
+                  offlineSongsSet.delete(parseInt(id));
+                  try {
+                    const cache = await caches.open('php-music-offline');
+                    await cache.delete(`?action=get_stream&id=${id}`);
+                    await cache.delete(`?action=get_image&id=${id}`);
+                    await cache.delete(`?action=get_song_data&id=${id}`);
+                  } catch(e) {}
+                  showToast('Removed from offline list.', 'success');
+                  
+                  if (currentView.type === 'get_offline_songs') {
+                     const row = document.querySelector(`.song-item[data-song-id="${id}"]`);
+                     if(row) {
+                       row.style.opacity = '0';
+                       setTimeout(() => row.remove(), 300);
+                     }
+                  }
+                }
+              }
+              break;
+            case 'recache_offline':
+              let tco = document.querySelector('.toast-container');
+              if (!tco) {
+                tco = document.createElement('div');
+                tco.className = 'toast-container position-fixed bottom-0 end-0 p-3';
+                tco.style.zIndex = "1100";
+                document.body.appendChild(tco);
+              }
+              const pToast = document.createElement('div');
+              pToast.className = 'toast align-items-center text-white bg-warning text-dark border-0 show';
+              pToast.innerHTML = `<div class="d-flex"><div class="toast-body" id="re-offline-progress-${id}">Re-caching song (0%)...</div></div>`;
+              tco.appendChild(pToast);
+
+              try {
+                const cache = await caches.open('php-music-offline');
+                
+                await cache.delete(`?action=get_stream&id=${id}`);
+                await cache.delete(`?action=get_image&id=${id}`);
+                await cache.delete(`?action=get_song_data&id=${id}`);
+                
+                await cache.add(`?action=get_image&id=${id}`);
+                await cache.add(`?action=get_song_data&id=${id}`);
+
+                const response = await fetch(`?action=get_stream&id=${id}`);
+                const contentLength = response.headers.get('content-length');
+                
+                if (!contentLength) {
+                  await cache.put(`?action=get_stream&id=${id}`, response.clone());
+                } else {
+                  const total = parseInt(contentLength, 10);
+                  let loaded = 0;
+                  const reader = response.body.getReader();
+                  const stream = new ReadableStream({
+                    async start(controller) {
+                      while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        loaded += value.length;
+                        const pct = Math.round((loaded / total) * 100);
+                        const pctText = document.getElementById(`re-offline-progress-${id}`);
+                        if(pctText) pctText.innerText = `Re-caching song (${pct}%)...`;
+                        controller.enqueue(value);
+                      }
+                      controller.close();
+                    }
+                  });
+                  const newResponse = new Response(stream, { headers: response.headers, status: response.status, statusText: response.statusText });
+                  await cache.put(`?action=get_stream&id=${id}`, newResponse);
+                }
+                
+                pToast.classList.replace('bg-warning', 'bg-success');
+                pToast.classList.replace('text-dark', 'text-white');
+                document.getElementById(`re-offline-progress-${id}`).innerText = 'Successfully re-cached!';
+                setTimeout(() => pToast.remove(), 3000);
+                
+                // Remove warning icon if it exists in the UI
+                const itemRow = document.querySelector(`.song-item[data-song-id="${id}"]`);
+                if(itemRow) {
+                  itemRow.classList.remove('offline-missing');
+                  itemRow.style.opacity = '1';
+                  const warningIcon = itemRow.querySelector('.offline-missing-icon');
+                  if(warningIcon) warningIcon.remove();
+                }
+              } catch(e) {
+                pToast.classList.replace('bg-warning', 'bg-danger');
+                pToast.classList.replace('text-dark', 'text-white');
+                document.getElementById(`re-offline-progress-${id}`).innerText = 'Failed to re-cache.';
+                setTimeout(() => pToast.remove(), 3000);
+              }
+              break;
+            case 'save_to_device':
+              try {
+                const res = await caches.match(`?action=get_stream&id=${id}`);
+                if (res) {
+                  const blob = await res.blob();
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = `${decodeURIComponent(title)}.mp3`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                  showToast('Downloaded from device cache successfully!', 'success');
+                } else {
+                  window.location.href = `?action=download_song&id=${id}`;
+                }
+              } catch (e) {
+                window.location.href = `?action=download_song&id=${id}`;
+              }
               break;
             case 'add_to_playlist':
               songIdForPlaylist = [parseInt(id)];
@@ -8711,6 +9185,61 @@ function perform_full_scan($db) {
           reader.readAsText(file);
         });
 
+        const importOfflineForm = document.getElementById('import-offline-form');
+        if (importOfflineForm) {
+          importOfflineForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const fileInput = document.getElementById('import-offline-file');
+            if (fileInput.files.length === 0) return;
+            
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+            
+            reader.onload = async (event) => {
+              try {
+                const importData = JSON.parse(event.target.result);
+                if (!importData.songs || !Array.isArray(importData.songs)) {
+                  showToast('Invalid JSON format.', 'error');
+                  return;
+                }
+                
+                const btn = importOfflineForm.querySelector('button[type="submit"]');
+                const originalText = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Scanning Library...';
+                
+                const response = await fetch('?action=import_offline', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(importData)
+                });
+                
+                const result = await response.json();
+                if (result) {
+                  showToast(result.message, result.status);
+                  if (result.status === 'success') {
+                    const modalEl = document.getElementById('import-offline-modal');
+                    if(modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+                    importOfflineForm.reset();
+                    fetchData('?action=get_offline_ids').then(ids => {
+                        if(ids) offlineSongsSet = new Set(ids.map(id => parseInt(id)));
+                        loadView(currentView);
+                    });
+                  }
+                }
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+              } catch (err) {
+                showToast('Failed to parse JSON or import.', 'error');
+                const btn = importOfflineForm.querySelector('button[type="submit"]');
+                btn.disabled = false;
+                btn.textContent = 'Import';
+              }
+            };
+            reader.readAsText(file);
+          });
+        }
+        
         if (importFavoritesForm) {
           importFavoritesForm.addEventListener('submit', async e => {
             e.preventDefault();
@@ -9378,6 +9907,8 @@ function perform_full_scan($db) {
             if (uploadRemainingText) {
               uploadRemainingText.textContent = `Today's remaining uploads: ${currentUser.uploads_remaining}`;
             }
+            const offIds = await fetchData('?action=get_offline_ids');
+            if(offIds) offlineSongsSet = new Set(offIds.map(id => parseInt(id)));
           } else {
             currentUser = null;
           }
