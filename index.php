@@ -4683,6 +4683,10 @@ function perform_full_scan($db) {
               <input class="form-check-input" type="checkbox" id="toggle-eq">
               <label class="form-check-label" for="toggle-eq">Enable Equalizer</label>
             </div>
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" id="toggle-spatial">
+              <label class="form-check-label" for="toggle-spatial">Enable Spatial Audio (3D HRTF)</label>
+            </div>
             <div id="eq-sliders" class="d-none mb-4">
                <div class="d-flex justify-content-between text-center small text-secondary">
                  <span>60Hz</span><span>230Hz</span><span>910Hz</span><span>3.6kHz</span><span>14kHz</span>
@@ -5506,26 +5510,35 @@ function perform_full_scan($db) {
           renderedQueueCount += nextChunkIds.length;
           isQueueLoading = false;
 
-          // Verify cache and show warning indicator for missing offline files in Up Next
-          if (currentView.type === 'get_offline_songs' || !navigator.onLine) {
-            caches.open('php-music-offline').then(cache => {
-              const addedItems = document.querySelectorAll('#desktop-player-queue-list .song-item:not(.queue-cache-checked), #mobile-player-queue-list .song-item:not(.queue-cache-checked)');
-              addedItems.forEach(async item => {
-                item.classList.add('queue-cache-checked');
-                const sid = item.dataset.songId;
-                const req = await cache.match(`?action=get_stream&id=${sid}`, { ignoreSearch: false, ignoreVary: true });
-                if (!req) {
-                  item.classList.add('offline-missing');
+          // Dynamically indicate offline availability for ALL queue items
+          caches.open('php-music-offline').then(cache => {
+            const addedItems = document.querySelectorAll('#desktop-player-queue-list .song-item:not(.queue-cache-checked), #mobile-player-queue-list .song-item:not(.queue-cache-checked)');
+            addedItems.forEach(async item => {
+              item.classList.add('queue-cache-checked');
+              const sid = item.dataset.songId;
+              const req = await cache.match(`?action=get_stream&id=${sid}`, { ignoreSearch: false, ignoreVary: true });
+              const titleWrapper = item.querySelector('.song-title-wrapper');
+              
+              if (!req) {
+                // It is NOT offline
+                item.classList.add('offline-missing');
+                if (!navigator.onLine) {
                   item.style.transition = 'opacity 0.3s ease';
                   item.style.opacity = '0.4';
-                  const titleWrapper = item.querySelector('.song-title-wrapper');
-                  if (titleWrapper && !titleWrapper.querySelector('.offline-missing-icon')) {
-                     titleWrapper.insertAdjacentHTML('beforeend', ' <i class="bi bi-cloud-slash-fill text-warning offline-missing-icon" title="Not cached for offline." style="font-size: 0.85rem; cursor: help;"></i>');
-                  }
                 }
-              });
+                if (titleWrapper && !titleWrapper.querySelector('.offline-status-icon')) {
+                   titleWrapper.insertAdjacentHTML('beforeend', ' <i class="bi bi-cloud-slash text-secondary offline-status-icon ms-1" title="Not saved offline" style="font-size: 0.85rem;"></i>');
+                }
+              } else {
+                // It IS offline
+                item.classList.remove('offline-missing');
+                item.style.opacity = '1';
+                if (titleWrapper && !titleWrapper.querySelector('.offline-status-icon')) {
+                   titleWrapper.insertAdjacentHTML('beforeend', ' <i class="bi bi-cloud-check-fill text-success offline-status-icon ms-1" title="Available offline" style="font-size: 0.85rem;"></i>');
+                }
+              }
             });
-          }
+          });
           
           // Focus the playing song if it was a total reset
           if (reset && currentSong) {
@@ -5611,8 +5624,10 @@ function perform_full_scan($db) {
         
         let audioCtx, sourceA, sourceB, gainA, gainB, perSongGain, compressor;
         let eqBands = [];
+        let spatialPanner, spatialBypass, spatialMix;
         let enableNormalization = true;
         let isEQEnabled = false;
+        let isSpatialEnabled = false;
         let globalVolumeMultiplier = 1.0;
         let globalEQBands = [0, 0, 0, 0, 0];
         let crossfadeDuration = 3.0;
@@ -5622,7 +5637,7 @@ function perform_full_scan($db) {
           if (!currentUser) return;
           clearTimeout(settingsSaveTimeout);
           settingsSaveTimeout = setTimeout(() => {
-            const settings = { enableNormalization, isEQEnabled, globalVolumeMultiplier, globalEQBands };
+            const settings = { enableNormalization, isEQEnabled, isSpatialEnabled, globalVolumeMultiplier, globalEQBands };
             fetchData('?action=save_global_settings', {
               method: 'POST', headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({ settings })
@@ -5653,7 +5668,22 @@ function perform_full_scan($db) {
           compressor.attack.value = 0.003;
           compressor.release.value = 0.25;
           
-          eqBands[eqBands.length - 1].connect(compressor);
+          spatialPanner = audioCtx.createPanner();
+          spatialPanner.panningModel = 'HRTF';
+          spatialPanner.distanceModel = 'inverse';
+          if (spatialPanner.positionZ) spatialPanner.positionZ.value = 1.0;
+          else spatialPanner.setPosition(0, 0, 1.0);
+          
+          spatialBypass = audioCtx.createGain();
+          spatialMix = audioCtx.createGain();
+          
+          eqBands[eqBands.length - 1].connect(spatialBypass);
+          eqBands[eqBands.length - 1].connect(spatialPanner);
+          
+          spatialBypass.connect(compressor);
+          spatialPanner.connect(spatialMix);
+          spatialMix.connect(compressor);
+
           compressor.connect(audioCtx.destination);
 
           sourceA = audioCtx.createMediaElementSource(audio);
@@ -5699,10 +5729,20 @@ function perform_full_scan($db) {
         const toggleAudioEnhancements = () => {
           if (!audioCtx) return;
           compressor.ratio.value = enableNormalization ? 12 : 1; 
+          
+          const t = audioCtx.currentTime;
+          spatialBypass.gain.setTargetAtTime(isSpatialEnabled ? 0 : 1, t, 0.1);
+          spatialMix.gain.setTargetAtTime(isSpatialEnabled ? 1 : 0, t, 0.1);
+
           applyAudioSettings();
         };
 
         // UI Event Listeners for Global Audio Settings
+        document.getElementById('toggle-spatial').addEventListener('change', (e) => {
+          isSpatialEnabled = e.target.checked;
+          toggleAudioEnhancements();
+          saveGlobalAudioSettings();
+        });
         document.getElementById('global-vol-slider').addEventListener('input', (e) => {
           globalVolumeMultiplier = parseFloat(e.target.value);
           document.getElementById('global-vol-val').textContent = globalVolumeMultiplier + 'x';
@@ -7041,6 +7081,19 @@ function perform_full_scan($db) {
         };
 
         const playSongById = async (songId) => {
+          // AUTOMATIC OFFLINE SKIP: If offline, ensure song is cached first
+          if (!navigator.onLine) {
+            const cache = await caches.open('php-music-offline');
+            const req = await cache.match(`?action=get_stream&id=${songId}`, { ignoreSearch: false, ignoreVary: true });
+            if (!req) {
+              console.warn(`Song ${songId} not cached. Skipping automatically because you are offline.`);
+              showToast("Skipped: Not available offline.", "info");
+              // Delay slightly to prevent infinite loop locking if all songs are missing
+              setTimeout(() => playNext(), 500);
+              return;
+            }
+          }
+
           let data = await fetchData(`?action=get_song_data&id=${songId}`, {}, true);
           
           // OFFLINE FALLBACK: If API fails, check the local memory cache!
@@ -10328,11 +10381,14 @@ function perform_full_scan($db) {
                 const s = JSON.parse(currentUser.settings);
                 enableNormalization = s.enableNormalization !== undefined ? s.enableNormalization : true;
                 isEQEnabled = s.isEQEnabled !== undefined ? s.isEQEnabled : false;
+                isSpatialEnabled = s.isSpatialEnabled !== undefined ? s.isSpatialEnabled : false;
                 globalVolumeMultiplier = s.globalVolumeMultiplier !== undefined ? s.globalVolumeMultiplier : 1.0;
                 globalEQBands = s.globalEQBands || [0, 0, 0, 0, 0];
                 
                 document.getElementById('toggle-normalization').checked = enableNormalization;
                 document.getElementById('toggle-eq').checked = isEQEnabled;
+                const toggleSpatialEl = document.getElementById('toggle-spatial');
+                if (toggleSpatialEl) toggleSpatialEl.checked = isSpatialEnabled;
                 document.getElementById('eq-sliders').classList.toggle('d-none', !isEQEnabled);
                 document.getElementById('global-vol-slider').value = globalVolumeMultiplier;
                 document.getElementById('global-vol-val').textContent = globalVolumeMultiplier + 'x';
