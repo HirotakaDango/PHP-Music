@@ -4006,6 +4006,12 @@ function perform_full_scan($db) {
       .search-dropdown-title { font-size: 0.95rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; }
       .search-dropdown-subtitle { font-size: 0.8rem; color: var(--ytm-secondary-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .search-dropdown-header { padding: 0.25rem 1rem; font-size: 0.75rem; text-transform: uppercase; color: var(--ytm-secondary-text); font-weight: bold; margin-top: 0.5rem; margin-bottom: 0.25rem;}
+      
+      #sleep-timer-bubble { position: fixed; top: 80px; right: 20px; background: rgba(30, 30, 30, 0.9); backdrop-filter: blur(10px); border: 1px solid var(--ytm-surface-2); border-radius: 50px; padding: 8px 16px; z-index: 1060; display: flex; align-items: center; gap: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); cursor: grab; user-select: none; touch-action: none; }
+      #sleep-timer-bubble:active { cursor: grabbing; }
+      #sleep-timer-bubble .time { font-weight: bold; font-family: monospace; font-size: 1.1rem; color: #fff; }
+      #sleep-timer-bubble .cancel-btn { background: none; border: none; color: var(--ytm-secondary-text); padding: 0; font-size: 1.2rem; display: flex; align-items: center; }
+      #sleep-timer-bubble .cancel-btn:hover { color: var(--ytm-accent); }
     </style>
   </head>
   <body class="logged-out">
@@ -5115,6 +5121,12 @@ function perform_full_scan($db) {
       </div>
     </div>
 
+    <div id="sleep-timer-bubble" class="d-none">
+      <i class="bi bi-moon-stars-fill text-info"></i>
+      <span class="time" id="sleep-timer-countdown">00:00</span>
+      <button class="cancel-btn" id="sleep-timer-cancel-btn"><i class="bi bi-x-circle-fill"></i></button>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
     <script>
@@ -5650,7 +5662,8 @@ function perform_full_scan($db) {
         let offlineSongsSet = new Set();
         let renderedQueueCount = 0;
         let isQueueLoading = false;
-        let sleepTimerTimeout = null;
+        let sleepTimerInterval = null;
+        let sleepTimerEndTime = 0;
         
         let holdTimer;
         let multiSelectMode = false;
@@ -9425,24 +9438,107 @@ function perform_full_scan($db) {
         document.getElementById('profile-dropdown-logout-mobile').addEventListener('click', handleLogout);
         document.getElementById('profile-dropdown-stats-desktop').addEventListener('click', () => loadView({type: 'get_user_stats'}));
         document.getElementById('profile-dropdown-stats-mobile').addEventListener('click', () => loadView({type: 'get_user_stats'}));
+        
+        const sleepTimerBubble = document.getElementById('sleep-timer-bubble');
+        const sleepTimerCountdown = document.getElementById('sleep-timer-countdown');
+        const sleepTimerCancelBtn = document.getElementById('sleep-timer-cancel-btn');
+
+        const cancelSleepTimer = () => {
+          if (sleepTimerInterval) clearInterval(sleepTimerInterval);
+          sleepTimerInterval = null;
+          sleepTimerBubble.classList.add('d-none');
+          showToast('Sleep timer canceled.', 'info');
+        };
+
+        sleepTimerCancelBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          cancelSleepTimer();
+        });
+
         const handleSleepTimer = () => {
-          if (sleepTimerTimeout) {
+          if (sleepTimerInterval) {
             if (confirm(`Sleep timer is active. Cancel it?`)) {
-              clearTimeout(sleepTimerTimeout); sleepTimerTimeout = null;
-              showToast('Sleep timer canceled.', 'info');
+              cancelSleepTimer();
             }
             return;
           }
           const mins = prompt("Stop playing after how many minutes?", "30");
           if (mins && !isNaN(mins) && parseInt(mins) > 0) {
-            sleepTimerTimeout = setTimeout(() => {
-              if (isPlaying) togglePlayPause();
-              showToast('Sleep timer reached. Playback paused.', 'info');
-              sleepTimerTimeout = null;
-            }, parseInt(mins) * 60000);
+            const ms = parseInt(mins) * 60000;
+            sleepTimerEndTime = Date.now() + ms;
+            
+            const updateTimer = () => {
+              const now = Date.now();
+              const remaining = sleepTimerEndTime - now;
+              if (remaining <= 0) {
+                clearInterval(sleepTimerInterval);
+                sleepTimerInterval = null;
+                sleepTimerBubble.classList.add('d-none');
+                if (isPlaying) togglePlayPause();
+                showToast('Sleep timer reached. Playback paused.', 'info');
+                return;
+              }
+              const totalSeconds = Math.floor(remaining / 1000);
+              const m = Math.floor(totalSeconds / 60);
+              const s = (totalSeconds % 60).toString().padStart(2, '0');
+              sleepTimerCountdown.textContent = `${m}:${s}`;
+            };
+            
+            updateTimer();
+            sleepTimerInterval = setInterval(updateTimer, 1000);
+            sleepTimerBubble.classList.remove('d-none');
             showToast(`Sleep timer set for ${mins} minutes.`, 'success');
           }
         };
+
+        // Sleep Timer Bubble Dragging Logic
+        let isDraggingBubble = false;
+        let bubbleOffsetX, bubbleOffsetY;
+
+        const startDragBubble = (e) => {
+          if (e.target.closest('.cancel-btn')) return;
+          isDraggingBubble = true;
+          const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+          const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+          const rect = sleepTimerBubble.getBoundingClientRect();
+          bubbleOffsetX = clientX - rect.left;
+          bubbleOffsetY = clientY - rect.top;
+          sleepTimerBubble.style.cursor = 'grabbing';
+        };
+
+        const moveDragBubble = (e) => {
+          if (!isDraggingBubble) return;
+          e.preventDefault(); // Prevents screen scrolling while dragging
+          const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+          const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+          
+          let newLeft = clientX - bubbleOffsetX;
+          let newTop = clientY - bubbleOffsetY;
+          
+          const maxX = window.innerWidth - sleepTimerBubble.offsetWidth;
+          const maxY = window.innerHeight - sleepTimerBubble.offsetHeight;
+          newLeft = Math.max(0, Math.min(newLeft, maxX));
+          newTop = Math.max(0, Math.min(newTop, maxY));
+          
+          sleepTimerBubble.style.left = `${newLeft}px`;
+          sleepTimerBubble.style.top = `${newTop}px`;
+          sleepTimerBubble.style.right = 'auto'; // Disable initial right constraint
+        };
+
+        const stopDragBubble = () => {
+          if (isDraggingBubble) {
+            isDraggingBubble = false;
+            sleepTimerBubble.style.cursor = 'grab';
+          }
+        };
+
+        sleepTimerBubble.addEventListener('mousedown', startDragBubble);
+        sleepTimerBubble.addEventListener('touchstart', startDragBubble, {passive: false});
+        document.addEventListener('mousemove', moveDragBubble, {passive: false});
+        document.addEventListener('touchmove', moveDragBubble, {passive: false});
+        document.addEventListener('mouseup', stopDragBubble);
+        document.addEventListener('touchend', stopDragBubble);
+
         document.getElementById('sleep-timer-btn-desktop').addEventListener('click', handleSleepTimer);
         document.getElementById('sleep-timer-btn-mobile').addEventListener('click', handleSleepTimer);
 

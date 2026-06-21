@@ -24,18 +24,23 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 - 🏷️ **Automatic Metadata**: Uses [getID3](https://github.com/JamesHeinrich/getID3) to extract artist, album, year, genre, and cover images.
 - 📚 **Library Management**: Browse by songs, artists, albums, genres, or favorites. Instant search included.
 - ❤️ **Favorites**: Mark/unmark songs as favorites. Drag to reorder in the "Favorites" view. Import/export your favorites as JSON.
+- 📴 **True Offline Listening (Cache Storage)**: Cache audio streams, metadata, and cover art directly to your browser's Cache Storage. Safely handles dynamic chunk requests offline. (Only available for logged-in users).
+- ⚠️ **Cache Verification**: The Offline Music section automatically checks cache integrity, visually dims incomplete tracks, displays warning indicators, blocks un-cached playback, and provides a "Re-download Cache" option.
+- 💾 **Local Device Export**: Export cached tracks directly from browser storage into your device as a standard file, saving internet data. This option dynamically displays only when the track is fully cached offline.
+- 🔀 **Offline Sorting**: Drag and drop to reorder offline tracks manually, with dedicated JSON import/export options for portability.
 - 🔊 **Player Controls**: Play, pause, next/prev, repeat, shuffle, seek, volume control, and cover art display. Media Session API support for background media controls.
 - 🎚️ **Advanced Audio Engine**: Features a built-in, togglable 5-band Graphic Equalizer (60Hz, 230Hz, 910Hz, 3.6kHz, 14kHz) with independent frequency adjustments, plus automatic, real-time Volume Normalization (AGC) using Web Audio API dynamics compression to keep varying song volumes level.
 - 🔄 **Gapless Playback & Crossfading**: Seamless track transitions via a dual HTML5 audio node system. Crossfades outgoing and incoming tracks automatically over an adjustable 3-second transition period.
 - 🔀 **Dynamic Queue Management**: YouTube Music-style "Up Next" dynamic queue. Context menus allow you to choose "Play Next" or "Add to Queue" for any song. Both desktop and mobile player modals feature a dedicated "Up Next" queue tab with chunked, on-demand infinite scrolling.
 - 📡 **Infinite Autoplay (Station Mode)**: When your active play queue is exhausted, the app automatically transitions to Station Mode—fetching and appending 15 similar tracks based on the artist and genre of your last seed song.
 - 👥 **Secure Collaborative Playlists**: Invite specific users by email or exact display name to edit a playlist. View who contributed each track directly in the playlist view (displays *"Added by [User]"*). Toggling a playlist back to private automatically purges all collaborators and their access.
-- ⏳ **Sleep Timer**: Schedule music playback to automatically pause after a specified duration (accessible from user dropdown menus on desktop and mobile).
+- ⏳ **Draggable Sleep Timer**: Set a sleep timer to pause playback after a specified duration. Shows a floating, interactive countdown bubble that can be dragged anywhere on your screen and features a quick-cancel button.
 - 📱 **Responsive UI**: Mobile-optimized, fast, and touch-friendly. Mobile player modal features dual tabs for Player and Up Next Queue layout.
-- ⚡ **PWA Support**: Install as an app on your phone or desktop. Works offline (caches static assets & some API). Manifest & service worker included.
+- ⚡ **PWA Support**: Install as an app on your phone or desktop. Works offline (caches static assets, media streams, and local endpoints). Manifest & service worker included.
 - 🚀 **No Database Setup**: Uses SQLite, auto-initialized on first run.
 - 👤 **User Accounts & Profiles**: Register/login, upload a custom profile picture, and view your personal statistics.
 - 🛡️ **Account Recovery**: Soft-delete your account while preserving data to generate a backup key, allowing you to restore your profile securely at a later time.
+- 🔐 **Long-Lasting Sessions**: Keep user sessions logged-in persistently for up to 1 year using robust cookie and garbage collection lifetimes.
 - 👥 **Social Features**: Follow other artists or users and find them easily in your "Following" tab.
 - ☁️ **Upload Music**: Upload new songs (multi-file, genre auto-detected or custom). Each user can upload up to 10 songs per day (daily limit resets at midnight).
 - ✏️ **Edit Metadata**: Edit a song's Title, Artist, Album, Genre, Lyrics, and Cover Image directly from the context menu (for your own uploads or as admin).
@@ -152,13 +157,19 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 
 ## Usage
 
-- **Register/Login**: Create a user account for full features (upload, scan, delete, edit, favorites, playlists, following).
+- **Register/Login**: Create a user account for full features. Sessions remain persistently active for up to a year.
 - **Profile Picture**: Set or change your profile picture from the settings modal (accepts PNG, JPG, GIF).
 - **Account Verification**: After registering, your account must be verified by an admin before you can upload music. Unverified users can still scan, browse, and play music.
 - **Account Backup/Restore**: If you need to change your email or reset credentials safely, use "Delete Account but Keep Data" in Settings to receive a backup key. You can restore this key via the "Restore Account" modal.
 - **Upload Limit**: Each user can upload up to 10 songs per day (resets at midnight).
 - **Scan Library**: Click "Scan All" in the sidebar to index or refresh your library (synchronizes disk files with database).
-- **Browse**: Use the sidebar to view all songs, favorites, albums, artists, genres, or your own uploads.
+- **Browse**: Use the sidebar to view all songs, favorites, offline music, albums, artists, genres, or your own uploads.
+- **Offline Music**:
+  - Open the 3-dot context menu on any song and select **Make Available Offline**. 
+  - A persistent progress notification will guide you through the process, caching audio streams, imagery, and relevant details inside your browser.
+  - When viewing the **Offline Music** section, missing or incomplete tracks will automatically dim, display a cloud warning icon, and prevent playback to safeguard your offline experience.
+  - Choose **Re-download Cache** to fix broken tracks, or **Save File to Device** to read from browser storage and save the raw file to your operating system without using data.
+  - Sort your offline lists manually with drag-and-drop controls, and maintain backups with standalone JSON import/export functions.
 - **Audio Enhancements**: Toggle volume normalization (Automatic Gain Control) or enable the 5-band Equalizer sliders inside the Settings panel to sculpt your sound.
 - **Playlists**: Create, edit, drag-to-reorder, import, export, and copy custom playlists. Add/remove songs easily.
 - **Manage Collaborators**: Toggle your playlist to Collaborative. From the playlist's 3-dot context menu, select "Manage Collaborators" to invite other users to contribute tracks by entering their exact username or email address. 
@@ -167,7 +178,7 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 - **Search**: Use the search bar (desktop/mobile) to instantly find songs, albums, or artists.
 - **Play Music**: Click a song to play, or use the player controls at the bottom.
 - **Favorites**: Click the heart icon to add/remove from favorites. Drag to reorder in "Favorites" view. Export or import your favorites at any time.
-- **Sleep Timer**: Click "Sleep Timer" in the user profile dropdown (desktop or mobile) and specify a countdown in minutes to automatically pause playback.
+- **Draggable Sleep Timer**: Click "Sleep Timer" in your profile dropdown, enter a duration, and a draggable, floating countdown bubble with a quick-cancel button will appear. It locks position inside the screen boundaries.
 - **Edit Metadata & Lyrics**: Right-click (or tap "..." on mobile) a song and choose "Edit Info" (your own uploads or as admin) to change Title, Artist, Album, Genre, Lyrics, and Cover Art. You can also view lyrics via "Show Lyrics" or check file details via "View Metadata".
   - **Adding Synchronized Lyrics (LRC):** When adding timestamps, ensure there is a space between the timestamp and the lyric text so the code parses it correctly.
     - ✅ **Correct:** `[00:15.30] Never gonna give you up`
@@ -196,15 +207,16 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 ## How does it work?
 
 - **index.php** is both the backend API (`?action=...`) and the single-page frontend application.
-- User authentication is session-based (server-side PHP sessions) with secure password hashing.
+- User authentication is session-based (server-side PHP sessions) with persistent year-long session and cookie lifetimes.
 - User uploads are separated—each user can only manage and edit their own uploads.
 - Playback runs via an advanced dual HTML5 `<audio>` engine and Web Audio API routing `(Source -> Gain Node -> 5-Band EQ Filters -> Dynamics Compressor -> Destination)` for gapless crossfading and real-time audio enhancements, utilizing the Media Session API.
 - Scanning uses getID3 for database indexing, storing everything in `music.db` (SQLite).
 - Album art and profile pictures are extracted, resized, and converted to `.webp` on the fly to save space and bandwidth.
-- PWA support includes a generated web manifest and a dynamic service worker (`?pwa=manifest`, `?pwa=sw`) to handle offline caching. IndexedDB is used for version tracking.
+- PWA support includes a web manifest and a customized service worker (`?pwa=manifest`, `?pwa=sw`) to handle offline caching. 
+- **Offline Audio Handling**: The Service Worker intercepts audio stream requests (`?action=get_stream`) and seamlessly constructs `206 Partial Content` range slices from cached file buffers, enabling background media seeking even when fully offline.
 - Uploads are safely stored in `/uploads/{artist_slug}/` directories.
 - Complete metadata modification is supported via the `edit_metadata` action which updates the database, and writes ID3 tags back into the file using getID3's writetags function.
-- Playlists and favorites support fluid drag-and-drop ordering powered by SortableJS, pushing positional arrays back to the server.
+- Playlists, offline lists, and favorites support fluid drag-and-drop ordering powered by SortableJS, pushing positional arrays back to the server.
 - Collaborative playlists track individual song contributions via an `added_by` column on the `playlist_songs` table, and authenticate editor permissions securely using a `playlist_collaborators` lookup.
 - Play histories and view counts are continuously logged locally (after 30 seconds of playback) to generate personalized "For You" shelves and track statistics.
 - A `follows` table tracks user-to-artist and user-to-user relationships.
@@ -241,4 +253,4 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite:
 
 ---
 
-Enjoy your self-hosted PHP music player!  
+Enjoy your self-hosted PHP music player!
