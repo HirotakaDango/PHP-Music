@@ -717,6 +717,12 @@ function init_db($db) {
   if (!in_array('is_collaborative', $playlists_columns)) {
     $db->exec("ALTER TABLE playlists ADD COLUMN is_collaborative INTEGER DEFAULT 0;");
   }
+  if (!in_array('is_private', $playlists_columns)) {
+    $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;");
+  }
+  if (!in_array('is_private', $music_columns)) {
+    $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;");
+  }
   $playlist_songs_cols = $db->query("PRAGMA table_info(playlist_songs);")->fetchAll(PDO::FETCH_COLUMN, 1);
   if (!in_array('added_by', $playlist_songs_cols)) {
     $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;");
@@ -888,9 +894,9 @@ if (isset($_GET['action'])) {
   $action = $_GET['action'];
   $db = get_db();
   
-  try {
-    $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;");
-  } catch(Exception $e) {}
+  try { $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;"); } catch(Exception $e) {}
+  try { $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+  try { $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
   
   init_db($db); // Force the database upgrade
   if (!isset($_SESSION['db_initialized'])) {
@@ -902,6 +908,7 @@ if (isset($_GET['action'])) {
   header('Expires: 0');
 
   $user_id = $_SESSION['user_id'] ?? null;
+  $is_super_admin = (isset($_SESSION['user_artist']) && $_SESSION['user_artist'] === 'Music Library') ? 1 : 0;
   $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
   $offset = ($page - 1) * PAGE_SIZE;
   $limit_clause = " LIMIT " . PAGE_SIZE . " OFFSET " . $offset;
@@ -941,7 +948,7 @@ if (isset($_GET['action'])) {
       $stmt->execute([$seed_id]);
       $seed = $stmt->fetch();
       
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
       
       if ($seed) {
         $radio_stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.genre = ? OR match_artist(m.artist, ?) = 1) AND m.id != ? ORDER BY RANDOM() LIMIT 15");
@@ -960,7 +967,7 @@ if (isset($_GET['action'])) {
       if (empty($ids)) { send_json([]); }
       
       $placeholders = implode(',', array_fill(0, count($ids), '?'));
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
       
       $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id IN ($placeholders)");
       $params = array_merge([$user_id], $ids);
@@ -1314,9 +1321,10 @@ if (isset($_GET['action'])) {
 
           $filePath = str_replace('\\', '/', $filePath); // Normalize slashes
           $actual_mtime = filemtime($filePath); // Get exact OS file modification time
+          $is_private = intval($_POST['is_private'] ?? 0);
           
-          $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-          $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $actual_mtime]);
+          $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified, is_private) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+          $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $actual_mtime, $is_private]);
 
           $new_count = ($user_data['last_upload_date'] === $today) ? $daily_upload_count + 1 : 1;
           $update_stmt = $db->prepare("UPDATE users SET daily_upload_count = ?, last_upload_date = ? WHERE id = ?");
@@ -1455,8 +1463,9 @@ if (isset($_GET['action'])) {
       $song = $stmt->fetch();
 
       if ($song && ($song['user_id'] == $user_id || $_SESSION['user_artist'] == 'Music Library')) {
-        $update_fields = ["title = ?", "artist = ?", "album = ?", "genre = ?", "lyrics = ?"];
-        $update_params = [$new_title, $new_artist, $new_album, $new_genre, $new_lyrics];
+        $is_private = intval($_POST['is_private'] ?? 0);
+        $update_fields = ["title = ?", "artist = ?", "album = ?", "genre = ?", "lyrics = ?", "is_private = ?"];
+        $update_params = [$new_title, $new_artist, $new_album, $new_genre, $new_lyrics, $is_private];
 
         $jpeg_data = null;
         $webp_data = null;
@@ -1533,7 +1542,7 @@ if (isset($_GET['action'])) {
       }
 
       $shelves = [];
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
       $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
 
       $discovery_songs_stmt = $db->prepare("
@@ -1674,9 +1683,12 @@ if (isset($_GET['action'])) {
         $where_clauses[] = 'm.user_id = ?';
         $params[] = $_GET['filter_user_id'];
       }
-      $where_sql = count($where_clauses) > 0 ? 'WHERE ' . implode(' AND ', $where_clauses) : '';
+      $where_clauses[] = '(m.is_private = 0 OR m.user_id = ? OR 1 = ?)';
+      $params[] = $user_id;
+      $params[] = $is_super_admin;
+      $where_sql = 'WHERE ' . implode(' AND ', $where_clauses);
       
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . $limit_clause);
       $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
@@ -1694,7 +1706,7 @@ if (isset($_GET['action'])) {
         'year_asc' => 'ORDER BY m.year ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC'
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['title_asc'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.user_id = ? " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.user_id = ? " . $order_by . $limit_clause);
       $stmt->execute([$user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -1718,7 +1730,7 @@ if (isset($_GET['action'])) {
         'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE os.user_id = ? " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE os.user_id = ? " . $order_by . $limit_clause);
       $stmt->execute([$user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -1838,7 +1850,7 @@ if (isset($_GET['action'])) {
         'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, 1 as is_favorite FROM music m JOIN favorites f ON m.id = f.song_id WHERE f.user_id = ? " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, 1 as is_favorite FROM music m JOIN favorites f ON m.id = f.song_id WHERE f.user_id = ? " . $order_by . $limit_clause);
       $stmt->execute([$user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -1860,15 +1872,15 @@ if (isset($_GET['action'])) {
       $current_limit = $is_all ? '' : $limit_clause;
       
       $stmt = $db->prepare("
-        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT artist FROM users WHERE id = ps.added_by) as added_by_name
+        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT artist FROM users WHERE id = ps.added_by) as added_by_name
         FROM music m
         JOIN playlist_songs ps ON m.id = ps.song_id
         JOIN playlists p ON ps.playlist_id = p.id
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-        WHERE p.public_id = ?
+        WHERE p.public_id = ? AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?)
         {$order_by} {$current_limit}
       ");
-      $stmt->execute([$user_id, $public_id]);
+      $stmt->execute([$user_id, $public_id, $user_id, $is_super_admin]);
       send_json($stmt->fetchAll());
       break;
 
@@ -2008,14 +2020,18 @@ if (isset($_GET['action'])) {
           break;
         case 'playlist_songs':
           $sql = "SELECT m.id FROM music m JOIN playlist_songs ps ON m.id = ps.song_id JOIN playlists p ON ps.playlist_id = p.id ";
-          $conditions = "WHERE p.public_id = ?";
+          $conditions = "WHERE p.public_id = ? AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?)";
           $params[] = $param;
+          $params[] = $user_id;
+          $params[] = $is_super_admin;
           $default_sort = 'manual_order';
           break;
         case 'mix_songs':
-          $sql = "SELECT ms.song_id as id FROM mix_songs ms JOIN mixes mx ON ms.mix_id = mx.id ";
-          $conditions = "WHERE mx.public_id = ?";
+          $sql = "SELECT m.id FROM mix_songs ms JOIN mixes mx ON ms.mix_id = mx.id JOIN music m ON ms.song_id = m.id ";
+          $conditions = "WHERE mx.public_id = ? AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?)";
           $params[] = $param;
+          $params[] = $user_id;
+          $params[] = $is_super_admin;
           $default_sort = 'manual_order';
           break;
         case 'search':
@@ -2074,7 +2090,8 @@ if (isset($_GET['action'])) {
 
     case 'get_artists':
       $sort_key = $_GET['sort'] ?? 'name_asc';
-      $stmt = $db->query("SELECT artist, id FROM music WHERE artist != '' AND artist IS NOT NULL ORDER BY id DESC");
+      $stmt = $db->prepare("SELECT artist, id FROM music WHERE artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR 1 = ?) ORDER BY id DESC");
+      $stmt->execute([$user_id, $is_super_admin]);
       $rows = $stmt->fetchAll();
       $artists = [];
       foreach ($rows as $row) {
@@ -2109,17 +2126,20 @@ if (isset($_GET['action'])) {
         'year_asc' => 'ORDER BY MAX(m.year) ASC',
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['album_asc'];
-      $stmt = $db->query("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album != '' AND m.album IS NOT NULL GROUP BY m.album, m.user_id " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album != '' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?) GROUP BY m.album, m.user_id " . $order_by . $limit_clause);
+      $stmt->execute([$user_id, $is_super_admin]);
       send_json($stmt->fetchAll());
       break;
     
     case 'get_genres':
-      $stmt = $db->query("SELECT genre as name, MAX(id) as id FROM music WHERE genre != '' AND genre IS NOT NULL GROUP BY genre ORDER BY genre COLLATE NOCASE" . $limit_clause);
+      $stmt = $db->prepare("SELECT genre as name, MAX(id) as id FROM music WHERE genre != '' AND genre IS NOT NULL AND (is_private = 0 OR user_id = ? OR 1 = ?) GROUP BY genre ORDER BY genre COLLATE NOCASE" . $limit_clause);
+      $stmt->execute([$user_id, $is_super_admin]);
       send_json($stmt->fetchAll());
       break;
     
     case 'get_years':
-      $stmt = $db->query("SELECT year as name, MAX(id) as id FROM music WHERE year > 0 AND year IS NOT NULL GROUP BY year ORDER BY year DESC" . $limit_clause);
+      $stmt = $db->prepare("SELECT year as name, MAX(id) as id FROM music WHERE year > 0 AND year IS NOT NULL AND (is_private = 0 OR user_id = ? OR 1 = ?) GROUP BY year ORDER BY year DESC" . $limit_clause);
+      $stmt->execute([$user_id, $is_super_admin]);
       send_json($stmt->fetchAll());
       break;
     
@@ -2167,7 +2187,7 @@ if (isset($_GET['action'])) {
         $order_by = $sort_map[$sort] ?? $sort_map['title_asc'];
 
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE m.user_id = ? {$order_by} {$limit_clause}
         ");
@@ -2176,7 +2196,7 @@ if (isset($_GET['action'])) {
       } elseif ($type === 'playlist') {
         if (empty($name)) { http_response_code(400); exit; }
         $stmt_details = $db->prepare("
-          SELECT p.name, p.public_id, p.user_id, u.artist as creator,
+          SELECT p.name, p.public_id, p.user_id, p.is_private, u.artist as creator,
           (SELECT COUNT(*) FROM playlist_songs WHERE playlist_id = p.id) as song_count,
           (SELECT SUM(m.duration) FROM music m JOIN playlist_songs ps ON m.id = ps.song_id WHERE ps.playlist_id = p.id) as total_duration,
           (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
@@ -2186,6 +2206,9 @@ if (isset($_GET['action'])) {
         $stmt_details->execute([$name]);
         $details = $stmt_details->fetch();
         if ($details) {
+          if ($details['is_private'] == 1 && $details['user_id'] != $user_id && $is_super_admin == 0) {
+            http_response_code(403); send_json(['status' => 'error', 'message' => 'This playlist is private.']);
+          }
           $details['image_url'] = '?action=get_image&id=' . ($details['image_id'] ?? 0);
         }
         $sort_map = [
@@ -2195,7 +2218,7 @@ if (isset($_GET['action'])) {
         ];
         $order_by = $sort_map[$sort] ?? $sort_map['manual_order'];
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
           FROM music m JOIN playlist_songs ps ON m.id = ps.song_id JOIN playlists p ON ps.playlist_id = p.id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE p.public_id = ? {$order_by} {$limit_clause}
         ");
@@ -2216,13 +2239,13 @@ if (isset($_GET['action'])) {
             'public_id' => $mix_public_id
           ];
           $stmt_songs = $db->prepare("
-            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
             FROM music m 
             JOIN mix_songs ms ON m.id = ms.song_id 
             LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-            WHERE ms.mix_id = ? ORDER BY ms.sort_order ASC
+            WHERE ms.mix_id = ? AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?) ORDER BY ms.sort_order ASC
           ");
-          $stmt_songs->execute([$user_id, $mix_row['id']]);
+          $stmt_songs->execute([$user_id, $mix_row['id'], $user_id, $is_super_admin]);
           $songs = $stmt_songs->fetchAll();
           foreach($songs as $s) { $details['total_duration'] += $s['duration']; }
           $details['song_count'] = count($songs);
@@ -2235,11 +2258,15 @@ if (isset($_GET['action'])) {
         $user_params = [];
         
         if ($field === 'artist') {
-          $field_cond = "match_artist(m.artist, ?) = 1";
+          $field_cond = "match_artist(m.artist, ?) = 1 AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?)";
           $user_params[] = $name;
+          $user_params[] = $user_id;
+          $user_params[] = $is_super_admin;
         } else {
-          $field_cond = "m.{$field} = ?";
+          $field_cond = "m.{$field} = ? AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?)";
           $user_params[] = $name;
+          $user_params[] = $user_id;
+          $user_params[] = $is_super_admin;
         }
         
         if ($filter_user_id !== '') {
@@ -2283,7 +2310,7 @@ if (isset($_GET['action'])) {
         $default_sort = ($type === 'album') ? 'title_asc' : 'artist_asc';
         $order_by = $sort_map[$sort] ?? $sort_map[$default_sort];
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE {$field_cond} {$user_cond} {$order_by} {$limit_clause}
         ");
@@ -2326,11 +2353,11 @@ if (isset($_GET['action'])) {
       $query = '%' . $q . '%';
       $shelves = [];
 
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
       $stmt_top = $db->prepare("
         SELECT {$song_fields} FROM music m 
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? 
-        WHERE m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ? 
+        WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?)
         ORDER BY 
           CASE 
             WHEN m.title LIKE ? THEN 1 
@@ -2340,7 +2367,7 @@ if (isset($_GET['action'])) {
           END ASC, m.id DESC 
         LIMIT 1
       ");
-      $stmt_top->execute([$user_id, $query, $query, $query, $q, $q, $q]);
+      $stmt_top->execute([$user_id, $query, $query, $query, $user_id, $is_super_admin, $q, $q, $q]);
       $top_result = $stmt_top->fetch();
       
       if ($top_result) {
@@ -2359,8 +2386,8 @@ if (isset($_GET['action'])) {
         $added_artists[strtolower($ua['name'])] = true;
       }
 
-      $stmt = $db->prepare("SELECT DISTINCT artist, MAX(id) as id FROM music WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL GROUP BY artist LIMIT 15");
-      $stmt->execute([$query]);
+      $stmt = $db->prepare("SELECT DISTINCT artist, MAX(id) as id FROM music WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR 1 = ?) GROUP BY artist LIMIT 15");
+      $stmt->execute([$query, $user_id, $is_super_admin]);
       $music_artists = $stmt->fetchAll();
       
       foreach ($music_artists as $ma) {
@@ -2378,23 +2405,23 @@ if (isset($_GET['action'])) {
         $shelves[] = ['title' => 'Artists', 'type' => 'artists', 'items' => array_slice($artists, 0, 15)];
       }
 
-      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album LIKE ? AND m.album != '' AND m.album IS NOT NULL GROUP BY m.album, m.user_id ORDER BY m.album ASC LIMIT 15");
-      $stmt->execute([$query]);
+      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album LIKE ? AND m.album != '' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?) GROUP BY m.album, m.user_id ORDER BY m.album ASC LIMIT 15");
+      $stmt->execute([$query, $user_id, $is_super_admin]);
       $albums = $stmt->fetchAll();
       if (count($albums) > 0) {
         $shelves[] = ['title' => 'Albums', 'type' => 'albums', 'items' => $albums];
       }
 
-      $stmt = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, u.artist as creator, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id FROM playlists p JOIN users u ON p.user_id = u.id WHERE p.name LIKE ? ORDER BY p.name ASC LIMIT 15");
-      $stmt->execute([$query]);
+      $stmt = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, u.artist as creator, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id FROM playlists p JOIN users u ON p.user_id = u.id WHERE p.name LIKE ? AND (p.is_private = 0 OR p.user_id = ? OR 1 = ?) ORDER BY p.name ASC LIMIT 15");
+      $stmt->execute([$query, $user_id, $is_super_admin]);
       $playlists = $stmt->fetchAll();
       if (count($playlists) > 0) {
         $shelves[] = ['title' => 'Playlists', 'type' => 'playlists', 'items' => $playlists];
       }
 
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
-      $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) ORDER BY m.title ASC LIMIT 50");
-      $stmt->execute([$user_id, $query, $query, $query]);
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?) ORDER BY m.title ASC LIMIT 50");
+      $stmt->execute([$user_id, $query, $query, $query, $user_id, $is_super_admin]);
       $songs = $stmt->fetchAll();
       if (count($songs) > 0) {
         $shelves[] = ['title' => 'Songs', 'type' => 'songs_list', 'items' => $songs];
@@ -2406,7 +2433,7 @@ if (isset($_GET['action'])) {
     case 'get_song_data':
       $id = intval($_GET['id'] ?? 0);
       $stmt = $db->prepare("
-        SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, 
+        SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, m.is_private,
         CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
         uss.volume_multiplier, uss.eq_bands
         FROM music m 
@@ -2417,6 +2444,9 @@ if (isset($_GET['action'])) {
       $stmt->execute([$user_id, $user_id, $id]);
       $song = $stmt->fetch();
       if ($song) {
+        if ($song['is_private'] == 1 && $song['user_id'] != $user_id && $is_super_admin == 0) {
+           http_response_code(403); send_json(['status' => 'error', 'message' => 'This song is private.']);
+        }
         $song['stream_url'] = '?action=get_stream&id=' . $song['id'];
         $song['image_url'] = '?action=get_image&id=' . $song['id'];
         if ($song['eq_bands']) $song['eq_bands'] = json_decode($song['eq_bands'], true);
@@ -2455,10 +2485,14 @@ if (isset($_GET['action'])) {
 
     case 'get_stream':
       $id = intval($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT file FROM music WHERE id = ?");
+      $stmt = $db->prepare("SELECT file, user_id, is_private FROM music WHERE id = ?");
       $stmt->execute([$id]);
-      $file_path = $stmt->fetchColumn();
-      if ($file_path && file_exists($file_path)) {
+      $song_stream = $stmt->fetch();
+      if ($song_stream && file_exists($song_stream['file'])) {
+        if ($song_stream['is_private'] == 1 && $song_stream['user_id'] != $user_id && $is_super_admin == 0) {
+           http_response_code(403); exit;
+        }
+        $file_path = $song_stream['file'];
         session_write_close();
         while (ob_get_level() > 0) { @ob_end_clean(); }
         $filesize = filesize($file_path);
@@ -2560,7 +2594,7 @@ if (isset($_GET['action'])) {
       }
       
       $stmt = $db->prepare("
-        SELECT p.id, p.name, p.public_id, p.is_collaborative, COUNT(ps.song_id) as song_count,
+        SELECT p.id, p.name, p.public_id, p.is_collaborative, p.is_private, COUNT(ps.song_id) as song_count,
         (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
         {$is_added_sql}
         FROM playlists p LEFT JOIN playlist_songs ps ON p.id = ps.playlist_id
@@ -2611,12 +2645,13 @@ if (isset($_GET['action'])) {
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
       $name = trim(htmlspecialchars($data['name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $is_private = intval($data['is_private'] ?? 0);
       if (empty($name)) {
         http_response_code(400); send_json(['status' => 'error', 'message' => 'Playlist name cannot be empty.']);
       }
       $public_id = bin2hex(random_bytes(8));
-      $stmt = $db->prepare("INSERT INTO playlists (user_id, name, public_id) VALUES (?, ?, ?)");
-      $stmt->execute([$user_id, $name, $public_id]);
+      $stmt = $db->prepare("INSERT INTO playlists (user_id, name, public_id, is_private) VALUES (?, ?, ?, ?)");
+      $stmt->execute([$user_id, $name, $public_id, $is_private]);
       send_json(['status' => 'success', 'message' => 'Playlist created.']);
       break;
 
@@ -2625,17 +2660,19 @@ if (isset($_GET['action'])) {
       $data = json_decode(file_get_contents('php://input'), true);
       $public_id = $data['public_id'];
       $new_name = trim(htmlspecialchars($data['name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $is_private = intval($data['is_private'] ?? 0);
       if (empty($new_name)) {
         http_response_code(400); send_json(['status' => 'error', 'message' => 'Playlist name cannot be empty.']);
       }
-      $stmt = $db->prepare("UPDATE playlists SET name = ? WHERE public_id = ? AND user_id = ?");
-      $stmt->execute([$new_name, $public_id, $user_id]);
-      if ($stmt->rowCount() > 0) {
-        send_json(['status' => 'success', 'message' => 'Playlist updated.']);
-      } else {
-        http_response_code(403);
-        send_json(['status' => 'error', 'message' => 'Permission denied or playlist not found.']);
+      $stmt = $db->prepare("UPDATE playlists SET name = ?, is_private = ?, is_collaborative = CASE WHEN ? = 1 THEN 0 ELSE is_collaborative END WHERE public_id = ? AND user_id = ?");
+      $stmt->execute([$new_name, $is_private, $is_private, $public_id, $user_id]);
+      
+      // Destroy collaborators safely if transitioning to Private
+      if ($is_private == 1) {
+        $db->prepare("DELETE FROM playlist_collaborators WHERE playlist_id = (SELECT id FROM playlists WHERE public_id = ?)")->execute([$public_id]);
       }
+      
+      send_json(['status' => 'success', 'message' => 'Playlist updated.']);
       break;
 
     case 'delete_playlist':
@@ -2807,7 +2844,7 @@ if (isset($_GET['action'])) {
       break;
       
     case 'get_trending':
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
       $stmt = $db->prepare("
         SELECT {$song_fields}
         FROM music m
@@ -2830,7 +2867,7 @@ if (isset($_GET['action'])) {
     case 'get_history':
       if (!$user_id) { send_json([]); }
       $stmt = $db->prepare("
-        SELECT MAX(h.played_at) AS played_at, m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id,
+        SELECT MAX(h.played_at) AS played_at, m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private,
         CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
         FROM history h
         JOIN music m ON h.song_id = m.id
@@ -2863,7 +2900,7 @@ if (isset($_GET['action'])) {
       }
 
       $shelves = [];
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
       $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
 
       $recent_songs_stmt = $db->prepare("
@@ -2938,7 +2975,7 @@ if (isset($_GET['action'])) {
       }
 
       $recent_playlists_stmt = $db->prepare("
-        SELECT p.name, p.public_id, p.is_collaborative, u.artist as creator,
+        SELECT p.name, p.public_id, p.is_collaborative, p.is_private, u.artist as creator,
         (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
         FROM playlists p JOIN users u ON p.user_id = u.id
         WHERE p.user_id = :user_id
@@ -3208,10 +3245,10 @@ if (isset($_GET['action'])) {
         SELECT p.name, m.file, m.title, m.artist, m.album FROM playlists p 
         JOIN playlist_songs ps ON p.id = ps.playlist_id 
         JOIN music m ON ps.song_id = m.id 
-        WHERE p.public_id = ? AND p.user_id = ?
+        WHERE p.public_id = ? AND p.user_id = ? AND (m.is_private = 0 OR m.user_id = ? OR 1 = ?)
         ORDER BY ps.sort_order ASC
       ");
-      $stmt->execute([$public_id, $user_id]);
+      $stmt->execute([$public_id, $user_id, $user_id, $is_super_admin]);
       $rows = $stmt->fetchAll();
 
       if (empty($rows)) { http_response_code(404); exit; }
@@ -4680,6 +4717,10 @@ function perform_full_scan($db) {
               <label for="song-genre" class="form-label">Custom Genre</label>
               <input type="text" class="form-control" id="song-genre" placeholder="Pop, Rock, J-Pop">
             </div>
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" id="song-is-private">
+              <label class="form-check-label text-white" for="song-is-private"><i class="bi bi-lock-fill text-warning"></i> Private Song</label>
+            </div>
             <button id="start-upload-btn" class="btn btn-danger">Start Upload</button>
             <div id="upload-progress-area" class="mt-3"></div>
           </div>
@@ -4727,8 +4768,12 @@ function perform_full_scan($db) {
           <div class="modal-body">
             <form id="create-playlist-form">
               <div class="mb-3">
-                <label for="playlist-name" class="form-label">Playlist Name</label>
+                <label for="playlist-name-input" class="form-label">Playlist Name</label>
                 <input type="text" class="form-control" id="playlist-name-input" required>
+              </div>
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="playlist-is-private">
+                <label class="form-check-label text-white" for="playlist-is-private"><i class="bi bi-lock-fill text-warning"></i> Private Playlist</label>
               </div>
               <button type="submit" class="btn btn-danger w-100">Create</button>
             </form>
@@ -4749,6 +4794,10 @@ function perform_full_scan($db) {
               <div class="mb-3">
                 <label for="edit-playlist-name-input" class="form-label">Playlist Name</label>
                 <input type="text" class="form-control" id="edit-playlist-name-input" required>
+              </div>
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="edit-playlist-is-private">
+                <label class="form-check-label text-white" for="edit-playlist-is-private"><i class="bi bi-lock-fill text-warning"></i> Private Playlist</label>
               </div>
               <button type="submit" class="btn btn-danger w-100">Save Changes</button>
             </form>
@@ -4884,6 +4933,10 @@ function perform_full_scan($db) {
               <div class="mb-3">
                 <label class="form-label">Lyrics</label>
                 <textarea class="form-control" id="edit-metadata-lyrics" rows="4"></textarea>
+              </div>
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="edit-metadata-is-private">
+                <label class="form-check-label text-white" for="edit-metadata-is-private"><i class="bi bi-lock-fill text-warning"></i> Private Song</label>
               </div>
               <button type="submit" class="btn btn-danger w-100" id="edit-metadata-submit-btn">Save Changes</button>
               <div class="progress mt-3 d-none" id="metadata-progress-container" style="height: 15px;">
@@ -5428,7 +5481,7 @@ function perform_full_scan($db) {
                   <img src="?action=get_image&id=${song.id}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                   <i class="bi bi-soundwave playing-icon"></i>
                 </div>
-                <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.title}</div></div>
+                <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
                 <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${song.artist}</div>
                 <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
                 <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
@@ -6180,7 +6233,7 @@ function perform_full_scan($db) {
                 <img src="?action=get_image&id=${song.id}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                 <i class="bi bi-soundwave playing-icon"></i>
               </div>
-              <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.title}</div></div>
+              <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
               <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
                 ${song.artist}
                 ${song.added_by_name ? `<br><span style="font-size: 0.7rem; color: var(--ytm-secondary-text);">Added by: ${escapeHTML(song.added_by_name)}</span>` : ''}
@@ -6346,7 +6399,7 @@ function perform_full_scan($db) {
               const useridAttr = item.user_id ? `data-userid="${item.user_id}"` : (type === 'get_following' ? `data-userid="${item.id}"` : '');
 
               const moreButton = (type === 'get_user_playlists') ? `
-                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}" data-is-collab="${item.is_collaborative || 0}">
+                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}">
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>` : '';
 
@@ -6356,7 +6409,9 @@ function perform_full_scan($db) {
                     ${moreButton}
                     <img src="${imgSrc}${imageId || 0}" class="card-img-top ${imgClass}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
                     <div class="card-body px-0 py-2">
-                      <h5 class="card-title fs-6 fw-normal text-truncate ${titleClass}">${name}</h5>
+                      <h5 class="card-title fs-6 fw-normal text-truncate ${titleClass}">
+                        ${type === 'get_user_playlists' && item.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1"></i>' : ''}${name}
+                      </h5>
                       ${subtext ? `<p class="card-text small text-secondary text-truncate ${subtextClass}">${subtext}</p>` : ''}
                     </div>
                   </div>
@@ -6444,7 +6499,7 @@ function perform_full_scan($db) {
                     <img src="?action=get_image&id=${song.id}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                     <i class="bi bi-soundwave playing-icon"></i>
                   </div>
-                  <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.title}</div></div>
+                  <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
                   <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${song.artist}</div>
                   <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
                   <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
@@ -7219,21 +7274,23 @@ function perform_full_scan($db) {
             return;
           }
           contextMenuItemEl = buttonEl;
-          const { publicId, name, isCollab } = playlistData;
+          const { publicId, name, isCollab, isPrivate } = playlistData;
           
-          const collabText = isCollab ? 'Make Private' : 'Make Collaborative';
-          const collabIcon = isCollab ? '<i class="bi bi-lock-fill"></i>' : '<i class="bi bi-globe"></i>';
+          let menuItems = '';
           
-          let menuItems = `
-            <li class="context-menu-item" data-action="toggle_collab" data-public-id="${publicId}">${collabIcon} ${collabText}</li>`;
+          if (!isPrivate) {
+            const collabText = isCollab ? 'Make Private' : 'Make Collaborative';
+            const collabIcon = isCollab ? '<i class="bi bi-lock-fill"></i>' : '<i class="bi bi-globe"></i>';
             
-          // ONLY show "Manage Collaborators" if the playlist is currently collaborative!
-          if (isCollab) {
-            menuItems += `<li class="context-menu-item" data-action="manage_collab" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-people-fill"></i> Manage Collaborators</li>`;
+            menuItems += `<li class="context-menu-item" data-action="toggle_collab" data-public-id="${publicId}">${collabIcon} ${collabText}</li>`;
+              
+            if (isCollab) {
+              menuItems += `<li class="context-menu-item" data-action="manage_collab" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-people-fill"></i> Manage Collaborators</li>`;
+            }
           }
           
           menuItems += `
-            <li class="context-menu-item" data-action="edit_playlist" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-pencil-fill"></i> Edit Playlist</li>
+            <li class="context-menu-item" data-action="edit_playlist" data-public-id="${publicId}" data-name="${name}" data-is-private="${isPrivate}"><i class="bi bi-pencil-fill"></i> Edit Playlist</li>
             <li class="context-menu-item" data-action="export_playlist" data-public-id="${publicId}"><i class="bi bi-box-arrow-up"></i> Export Playlist</li>
             <li class="context-menu-item text-danger" data-action="delete_playlist" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-trash-fill"></i> Delete Playlist</li>
             <hr class="dropdown-divider bg-secondary mx-2 my-1">
@@ -7870,7 +7927,8 @@ function perform_full_scan($db) {
             const playlistData = { 
               publicId: playlistMoreBtn.dataset.publicId, 
               name: playlistMoreBtn.dataset.name,
-              isCollab: parseInt(playlistMoreBtn.dataset.isCollab || 0)
+              isCollab: parseInt(playlistMoreBtn.dataset.isCollab || 0),
+              isPrivate: parseInt(playlistMoreBtn.dataset.isPrivate || 0)
             };
             buildAndShowPlaylistContextMenu(playlistMoreBtn, playlistData);
             return;
@@ -8364,7 +8422,8 @@ function perform_full_scan($db) {
             case 'edit_playlist':
               document.getElementById('edit-playlist-id-input').value = publicId;
               document.getElementById('edit-playlist-name-input').value = name;
-              editPlaylistModal.show();
+              document.getElementById('edit-playlist-is-private').checked = item.dataset.isPrivate === '1';
+              if (editPlaylistModal) editPlaylistModal.show();
               break;
             case 'export_playlist':
               window.location.href = `?action=export_playlist&id=${publicId}`;
@@ -8400,6 +8459,7 @@ function perform_full_scan($db) {
               document.getElementById('edit-metadata-cover').value = '';
               const metaSongDataToEdit = await fetchData(`?action=get_song_data&id=${id}`);
               document.getElementById('edit-metadata-lyrics').value = metaSongDataToEdit ? (metaSongDataToEdit.lyrics || '') : '';
+              document.getElementById('edit-metadata-is-private').checked = metaSongDataToEdit ? (metaSongDataToEdit.is_private == 1) : false;
               if (editMetadataModal) editMetadataModal.show();
               break;
             case 'show_metadata':
@@ -9160,9 +9220,10 @@ function perform_full_scan($db) {
         createPlaylistForm.addEventListener('submit', async e => {
           e.preventDefault();
           const name = document.getElementById('playlist-name-input').value;
+          const is_private = document.getElementById('playlist-is-private').checked ? 1 : 0;
           const data = await fetchData('?action=create_playlist', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ name })
+            body: JSON.stringify({ name, is_private })
           });
           if (data && data.status === 'success') {
             createPlaylistModal.hide();
@@ -9174,6 +9235,25 @@ function perform_full_scan($db) {
           }
         });
         
+        if (editPlaylistForm) {
+          editPlaylistForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const public_id = document.getElementById('edit-playlist-id-input').value;
+            const name = document.getElementById('edit-playlist-name-input').value;
+            const is_private = document.getElementById('edit-playlist-is-private').checked ? 1 : 0;
+            const data = await fetchData('?action=edit_playlist', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ public_id, name, is_private })
+            });
+            if (data && data.status === 'success') {
+              if (editPlaylistModal) editPlaylistModal.hide();
+              editPlaylistForm.reset();
+              showToast(data.message, 'success');
+              loadView(currentView);
+            }
+          });
+        }
+
         importPlaylistForm.addEventListener('submit', async e => {
           e.preventDefault();
           const fileInput = document.getElementById('import-playlist-file');
@@ -9349,6 +9429,7 @@ function perform_full_scan($db) {
             formData.append('album', document.getElementById('edit-metadata-album').value);
             formData.append('genre', document.getElementById('edit-metadata-genre').value);
             formData.append('lyrics', document.getElementById('edit-metadata-lyrics').value);
+            formData.append('is_private', document.getElementById('edit-metadata-is-private').checked ? 1 : 0);
 
             const doMetadataUpload = () => {
               const xhr = new XMLHttpRequest();
@@ -9870,6 +9951,7 @@ function perform_full_scan($db) {
             const formData = new FormData();
             formData.append('song', file);
             formData.append('genre', songGenreInput.value);
+            formData.append('is_private', document.getElementById('song-is-private').checked ? 1 : 0);
 
             const xhr = new XMLHttpRequest();
             xhr.open('POST', '?action=upload_song', true);
