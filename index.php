@@ -36,7 +36,7 @@ if (isset($_GET['pwa'])) {
     header('Content-Type: application/javascript; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     echo <<<SW
-const CACHE_NAME = 'php-music-cache-v29';
+const CACHE_NAME = 'php-music-cache-v30';
 const STATIC_ASSETS =[
   './',
   'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
@@ -110,7 +110,7 @@ self.addEventListener('fetch', event => {
         }
         return response;
       }).catch(() => {
-        return caches.match(event.request);
+        return caches.match(event.request, { ignoreSearch: false, ignoreVary: true });
       })
     );
     return;
@@ -1730,7 +1730,11 @@ if (isset($_GET['action'])) {
         'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE os.user_id = ? " . $order_by . $limit_clause);
+      
+      $is_all = isset($_GET['all']) && $_GET['all'] == '1';
+      $current_limit = $is_all ? '' : $limit_clause;
+
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE os.user_id = ? " . $order_by . " " . $current_limit);
       $stmt->execute([$user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -5454,7 +5458,7 @@ function perform_full_scan($db) {
             const fetchedData = await fetchData('?action=get_queue_songs', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ ids: missingIds })
-            });
+            }, true); // Silent flag set to true
             if (fetchedData) {
               fetchedData.forEach(song => globalSongCache[song.id] = song);
             }
@@ -5724,6 +5728,7 @@ function perform_full_scan($db) {
         let contextMenuItemEl = null;
         let previousVolume = 1;
         let cachedExploreData = null;
+        let offlineViewSongsData = [];
         let currentLrcData = null;
         let currentLrcSongId = null;
         let currentLyricIndex = -1;
@@ -5850,7 +5855,7 @@ function perform_full_scan($db) {
           return "Just now";
         };
 
-        const fetchData = async (url, options = {}) => {
+        const fetchData = async (url, options = {}, silent = false) => {
           try {
             options.cache = 'no-store';
             const response = await fetch(url, options);
@@ -5865,7 +5870,7 @@ function perform_full_scan($db) {
             return await response.text();
           } catch (error) {
             console.error("Fetch error for " + url, error);
-            showToast(error.message, 'error');
+            if (!silent) showToast(error.message, 'error');
             return null;
           }
         };
@@ -6685,11 +6690,26 @@ function perform_full_scan($db) {
           switch (type) {
             case 'get_songs':
             case 'get_favorites':
-            case 'get_offline_songs':
             case 'get_history':
             case 'get_trending':
               data = await fetchData(`?action=${type}&${params.toString()}`);
               renderSongs(data, true);
+              break;
+            case 'get_offline_songs':
+              if (offlineViewSongsData && offlineViewSongsData.length > 0) {
+                 const startIndex = (currentPage - 1) * PAGE_SIZE;
+                 const endIndex = startIndex + PAGE_SIZE;
+                 data = offlineViewSongsData.slice(startIndex, endIndex);
+                 if (data.length > 0) {
+                   renderSongs(data, true);
+                 }
+                 if (endIndex >= offlineViewSongsData.length) {
+                   allContentloaded = true;
+                 }
+              } else {
+                 data = [];
+                 allContentloaded = true;
+              }
               break;
             case 'user_profile':
               const profileData = await fetchData(`?action=get_view_data&type=profile&sort=${sort}&page=${currentPage}`);
@@ -6851,8 +6871,18 @@ function perform_full_scan($db) {
                   <a href="?action=export_offline" class="btn btn-outline-light" id="export-offline-btn"><i class="bi bi-box-arrow-up"></i> Export Offline</a>
                   <button class="btn btn-outline-light" id="import-offline-btn"><i class="bi bi-box-arrow-in-down"></i> Import Offline</button>
                 </div>`;
-                data = await fetchData(`?action=get_offline_songs&${pageParams.toString()}`);
-                renderSongs(data, true);
+                
+                const allData = await fetchData(`?action=get_offline_songs&sort=${currentView.sort}&all=1`, {}, true);
+                if (allData && allData.length > 0) {
+                   offlineViewSongsData = allData;
+                   data = offlineViewSongsData.slice(0, PAGE_SIZE);
+                   renderSongs(data, true);
+                   if (offlineViewSongsData.length <= PAGE_SIZE) allContentloaded = true;
+                } else {
+                   offlineViewSongsData = [];
+                   renderSongs([], true);
+                   allContentloaded = true;
+                }
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your offline music.</div>`;
               }
@@ -6988,13 +7018,23 @@ function perform_full_scan($db) {
         };
 
         const playSongById = async (songId) => {
-          const data = await fetchData(`?action=get_song_data&id=${songId}`);
-          if (!data) return;
+          let data = await fetchData(`?action=get_song_data&id=${songId}`, {}, true);
+          
+          // OFFLINE FALLBACK: If API fails, check the local memory cache!
+          if (!data) {
+            if (globalSongCache[songId]) {
+              data = Object.assign({}, globalSongCache[songId]);
+              if (!data.stream_url) data.stream_url = `?action=get_stream&id=${songId}`;
+              if (!data.image_url) data.image_url = `?action=get_image&id=${songId}`;
+            } else {
+              showToast("Song data not available offline.", "error");
+              return;
+            }
+          }
+          
           currentSong = data;
           globalSongCache[currentSong.id] = currentSong;
           currentSong.logged = false;
-          
-          globalSongCache[currentSong.id] = currentSong;
           
           initWebAudio();
           if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -7468,7 +7508,9 @@ function perform_full_scan($db) {
           const contextView = view || currentView;
           let fetchedQueue = [];
           
-          if (contextView.type === 'get_recommendations' || contextView.type === 'search') {
+          if (contextView.type === 'get_offline_songs' && offlineViewSongsData && offlineViewSongsData.length > 0) {
+            fetchedQueue = offlineViewSongsData.map(song => parseInt(song.id));
+          } else if (contextView.type === 'get_recommendations' || contextView.type === 'search') {
             const allShelfSongs = [...document.querySelectorAll('.shelf-item[data-song-id], .song-item[data-song-id], .top-result-card[data-song-id]')];
             const allSongIds = allShelfSongs.map(item => parseInt(item.dataset.songId));
             fetchedQueue = [...new Set(allSongIds)];
@@ -7478,7 +7520,7 @@ function perform_full_scan($db) {
             const allIds = await fetchData('?action=get_view_ids', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ view_type: viewTypeForIds, param: contextView.param, sort: contextView.sort, filter_user_id: contextView.filter_user_id || '' })
-            });
+            }, true);
             
             if (allIds && allIds.length > 0) {
                 fetchedQueue = allIds.map(id => parseInt(id));
