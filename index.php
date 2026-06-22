@@ -1048,7 +1048,7 @@ if (isset($_GET['action'])) {
       $stmt->execute([$seed_id]);
       $seed = $stmt->fetch();
       
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       
       if ($seed) {
         $radio_stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.genre = ? OR match_artist(m.artist, ?) = 1) AND m.id != ? ORDER BY RANDOM() LIMIT 15");
@@ -1067,7 +1067,7 @@ if (isset($_GET['action'])) {
       if (empty($ids)) { send_json([]); }
       
       $placeholders = implode(',', array_fill(0, count($ids), '?'));
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       
       $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id IN ($placeholders)");
       $params = array_merge([$user_id], $ids);
@@ -1677,7 +1677,7 @@ if (isset($_GET['action'])) {
       }
 
       $shelves = [];
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
 
       $discovery_songs_stmt = $db->prepare("
@@ -1822,7 +1822,7 @@ if (isset($_GET['action'])) {
       $params[] = $user_id;
       $where_sql = 'WHERE ' . implode(' AND ', $where_clauses);
       
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . $limit_clause);
       $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
@@ -1840,7 +1840,7 @@ if (isset($_GET['action'])) {
         'year_asc' => 'ORDER BY m.year ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC'
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['title_asc'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.user_id = ? " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.user_id = ? " . $order_by . $limit_clause);
       $stmt->execute([$user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -1868,7 +1868,7 @@ if (isset($_GET['action'])) {
       $is_all = isset($_GET['all']) && $_GET['all'] == '1';
       $current_limit = $is_all ? '' : $limit_clause;
 
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE os.user_id = ? " . $order_by . " " . $current_limit);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE os.user_id = ? " . $order_by . " " . $current_limit);
       $stmt->execute([$user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -1988,7 +1988,7 @@ if (isset($_GET['action'])) {
         'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, 1 as is_favorite FROM music m JOIN favorites f ON m.id = f.song_id WHERE f.user_id = ? " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, 1 as is_favorite FROM music m JOIN favorites f ON m.id = f.song_id WHERE f.user_id = ? " . $order_by . $limit_clause);
       $stmt->execute([$user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -2010,7 +2010,7 @@ if (isset($_GET['action'])) {
       $current_limit = $is_all ? '' : $limit_clause;
       
       $stmt = $db->prepare("
-        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.bitrate, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT artist FROM users WHERE id = ps.added_by) as added_by_name
+        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.bitrate, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT artist FROM users WHERE id = ps.added_by) as added_by_name
         FROM music m
         JOIN playlist_songs ps ON m.id = ps.song_id
         JOIN playlists p ON ps.playlist_id = p.id
@@ -2060,7 +2060,7 @@ if (isset($_GET['action'])) {
         'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC', 'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC', 'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC'
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN listen_later ll ON m.id = ll.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE ll.user_id = ? " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN listen_later ll ON m.id = ll.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE ll.user_id = ? " . $order_by . $limit_clause);
       $stmt->execute([$user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -2556,7 +2556,7 @@ if (isset($_GET['action'])) {
         $order_by = $sort_map[$sort] ?? $sort_map['title_asc'];
 
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE m.user_id = ? {$order_by} {$limit_clause}
         ");
@@ -2587,7 +2587,7 @@ if (isset($_GET['action'])) {
         ];
         $order_by = $sort_map[$sort] ?? $sort_map['manual_order'];
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m JOIN playlist_songs ps ON m.id = ps.song_id JOIN playlists p ON ps.playlist_id = p.id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE p.public_id = ? {$order_by} {$limit_clause}
         ");
@@ -2608,7 +2608,7 @@ if (isset($_GET['action'])) {
             'public_id' => $mix_public_id
           ];
           $stmt_songs = $db->prepare("
-            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
+            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
             FROM music m 
             JOIN mix_songs ms ON m.id = ms.song_id 
             LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
@@ -2680,7 +2680,7 @@ if (isset($_GET['action'])) {
         $default_sort = ($type === 'album') ? 'title_asc' : 'artist_asc';
         $order_by = $sort_map[$sort] ?? $sort_map[$default_sort];
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE {$field_cond} {$user_cond} {$order_by} {$limit_clause}
         ");
@@ -2723,7 +2723,7 @@ if (isset($_GET['action'])) {
           $query = '%' . $q . '%';
           $shelves = [];
 
-          $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+          $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
           $stmt_top = $db->prepare("
             SELECT {$song_fields} FROM music m 
             LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? 
@@ -2789,7 +2789,7 @@ if (isset($_GET['action'])) {
             $shelves[] = ['title' => 'Playlists', 'type' => 'playlists', 'items' => $playlists];
           }
 
-          $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+          $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
           $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY m.title ASC LIMIT 50");
           $stmt->execute([$user_id, $query, $query, $query, $user_id]);
       $songs = $stmt->fetchAll();
@@ -2803,7 +2803,7 @@ if (isset($_GET['action'])) {
     case 'get_song_data':
       $id = intval($_GET['id'] ?? 0);
       $stmt = $db->prepare("
-        SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, m.is_private, m.replaygain,
+        SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, m.is_private, m.last_modified, m.replaygain,
         CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
         uss.volume_multiplier, uss.eq_bands
         FROM music m 
@@ -2818,7 +2818,7 @@ if (isset($_GET['action'])) {
            http_response_code(403); send_json(['status' => 'error', 'message' => 'This song is private.']);
         }
         $song['stream_url'] = '?action=get_stream&id=' . $song['id'];
-        $song['image_url'] = '?action=get_image&id=' . $song['id'];
+        $song['image_url'] = '?action=get_image&id=' . $song['id'] . '&v=' . ($song['last_modified'] ?? 0);
         if ($song['eq_bands']) $song['eq_bands'] = json_decode($song['eq_bands'], true);
       }
       send_json($song);
@@ -3234,7 +3234,7 @@ if (isset($_GET['action'])) {
       break;
       
     case 'get_trending':
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       $stmt = $db->prepare("
         SELECT {$song_fields}
         FROM music m
@@ -3257,7 +3257,7 @@ if (isset($_GET['action'])) {
     case 'get_history':
       if (!$user_id) { send_json([]); }
       $stmt = $db->prepare("
-        SELECT MAX(h.played_at) AS played_at, m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private,
+        SELECT MAX(h.played_at) AS played_at, m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified,
         CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
         (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
         FROM history h
@@ -3291,7 +3291,7 @@ if (isset($_GET['action'])) {
       }
 
       $shelves = [];
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
 
       $recent_songs_stmt = $db->prepare("
@@ -6103,7 +6103,7 @@ function perform_full_scan($db) {
                 data-song-genre="${escapeAttr(song.genre)}"
                 data-song-user-id="${song.user_id}">
                 <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
-                  <img src="?action=get_image&id=${song.id}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                   <i class="bi bi-soundwave playing-icon"></i>
                 </div>
                 <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
@@ -6835,11 +6835,14 @@ function perform_full_scan($db) {
           try {
             const cache = await caches.open('php-music-offline');
             
-            await cache.delete(`?action=get_stream&id=${id}`);
-            await cache.delete(`?action=get_image&id=${id}`);
-            await cache.delete(`?action=get_song_data&id=${id}`);
+            const keys = await cache.keys();
+            for (let req of keys) {
+              const u = new URL(req.url);
+              if (u.searchParams.get('id') == id) await cache.delete(req);
+            }
             
-            await cache.add(`?action=get_image&id=${id}`);
+            const v = globalSongCache[id] ? (globalSongCache[id].last_modified || 0) : 0;
+            await cache.add(`?action=get_image&id=${id}&v=${v}`);
             await cache.add(`?action=get_song_data&id=${id}`);
 
             const response = await fetch(`?action=get_stream&id=${id}`);
@@ -6940,9 +6943,11 @@ function perform_full_scan($db) {
               await fetchData('?action=toggle_offline', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: parseInt(songId) }) });
               try {
                 const cache = await caches.open('php-music-offline');
-                await cache.delete(`?action=get_stream&id=${songId}`);
-                await cache.delete(`?action=get_image&id=${songId}`);
-                await cache.delete(`?action=get_song_data&id=${songId}`);
+                const keys = await cache.keys();
+                for (let req of keys) {
+                  const u = new URL(req.url);
+                  if (u.searchParams.get('id') == songId) await cache.delete(req);
+                }
               } catch (e) {}
               offlineSongsSet.delete(parseInt(songId));
               removed++;
@@ -7173,7 +7178,7 @@ function perform_full_scan($db) {
               data-song-genre="${escapeAttr(song.genre)}"
               data-song-user-id="${song.user_id}">
               <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
-                <img src="?action=get_image&id=${song.id}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                 <i class="bi bi-soundwave playing-icon"></i>
               </div>
               <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${escapeHTML(song.title)}</div></div>
@@ -7402,7 +7407,7 @@ function perform_full_scan($db) {
                     <h3 class="shelf-title">${shelf.title}</h3>
                   </div>
                   <div class="card bg-transparent border-secondary d-flex flex-row align-items-center p-3 top-result-card" data-song-id="${song.id}" style="border-radius: 12px; cursor: pointer; max-width: 600px; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'">
-                    <img src="?action=get_image&id=${song.id}" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
                     <div class="d-flex flex-column justify-content-center overflow-hidden w-100">
                       <h4 class="text-white text-truncate mb-1 fw-bold">${escapeHTML(song.title)}</h4>
                       <p class="text-secondary text-truncate mb-0">Song • ${escapeHTML(song.artist)}</p>
@@ -7447,7 +7452,7 @@ function perform_full_scan($db) {
                   data-song-genre="${escapeAttr(song.genre)}"
                   data-song-user-id="${song.user_id}">
                   <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
-                    <img src="?action=get_image&id=${song.id}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                     <i class="bi bi-soundwave playing-icon"></i>
                   </div>
                   <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
@@ -7479,7 +7484,7 @@ function perform_full_scan($db) {
             if (shelf.type === 'songs') {
               itemsHTML = shelf.items.map(song => `
                 <div class="shelf-item" data-song-id="${song.id}">
-                  <img src="?action=get_image&id=${song.id}" alt="${escapeHTML(song.title)}">
+                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" alt="${escapeHTML(song.title)}">
                   <div class="item-title">${escapeHTML(song.title)}</div>
                   <div class="item-subtitle" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${escapeHTML(song.artist)}</div>
                 </div>
@@ -8196,7 +8201,7 @@ function perform_full_scan($db) {
             if (globalSongCache[songId]) {
               data = Object.assign({}, globalSongCache[songId]);
               if (!data.stream_url) data.stream_url = `?action=get_stream&id=${songId}`;
-              if (!data.image_url) data.image_url = `?action=get_image&id=${songId}`;
+              if (!data.image_url) data.image_url = `?action=get_image&id=${songId}&v=${globalSongCache[songId]?.last_modified || 0}`;
             } else {
               showToast("Song data not available offline.", "error");
               return;
@@ -8255,7 +8260,7 @@ function perform_full_scan($db) {
             playerBar.classList.remove('d-none');
             document.body.classList.add('player-visible');
           }
-          const imageUrl = `?action=get_image&id=${currentSong.id}`;
+          const imageUrl = `?action=get_image&id=${currentSong.id}&v=${currentSong.last_modified || 0}`;
           playerElements.art.forEach(el => el.src = imageUrl);
           playerElements.title.forEach(el => el.textContent = currentSong.title);
           playerElements.artist.forEach(el => el.textContent = currentSong.artist);
@@ -8509,11 +8514,13 @@ function perform_full_scan($db) {
               <hr class="dropdown-divider bg-secondary mx-2 my-1">`;
           }
           
-          const isLL = typeof listenLaterSet !== 'undefined' && listenLaterSet.has(songId);
-          const llIcon = isLL ? '<i class="bi bi-bookmark-fill"></i>' : '<i class="bi bi-bookmark"></i>';
-          const llText = isLL ? "Remove from Listen Later" : "Listen Later";
-          menuItems += `<li class="context-menu-item" data-action="listen_later" data-id="${songId}">${llIcon} ${llText}</li>`;
-          menuItems += `<li class="context-menu-item" data-action="view_comments" data-id="${songId}"><i class="bi bi-chat-dots"></i> View Comments & Likes</li>`;
+          if (currentUser) {
+            const isLL = typeof listenLaterSet !== 'undefined' && listenLaterSet.has(songId);
+            const llIcon = isLL ? '<i class="bi bi-bookmark-fill"></i>' : '<i class="bi bi-bookmark"></i>';
+            const llText = isLL ? "Remove from Listen Later" : "Listen Later";
+            menuItems += `<li class="context-menu-item" data-action="listen_later" data-id="${songId}">${llIcon} ${llText}</li>`;
+            menuItems += `<li class="context-menu-item" data-action="view_comments" data-id="${songId}"><i class="bi bi-chat-dots"></i> View Comments & Likes</li>`;
+          }
           
           menuItems += `
             <li class="context-menu-item" data-action="share_song" data-id="${songId}" data-name="${encodeURIComponent(title)}"><i class="bi bi-share-fill"></i> Share Song</li>
@@ -9071,7 +9078,7 @@ function perform_full_scan($db) {
                 const song = shelf.items[0];
                 html += `<div class="search-dropdown-header text-danger">Top Result</div>
                   <div class="search-dropdown-item top-result-item" data-id="${song.id}">
-                    <img src="?action=get_image&id=${song.id}" class="search-dropdown-img" style="width: 50px; height: 50px; border-radius: 50%;">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" class="search-dropdown-img" style="width: 50px; height: 50px; border-radius: 50%;">
                     <div class="search-dropdown-text">
                       <div class="search-dropdown-title fw-bold" style="font-size: 1rem;">${escapeHTML(song.title)}</div>
                       <div class="search-dropdown-subtitle">Song • ${escapeHTML(song.artist)}</div>
@@ -9081,7 +9088,7 @@ function perform_full_scan($db) {
               html += `<div class="search-dropdown-header">Songs</div>`;
               shelf.items.slice(0, 4).forEach(song => {
                 html += `<div class="search-dropdown-item song-dropdown-item" data-id="${song.id}">
-                    <img src="?action=get_image&id=${song.id}" class="search-dropdown-img">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" class="search-dropdown-img">
                     <div class="search-dropdown-text">
                       <div class="search-dropdown-title">${escapeHTML(song.title)}</div>
                       <div class="search-dropdown-subtitle">${escapeHTML(song.artist)}</div>
@@ -9854,7 +9861,8 @@ function perform_full_scan($db) {
 
                   try {
                     const cache = await caches.open('php-music-offline');
-                    await cache.add(`?action=get_image&id=${id}`);
+                    const v = globalSongCache[id] ? (globalSongCache[id].last_modified || 0) : 0;
+                    await cache.add(`?action=get_image&id=${id}&v=${v}`);
                     await cache.add(`?action=get_song_data&id=${id}`);
 
                     const response = await fetch(`?action=get_stream&id=${id}`);
@@ -9904,9 +9912,11 @@ function perform_full_scan($db) {
                   offlineSongsSet.delete(parseInt(id));
                   try {
                     const cache = await caches.open('php-music-offline');
-                    await cache.delete(`?action=get_stream&id=${id}`);
-                    await cache.delete(`?action=get_image&id=${id}`);
-                    await cache.delete(`?action=get_song_data&id=${id}`);
+                    const keys = await cache.keys();
+                    for (let req of keys) {
+                      const u = new URL(req.url);
+                      if (u.searchParams.get('id') == id) await cache.delete(req);
+                    }
                   } catch(e) {}
                   showToast('Removed from offline list.', 'success');
                   
