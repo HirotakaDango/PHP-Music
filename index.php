@@ -21,9 +21,9 @@ if (isset($_GET['pwa'])) {
       "start_url" => "./",
       "scope" => "./",
       "display" => "standalone",
-          "background_color" => "#050505",
-          "theme_color" => "#050505",
-          "description" => "A simple, fast music player with user accounts and uploads.",
+      "background_color" => "#0a0a0a",
+      "theme_color" => "#0a0a0a",
+      "description" => "A simple, fast music player with user accounts and uploads.",
       "icons" => [[
           "src" => "?action=get_app_icon&size=192",
           "sizes" => "192x192",
@@ -173,7 +173,7 @@ set_time_limit(0);
 
 // ULTRA-SCALE CONCURRENCY: Release the PHP session write-lock early for read-only requests.
 // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
-$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture'];
+$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post'];
 $current_action = $_GET['action'] ?? '';
 
 if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
@@ -845,6 +845,37 @@ function init_db($db) {
   $db->exec("CREATE INDEX IF NOT EXISTS history_user_id_idx ON history(user_id);");
   $db->exec("CREATE INDEX IF NOT EXISTS play_counts_user_id_idx ON play_counts(user_id);");
 
+  $db->exec("
+    CREATE TABLE IF NOT EXISTS listen_later (
+      user_id INTEGER NOT NULL, song_id INTEGER NOT NULL, sort_order INTEGER,
+      PRIMARY KEY (user_id, song_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS personal_notes (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT, content TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS song_reactions (
+      user_id INTEGER NOT NULL, song_id INTEGER NOT NULL, reaction TEXT,
+      PRIMARY KEY (user_id, song_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS song_comments (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, song_id INTEGER NOT NULL, parent_id INTEGER DEFAULT NULL, content TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS community_posts (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, content TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS community_reactions (
+      user_id INTEGER NOT NULL, post_id INTEGER NOT NULL, reaction TEXT,
+      PRIMARY KEY (user_id, post_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (post_id) REFERENCES community_posts(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS comment_reactions (
+      user_id INTEGER NOT NULL, comment_id INTEGER NOT NULL, reaction TEXT,
+      PRIMARY KEY (user_id, comment_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (comment_id) REFERENCES song_comments(id) ON DELETE CASCADE
+    );
+  ");
+
   $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
   if (!$stmt->fetch()) {
     $db->prepare("INSERT INTO users (email, artist, password_hash, verified) VALUES (?, ?, ?, ?)")
@@ -1091,21 +1122,13 @@ if (isset($_GET['action'])) {
       ]);
       break;
 
-    case 'get_pwa_splash':
-      header('Content-Type: image/svg+xml');
-      header('Cache-Control: public, max-age=31536000, immutable');
-      header('Pragma: cache');
-      header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
-      echo '<?xml version="1.0" encoding="utf-8"?><svg width="100%" height="100%" viewBox="0 0 1000 1000" xmlns="http://www.w3.org/2000/svg"><rect width="1000" height="1000" fill="#050507"/><g transform="translate(380, 380) scale(10)"><rect width="24" height="24" rx="6" fill="#121212"/><path d="M0 24L24 0V24H0Z" fill="#1d1d22" clip-path="inset(0px round 6px)"/><path d="M4 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M16 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M7 7L7 16" stroke="#DF1463" stroke-width="1.7" stroke-linecap="round"/><path d="M13 7L13 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M19 7L19 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M10 4L10 19" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/></g></svg>';
-      exit;
-
     case 'get_app_icon':
       header('Content-Type: image/svg+xml');
       header('Cache-Control: public, max-age=31536000, immutable');
       header('Pragma: cache');
       header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
       $size = intval($_GET['size'] ?? 192);
-      echo '<?xml version="1.0" encoding="utf-8"?><svg width="'.$size.'px" height="'.$size.'px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="24" height="24" rx="6" fill="#F3F4F6"/><path d="M0 24L24 0V24H0Z" fill="#E5E7EB" clip-path="inset(0px round 6px)"/><path d="M4 10V13" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M16 10V13" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M7 7L7 16" stroke="#DF1463" stroke-width="1.7" stroke-linecap="round"/><path d="M13 7L13 16" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M19 7L19 16" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M10 4L10 19" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/></svg>';
+      echo '<?xml version="1.0" encoding="utf-8"?><svg width="'.$size.'px" height="'.$size.'px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="24" height="24" rx="6" fill="#0a0a0a"/><path d="M0 24L24 0V24H0Z" fill="#141414" clip-path="inset(0px round 6px)"/><path d="M4 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M16 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M7 7L7 16" stroke="#ff0044" stroke-width="1.7" stroke-linecap="round"/><path d="M13 7L13 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M19 7L19 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M10 4L10 19" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/></svg>';
       exit;
 
     case 'get_session':
@@ -2028,6 +2051,198 @@ if (isset($_GET['action'])) {
         send_json(['status' => 'added', 'is_favorite' => true]);
       }
       break;
+    
+    case 'get_listen_later':
+      if (!$user_id) { send_json([]); }
+      $sort_key = $_GET['sort'] ?? 'manual_order';
+      $sort_map = [
+        'manual_order' => 'ORDER BY ll.sort_order ASC', 'added_newest' => 'ORDER BY ll.sort_order DESC', 'added_oldest' => 'ORDER BY ll.sort_order ASC',
+        'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC', 'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC', 'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC'
+      ];
+      $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN listen_later ll ON m.id = ll.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE ll.user_id = ? " . $order_by . $limit_clause);
+      $stmt->execute([$user_id, $user_id]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'toggle_listen_later':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $song_id = intval($data['id']);
+      $stmt = $db->prepare("SELECT song_id FROM listen_later WHERE user_id = ? AND song_id = ?");
+      $stmt->execute([$user_id, $song_id]);
+      if ($stmt->fetch()) {
+        $db->prepare("DELETE FROM listen_later WHERE user_id = ? AND song_id = ?")->execute([$user_id, $song_id]);
+        send_json(['status' => 'removed']);
+      } else {
+        $max_order = $db->query("SELECT MAX(sort_order) FROM listen_later WHERE user_id = $user_id")->fetchColumn() ?? 0;
+        $db->prepare("INSERT INTO listen_later (user_id, song_id, sort_order) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $max_order + 1]);
+        send_json(['status' => 'added']);
+      }
+      break;
+
+    case 'update_listen_later_order':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->beginTransaction();
+      foreach ($data['ids'] as $index => $song_id) {
+        $db->prepare("UPDATE listen_later SET sort_order = ? WHERE user_id = ? AND song_id = ?")->execute([$index, $user_id, $song_id]);
+      }
+      $db->commit();
+      send_json(['status' => 'success']);
+      break;
+
+    case 'get_notes':
+      if (!$user_id) { send_json([]); }
+      $sort_key = $_GET['sort'] ?? 'newest';
+      $order_by = ['newest' => 'ORDER BY created_at DESC', 'oldest' => 'ORDER BY created_at ASC', 'modified' => 'ORDER BY updated_at DESC'][$sort_key] ?? 'ORDER BY created_at DESC';
+      $stmt = $db->prepare("SELECT * FROM personal_notes WHERE user_id = ? $order_by $limit_clause");
+      $stmt->execute([$user_id]);
+      send_json($stmt->fetchAll());
+      break;
+    
+    case 'save_note':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $note_id = $data['id'] ?? null;
+      $title = htmlspecialchars($data['title']);
+      $content = htmlspecialchars($data['content']);
+      if ($note_id) {
+        $db->prepare("UPDATE personal_notes SET title = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")->execute([$title, $content, $note_id, $user_id]);
+      } else {
+        $db->prepare("INSERT INTO personal_notes (user_id, title, content) VALUES (?, ?, ?)")->execute([$user_id, $title, $content]);
+      }
+      send_json(['status' => 'success']);
+      break;
+
+    case 'delete_note':
+      if (!$user_id) { http_response_code(403); exit; }
+      $db->prepare("DELETE FROM personal_notes WHERE id = ? AND user_id = ?")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'get_song_comments':
+      $song_id = intval($_GET['song_id']);
+      $comments = $db->prepare("
+        SELECT c.*, u.artist, u.profile_picture_type, u.id as u_id,
+        (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'like') as like_count,
+        (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'dislike') as dislike_count,
+        (SELECT reaction FROM comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
+        FROM song_comments c JOIN users u ON c.user_id = u.id WHERE c.song_id = ? ORDER BY c.created_at ASC
+      ");
+      $comments->execute([$user_id ?? 0, $song_id]);
+      
+      $likes = $db->prepare("SELECT reaction, COUNT(*) as c FROM song_reactions WHERE song_id = ? GROUP BY reaction");
+      $likes->execute([$song_id]);
+      $reaction_counts = ['like'=>0, 'dislike'=>0];
+      foreach($likes->fetchAll() as $r) { $reaction_counts[$r['reaction']] = $r['c']; }
+      
+      $my_reaction = null;
+      if ($user_id) {
+        $stmt = $db->prepare("SELECT reaction FROM song_reactions WHERE user_id = ? AND song_id = ?");
+        $stmt->execute([$user_id, $song_id]);
+        $my_reaction = $stmt->fetchColumn();
+      }
+      send_json(['comments' => $comments->fetchAll(), 'reactions' => $reaction_counts, 'my_reaction' => $my_reaction]);
+      break;
+
+    case 'toggle_song_reaction':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $song_id = intval($data['song_id']);
+      $reaction = $data['reaction']; 
+      $existing = $db->prepare("SELECT reaction FROM song_reactions WHERE user_id = ? AND song_id = ?");
+      $existing->execute([$user_id, $song_id]);
+      if ($existing->fetchColumn() === $reaction) {
+        $db->prepare("DELETE FROM song_reactions WHERE user_id = ? AND song_id = ?")->execute([$user_id, $song_id]);
+      } else {
+        $db->prepare("REPLACE INTO song_reactions (user_id, song_id, reaction) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $reaction]);
+      }
+      send_json(['status' => 'success']);
+      break;
+
+    case 'toggle_comment_reaction':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $comment_id = intval($data['comment_id']);
+      $reaction = $data['reaction'];
+      $existing = $db->prepare("SELECT reaction FROM comment_reactions WHERE user_id = ? AND comment_id = ?");
+      $existing->execute([$user_id, $comment_id]);
+      if ($existing->fetchColumn() === $reaction) {
+        $db->prepare("DELETE FROM comment_reactions WHERE user_id = ? AND comment_id = ?")->execute([$user_id, $comment_id]);
+      } else {
+        $db->prepare("REPLACE INTO comment_reactions (user_id, comment_id, reaction) VALUES (?, ?, ?)")->execute([$user_id, $comment_id, $reaction]);
+      }
+      send_json(['status' => 'success']);
+      break;
+
+    case 'add_song_comment':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $content = htmlspecialchars($data['content']);
+      $content = preg_replace('/@(\w+)/', '<strong class="text-info">@$1</strong>', $content);
+      $parent_id = empty($data['parent_id']) ? null : intval($data['parent_id']);
+      $db->prepare("INSERT INTO song_comments (user_id, song_id, parent_id, content) VALUES (?, ?, ?, ?)")->execute([$user_id, $data['song_id'], $parent_id, $content]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'edit_song_comment':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $content = htmlspecialchars($data['content']);
+      $content = preg_replace('/@(\w+)/', '<strong class="text-info">@$1</strong>', $content);
+      $db->prepare("UPDATE song_comments SET content = ? WHERE id = ? AND user_id = ?")->execute([$content, intval($data['comment_id']), $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'delete_song_comment':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("DELETE FROM song_comments WHERE id = ? AND (user_id = ? OR {$is_super_admin} = 1)")->execute([intval($data['comment_id']), $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'get_community':
+      $sort_key = $_GET['sort'] ?? 'newest';
+      $order_by = 'ORDER BY p.created_at DESC';
+      $join_cond = "";
+      if ($sort_key === 'most_liked') {
+        $order_by = 'ORDER BY like_count DESC, p.created_at DESC';
+      } elseif ($sort_key === 'following' && $user_id) {
+        $join_cond = "JOIN follows f ON f.following_id = p.user_id AND f.follower_id = $user_id";
+      }
+      $stmt = $db->prepare("
+        SELECT p.*, u.artist, 
+        (SELECT COUNT(*) FROM community_reactions WHERE post_id = p.id AND reaction = 'like') as like_count,
+        (SELECT COUNT(*) FROM community_reactions WHERE post_id = p.id AND reaction = 'dislike') as dislike_count,
+        (SELECT reaction FROM community_reactions WHERE post_id = p.id AND user_id = ?) as my_reaction 
+        FROM community_posts p JOIN users u ON p.user_id = u.id $join_cond $order_by $limit_clause
+      ");
+      $stmt->execute([$user_id ?? 0]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'create_community_post':
+      if (!$user_id) { http_response_code(403); exit; }
+      $content = htmlspecialchars(json_decode(file_get_contents('php://input'), true)['content']);
+      $db->prepare("INSERT INTO community_posts (user_id, content) VALUES (?, ?)")->execute([$user_id, $content]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'toggle_post_reaction':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $post_id = intval($data['post_id']);
+      $reaction = $data['reaction'];
+      $stmt = $db->prepare("SELECT reaction FROM community_reactions WHERE user_id = ? AND post_id = ?");
+      $stmt->execute([$user_id, $post_id]);
+      if ($stmt->fetchColumn() === $reaction) {
+        $db->prepare("DELETE FROM community_reactions WHERE user_id = ? AND post_id = ?")->execute([$user_id, $post_id]);
+      } else {
+        $db->prepare("REPLACE INTO community_reactions (user_id, post_id, reaction) VALUES (?, ?, ?)")->execute([$user_id, $post_id, $reaction]);
+      }
+      send_json(['status' => 'success']);
+      break;
 
     case 'toggle_follow':
       if (!$user_id) { http_response_code(403); exit; }
@@ -2101,6 +2316,13 @@ if (isset($_GET['action'])) {
           if (!$user_id) { send_json([]); }
           $sql = "SELECT m.id FROM music m JOIN favorites f ON m.id = f.song_id ";
           $conditions = "WHERE f.user_id = ?";
+          $params[] = $user_id;
+          $default_sort = 'manual_order';
+          break;
+        case 'get_listen_later':
+          if (!$user_id) { send_json([]); }
+          $sql = "SELECT m.id FROM music m JOIN listen_later ll ON m.id = ll.song_id ";
+          $conditions = "WHERE ll.user_id = ?";
           $params[] = $user_id;
           $default_sort = 'manual_order';
           break;
@@ -2189,7 +2411,7 @@ if (isset($_GET['action'])) {
         'trending' => 'ORDER BY COALESCE(pc.total_plays, 0) DESC, m.id DESC LIMIT 100',
         'random' => 'ORDER BY RANDOM()',
       ];
-      if ($view_type === 'get_favorites') {
+      if ($view_type === 'get_favorites' || $view_type === 'get_listen_later') {
         $sort_map['manual_order'] = 'ORDER BY f.sort_order ASC';
         $sort_map['added_newest'] = 'ORDER BY f.sort_order DESC';
         $sort_map['added_oldest'] = 'ORDER BY f.sort_order ASC';
@@ -2261,9 +2483,30 @@ if (isset($_GET['action'])) {
       break;
     
     case 'get_years':
-      $stmt = $db->prepare("SELECT year as name, MAX(id) as id FROM music WHERE year > 0 AND year IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY year ORDER BY year DESC" . $limit_clause);
-      $stmt->execute([$user_id]);
+      $stmt = $db->prepare("SELECT CAST(year AS TEXT) as name, MAX(id) as id FROM music WHERE year IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY year ORDER BY year DESC" . $limit_clause);
+      $stmt->execute([$user_id ?? 0]);
       send_json($stmt->fetchAll());
+      break;
+
+    case 'get_listen_later_ids':
+      if (!$user_id) { send_json([]); }
+      $stmt = $db->prepare("SELECT song_id FROM listen_later WHERE user_id = ?");
+      $stmt->execute([$user_id]);
+      send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
+      break;
+
+    case 'edit_community_post':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("UPDATE community_posts SET content = ? WHERE id = ? AND user_id = ?")->execute([htmlspecialchars($data['content']), intval($data['id']), $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'delete_community_post':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("DELETE FROM community_posts WHERE id = ? AND (user_id = ? OR {$is_super_admin} = 1)")->execute([intval($data['id']), $user_id]);
+      send_json(['status' => 'success']);
       break;
     
     case 'get_all_genres':
@@ -3790,7 +4033,7 @@ function perform_full_scan($db) {
     <link rel="apple-touch-startup-image" href="?action=get_pwa_splash">
     <title>PHP Music</title>
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
-    <meta name="theme-color" content="#050505"/>
+    <meta name="theme-color" content="#0a0a0a"/>
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
       (async function() {
@@ -4029,7 +4272,6 @@ function perform_full_scan($db) {
       .form-control:focus, .form-select:focus { background-color: var(--ytm-surface-2); border-color: #666; color: var(--ytm-primary-text); box-shadow: none; }
       .form-control::placeholder { color: var(--ytm-secondary-text); }
       .dropdown-menu-dark { background-color: var(--ytm-surface-2); }
-      #upload-progress-area .progress { height: 10px; }
       body.logged-out .logged-in-only { display: none !important; }
       body.logged-in .logged-out-only { display: none !important; }
       .verified-user-only { display: none !important; }
@@ -4271,6 +4513,18 @@ function perform_full_scan($db) {
             <a href="#" class="nav-link" data-view="get_following">
               <i class="bi bi-person-lines-fill"></i>
               <span>Following</span>
+            </a>
+            <a href="#" class="nav-link" data-view="get_listen_later">
+              <i class="bi bi-clock-fill"></i>
+              <span>Listen Later</span>
+            </a>
+            <a href="#" class="nav-link" data-view="get_community">
+              <i class="bi bi-people"></i>
+              <span>Community</span>
+            </a>
+            <a href="#" class="nav-link" data-view="get_notes">
+              <i class="bi bi-journal-text"></i>
+              <span>Personal Notes</span>
             </a>
           </div>
           
@@ -4714,6 +4968,52 @@ function perform_full_scan($db) {
       </div>
     </div>
 
+    <div class="modal fade" id="comments-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
+          <div class="modal-header border-secondary">
+            <h5 class="modal-title w-100 text-white">Song Community</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div class="d-flex justify-content-center gap-4 mb-4">
+              <button class="btn btn-outline-light d-flex align-items-center gap-2" id="song-like-btn">
+                <i class="bi bi-hand-thumbs-up"></i> <span id="song-like-count">0</span>
+              </button>
+              <button class="btn btn-outline-light d-flex align-items-center gap-2" id="song-dislike-btn">
+                <i class="bi bi-hand-thumbs-down"></i> <span id="song-dislike-count">0</span>
+              </button>
+            </div>
+            <form id="comment-form" class="mb-4 d-flex gap-2">
+              <input type="hidden" id="comment-parent-id" value="">
+              <input type="text" id="comment-input" class="form-control bg-dark text-white border-secondary" placeholder="Add a comment... (use @ to mention)" required>
+              <button type="submit" class="btn btn-danger"><i class="bi bi-send"></i></button>
+            </form>
+            <div id="comments-list" class="d-flex flex-column gap-3"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="modal fade" id="note-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface);">
+          <div class="modal-header border-0">
+            <h5 class="modal-title text-white">Edit Note</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="note-form">
+              <input type="hidden" id="note-id">
+              <input type="text" id="note-title" class="form-control bg-dark text-white border-secondary mb-3" placeholder="Title" required>
+              <textarea id="note-content" class="form-control bg-dark text-white border-secondary mb-3" rows="6" placeholder="Write your note here..." required></textarea>
+              <button type="submit" class="btn btn-danger w-100">Save Note</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="login-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -4790,6 +5090,87 @@ function perform_full_scan($db) {
                 <input type="password" class="form-control" id="restore-password" required minlength="6">
               </div>
               <button type="submit" class="btn btn-danger w-100">Restore</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal fade" id="comments-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
+          <div class="modal-header border-secondary">
+            <h5 class="modal-title w-100 text-white">Song Community</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div class="d-flex justify-content-center gap-4 mb-4">
+              <button class="btn btn-outline-light d-flex align-items-center gap-2" id="song-like-btn">
+                <i class="bi bi-hand-thumbs-up"></i> <span id="song-like-count">0</span>
+              </button>
+              <button class="btn btn-outline-light d-flex align-items-center gap-2" id="song-dislike-btn">
+                <i class="bi bi-hand-thumbs-down"></i> <span id="song-dislike-count">0</span>
+              </button>
+            </div>
+            <form id="comment-form" class="mb-4 d-flex gap-2">
+              <input type="hidden" id="comment-parent-id" value="">
+              <input type="text" id="comment-input" class="form-control bg-dark text-white border-secondary" placeholder="Add a comment... (use @ to mention)" required>
+              <button type="submit" class="btn btn-danger"><i class="bi bi-send"></i></button>
+            </form>
+            <div id="comments-list" class="d-flex flex-column gap-3"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="modal fade" id="note-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface);">
+          <div class="modal-header border-0">
+            <h5 class="modal-title text-white">Edit Note</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="note-form">
+              <input type="hidden" id="note-id">
+              <input type="text" id="note-title" class="form-control bg-dark text-white border-secondary mb-3" placeholder="Title" required>
+              <textarea id="note-content" class="form-control bg-dark text-white border-secondary mb-3" rows="6" placeholder="Write your note here..." required></textarea>
+              <button type="submit" class="btn btn-danger w-100">Save Note</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="modal fade" id="edit-comment-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface);">
+          <div class="modal-header border-0">
+            <h5 class="modal-title text-white">Edit Comment</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="edit-comment-form">
+              <input type="hidden" id="edit-comment-id">
+              <input type="text" id="edit-comment-input" class="form-control bg-dark text-white border-secondary mb-3" required>
+              <button type="submit" class="btn btn-danger w-100">Save Changes</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="edit-post-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface);">
+          <div class="modal-header border-0">
+            <h5 class="modal-title text-white">Edit Post</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="edit-post-form">
+              <input type="hidden" id="edit-post-id">
+              <textarea id="edit-post-input" class="form-control bg-dark text-white border-secondary mb-3" rows="4" placeholder="Edit your post..." required></textarea>
+              <button type="submit" class="btn btn-info text-dark fw-bold w-100">Save Changes</button>
             </form>
           </div>
         </div>
@@ -6077,6 +6458,7 @@ function perform_full_scan($db) {
         let currentLyricIndex = -1;
         let globalSongCache = {};
         let offlineSongsSet = new Set();
+        let listenLaterSet = new Set();
         let renderedQueueCount = 0;
         let isQueueLoading = false;
         let sleepTimerInterval = null;
@@ -7170,7 +7552,7 @@ function perform_full_scan($db) {
         };
         
         const setupSortOptions = (viewType) => {
-          const isSortable = ['get_favorites', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
+          const isSortable = ['get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
           
           if (isSortable) {
             let options = {};
@@ -7194,6 +7576,7 @@ function perform_full_scan($db) {
                   'year_desc': 'Year (Newest)', 'year_asc': 'Year (Oldest)'};
                   break;
               case 'get_favorites':
+              case 'get_listen_later':
               case 'get_offline_songs':
               case 'playlist_songs':
                 options = { 
@@ -7201,8 +7584,11 @@ function perform_full_scan($db) {
                   'artist_asc': 'Artist', 'title_asc': 'Title', 'album_asc': 'Album'
                 };
                 break;
-              case 'get_history':
-                options = { 'history_desc': 'Recently Played', 'title_asc': 'Title', 'artist_asc': 'Artist' };
+              case 'get_notes':
+                options = { 'newest': 'Newest', 'oldest': 'Oldest', 'modified': 'Recently Modified' };
+                break;
+              case 'get_community':
+                options = { 'newest': 'Newest', 'most_liked': 'Most Liked', 'following': 'Following Users' };
                 break;
               case 'get_albums':
                 options = {
@@ -7260,6 +7646,7 @@ function perform_full_scan($db) {
           switch (type) {
             case 'get_songs':
             case 'get_favorites':
+            case 'get_listen_later':
             case 'get_history':
             case 'get_trending':
               data = await fetchData(`?action=${type}&${params.toString()}`);
@@ -7315,6 +7702,66 @@ function perform_full_scan($db) {
             case 'get_following':
               data = await fetchData(`?action=${type}&${params.toString()}`);
               renderGrid(data, type, true);
+              break;
+            case 'get_notes':
+              data = await fetchData(`?action=get_notes&${params.toString()}`);
+              if (data && data.length > 0) {
+                 const grid = document.getElementById('notes-grid');
+                 if(grid) {
+                   grid.insertAdjacentHTML('beforeend', data.map(n => `
+                    <div class="col">
+                      <div class="card h-100 bg-dark text-white border-secondary">
+                        <div class="card-body">
+                          <h5 class="card-title fw-bold text-truncate">${escapeHTML(n.title)}</h5>
+                          <p class="card-text text-secondary small" style="white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">${escapeHTML(n.content)}</p>
+                        </div>
+                        <div class="card-footer border-secondary d-flex justify-content-between align-items-center">
+                          <small class="text-secondary">${timeAgo(n.updated_at)}</small>
+                          <div>
+                            <button class="btn btn-sm btn-outline-light me-1 edit-note-btn" data-id="${n.id}" data-title="${escapeHTML(n.title)}" data-content="${escapeHTML(n.content)}"><i class="bi bi-pencil"></i></button>
+                            <button class="btn btn-sm btn-outline-danger delete-note-btn" data-id="${n.id}"><i class="bi bi-trash"></i></button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>`).join(''));
+                 }
+              }
+              break;
+            case 'get_community':
+              data = await fetchData(`?action=get_community&${params.toString()}`);
+              if (data && data.length > 0) {
+                 const feed = document.getElementById('community-feed');
+                 if(feed) {
+                   feed.insertAdjacentHTML('beforeend', data.map(p => `
+                    <div class="card bg-transparent border-secondary text-white">
+                      <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start mb-3">
+                          <div class="d-flex align-items-center gap-3">
+                            <img src="?action=get_profile_picture&id=${p.user_id}" style="width:40px; height:40px; border-radius:50%; object-fit:cover;">
+                            <div>
+                              <div class="fw-bold">${escapeHTML(p.artist)}</div>
+                              <small class="text-secondary">${timeAgo(p.created_at)}</small>
+                            </div>
+                          </div>
+                          ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                          <div>
+                            <button class="btn btn-sm btn-outline-light me-1 edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i></button>
+                            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>
+                          </div>` : ''}
+                        </div>
+                        <p class="mb-3" style="font-size: 1.05rem;">${escapeHTML(p.content)}</p>
+                        <div class="d-flex gap-3">
+                          <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'like' ? 'text-info' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="like">
+                            <i class="bi ${p.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'} fs-5"></i> <span>${p.like_count}</span>
+                          </button>
+                          <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'dislike' ? 'text-danger' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="dislike">
+                            <i class="bi ${p.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'} fs-5"></i> <span>${p.dislike_count}</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>`).join(''));
+                 }
+              }
               break;
             default:
               allContentloaded = true;
@@ -7477,6 +7924,133 @@ function perform_full_scan($db) {
                 renderSongs(data, true);
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your favorites.</div>`;
+              }
+              break;
+            case 'get_listen_later':
+              updateContentTitle('Listen Later', !!currentUser);
+              if (currentUser) {
+                contentArea.innerHTML = `
+                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-clock-fill text-warning me-3 fs-3"></i> Listen Later</div>
+                  </div>`;
+                data = await fetchData(`?action=get_listen_later&${pageParams.toString()}`);
+                renderSongs(data, true);
+                
+                setTimeout(() => {
+                  if (currentView.sort === 'manual_order' && !sortable) {
+                    const sList = contentArea.querySelector('.song-list');
+                    if (sList) {
+                      sortable = Sortable.create(sList, {
+                        animation: 150, delay: 250, delayOnTouchOnly: false,
+                        onEnd: async () => {
+                          const ids = Array.from(sList.querySelectorAll('.song-item')).map(item => item.dataset.songId);
+                          await fetchData('?action=update_listen_later_order', { method: 'POST', body: JSON.stringify({ids}) });
+                        }
+                      });
+                    }
+                  }
+                }, 500);
+
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see listen later.</div>`;
+              }
+              break;
+
+            case 'get_notes':
+              updateContentTitle('Personal Notes', !!currentUser);
+              if (currentUser) {
+                contentArea.innerHTML = `
+                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-journal-text text-primary me-3 fs-3"></i> My Notes</div>
+                    <button class="btn btn-primary rounded-pill px-4 fw-medium shadow-sm new-note-btn"><i class="bi bi-plus-lg me-1"></i> New Note</button>
+                  </div>
+                  <div id="notes-grid" class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4 mx-md-1 mb-4"></div>`;
+                const notes = await fetchData(`?action=get_notes&${pageParams.toString()}`);
+                const grid = document.getElementById('notes-grid');
+                if (notes && notes.length > 0) {
+                  grid.innerHTML = notes.map(n => `
+                    <div class="col">
+                      <div class="card h-100 bg-dark text-white border-secondary">
+                        <div class="card-body">
+                          <h5 class="card-title fw-bold text-truncate">${escapeHTML(n.title)}</h5>
+                          <p class="card-text text-secondary small" style="white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">${escapeHTML(n.content)}</p>
+                        </div>
+                        <div class="card-footer border-secondary d-flex justify-content-between align-items-center">
+                          <small class="text-secondary">${timeAgo(n.updated_at)}</small>
+                          <div>
+                            <button class="btn btn-sm btn-outline-light me-1 edit-note-btn" data-id="${n.id}" data-title="${escapeHTML(n.title)}" data-content="${escapeHTML(n.content)}"><i class="bi bi-pencil"></i></button>
+                            <button class="btn btn-sm btn-outline-danger delete-note-btn" data-id="${n.id}"><i class="bi bi-trash"></i></button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>`).join('');
+                } else {
+                  grid.innerHTML = '<div class="col-12 text-center text-secondary py-5">No notes found. Create your first note!</div>';
+                }
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your notes.</div>`;
+              }
+              break;
+
+            case 'get_community':
+              updateContentTitle('Community', !!currentUser);
+              if (currentUser) {
+                contentArea.innerHTML = `
+                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-people text-info me-3 fs-3"></i> Community</div>
+                  </div>
+                  <div class="mx-md-3 mb-5">
+                    <form id="community-post-form" class="d-flex gap-2">
+                      <input type="text" id="community-post-input" class="form-control bg-dark text-white border-secondary" placeholder="What's on your mind?" required>
+                      <button type="submit" class="btn btn-info text-dark fw-bold px-4">Post</button>
+                    </form>
+                  </div>
+                  <div id="community-feed" class="d-flex flex-column gap-3 mx-md-3 mb-4"></div>`;
+                  
+                document.getElementById('community-post-form').addEventListener('submit', async e => {
+                  e.preventDefault();
+                  const input = document.getElementById('community-post-input');
+                  await fetchData('?action=create_community_post', { method:'POST', body: JSON.stringify({content: input.value}) });
+                  input.value = '';
+                  loadView(currentView);
+                });
+
+                const posts = await fetchData(`?action=get_community&${pageParams.toString()}`);
+                const feed = document.getElementById('community-feed');
+                if (posts && posts.length > 0) {
+                  feed.innerHTML = posts.map(p => `
+                    <div class="card bg-transparent border-secondary text-white">
+                      <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start mb-3">
+                          <div class="d-flex align-items-center gap-3">
+                            <img src="?action=get_profile_picture&id=${p.user_id}" style="width:40px; height:40px; border-radius:50%; object-fit:cover;">
+                            <div>
+                              <div class="fw-bold">${escapeHTML(p.artist)}</div>
+                              <small class="text-secondary">${timeAgo(p.created_at)}</small>
+                            </div>
+                          </div>
+                          ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                          <div>
+                            <button class="btn btn-sm btn-outline-light me-1 edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i></button>
+                            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>
+                          </div>` : ''}
+                        </div>
+                        <p class="mb-3" style="font-size: 1.05rem;">${escapeHTML(p.content)}</p>
+                        <div class="d-flex gap-3">
+                          <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'like' ? 'text-info' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="like">
+                            <i class="bi ${p.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'} fs-5"></i> <span>${p.like_count}</span>
+                          </button>
+                          <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'dislike' ? 'text-danger' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="dislike">
+                            <i class="bi ${p.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'} fs-5"></i> <span>${p.dislike_count}</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>`).join('');
+                } else {
+                  feed.innerHTML = '<div class="text-center text-secondary py-5">No posts yet. Be the first!</div>';
+                }
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to view the community.</div>`;
               }
               break;
             case 'get_history':
@@ -7934,6 +8508,12 @@ function perform_full_scan($db) {
               <li class="context-menu-item" data-action="add_to_queue" data-id="${songId}"><i class="bi bi-list-ul"></i> Add to Queue</li>
               <hr class="dropdown-divider bg-secondary mx-2 my-1">`;
           }
+          
+          const isLL = typeof listenLaterSet !== 'undefined' && listenLaterSet.has(songId);
+          const llIcon = isLL ? '<i class="bi bi-bookmark-fill"></i>' : '<i class="bi bi-bookmark"></i>';
+          const llText = isLL ? "Remove from Listen Later" : "Listen Later";
+          menuItems += `<li class="context-menu-item" data-action="listen_later" data-id="${songId}">${llIcon} ${llText}</li>`;
+          menuItems += `<li class="context-menu-item" data-action="view_comments" data-id="${songId}"><i class="bi bi-chat-dots"></i> View Comments & Likes</li>`;
           
           menuItems += `
             <li class="context-menu-item" data-action="share_song" data-id="${songId}" data-name="${encodeURIComponent(title)}"><i class="bi bi-share-fill"></i> Share Song</li>
@@ -8723,7 +9303,183 @@ function perform_full_scan($db) {
             }, 200);
           });
         }
+        let activeCommentSongId = null;
         
+        window.openCommentsModal = async (songId) => {
+          activeCommentSongId = songId;
+          const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('comments-modal'));
+          await window.refreshComments();
+          modal.show();
+        };
+
+        window.refreshComments = async () => {
+          if (!activeCommentSongId) return;
+          const data = await fetchData(`?action=get_song_comments&song_id=${activeCommentSongId}`);
+          document.getElementById('song-like-count').textContent = data.reactions.like || 0;
+          document.getElementById('song-dislike-count').textContent = data.reactions.dislike || 0;
+          
+          const lBtn = document.getElementById('song-like-btn');
+          const dBtn = document.getElementById('song-dislike-btn');
+          if(lBtn) {
+            lBtn.classList.toggle('active', data.my_reaction === 'like');
+            lBtn.classList.toggle('text-info', data.my_reaction === 'like');
+          }
+          if(dBtn) {
+            dBtn.classList.toggle('active', data.my_reaction === 'dislike');
+            dBtn.classList.toggle('text-danger', data.my_reaction === 'dislike');
+          }
+          
+          const buildTree = (comments, parent = null) => {
+            return comments.filter(c => c.parent_id == parent).map(c => `
+              <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: ${parent ? '20px' : '0'};">
+                <div class="d-flex align-items-center gap-2 mb-1">
+                  <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
+                  <strong>${escapeHTML(c.artist)}</strong>
+                  <small class="text-secondary">${timeAgo(c.created_at)}</small>
+                </div>
+                <div style="font-size: 0.9rem;" class="mb-1">${c.content}</div>
+                <div class="d-flex align-items-center gap-3">
+                  <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="like">
+                    <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-info' : 'bi-hand-thumbs-up'}"></i> ${c.like_count || 0}
+                  </button>
+                  <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="dislike">
+                    <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
+                  </button>
+                  <button class="btn btn-link btn-sm text-secondary p-0 reply-btn" data-id="${c.id}">Reply</button>
+                  ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                    <button class="btn btn-link btn-sm text-secondary p-0 edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content).replace(/"/g, '&quot;')}"><i class="bi bi-pencil"></i></button>
+                    <button class="btn btn-link btn-sm text-danger p-0 delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
+                  ` : ''}
+                </div>
+                <div class="mt-2">${buildTree(comments, c.id)}</div>
+              </div>
+            `).join('');
+          };
+          
+          const commentsList = document.getElementById('comments-list');
+          if(commentsList) {
+            commentsList.innerHTML = buildTree(data.comments) || '<p class="text-secondary text-center mt-3">No comments yet.</p>';
+            
+            const newCommentsList = commentsList.cloneNode(true);
+            commentsList.parentNode.replaceChild(newCommentsList, commentsList);
+            
+            newCommentsList.addEventListener('click', async (e) => {
+              const replyBtn = e.target.closest('.reply-btn');
+              if (replyBtn) {
+                document.getElementById('comment-parent-id').value = replyBtn.dataset.id;
+                const input = document.getElementById('comment-input');
+                input.placeholder = "Replying to comment...";
+                input.focus();
+                return;
+              }
+              const reactBtn = e.target.closest('.comment-react-btn');
+              if (reactBtn) {
+                if (!currentUser) return showToast('Please login', 'error');
+                await fetchData('?action=toggle_comment_reaction', { method:'POST', body: JSON.stringify({comment_id: reactBtn.dataset.id, reaction: reactBtn.dataset.reaction}) });
+                window.refreshComments();
+                return;
+              }
+              const editBtn = e.target.closest('.edit-comment-btn');
+              if (editBtn) {
+                document.getElementById('edit-comment-id').value = editBtn.dataset.id;
+                document.getElementById('edit-comment-input').value = editBtn.dataset.content.replace(/<strong class="text-info">@\w+<\/strong>/g, (m) => m.replace(/<[^>]*>?/gm, ''));
+                bootstrap.Modal.getOrCreateInstance(document.getElementById('edit-comment-modal')).show();
+                return;
+              }
+              const deleteBtn = e.target.closest('.delete-comment-btn');
+              if (deleteBtn) {
+                if (confirm('Delete this comment?')) {
+                  await fetchData('?action=delete_song_comment', { method:'POST', body: JSON.stringify({comment_id: deleteBtn.dataset.id}) });
+                  window.refreshComments();
+                }
+                return;
+              }
+            });
+          }
+        };
+
+        window.handleReaction = async (reaction) => {
+          if (!currentUser) return showToast('Please login', 'error');
+          await fetchData('?action=toggle_song_reaction', { method:'POST', body: JSON.stringify({song_id: activeCommentSongId, reaction}) });
+          window.refreshComments();
+        };
+
+        const songLikeBtn = document.getElementById('song-like-btn');
+        const songDislikeBtn = document.getElementById('song-dislike-btn');
+        const commentForm = document.getElementById('comment-form');
+        const editCommentForm = document.getElementById('edit-comment-form');
+        
+        if (songLikeBtn) {
+          const newLikeBtn = songLikeBtn.cloneNode(true);
+          songLikeBtn.parentNode.replaceChild(newLikeBtn, songLikeBtn);
+          newLikeBtn.addEventListener('click', () => window.handleReaction('like'));
+        }
+        if (songDislikeBtn) {
+          const newDislikeBtn = songDislikeBtn.cloneNode(true);
+          songDislikeBtn.parentNode.replaceChild(newDislikeBtn, songDislikeBtn);
+          newDislikeBtn.addEventListener('click', () => window.handleReaction('dislike'));
+        }
+        
+        if (commentForm) {
+          const newCommentForm = commentForm.cloneNode(true);
+          commentForm.parentNode.replaceChild(newCommentForm, commentForm);
+          newCommentForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            if (!currentUser) return showToast('Please login', 'error');
+            const input = document.getElementById('comment-input');
+            await fetchData('?action=add_song_comment', { method:'POST', body: JSON.stringify({song_id: activeCommentSongId, parent_id: document.getElementById('comment-parent-id').value || null, content: input.value}) });
+            input.value = '';
+            document.getElementById('comment-parent-id').value = '';
+            input.placeholder = "Add a comment... (use @ to mention)";
+            window.refreshComments();
+          });
+        }
+        
+        if (editCommentForm) {
+          const newEditCommentForm = editCommentForm.cloneNode(true);
+          editCommentForm.parentNode.replaceChild(newEditCommentForm, editCommentForm);
+          newEditCommentForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const id = document.getElementById('edit-comment-id').value;
+            const content = document.getElementById('edit-comment-input').value;
+            await fetchData('?action=edit_song_comment', { method:'POST', body: JSON.stringify({comment_id: id, content}) });
+            bootstrap.Modal.getInstance(document.getElementById('edit-comment-modal')).hide();
+            window.refreshComments();
+          });
+        }
+
+        window.openNoteModal = (id = '', title = '', content = '') => {
+          document.getElementById('note-id').value = id;
+          document.getElementById('note-title').value = title;
+          document.getElementById('note-content').value = content;
+          bootstrap.Modal.getOrCreateInstance(document.getElementById('note-modal')).show();
+        };
+
+        window.deleteNote = async (id) => {
+          if (!confirm('Delete this note?')) return;
+          await fetchData('?action=delete_note', { method:'POST', body: JSON.stringify({id}) });
+          loadView(currentView);
+        };
+
+        const noteForm = document.getElementById('note-form');
+        if (noteForm) {
+          const newNoteForm = noteForm.cloneNode(true);
+          noteForm.parentNode.replaceChild(newNoteForm, noteForm);
+          newNoteForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const id = document.getElementById('note-id').value;
+            const title = document.getElementById('note-title').value;
+            const content = document.getElementById('note-content').value;
+            await fetchData('?action=save_note', { method:'POST', body: JSON.stringify({id, title, content}) });
+            bootstrap.Modal.getInstance(document.getElementById('note-modal')).hide();
+            loadView(currentView);
+          });
+        }
+
+        window.togglePostReaction = async (post_id, reaction) => {
+          await fetchData('?action=toggle_post_reaction', { method:'POST', body: JSON.stringify({post_id, reaction}) });
+          loadView(currentView);
+        };
         contentArea.addEventListener('click', async e => {
           const target = e.target;
 
@@ -8928,6 +9684,46 @@ function perform_full_scan($db) {
               return;
             }
           }
+          const newNoteBtn = target.closest('.new-note-btn');
+          if (newNoteBtn) {
+            e.stopPropagation();
+            openNoteModal();
+            return;
+          }
+          const editNoteBtn = target.closest('.edit-note-btn');
+          if (editNoteBtn) {
+            e.stopPropagation();
+            openNoteModal(editNoteBtn.dataset.id, editNoteBtn.dataset.title, editNoteBtn.dataset.content);
+            return;
+          }
+          const deleteNoteBtn = target.closest('.delete-note-btn');
+          if (deleteNoteBtn) {
+            e.stopPropagation();
+            deleteNote(deleteNoteBtn.dataset.id);
+            return;
+          }
+          const communityReactBtn = target.closest('.community-react-btn');
+          if (communityReactBtn) {
+            e.stopPropagation();
+            window.togglePostReaction(communityReactBtn.dataset.id, communityReactBtn.dataset.reaction);
+            return;
+          }
+          const editPostBtn = target.closest('.edit-post-btn');
+          if (editPostBtn) {
+            e.stopPropagation();
+            document.getElementById('edit-post-id').value = editPostBtn.dataset.id;
+            document.getElementById('edit-post-input').value = editPostBtn.dataset.content;
+            new bootstrap.Modal(document.getElementById('edit-post-modal')).show();
+            return;
+          }
+          const deletePostBtn = target.closest('.delete-post-btn');
+          if (deletePostBtn) {
+            e.stopPropagation();
+            if(confirm('Delete this post?')) {
+              fetchData('?action=delete_community_post', { method:'POST', body: JSON.stringify({id: deletePostBtn.dataset.id}) }).then(() => loadView(currentView));
+            }
+            return;
+          }
           const seeAllButton = target.closest('.shelf-header button');
           if (seeAllButton) {
             e.stopPropagation();
@@ -9019,6 +9815,19 @@ function perform_full_scan($db) {
               break;
             case 'toggle_favorite':
               toggleFavorite(parseInt(id));
+              break;
+            case 'listen_later':
+              fetchData('?action=toggle_listen_later', { method: 'POST', body: JSON.stringify({id: parseInt(id)}) })
+                .then(res => { 
+                  if(res) {
+                    if(res.status === 'added') listenLaterSet.add(parseInt(id));
+                    else listenLaterSet.delete(parseInt(id));
+                    showToast(res.status === 'added' ? 'Added to Listen Later' : 'Removed from Listen Later', 'success'); 
+                  }
+                });
+              break;
+            case 'view_comments':
+              window.openCommentsModal(parseInt(id));
               break;
             case 'toggle_offline':
               const offRes = await fetchData('?action=toggle_offline', {
@@ -10262,7 +11071,6 @@ function perform_full_scan($db) {
 
             const doMetadataUpload = () => {
               const xhr = new XMLHttpRequest();
-              xhr.open('POST', '?action=edit_metadata', true);
               xhr.upload.onprogress = (evt) => {
                 if (evt.lengthComputable) {
                   const pct = Math.round((evt.loaded / evt.total) * 100);
@@ -10270,6 +11078,7 @@ function perform_full_scan($db) {
                   progBar.textContent = pct + '%';
                 }
               };
+              xhr.open('POST', '?action=edit_metadata', true);
               xhr.onload = () => {
                 submitBtn.disabled = false;
                 progContainer.classList.add('d-none');
@@ -10673,7 +11482,6 @@ function perform_full_scan($db) {
             formData.append('profile_picture', blob, 'profile.jpg');
 
             const xhr = new XMLHttpRequest();
-            xhr.open('POST', '?action=upload_profile_picture', true);
             xhr.upload.onprogress = (evt) => {
               if (evt.lengthComputable) {
                 const pct = Math.round((evt.loaded / evt.total) * 100);
@@ -10681,6 +11489,7 @@ function perform_full_scan($db) {
                 progBar.textContent = pct + '%';
               }
             };
+            xhr.open('POST', '?action=upload_profile_picture', true);
             xhr.onload = async () => {
               submitBtn.disabled = false;
               progContainer.classList.add('d-none');
@@ -10792,12 +11601,18 @@ function perform_full_scan($db) {
 
           for (let i = 0; i < filesToUpload.length; i++) {
             const file = filesToUpload[i];
-            const progressId = `progress-${i}`;
-            uploadProgressArea.innerHTML += `
-              <div class="mb-2">
-                <small>${file.name}</small>
-                <div class="progress"><div id="${progressId}" class="progress-bar" role="progressbar" style="width: 0%">0%</div></div>
-              </div>`;
+            const progressId = `upload-prog-${Date.now()}-${i}`;
+            
+            uploadProgressArea.insertAdjacentHTML('beforeend', `
+              <div class="mb-3 p-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid #404040;">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <small class="text-white text-truncate fw-bold" style="max-width: 80%;">${escapeHTML(file.name)}</small>
+                  <small class="text-secondary fw-bold" id="${progressId}-text">0%</small>
+                </div>
+                <div class="progress" style="height: 8px; background-color: #000;">
+                  <div id="${progressId}" class="progress-bar bg-danger" role="progressbar" style="width: 0%; transition: width 0.1s linear;"></div>
+                </div>
+              </div>`);
 
             const formData = new FormData();
             formData.append('song', file);
@@ -10805,24 +11620,32 @@ function perform_full_scan($db) {
             formData.append('is_private', document.getElementById('song-is-private').checked ? 1 : 0);
 
             const xhr = new XMLHttpRequest();
-            xhr.open('POST', '?action=upload_song', true);
+            
             xhr.upload.onprogress = (e) => {
               if (e.lengthComputable) {
                 const percentComplete = Math.round((e.loaded / e.total) * 100);
                 const progressBar = document.getElementById(progressId);
-                progressBar.style.width = `${percentComplete}%`;
-                progressBar.textContent = `${percentComplete}%`;
+                const progressText = document.getElementById(`${progressId}-text`);
+                if (progressBar) progressBar.style.width = `${percentComplete}%`;
+                if (progressText) progressText.textContent = `${percentComplete}%`;
               }
             };
+            
+            xhr.open('POST', '?action=upload_song', true);
             
             await new Promise(resolve => {
               xhr.onload = () => {
                 const progressBar = document.getElementById(progressId);
+                const progressText = document.getElementById(`${progressId}-text`);
                 if (xhr.status === 200) {
-                  progressBar.classList.add('bg-success');
+                  if (progressBar) progressBar.classList.replace('bg-danger', 'bg-success');
+                  if (progressText) progressText.classList.replace('text-secondary', 'text-success');
                 } else {
-                  progressBar.classList.add('bg-danger');
-                  progressBar.textContent = 'Error';
+                  if (progressBar) progressBar.classList.replace('bg-danger', 'bg-warning');
+                  if (progressText) {
+                    progressText.classList.replace('text-secondary', 'text-warning');
+                    progressText.textContent = 'Failed';
+                  }
                   try {
                     showToast(`Upload failed for ${file.name}: ${JSON.parse(xhr.responseText).message}`, 'error');
                   } catch (e) {
@@ -10832,8 +11655,13 @@ function perform_full_scan($db) {
                 resolve();
               };
               xhr.onerror = () => {
-                document.getElementById(progressId).classList.add('bg-danger');
-                document.getElementById(progressId).textContent = 'Error';
+                const progressBar = document.getElementById(progressId);
+                const progressText = document.getElementById(`${progressId}-text`);
+                if (progressBar) progressBar.classList.replace('bg-danger', 'bg-warning');
+                if (progressText) {
+                  progressText.classList.replace('text-secondary', 'text-warning');
+                  progressText.textContent = 'Network Error';
+                }
                 showToast(`A network error occurred during upload of ${file.name}.`, 'error');
                 resolve();
               };
@@ -11188,6 +12016,8 @@ function perform_full_scan($db) {
             }
             const offIds = await fetchData('?action=get_offline_ids');
             if(offIds) offlineSongsSet = new Set(offIds.map(id => parseInt(id)));
+            const llIds = await fetchData('?action=get_listen_later_ids');
+            if(llIds) listenLaterSet = new Set(llIds.map(id => parseInt(id)));
           } else {
             currentUser = null;
           }
