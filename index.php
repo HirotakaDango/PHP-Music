@@ -184,7 +184,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '3.6');
+define('APP_VERSION', '3.7');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -214,11 +214,15 @@ function get_db() {
     ");
     
     $db->sqliteCreateFunction('match_artist', function($artist_field, $search_name) {
-      if ($artist_field === null) return 0;
-      $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $artist_field);
-      if (!is_array($parts)) $parts = [$artist_field]; // Fallback to prevent crash
-      foreach ($parts as $part) {
-        if (strcasecmp(trim($part), trim($search_name)) === 0) return 1;
+      if ($artist_field === null || $search_name === null) return 0;
+      $db_parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $artist_field);
+      $search_parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $search_name);
+      if (!is_array($db_parts)) $db_parts = [$artist_field];
+      if (!is_array($search_parts)) $search_parts = [$search_name];
+      foreach ($db_parts as $db_part) {
+        foreach ($search_parts as $search_part) {
+          if (strcasecmp(trim($db_part), trim($search_part)) === 0) return 1;
+        }
       }
       return 0;
     }, 2);
@@ -593,10 +597,14 @@ if (isset($_GET['share_type'])) {
     case 'album':
       $album_name = $_GET['album_name'] ?? $_GET['id'] ?? null;
       $artist_id = $_GET['artist_id'] ?? null;
+      $artist_name = $_GET['artist_name'] ?? null;
       if ($album_name) {
-        $view_config = ['type' => 'album_songs', 'param' => rawurlencode($album_name), 'sort' => 'title_asc'];
+        $view_config = ['type' => 'album_songs', 'param' => $album_name, 'sort' => 'title_asc'];
         if ($artist_id) {
           $view_config['filter_user_id'] = (int)$artist_id;
+        }
+        if ($artist_name) {
+          $view_config['artist_name'] = $artist_name;
         }
       }
       break;
@@ -607,10 +615,10 @@ if (isset($_GET['share_type'])) {
         $stmt->execute([(int)$share_id]);
         $artist_name = $stmt->fetchColumn();
         if ($artist_name) {
-          $view_config = ['type' => 'artist_songs', 'param' => rawurlencode($artist_name), 'sort' => 'album_asc', 'filter_user_id' => (int)$share_id];
+          $view_config = ['type' => 'artist_songs', 'param' => $artist_name, 'sort' => 'album_asc', 'filter_user_id' => (int)$share_id];
         }
       } else if ($share_id) {
-        $view_config = ['type' => 'artist_songs', 'param' => rawurlencode($share_id), 'sort' => 'album_asc'];
+        $view_config = ['type' => 'artist_songs', 'param' => $share_id, 'sort' => 'album_asc'];
       }
       break;
     case 'playlist':
@@ -618,7 +626,7 @@ if (isset($_GET['share_type'])) {
       $stmt = $db_for_share->prepare("SELECT id FROM playlists WHERE public_id = ?");
       $stmt->execute([$share_id]);
       if ($stmt->fetch()) {
-        $view_config = ['type' => 'playlist_songs', 'param' => rawurlencode($share_id), 'sort' => 'manual_order'];
+        $view_config = ['type' => 'playlist_songs', 'param' => $share_id, 'sort' => 'manual_order'];
       }
       break;
     case 'mix':
@@ -626,7 +634,7 @@ if (isset($_GET['share_type'])) {
       $stmt = $db_for_share->prepare("SELECT id FROM mixes WHERE public_id = ?");
       $stmt->execute([$share_id]);
       if ($stmt->fetch()) {
-        $view_config = ['type' => 'mix_songs', 'param' => rawurlencode($share_id), 'sort' => 'manual_order'];
+        $view_config = ['type' => 'mix_songs', 'param' => $share_id, 'sort' => 'manual_order'];
       }
       break;
   }
@@ -1283,23 +1291,36 @@ if (isset($_GET['action'])) {
       header('Pragma: cache');
       header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
       $pic_user_id = (int)($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT profile_picture, profile_picture_type FROM users WHERE id = ?");
+      $stmt = $db->prepare("SELECT profile_picture, profile_picture_type, artist FROM users WHERE id = ?");
       $stmt->execute([$pic_user_id]);
       $pic_data = $stmt->fetch();
+      
       if ($pic_data && $pic_data['profile_picture']) {
         header('Content-Type: ' . $pic_data['profile_picture_type']);
         echo $pic_data['profile_picture'];
+        exit;
+      } 
+      
+      // Advanced Fallback: Search for the newest song uploaded by this user OR featuring this artist name
+      $artist_name = $pic_data['artist'] ?? '';
+      $song_img = null;
+      
+      if ($artist_name) {
+         $stmt2 = $db->prepare("SELECT image FROM music WHERE (user_id = ? OR match_artist(artist, ?) = 1) AND image IS NOT NULL ORDER BY id DESC LIMIT 1");
+         $stmt2->execute([$pic_user_id, $artist_name]);
+         $song_img = $stmt2->fetchColumn();
       } else {
-        $stmt2 = $db->prepare("SELECT image FROM music WHERE user_id = ? AND image IS NOT NULL LIMIT 1");
-        $stmt2->execute([$pic_user_id]);
-        $song_img = $stmt2->fetchColumn();
-        if ($song_img) {
-          header('Content-Type: image/webp');
-          echo $song_img;
-        } else {
-          header('Content-Type: image/svg+xml');
-          echo '<svg xmlns="http://www.w3.org/2000/svg" fill="#404040" viewBox="0 0 16 16"><path d="M11 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0"/><path fill-rule="evenodd" d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8m8-7a7 7 0 0 0-5.468 11.37C3.242 11.226 4.805 10 8 10s4.757 1.225 5.468 2.37A7 7 0 0 0 8 1"/></svg>';
-        }
+         $stmt2 = $db->prepare("SELECT image FROM music WHERE user_id = ? AND image IS NOT NULL ORDER BY id DESC LIMIT 1");
+         $stmt2->execute([$pic_user_id]);
+         $song_img = $stmt2->fetchColumn();
+      }
+
+      if ($song_img) {
+        header('Content-Type: image/webp');
+        echo $song_img;
+      } else {
+        header('Content-Type: image/svg+xml');
+        echo '<svg xmlns="http://www.w3.org/2000/svg" fill="#404040" viewBox="0 0 16 16"><path d="M11 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0"/><path fill-rule="evenodd" d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8m8-7a7 7 0 0 0-5.468 11.37C3.242 11.226 4.805 10 8 10s4.757 1.225 5.468 2.37A7 7 0 0 0 8 1"/></svg>';
       }
       exit;
 
@@ -1697,16 +1718,32 @@ if (isset($_GET['action'])) {
       }
       
       $discovery_stmt = $db->prepare("
-        SELECT {$album_fields} FROM music m
-        WHERE m.album != 'Unknown Album' " . ($user_id ? "AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)" : "") . "
-        GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
+        SELECT m.album, m.artist, m.user_id, m.id FROM music m
+        WHERE m.album != 'Unknown Album' AND m.album != '' AND m.album IS NOT NULL " . ($user_id ? "AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)" : "") . "
+        ORDER BY RANDOM() LIMIT 100
       ");
       $album_params = [];
       if ($user_id) {
         $album_params[':user_id'] = $user_id;
       }
       $discovery_stmt->execute($album_params);
-      $discovery_albums = $discovery_albums = $discovery_stmt->fetchAll();
+      $disc_rows = $discovery_stmt->fetchAll();
+      $discovery_albums = [];
+      foreach ($disc_rows as $row) {
+        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        if (!is_array($parts)) $parts = [$row['artist']];
+        foreach ($parts as $part) {
+          $p = trim($part);
+          if ($p !== '') {
+            $key = strtolower($row['album'] . ':::' . $p);
+            if (!isset($discovery_albums[$key])) {
+              $discovery_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+            }
+          }
+        }
+      }
+      shuffle($discovery_albums);
+      $discovery_albums = array_slice($discovery_albums, 0, 10);
       if (count($discovery_albums) > 0) {
         $shelves[] = ['title' => 'Discover Albums', 'type' => 'albums', 'items' => $discovery_albums];
       }
@@ -1768,12 +1805,28 @@ if (isset($_GET['action'])) {
         }
 
         $rec_followed_albums_stmt = $db->prepare("
-          SELECT {$album_fields} FROM music m
-          WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id) AND m.album != 'Unknown Album'
-          GROUP BY m.album, m.user_id ORDER BY RANDOM() LIMIT 10
+          SELECT m.album, m.artist, m.user_id, m.id FROM music m
+          WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id) AND m.album != 'Unknown Album' AND m.album != '' AND m.album IS NOT NULL
+          ORDER BY RANDOM() LIMIT 100
         ");
         $rec_followed_albums_stmt->execute([':user_id' => $user_id]);
-        $rec_followed_albums = $rec_followed_albums_stmt->fetchAll();
+        $fol_rows = $rec_followed_albums_stmt->fetchAll();
+        $rec_followed_albums = [];
+        foreach ($fol_rows as $row) {
+          $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+          if (!is_array($parts)) $parts = [$row['artist']];
+          foreach ($parts as $part) {
+            $p = trim($part);
+            if ($p !== '') {
+              $key = strtolower($row['album'] . ':::' . $p);
+              if (!isset($rec_followed_albums[$key])) {
+                $rec_followed_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+              }
+            }
+          }
+        }
+        shuffle($rec_followed_albums);
+        $rec_followed_albums = array_slice($rec_followed_albums, 0, 10);
         if (count($rec_followed_albums) > 0) {
           $shelves[] = ['title' => 'From Your Artists: New Albums', 'type' => 'albums', 'items' => $rec_followed_albums];
         }
@@ -2292,10 +2345,9 @@ if (isset($_GET['action'])) {
       $param = $post_data['param'] ?? '';
       $sort = $post_data['sort'] ?? '';
       $filter_user_id = $post_data['filter_user_id'] ?? '';
+      $artist_name = $post_data['artist_name'] ?? '';
 
-      if (in_array($view_type, ['artist_songs', 'album_songs', 'genre_songs', 'playlist_songs', 'mix_songs'])) {
-        $param = urldecode($param);
-      }
+      $sql = "SELECT m.id FROM music m ";
 
       $sql = "SELECT m.id FROM music m ";
       $conditions = "";
@@ -2346,23 +2398,39 @@ if (isset($_GET['action'])) {
           $default_sort = 'trending';
           break;
         case 'artist_songs':
-          $conditions = "WHERE match_artist(m.artist, ?) = 1";
-          $params[] = $param;
+          if ($filter_user_id !== '') {
+            $conditions = "WHERE (match_artist(m.artist, ?) = 1 OR m.user_id = ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+            $params[] = $param;
+            $params[] = $filter_user_id;
+            $params[] = $user_id;
+            $filter_user_id = ''; // Processed here, prevent global append
+          } else {
+            $conditions = "WHERE match_artist(m.artist, ?) = 1 AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+            $params[] = $param;
+            $params[] = $user_id;
+          }
           $default_sort = 'album_asc';
           break;
         case 'album_songs':
-          $conditions = "WHERE m.album = ?";
+          $conditions = "WHERE m.album = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
           $params[] = $param;
+          $params[] = $user_id;
+          if ($artist_name !== '') {
+            $conditions .= " AND match_artist(m.artist, ?) = 1";
+            $params[] = $artist_name;
+          }
           $default_sort = 'title_asc';
           break;
         case 'year_songs':
-          $conditions = "WHERE m.year = ?";
+          $conditions = "WHERE m.year = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
           $params[] = $param;
+          $params[] = $user_id;
           $default_sort = 'artist_asc';
           break;
         case 'genre_songs':
-          $conditions = "WHERE m.genre = ?";
+          $conditions = "WHERE m.genre = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
           $params[] = $param;
+          $params[] = $user_id;
           $default_sort = 'artist_asc';
           break;
         case 'playlist_songs':
@@ -2435,7 +2503,8 @@ if (isset($_GET['action'])) {
 
     case 'get_artists':
       $sort_key = $_GET['sort'] ?? 'name_asc';
-      $stmt = $db->prepare("SELECT artist, id FROM music WHERE artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) ORDER BY id DESC");
+      // ADVANCED IMAGE SCANNER: Tracks if the current song actually has an image
+      $stmt = $db->prepare("SELECT artist, id, CASE WHEN image IS NOT NULL THEN 1 ELSE 0 END as has_img FROM music WHERE artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) ORDER BY id DESC");
       $stmt->execute([$user_id]);
       $rows = $stmt->fetchAll();
       $artists = [];
@@ -2446,7 +2515,12 @@ if (isset($_GET['action'])) {
           if ($p !== '') {
             $key = strtolower($p);
             if (!isset($artists[$key])) {
-              $artists[$key] = ['name' => $p, 'id' => $row['id']];
+              // Register artist with initial song ID
+              $artists[$key] = ['name' => $p, 'id' => $row['id'], 'has_img' => $row['has_img']];
+            } elseif (!$artists[$key]['has_img'] && $row['has_img']) {
+              // UPGRADE: If previously blank, replace with a song ID that has a cover image!
+              $artists[$key]['id'] = $row['id'];
+              $artists[$key]['has_img'] = 1;
             }
           }
         }
@@ -2462,18 +2536,46 @@ if (isset($_GET['action'])) {
 
     case 'get_albums':
       $sort_key = $_GET['sort'] ?? 'album_asc';
-      $sort_map = [
-        'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC',
-        'album_desc' => 'ORDER BY m.album COLLATE NOCASE DESC',
-        'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC',
-        'artist_desc' => 'ORDER BY m.artist COLLATE NOCASE DESC',
-        'year_desc' => 'ORDER BY MAX(m.year) DESC',
-        'year_asc' => 'ORDER BY MAX(m.year) ASC',
-      ];
-      $order_by = $sort_map[$sort_key] ?? $sort_map['album_asc'];
-      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album != '' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) GROUP BY m.album, m.user_id " . $order_by . $limit_clause);
+      
+      $stmt = $db->prepare("SELECT album, artist, user_id, id, year FROM music WHERE album != '' AND album != 'Unknown Album' AND album IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) ORDER BY id DESC");
       $stmt->execute([$user_id]);
-      send_json($stmt->fetchAll());
+      $rows = $stmt->fetchAll();
+      
+      $albums = [];
+      foreach ($rows as $row) {
+        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        if (!is_array($parts)) $parts = [$row['artist']];
+        foreach ($parts as $part) {
+          $p = trim($part);
+          if ($p !== '') {
+            $key = strtolower($row['album'] . ':::' . $p);
+            if (!isset($albums[$key])) {
+              $albums[$key] = [
+                'album' => $row['album'],
+                'artist' => $p,
+                'user_id' => $row['user_id'],
+                'id' => $row['id'],
+                'year' => $row['year']
+              ];
+            }
+          }
+        }
+      }
+      
+      usort($albums, function($a, $b) use ($sort_key) {
+        switch ($sort_key) {
+          case 'album_desc': return strcasecmp($b['album'], $a['album']);
+          case 'artist_asc': return strcasecmp($a['artist'], $b['artist']);
+          case 'artist_desc': return strcasecmp($b['artist'], $a['artist']);
+          case 'year_desc': return ($b['year'] ?? 0) <=> ($a['year'] ?? 0);
+          case 'year_asc': return ($a['year'] ?? 0) <=> ($b['year'] ?? 0);
+          case 'album_asc':
+          default: return strcasecmp($a['album'], $b['album']);
+        }
+      });
+      
+      $sliced = array_slice($albums, $offset, PAGE_SIZE);
+      send_json(array_values($sliced));
       break;
     
     case 'get_genres':
@@ -2623,17 +2725,30 @@ if (isset($_GET['action'])) {
         if (empty($name)) { http_response_code(400); exit; }
         $field = $type;
         $filter_user_id = $_GET['filter_user_id'] ?? '';
+        $artist_name = $_GET['artist_name'] ?? '';
         $user_cond = "";
         $user_params = [];
         
         if ($field === 'artist') {
-          $field_cond = "match_artist(m.artist, ?) = 1 AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
-          $user_params[] = $name;
-          $user_params[] = $user_id;
+          if ($filter_user_id !== '') {
+            $field_cond = "(match_artist(m.artist, ?) = 1 OR m.user_id = ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+            $user_params[] = $name;
+            $user_params[] = $filter_user_id;
+            $user_params[] = $user_id;
+            $filter_user_id = ''; // Processed here, prevent global append
+          } else {
+            $field_cond = "match_artist(m.artist, ?) = 1 AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+            $user_params[] = $name;
+            $user_params[] = $user_id;
+          }
         } else {
           $field_cond = "m.{$field} = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
           $user_params[] = $name;
           $user_params[] = $user_id;
+          if ($field === 'album' && $artist_name !== '') {
+            $field_cond .= " AND match_artist(m.artist, ?) = 1";
+            $user_params[] = $artist_name;
+          }
         }
         
         if ($filter_user_id !== '') {
@@ -2641,11 +2756,18 @@ if (isset($_GET['action'])) {
           $user_params[] = $filter_user_id;
         }
 
-        $stmt_details = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, MAX(id) as image_id FROM music m WHERE {$field_cond} {$user_cond}");
+        // Advanced Fallback: Fetch basic stats first
+        $stmt_details = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, MAX(user_id) as user_id FROM music m WHERE {$field_cond} {$user_cond}");
         $stmt_details->execute($user_params);
         $details = $stmt_details->fetch();
+        
+        // Advanced Fallback: Query explicitly for the newest song that actually has a cover image
+        $stmt_img = $db->prepare("SELECT id FROM music m WHERE {$field_cond} {$user_cond} AND image IS NOT NULL ORDER BY id DESC LIMIT 1");
+        $stmt_img->execute($user_params);
+        $verified_image_id = $stmt_img->fetchColumn();
+
         $details['name'] = $name;
-        $details['image_url'] = '?action=get_image&id=' . ($details['image_id'] ?? 0);
+        $details['image_url'] = '?action=get_image&id=' . ($verified_image_id ?: 0);
         $details['public_id'] = null;
 
         if ($type === 'artist') {
@@ -2719,79 +2841,95 @@ if (isset($_GET['action'])) {
       break;
 
     case 'search':
-          $q = $_GET['q'] ?? '';
-          $query = '%' . $q . '%';
-          $shelves = [];
+      $q = $_GET['q'] ?? '';
+      $query = '%' . $q . '%';
+      $shelves = [];
 
-          $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
-          $stmt_top = $db->prepare("
-            SELECT {$song_fields} FROM music m 
-            LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? 
-            WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)
-            ORDER BY 
-              CASE 
-                WHEN m.title LIKE ? THEN 1 
-                WHEN m.artist LIKE ? THEN 2 
-                WHEN m.album LIKE ? THEN 3 
-                ELSE 4 
-              END ASC, m.id DESC 
-            LIMIT 1
-          ");
-          $stmt_top->execute([$user_id, $query, $query, $query, $user_id, $q, $q, $q]);
-          $top_result = $stmt_top->fetch();
-          
-          if ($top_result) {
-            $shelves[] = ['title' => 'Top Result', 'type' => 'top_result', 'items' => [$top_result]];
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $stmt_top = $db->prepare("
+        SELECT {$song_fields} FROM music m 
+        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? 
+        WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)
+        ORDER BY 
+          CASE 
+            WHEN m.title LIKE ? THEN 1 
+            WHEN m.artist LIKE ? THEN 2 
+            WHEN m.album LIKE ? THEN 3 
+            ELSE 4 
+          END ASC, m.id DESC 
+        LIMIT 1
+      ");
+      $stmt_top->execute([$user_id, $query, $query, $query, $user_id, $q, $q, $q]);
+      $top_result = $stmt_top->fetch();
+      
+      if ($top_result) {
+        $shelves[] = ['title' => 'Top Result', 'type' => 'top_result', 'items' => [$top_result]];
+      }
+
+      $artists = [];
+      $added_artists = [];
+      
+      $stmt = $db->prepare("SELECT id, artist as name FROM users WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL ORDER BY artist ASC LIMIT 15");
+      $stmt->execute([$query]);
+      $user_artists = $stmt->fetchAll();
+      
+      foreach ($user_artists as $ua) {
+        $artists[] = ['name' => $ua['name'], 'id' => $ua['id'], 'is_user' => true];
+        $added_artists[strtolower($ua['name'])] = true;
+      }
+
+      $stmt = $db->prepare("SELECT DISTINCT artist, MAX(id) as id FROM music WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY artist LIMIT 15");
+      $stmt->execute([$query, $user_id]);
+      $music_artists = $stmt->fetchAll();
+      
+      foreach ($music_artists as $ma) {
+        $parts = preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $ma['artist']);
+        foreach ($parts as $p) {
+          $p = trim($p);
+          if ($p !== '' && stripos($p, $q) !== false && !isset($added_artists[strtolower($p)])) {
+            $artists[] = ['name' => $p, 'id' => $ma['id'], 'is_user' => false];
+            $added_artists[strtolower($p)] = true;
           }
+        }
+      }
+      
+      if (count($artists) > 0) {
+        $shelves[] = ['title' => 'Artists', 'type' => 'artists', 'items' => array_slice($artists, 0, 15)];
+      }
 
-          $artists = [];
-          $added_artists = [];
-          
-          $stmt = $db->prepare("SELECT id, artist as name FROM users WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL ORDER BY artist ASC LIMIT 15");
-          $stmt->execute([$query]);
-          $user_artists = $stmt->fetchAll();
-          
-          foreach ($user_artists as $ua) {
-            $artists[] = ['name' => $ua['name'], 'id' => $ua['id'], 'is_user' => true];
-            $added_artists[strtolower($ua['name'])] = true;
-          }
-
-          $stmt = $db->prepare("SELECT DISTINCT artist, MAX(id) as id FROM music WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY artist LIMIT 15");
-          $stmt->execute([$query, $user_id]);
-          $music_artists = $stmt->fetchAll();
-          
-          foreach ($music_artists as $ma) {
-            $parts = preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $ma['artist']);
-            foreach ($parts as $p) {
-              $p = trim($p);
-              if ($p !== '' && stripos($p, $q) !== false && !isset($added_artists[strtolower($p)])) {
-                $artists[] = ['name' => $p, 'id' => $ma['id'], 'is_user' => false];
-                $added_artists[strtolower($p)] = true;
-              }
+      $stmt = $db->prepare("SELECT album, artist, user_id, id FROM music WHERE album LIKE ? AND album != '' AND album != 'Unknown Album' AND album IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) ORDER BY id DESC");
+      $stmt->execute([$query, $user_id]);
+      $search_albums_rows = $stmt->fetchAll();
+      $search_albums = [];
+      foreach ($search_albums_rows as $row) {
+        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        if (!is_array($parts)) $parts = [$row['artist']];
+        foreach ($parts as $part) {
+          $p = trim($part);
+          if ($p !== '') {
+            $key = strtolower($row['album'] . ':::' . $p);
+            if (!isset($search_albums[$key])) {
+              $search_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
             }
           }
-          
-          if (count($artists) > 0) {
-            $shelves[] = ['title' => 'Artists', 'type' => 'artists', 'items' => array_slice($artists, 0, 15)];
-          }
+        }
+      }
+      usort($search_albums, function($a, $b) { return strcasecmp($a['album'], $b['album']); });
+      $search_albums = array_slice($search_albums, 0, 15);
+      if (count($search_albums) > 0) {
+        $shelves[] = ['title' => 'Albums', 'type' => 'albums', 'items' => $search_albums];
+      }
 
-          $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, MAX(m.id) as id FROM music m WHERE m.album LIKE ? AND m.album != '' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) GROUP BY m.album, m.user_id ORDER BY m.album ASC LIMIT 15");
-          $stmt->execute([$query, $user_id]);
-          $albums = $stmt->fetchAll();
-          if (count($albums) > 0) {
-            $shelves[] = ['title' => 'Albums', 'type' => 'albums', 'items' => $albums];
-          }
+      $stmt = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, u.artist as creator, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id FROM playlists p JOIN users u ON p.user_id = u.id WHERE p.name LIKE ? AND (p.is_private = 0 OR p.user_id = ? OR {$is_super_admin} = 1) ORDER BY p.name ASC LIMIT 15");
+      $stmt->execute([$query, $user_id]);
+      $playlists = $stmt->fetchAll();
+      if (count($playlists) > 0) {
+        $shelves[] = ['title' => 'Playlists', 'type' => 'playlists', 'items' => $playlists];
+      }
 
-          $stmt = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, u.artist as creator, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id FROM playlists p JOIN users u ON p.user_id = u.id WHERE p.name LIKE ? AND (p.is_private = 0 OR p.user_id = ? OR {$is_super_admin} = 1) ORDER BY p.name ASC LIMIT 15");
-          $stmt->execute([$query, $user_id]);
-          $playlists = $stmt->fetchAll();
-          if (count($playlists) > 0) {
-            $shelves[] = ['title' => 'Playlists', 'type' => 'playlists', 'items' => $playlists];
-          }
-
-          $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
-          $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY m.title ASC LIMIT 50");
-          $stmt->execute([$user_id, $query, $query, $query, $user_id]);
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY m.title ASC LIMIT 50");
+      $stmt->execute([$user_id, $query, $query, $query, $user_id]);
       $songs = $stmt->fetchAll();
       if (count($songs) > 0) {
         $shelves[] = ['title' => 'Songs', 'type' => 'songs_list', 'items' => $songs];
@@ -2819,7 +2957,18 @@ if (isset($_GET['action'])) {
         }
         $song['stream_url'] = '?action=get_stream&id=' . $song['id'];
         $song['image_url'] = '?action=get_image&id=' . $song['id'] . '&v=' . ($song['last_modified'] ?? 0);
-        if ($song['eq_bands']) $song['eq_bands'] = json_decode($song['eq_bands'], true);
+        
+        // STRICT JSON PARSER: Forces DB Equalizer strings into Floats so the JS engine doesn't crash
+        if (!empty($song['eq_bands'])) {
+            $parsed_eq = json_decode($song['eq_bands'], true);
+            $song['eq_bands'] = is_array($parsed_eq) ? array_map('floatval', $parsed_eq) : [0,0,0,0,0];
+        } else {
+            $song['eq_bands'] = null;
+        }
+        
+        if (!empty($song['volume_multiplier'])) {
+            $song['volume_multiplier'] = (float)$song['volume_multiplier'];
+        }
       }
       send_json($song);
       break;
@@ -3316,14 +3465,28 @@ if (isset($_GET['action'])) {
 
       if ($top_artist) {
         $more_from_artist_stmt = $db->prepare("
-          SELECT {$album_fields} FROM music m
-          JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 100) r ON m.id = r.id
-          WHERE match_artist(m.artist, :artist_name) = 1 AND m.album != 'Unknown Album'
+          SELECT m.album, m.artist, m.user_id, m.id FROM music m
+          JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 200) r ON m.id = r.id
+          WHERE match_artist(m.artist, :artist_name) = 1 AND m.album != 'Unknown Album' AND m.album != '' AND m.album IS NOT NULL
           AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)
-          GROUP BY m.album, m.user_id LIMIT 10
         ");
         $more_from_artist_stmt->execute([':user_id' => $user_id, ':artist_name' => $top_artist]);
-        $artist_albums = $more_from_artist_stmt->fetchAll();
+        $artist_rows = $more_from_artist_stmt->fetchAll();
+        $artist_albums = [];
+        foreach ($artist_rows as $row) {
+          $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+          if (!is_array($parts)) $parts = [$row['artist']];
+          foreach ($parts as $part) {
+            $p = trim($part);
+            if ($p !== '' && strcasecmp($p, $top_artist) === 0) {
+              $key = strtolower($row['album'] . ':::' . $p);
+              if (!isset($artist_albums[$key])) {
+                $artist_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+              }
+            }
+          }
+        }
+        $artist_albums = array_slice(array_values($artist_albums), 0, 10);
         if (count($artist_albums) > 0) {
           $shelves[] = ['title' => 'More from ' . $top_artist, 'type' => 'albums', 'items' => $artist_albums, 'connected_view' => 'artist_songs', 'param' => urlencode($top_artist)];
         }
@@ -3392,13 +3555,27 @@ if (isset($_GET['action'])) {
       }
       
       $discovery_stmt = $db->prepare("
-        SELECT {$album_fields} FROM music m
-        JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 100) r ON m.id = r.id
-        WHERE m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id) AND m.album != 'Unknown Album'
-        GROUP BY m.album, m.user_id LIMIT 10
+        SELECT m.album, m.artist, m.user_id, m.id FROM music m
+        JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 200) r ON m.id = r.id
+        WHERE m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id) AND m.album != 'Unknown Album' AND m.album != '' AND m.album IS NOT NULL
       ");
       $discovery_stmt->execute([':user_id' => $user_id]);
-      $discovery_albums = $discovery_stmt->fetchAll();
+      $disc_rec_rows = $discovery_stmt->fetchAll();
+      $discovery_albums = [];
+      foreach ($disc_rec_rows as $row) {
+        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        if (!is_array($parts)) $parts = [$row['artist']];
+        foreach ($parts as $part) {
+          $p = trim($part);
+          if ($p !== '') {
+            $key = strtolower($row['album'] . ':::' . $p);
+            if (!isset($discovery_albums[$key])) {
+              $discovery_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+            }
+          }
+        }
+      }
+      $discovery_albums = array_slice(array_values($discovery_albums), 0, 10);
       if (count($discovery_albums) > 0) {
         $shelves[] = ['title' => 'Discover New Albums', 'type' => 'albums', 'items' => $discovery_albums];
       }
@@ -3504,12 +3681,27 @@ if (isset($_GET['action'])) {
       }
 
       $latest_followed_albums_stmt = $db->prepare("
-        SELECT {$album_fields} FROM music m
-        WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id) AND m.album != 'Unknown Album'
-        GROUP BY m.album, m.user_id ORDER BY MAX(m.id) DESC LIMIT 10
+        SELECT m.album, m.artist, m.user_id, m.id FROM music m
+        WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id) AND m.album != 'Unknown Album' AND m.album != '' AND m.album IS NOT NULL
+        ORDER BY id DESC LIMIT 200
       ");
       $latest_followed_albums_stmt->execute([':user_id' => $user_id]);
-      $latest_followed_albums = $latest_followed_albums_stmt->fetchAll();
+      $lf_rows = $latest_followed_albums_stmt->fetchAll();
+      $latest_followed_albums = [];
+      foreach ($lf_rows as $row) {
+        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        if (!is_array($parts)) $parts = [$row['artist']];
+        foreach ($parts as $part) {
+          $p = trim($part);
+          if ($p !== '') {
+            $key = strtolower($row['album'] . ':::' . $p);
+            if (!isset($latest_followed_albums[$key])) {
+              $latest_followed_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+            }
+          }
+        }
+      }
+      $latest_followed_albums = array_slice(array_values($latest_followed_albums), 0, 10);
       if (count($latest_followed_albums) > 0) {
         $shelves[] = ['title' => 'From Your Artists: New Albums', 'type' => 'albums', 'items' => $latest_followed_albums];
       }
@@ -5037,6 +5229,7 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+
     <div class="modal fade" id="register-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -5064,6 +5257,7 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+
     <div class="modal fade" id="restore-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -5095,52 +5289,7 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
-    <div class="modal fade" id="comments-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
-        <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
-          <div class="modal-header border-secondary">
-            <h5 class="modal-title w-100 text-white">Song Community</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body">
-            <div class="d-flex justify-content-center gap-4 mb-4">
-              <button class="btn btn-outline-light d-flex align-items-center gap-2" id="song-like-btn">
-                <i class="bi bi-hand-thumbs-up"></i> <span id="song-like-count">0</span>
-              </button>
-              <button class="btn btn-outline-light d-flex align-items-center gap-2" id="song-dislike-btn">
-                <i class="bi bi-hand-thumbs-down"></i> <span id="song-dislike-count">0</span>
-              </button>
-            </div>
-            <form id="comment-form" class="mb-4 d-flex gap-2">
-              <input type="hidden" id="comment-parent-id" value="">
-              <input type="text" id="comment-input" class="form-control bg-dark text-white border-secondary" placeholder="Add a comment... (use @ to mention)" required>
-              <button type="submit" class="btn btn-danger"><i class="bi bi-send"></i></button>
-            </form>
-            <div id="comments-list" class="d-flex flex-column gap-3"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-    
-    <div class="modal fade" id="note-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content" style="background-color: var(--ytm-surface);">
-          <div class="modal-header border-0">
-            <h5 class="modal-title text-white">Edit Note</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body">
-            <form id="note-form">
-              <input type="hidden" id="note-id">
-              <input type="text" id="note-title" class="form-control bg-dark text-white border-secondary mb-3" placeholder="Title" required>
-              <textarea id="note-content" class="form-control bg-dark text-white border-secondary mb-3" rows="6" placeholder="Write your note here..." required></textarea>
-              <button type="submit" class="btn btn-danger w-100">Save Note</button>
-            </form>
-          </div>
-        </div>
-      </div>
-    </div>
-    
+
     <div class="modal fade" id="edit-comment-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content" style="background-color: var(--ytm-surface);">
@@ -6207,12 +6356,39 @@ function perform_full_scan($db) {
 
               const songAlbumEl = e.target.closest('.song-album');
               if (songAlbumEl) {
-                 e.stopPropagation();
-                 if (desktopPlayerModal) desktopPlayerModal.hide();
-                 if (playerModal) playerModal.hide();
-                 const songItem = e.target.closest('.song-item');
-                 loadView({ type: 'album_songs', param: songAlbumEl.dataset.album, sort: 'title_asc', filter_user_id: songItem ? songItem.dataset.userid || songItem.dataset.songUserId || '' : '' });
-                 return;
+                e.stopPropagation();
+                if (desktopPlayerModal) desktopPlayerModal.hide();
+                if (playerModal) playerModal.hide();
+                const songItem = e.target.closest('.song-item');
+                
+                let rawUserId = songAlbumEl.getAttribute('data-userid') || (songItem ? (songItem.getAttribute('data-userid') || songItem.getAttribute('data-song-user-id')) : '') || '';
+                let validUserId = parseInt(rawUserId, 10);
+                
+                let albumRaw = decodeURIComponent(songAlbumEl.getAttribute('data-album') || '');
+                let songArtistRaw = songItem ? (songItem.getAttribute('data-song-artist') || '') : '';
+                const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+
+                if (songArtistsList.length > 1) {
+                  if (artistsModalBody) {
+                    const modalTitle = artistsModalEl.querySelector('.modal-title');
+                    if (modalTitle) modalTitle.textContent = 'Select Album Artist';
+                    artistsModalBody.innerHTML = `
+                      <div class="list-group list-group-flush rounded">
+                        ${songArtistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary album-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${rawUserId}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join('')}
+                      </div>
+                    `;
+                    if (artistsModal) artistsModal.show();
+                  }
+                } else {
+                  loadView({ 
+                    type: 'album_songs', 
+                    param: albumRaw, 
+                    sort: 'title_asc', 
+                    filter_user_id: (isNaN(validUserId) || validUserId <= 0) ? '' : validUserId,
+                    artist_name: songArtistRaw
+                  });
+                }
+                return;
               }
 
               const songItem = e.target.closest('.song-item');
@@ -6241,7 +6417,9 @@ function perform_full_scan($db) {
         }
 
         const audio = new Audio();
+        audio.crossOrigin = 'anonymous'; // CRITICAL: Unlocks Web Audio API effects like Equalizer
         const audioB = new Audio();
+        audioB.crossOrigin = 'anonymous';
         
         let audioCtx, sourceA, sourceB, gainA, gainB, perSongGain, compressor, analyser;
         let visualizerDataArray;
@@ -6264,16 +6442,33 @@ function perform_full_scan($db) {
           'Bass Boost': [8, 5, 0, 0, 0]
         };
 
-        const saveGlobalAudioSettings = () => {
+        const saveGlobalAudioSettings = async () => {
           if (!currentUser) return;
           clearTimeout(settingsSaveTimeout);
-          settingsSaveTimeout = setTimeout(() => {
-            const settings = { enableNormalization, isEQEnabled, isSpatialEnabled, globalVolumeMultiplier, globalEQBands, crossfadeDuration };
-            fetchData('?action=save_global_settings', {
-              method: 'POST', headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ settings })
-            });
-          }, 1000);
+          settingsSaveTimeout = setTimeout(async () => {
+            try {
+               const settings = { 
+                  enableNormalization: enableNormalization, 
+                  isEQEnabled: isEQEnabled, 
+                  isSpatialEnabled: isSpatialEnabled, 
+                  globalVolumeMultiplier: parseFloat(globalVolumeMultiplier), 
+                  globalEQBands: globalEQBands.map(b => parseFloat(b)), 
+                  crossfadeDuration: parseFloat(crossfadeDuration) 
+               };
+               
+               const response = await fetchData('?action=save_global_settings', {
+                 method: 'POST', headers: {'Content-Type': 'application/json'},
+                 body: JSON.stringify({ settings: settings })
+               });
+               
+               if (response && response.status === 'success') {
+                  // Update the local current user memory so it doesn't revert on next checkSession
+                  currentUser.settings = JSON.stringify(settings);
+               }
+            } catch(e) {
+               console.error("Failed to save audio settings", e);
+            }
+          }, 800); // 800ms debounce
         };
 
         const initWebAudio = () => {
@@ -6340,40 +6535,54 @@ function perform_full_scan($db) {
         const applyAudioSettings = () => {
           if (!audioCtx || !currentSong) return;
           
-          let targetVol = globalVolumeMultiplier;
-          let targetEQ = [...globalEQBands];
+          let targetVol = parseFloat(globalVolumeMultiplier);
+          let targetEQ = globalEQBands.map(v => parseFloat(v) || 0);
 
-          // ReplayGain (Normalization) logic scale adjustments based on extracted database values
-          if (currentSong.replaygain) {
-             const rgLinear = Math.pow(10, currentSong.replaygain / 20);
-             targetVol *= Math.max(0.1, Math.min(rgLinear, 3.0));
+          if (currentSong.replaygain && enableNormalization) {
+            const rgLinear = Math.pow(10, parseFloat(currentSong.replaygain) / 20);
+            targetVol *= Math.max(0.1, Math.min(rgLinear, 3.0));
           }
 
-          // Override with database song settings if they exist
           if (currentSong.volume_multiplier !== null && currentSong.volume_multiplier !== undefined) {
-             targetVol = parseFloat(currentSong.volume_multiplier);
+            targetVol = parseFloat(currentSong.volume_multiplier);
           }
-          if (currentSong.eq_bands && Array.isArray(currentSong.eq_bands)) {
-             targetEQ = currentSong.eq_bands;
+          
+          if (currentSong.eq_bands) {
+            try {
+              const parsedEq = typeof currentSong.eq_bands === 'string' ? JSON.parse(currentSong.eq_bands) : currentSong.eq_bands;
+              if (Array.isArray(parsedEq) && parsedEq.length === 5) {
+                targetEQ = parsedEq.map(v => parseFloat(v) || 0);
+              }
+            } catch (err) {
+              console.error("EQ Parse Error:", err);
+            }
           } else if (!isEQEnabled) {
-             targetEQ = [0, 0, 0, 0, 0];
+            targetEQ = [0, 0, 0, 0, 0];
           }
 
-          if (perSongGain) {
-            perSongGain.gain.setTargetAtTime(targetVol, audioCtx.currentTime, 0.1);
+          if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
           }
-          eqBands.forEach((band, i) => {
-            band.gain.setTargetAtTime(targetEQ[i] || 0, audioCtx.currentTime, 0.1);
-          });
+
+          setTimeout(() => {
+            if (perSongGain && perSongGain.gain) {
+              perSongGain.gain.setTargetAtTime(targetVol, audioCtx.currentTime, 0.05);
+            }
+            eqBands.forEach((band, i) => {
+              if (band && band.gain) {
+                band.gain.setTargetAtTime(targetEQ[i], audioCtx.currentTime, 0.05);
+              }
+            });
+          }, 50);
         };
 
         const toggleAudioEnhancements = () => {
           if (!audioCtx) return;
           compressor.ratio.value = enableNormalization ? 12 : 1; 
           
-          const t = audioCtx.currentTime;
-          spatialBypass.gain.setTargetAtTime(isSpatialEnabled ? 0 : 1, t, 0.1);
-          spatialMix.gain.setTargetAtTime(isSpatialEnabled ? 1 : 0, t, 0.1);
+          // Direct value assignment to avoid context freezing bugs
+          spatialBypass.gain.value = isSpatialEnabled ? 0 : 1;
+          spatialMix.gain.value = isSpatialEnabled ? 1 : 0;
 
           applyAudioSettings();
         };
@@ -6435,7 +6644,7 @@ function perform_full_scan($db) {
         });
 
         document.body.addEventListener('click', initWebAudio, { once: true });
-        let currentView = { type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' };
+        let currentView = { type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' };
         let currentUser = null;
         let currentSong = null;
         let queue = [];
@@ -7003,11 +7212,11 @@ function perform_full_scan($db) {
           updateMultiSelectUI();
         });
         
-        const renderViewDetailsHeader = (details, type) => {
+        const renderViewDetailsHeader = (details, type, songsList = []) => {
           let typeText = type.charAt(0).toUpperCase() + type.slice(1);
           let statsText = `${details.song_count || 0} songs &bull; ${formatTime(details.total_duration || 0)}`;
           if (details.play_count !== undefined) {
-             statsText += ` &bull; ${details.play_count || 0} plays`;
+            statsText += ` &bull; ${details.play_count || 0} plays`;
           }
           if (details.followers_count !== undefined) {
             statsText += ` &bull; ${details.followers_count || 0} followers`;
@@ -7016,8 +7225,17 @@ function perform_full_scan($db) {
           
           let shareId = '';
           let shareName = encodeURIComponent(details.name);
-          let artistIdForShare = currentView.filter_user_id || details.user_id || '';
           
+          // ADVANCED ALBUM ARTIST MATCHER
+          let rawArtistId = currentView.filter_user_id || details.user_id;
+          if (!rawArtistId && songsList && songsList.length > 0) {
+            rawArtistId = songsList[0].user_id;
+          }
+          let artistIdForShare = parseInt(rawArtistId, 10);
+          if (isNaN(artistIdForShare) || artistIdForShare <= 0) {
+            artistIdForShare = '';
+          }
+
           if (type === 'playlist') {
             typeText = `Playlist by ${escapeHTML(details.creator)}`;
             shareId = details.public_id;
@@ -7033,10 +7251,11 @@ function perform_full_scan($db) {
             document.title = `${details.name} - PHP Music`;
             downloadButtonHTML = `<button class="btn btn-outline-light border-0 add-mix-to-playlist-btn" data-mix-id="${details.public_id}" title="Add to Playlist"><i class="bi bi-plus-lg"></i> <span class="d-none d-md-inline">Add to Playlist</span></button>`;
           } else if (type === 'artist') {
-            shareId = artistIdForShare;
+            shareId = artistIdForShare ? artistIdForShare : shareName; 
             document.title = `${details.name} - Artist - PHP Music`;
           } else if (type === 'album') {
             shareId = shareName;
+            if (!artistIdForShare && details.user_id) artistIdForShare = details.user_id; 
             document.title = `${details.name} - Album - PHP Music`;
           } else if (type === 'profile') {
             typeText = 'My Profile';
@@ -7046,8 +7265,12 @@ function perform_full_scan($db) {
           }
           
           if(type !== 'profile'){
+            let shareArtistName = currentView.artist_name || '';
+            if (!shareArtistName && songsList && songsList.length > 0) {
+              shareArtistName = songsList[0].artist;
+            }
             shareButtonHTML = `
-              <button class="btn btn-outline-light border-0 share-view-btn" title="Share ${type}" data-share-type="${type}" data-share-id="${shareId}" data-share-name="${shareName}" data-artist-id="${artistIdForShare}">
+              <button class="btn btn-outline-light border-0 share-view-btn" title="Share ${type}" data-share-type="${type}" data-share-id="${shareId}" data-share-name="${shareName}" data-artist-id="${artistIdForShare}" data-artist-name="${encodeURIComponent(shareArtistName)}">
                 <i class="bi bi-share-fill"></i> <span class="d-none d-md-inline">Share</span>
               </button>`;
           }
@@ -7353,6 +7576,7 @@ function perform_full_scan($db) {
               }
               
               const useridAttr = item.user_id ? `data-userid="${item.user_id}"` : (type === 'get_following' ? `data-userid="${item.id}"` : '');
+              const artistNameAttr = (type === 'get_albums' && item.artist) ? `data-artistname="${encodeURIComponent(item.artist)}"` : '';
 
               const moreButton = (type === 'get_user_playlists') ? `
                 <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}">
@@ -7361,7 +7585,7 @@ function perform_full_scan($db) {
 
               if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists' || type === 'get_following' || type === 'get_genres' || type === 'get_years') {
                 return `<div class="col">
-                  <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
+                  <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} ${artistNameAttr} style="cursor: pointer;">
                     ${moreButton}
                     <img src="${imgSrc}${imageId || 0}" class="card-img-top ${imgClass}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
                     <div class="card-body px-0 py-2">
@@ -7507,7 +7731,7 @@ function perform_full_scan($db) {
               `).join('');
             } else if (shelf.type === 'artists') {
               itemsHTML = shelf.items.map(artist => `
-                <div class="shelf-item text-center" data-artist="${encodeURIComponent(artist.name)}" data-userid="${artist.id || ''}">
+                <div class="shelf-item text-center" data-artist="${encodeURIComponent(artist.name)}" data-userid="${artist.is_user ? artist.id : ''}">
                   <img src="${artist.is_user ? `?action=get_profile_picture&id=${artist.id}` : `?action=get_image&id=${artist.id || 0}`}" class="rounded-circle" alt="${escapeHTML(artist.name)}" style="aspect-ratio: 1/1; object-fit: cover;">
                   <div class="item-title mt-2">${escapeHTML(artist.name)}</div>
                   <div class="item-subtitle text-uppercase small text-secondary">Artist</div>
@@ -7641,11 +7865,14 @@ function perform_full_scan($db) {
             return;
           }
           let data;
-          const { type, param, sort, filter_user_id } = currentView;
+          const { type, param, sort, filter_user_id, artist_name } = currentView;
 
           const params = new URLSearchParams({ page: currentPage, sort: sort });
           if (filter_user_id) {
             params.append('filter_user_id', filter_user_id);
+          }
+          if (artist_name) {
+            params.append('artist_name', artist_name);
           }
 
           switch (type) {
@@ -7801,7 +8028,8 @@ function perform_full_scan($db) {
             const isSameView = currentView.type === viewConfig.type &&
                                currentView.param === viewConfig.param &&
                                currentView.sort === viewConfig.sort &&
-                               currentView.filter_user_id === viewConfig.filter_user_id;
+                               currentView.filter_user_id === viewConfig.filter_user_id &&
+                               currentView.artist_name === viewConfig.artist_name;
             if (!isSameView) {
               history.pushState({ viewConfig }, "");
             }
@@ -7828,6 +8056,7 @@ function perform_full_scan($db) {
           let data;
           let pageParams = new URLSearchParams({ sort: currentView.sort, page: 1 });
           if (currentView.filter_user_id) pageParams.append('filter_user_id', currentView.filter_user_id);
+          if (currentView.artist_name) pageParams.append('artist_name', currentView.artist_name);
           
           switch (currentView.type) {
             case 'get_songs':
@@ -8112,12 +8341,12 @@ function perform_full_scan($db) {
             case 'playlist_songs':
             case 'mix_songs':
               const type = currentView.type.split('_')[0];
-              const name_param = currentView.param;
+              const name_param = encodeURIComponent(currentView.param);
               updateContentTitle('', false);
               const typeViewData = await fetchData(`?action=get_view_data&type=${type}&name=${name_param}&${pageParams.toString()}`);
               contentArea.innerHTML = '';
               if (typeViewData && typeViewData.details) {
-                renderViewDetailsHeader(typeViewData.details, type);
+                renderViewDetailsHeader(typeViewData.details, type, typeViewData.songs);
                 renderSongs(typeViewData.songs, false);
                 data = typeViewData.songs;
               } else {
@@ -8423,14 +8652,30 @@ function perform_full_scan($db) {
           }
         };
         
-        const showShareModal = (type, id, name, artistId) => {
-          const decodedName = decodeURIComponent(name);
+        const showShareModal = (type, id, name, artistId, artistName = '') => {
+          const decodedName = decodeURIComponent(name || '');
           let shareUrl = `${window.location.origin}${window.location.pathname}?share_type=${type}`;
 
+          const cleanId = String(id).replace(/undefined|null|nan/gi, '').trim();
+          const cleanName = String(name).replace(/undefined|null|nan/gi, '').trim();
+          const cleanArtistId = parseInt(artistId, 10);
+          const finalArtistId = (!isNaN(cleanArtistId) && cleanArtistId > 0) ? cleanArtistId : '';
+          const cleanArtistName = String(artistName).replace(/undefined|null|nan/gi, '').trim();
+          
           if (type === 'album') {
-            shareUrl += `&album_name=${id}&artist_id=${artistId}`;
+            shareUrl += `&album_name=${encodeURIComponent(decodedName || cleanId)}`;
+            if (finalArtistId !== '') {
+              shareUrl += `&artist_id=${finalArtistId}`;
+            }
+            if (cleanArtistName !== '') {
+              shareUrl += `&artist_name=${encodeURIComponent(decodeURIComponent(cleanArtistName))}`;
+            }
           } else {
-            shareUrl += `&id=${id}`;
+            if (cleanId !== '') {
+              shareUrl += `&id=${cleanId}`;
+            } else if (cleanName !== '') {
+              shareUrl += `&id=${encodeURIComponent(cleanName)}`;
+            }
           }
 
           shareModalTitle.textContent = `Share "${decodedName}"`;
@@ -8525,7 +8770,7 @@ function perform_full_scan($db) {
           menuItems += `
             <li class="context-menu-item" data-action="share_song" data-id="${songId}" data-name="${encodeURIComponent(title)}"><i class="bi bi-share-fill"></i> Share Song</li>
             <li class="context-menu-item" data-action="go_artist" data-name="${encodeURIComponent(artist)}" data-userid="${songUserId}"><i class="bi bi-person-fill"></i> Go to Artist</li>
-            <li class="context-menu-item" data-action="go_album" data-name="${encodeURIComponent(album)}" data-userid="${songUserId}"><i class="bi bi-disc-fill"></i> Go to Album</li>
+            <li class="context-menu-item" data-action="go_album" data-name="${encodeURIComponent(album)}" data-userid="${songUserId}" data-artistname="${encodeURIComponent(artist)}"><i class="bi bi-disc-fill"></i> Go to Album</li>
             <li class="context-menu-item" data-action="show_all_genres"><i class="bi bi-tags-fill"></i> View All Genres</li>
             <li class="context-menu-item" data-action="download_song" data-id="${songId}"><i class="bi bi-download"></i> Download Song</li>
             <li class="context-menu-item" data-action="download_cover" data-id="${songId}"><i class="bi bi-image"></i> Download Cover Art</li>
@@ -8947,7 +9192,7 @@ function perform_full_scan($db) {
             if (contextView.type === 'user_profile') viewTypeForIds = 'get_profile_songs';
             const allIds = await fetchData('?action=get_view_ids', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ view_type: viewTypeForIds, param: contextView.param, sort: contextView.sort, filter_user_id: contextView.filter_user_id || '' })
+              body: JSON.stringify({ view_type: viewTypeForIds, param: contextView.param, sort: contextView.sort, filter_user_id: contextView.filter_user_id || '', artist_name: contextView.artist_name || '' })
             }, true);
             
             if (allIds && allIds.length > 0) {
@@ -9099,7 +9344,7 @@ function perform_full_scan($db) {
               html += `<div class="search-dropdown-header">Artists</div>`;
               shelf.items.slice(0, 3).forEach(artist => {
                 const img = artist.is_user ? `?action=get_profile_picture&id=${artist.id}` : `?action=get_image&id=${artist.id || 0}`;
-                html += `<div class="search-dropdown-item artist-dropdown-item" data-artist="${encodeURIComponent(artist.name)}" data-userid="${artist.id || ''}">
+                html += `<div class="search-dropdown-item artist-dropdown-item" data-artist="${encodeURIComponent(artist.name)}" data-userid="${artist.is_user ? artist.id : ''}">
                     <img src="${img}" class="search-dropdown-img" style="border-radius: 50%;">
                     <div class="search-dropdown-text">
                       <div class="search-dropdown-title">${escapeHTML(artist.name)}</div>
@@ -9110,7 +9355,7 @@ function perform_full_scan($db) {
             } else if (shelf.type === 'albums') {
               html += `<div class="search-dropdown-header">Albums</div>`;
               shelf.items.slice(0, 2).forEach(album => {
-                html += `<div class="search-dropdown-item album-dropdown-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
+                html += `<div class="search-dropdown-item album-dropdown-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}" data-artistname="${encodeURIComponent(album.artist || '')}">
                     <img src="?action=get_image&id=${album.id || 0}" class="search-dropdown-img">
                     <div class="search-dropdown-text">
                       <div class="search-dropdown-title">${escapeHTML(album.album)}</div>
@@ -9137,7 +9382,7 @@ function perform_full_scan($db) {
 
           if (query.trim() === '') {
             targetDropdown.classList.add('d-none');
-            if (currentView.type === 'search') loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
+            if (currentView.type === 'search') loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
             return;
           }
 
@@ -9146,7 +9391,7 @@ function perform_full_scan($db) {
             
             renderSearchDropdown(targetDropdown, data);
             
-            currentView = { type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '' };
+            currentView = { type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '', artist_name: '' };
             updateContentTitle(`Search: "${query.trim()}"`);
             renderRecommendations(data);
             allContentloaded = true;
@@ -9185,7 +9430,7 @@ function perform_full_scan($db) {
             } else if (dropItem.classList.contains('artist-dropdown-item')) {
               loadView({ type: 'artist_songs', param: dropItem.dataset.artist, sort: 'album_asc', filter_user_id: dropItem.dataset.userid });
             } else if (dropItem.classList.contains('album-dropdown-item')) {
-              loadView({ type: 'album_songs', param: dropItem.dataset.album, sort: 'title_asc', filter_user_id: dropItem.dataset.userid });
+              loadView({ type: 'album_songs', param: dropItem.dataset.album, sort: 'title_asc', filter_user_id: dropItem.dataset.userid, artist_name: dropItem.dataset.artistname });
             }
           }
         });
@@ -9283,6 +9528,8 @@ function perform_full_scan($db) {
             const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
             if (artistsList.length > 1) {
               if (artistsModalBody) {
+                const modalTitle = artistsModalEl.querySelector('.modal-title');
+                if (modalTitle) modalTitle.textContent = 'Artists';
                 artistsModalBody.innerHTML = `
                   <div class="list-group list-group-flush rounded">
                     ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userId}">${a}</button>`).join('')}
@@ -9299,15 +9546,28 @@ function perform_full_scan($db) {
 
         if (artistsModalBody) {
           artistsModalBody.addEventListener('click', e => {
-            const btn = e.target.closest('.artist-modal-item');
-            if (!btn) return;
-            const artistName = decodeURIComponent(btn.dataset.artist);
-            const userId = btn.dataset.userid;
-            closeOpenModals();
-            setTimeout(() => {
-              loadView({ type: 'artist_songs', param: artistName, sort: 'album_asc', filter_user_id: userId });
-              hideMobileSidebar();
-            }, 200);
+            const artistBtn = e.target.closest('.artist-modal-item');
+            const albumBtn = e.target.closest('.album-modal-item');
+            
+            if (artistBtn) {
+              const artistName = decodeURIComponent(artistBtn.dataset.artist);
+              const userId = artistBtn.dataset.userid;
+              closeOpenModals();
+              setTimeout(() => {
+                loadView({ type: 'artist_songs', param: artistName, sort: 'album_asc', filter_user_id: userId, artist_name: '' });
+                hideMobileSidebar();
+              }, 200);
+            } else if (albumBtn) {
+              const albumName = decodeURIComponent(albumBtn.dataset.album);
+              const artistName = decodeURIComponent(albumBtn.dataset.artist);
+              let validUserId = parseInt(albumBtn.dataset.userid, 10);
+              let safeUserId = (isNaN(validUserId) || validUserId <= 0) ? '' : validUserId;
+              closeOpenModals();
+              setTimeout(() => {
+                loadView({ type: 'album_songs', param: albumName, sort: 'title_asc', filter_user_id: safeUserId, artist_name: artistName });
+                hideMobileSidebar();
+              }, 200);
+            }
           });
         }
         let activeCommentSongId = null;
@@ -9565,8 +9825,8 @@ function perform_full_scan($db) {
           const shareBtn = target.closest('.share-view-btn');
           if (shareBtn) {
             e.stopPropagation();
-            const { shareType, shareId, shareName, artistId } = shareBtn.dataset;
-            showShareModal(shareType, shareId, shareName, artistId);
+            const { shareType, shareId, shareName, artistId, artistName } = shareBtn.dataset;
+            showShareModal(shareType, shareId, shareName, artistId, artistName);
             return;
           }
           const copyBtn = target.closest('.copy-playlist-btn');
@@ -9632,11 +9892,13 @@ function perform_full_scan($db) {
           if (songArtistEl) {
             e.stopPropagation();
             const artistRaw = songArtistEl.dataset.artist ? decodeURIComponent(songArtistEl.dataset.artist) : songArtistEl.textContent.trim();
-            const userId = songArtistEl.dataset.userid || '';
-            const artistsList = artistRaw.split(/\s*(?:,|&|\/)\s*/).filter(a => a.trim() !== '');
+            const userId = ''; // Force empty to prevent breaking queries by looking up uploader IDs
+            const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
             
             if (artistsList.length > 1) {
               if (artistsModalBody) {
+                const modalTitle = artistsModalEl.querySelector('.modal-title');
+                if (modalTitle) modalTitle.textContent = 'Artists';
                 artistsModalBody.innerHTML = `
                   <div class="list-group list-group-flush rounded">
                     ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userId}">${a}</button>`).join('')}
@@ -9645,7 +9907,7 @@ function perform_full_scan($db) {
                 if (artistsModal) artistsModal.show();
               }
             } else {
-              loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId });
+              loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId, artist_name: '' });
             }
             return;
           }
@@ -9653,41 +9915,76 @@ function perform_full_scan($db) {
           if (songAlbumEl) {
             e.stopPropagation();
             const songItem = target.closest('.song-item, .shelf-item');
-            loadView({ type: 'album_songs', param: songAlbumEl.dataset.album, sort: 'title_asc', filter_user_id: songItem ? songItem.dataset.userid || songItem.dataset.songUserId || '' : '' });
+            
+            let rawUserId = songAlbumEl.getAttribute('data-userid') || (songItem ? (songItem.getAttribute('data-userid') || songItem.getAttribute('data-song-user-id')) : '') || '';
+            let validUserId = parseInt(rawUserId, 10);
+            let safeUserId = (isNaN(validUserId) || validUserId <= 0) ? '' : validUserId;
+            
+            let albumRaw = decodeURIComponent(songAlbumEl.getAttribute('data-album') || '');
+            let songArtistRaw = songItem ? (songItem.getAttribute('data-song-artist') || songItem.querySelector('.item-subtitle')?.textContent || '') : '';
+            const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+
+            if (songArtistsList.length > 1) {
+              if (artistsModalBody) {
+                const modalTitle = artistsModalEl.querySelector('.modal-title');
+                if (modalTitle) modalTitle.textContent = 'Select Album Artist';
+                artistsModalBody.innerHTML = `
+                  <div class="list-group list-group-flush rounded">
+                    ${songArtistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary album-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${safeUserId}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join('')}
+                  </div>
+                `;
+                if (artistsModal) artistsModal.show();
+              }
+            } else {
+              loadView({ 
+                type: 'album_songs', 
+                param: albumRaw, 
+                sort: 'title_asc', 
+                filter_user_id: safeUserId,
+                artist_name: songArtistRaw
+              });
+            }
             return;
           }
           const cardEl = target.closest('.card, .shelf-item[data-playlist], .shelf-item[data-mix], .shelf-item[data-artist]');
           if (cardEl && !target.closest('.playlist-more-btn')) {
             let viewType, param, sort;
             let filterUserId = cardEl.dataset.userid || '';
+            let filterArtistName = '';
+            
+            // Protect against 'undefined' or 'null' strings passed in HTML attributes
+            if (filterUserId === 'undefined' || filterUserId === 'null') filterUserId = '';
+
             if (cardEl.dataset.artist) {
               viewType = 'artist_songs';
-              param = cardEl.dataset.artist;
+              param = decodeURIComponent(cardEl.dataset.artist);
               sort = 'album_asc';
+              filterUserId = ''; 
             } else if (cardEl.dataset.album) {
               viewType = 'album_songs';
-              param = cardEl.dataset.album;
+              param = decodeURIComponent(cardEl.dataset.album);
               sort = 'title_asc';
+              filterArtistName = cardEl.dataset.artistname ? decodeURIComponent(cardEl.dataset.artistname) : '';
             } else if (cardEl.dataset.genre) {
               viewType = 'genre_songs';
-              param = cardEl.dataset.genre;
+              param = decodeURIComponent(cardEl.dataset.genre);
               sort = 'artist_asc';
             } else if (cardEl.dataset.year) {
               viewType = 'year_songs';
-              param = cardEl.dataset.year;
+              param = decodeURIComponent(cardEl.dataset.year);
               sort = 'artist_asc';
             } else if (cardEl.dataset.playlist) {
               viewType = 'playlist_songs';
-              param = cardEl.dataset.playlist;
+              param = decodeURIComponent(cardEl.dataset.playlist);
               sort = 'manual_order';
             } else if (cardEl.dataset.mix) {
               viewType = 'mix_songs';
-              param = cardEl.dataset.mix;
+              param = decodeURIComponent(cardEl.dataset.mix);
               sort = 'manual_order';
             }
             
             if (viewType) {
-              loadView({ type: viewType, param: param, sort: sort, filter_user_id: filterUserId });
+              loadView({ type: viewType, param: param, sort: sort, filter_user_id: filterUserId, artist_name: filterArtistName });
               return;
             }
           }
@@ -9797,9 +10094,11 @@ function perform_full_scan($db) {
             case 'go_artist':
               closeOpenModals();
               const artistRaw = decodeURIComponent(name);
-              const artistsList = artistRaw.split(/\s*(?:,|&|\/)\s*/).filter(a => a.trim() !== '');
+              const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
               if (artistsList.length > 1) {
                 if (artistsModalBody) {
+                  const modalTitle = artistsModalEl.querySelector('.modal-title');
+                  if (modalTitle) modalTitle.textContent = 'Artists';
                   artistsModalBody.innerHTML = `
                     <div class="list-group list-group-flush rounded">
                       ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userid}">${a}</button>`).join('')}
@@ -9808,13 +10107,38 @@ function perform_full_scan($db) {
                   if (artistsModal) artistsModal.show();
                 }
               } else {
-                loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userid || '' });
+                loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userid || '', artist_name: '' });
                 hideMobileSidebar();
               }
               break;
             case 'go_album':
               closeOpenModals();
-              loadView({ type: 'album_songs', param: name, sort: 'title_asc', filter_user_id: userid || '' });
+              const albumRaw = decodeURIComponent(name);
+              const songArtistRaw = decodeURIComponent(item.dataset.artistname || '');
+              const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+              
+              let validMenuUserId = parseInt(userid, 10);
+              let safeMenuUserId = (isNaN(validMenuUserId) || validMenuUserId <= 0) ? '' : validMenuUserId;
+
+              if (songArtistsList.length > 1) {
+                if (artistsModalBody) {
+                  const modalTitle = artistsModalEl.querySelector('.modal-title');
+                  if (modalTitle) modalTitle.textContent = 'Select Album Artist';
+                  artistsModalBody.innerHTML = `
+                    <div class="list-group list-group-flush rounded">
+                      ${songArtistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary album-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${safeMenuUserId}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join('')}
+                    </div>
+                  `;
+                  if (artistsModal) artistsModal.show();
+                }
+              } else {
+                loadView({ type: 'album_songs', param: albumRaw, sort: 'title_asc', filter_user_id: safeMenuUserId, artist_name: songArtistRaw });
+                hideMobileSidebar();
+              }
+              break;
+            case 'go_album':
+              closeOpenModals();
+              loadView({ type: 'album_songs', param: name, sort: 'title_asc', filter_user_id: userid || '', artist_name: item.dataset.artistname || '' });
               hideMobileSidebar();
               break;
             case 'show_all_genres':
@@ -11262,7 +11586,7 @@ function perform_full_scan($db) {
           currentUser = null;
           cachedExploreData = null;
           updateUIForAuthState();
-          loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
+          loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
         };
         
         document.getElementById('profile-dropdown-logout-desktop').addEventListener('click', handleLogout);
@@ -11549,16 +11873,6 @@ function perform_full_scan($db) {
           toggleAudioEnhancements();
         });
 
-        document.querySelectorAll('.eq-band').forEach(slider => {
-          slider.addEventListener('input', (e) => {
-            if (!audioCtx) initWebAudio();
-            if (!currentSong || !localStorage.getItem(`song_settings_${currentSong.id}`)) {
-                const bandIndex = parseInt(e.target.dataset.band);
-                eqBands[bandIndex].gain.value = parseFloat(e.target.value);
-            }
-          });
-        });
-
         if (btnDeleteKeep) {
           btnDeleteKeep.addEventListener('click', async () => {
             if (!confirm('Are you sure you want to delete your account but keep the data? A backup key will be downloaded.')) return;
@@ -11574,7 +11888,7 @@ function perform_full_scan($db) {
               showToast('Account deleted. Backup key downloaded.', 'success');
               bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
               await checkSession();
-              loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
+              loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
             }
           });
         }
@@ -11587,7 +11901,7 @@ function perform_full_scan($db) {
               showToast('Account and data permanently deleted.', 'success');
               bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
               await checkSession();
-              loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
+              loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
             }
           });
         }
@@ -11996,28 +12310,54 @@ function perform_full_scan($db) {
             currentUser = data.user;
             if (currentUser.settings) {
               try {
-                const s = JSON.parse(currentUser.settings);
+                // Highly robust JSON extraction for settings
+                const s = typeof currentUser.settings === 'string' ? JSON.parse(currentUser.settings) : currentUser.settings;
+                
                 enableNormalization = s.enableNormalization !== undefined ? s.enableNormalization : true;
                 isEQEnabled = s.isEQEnabled !== undefined ? s.isEQEnabled : false;
                 isSpatialEnabled = s.isSpatialEnabled !== undefined ? s.isSpatialEnabled : false;
-                globalVolumeMultiplier = s.globalVolumeMultiplier !== undefined ? s.globalVolumeMultiplier : 1.0;
-                globalEQBands = s.globalEQBands || [0, 0, 0, 0, 0];
-                crossfadeDuration = s.crossfadeDuration !== undefined ? s.crossfadeDuration : 3.0;
+                globalVolumeMultiplier = s.globalVolumeMultiplier !== undefined ? parseFloat(s.globalVolumeMultiplier) : 1.0;
+                globalEQBands = Array.isArray(s.globalEQBands) ? s.globalEQBands.map(b => parseFloat(b)) : [0, 0, 0, 0, 0];
+                crossfadeDuration = s.crossfadeDuration !== undefined ? parseFloat(s.crossfadeDuration) : 3.0;
                 
-                document.getElementById('toggle-normalization').checked = enableNormalization;
-                document.getElementById('crossfade-slider').value = crossfadeDuration;
-                document.getElementById('crossfade-val').textContent = crossfadeDuration + 's';
-                document.getElementById('toggle-eq').checked = isEQEnabled;
-                const toggleSpatialEl = document.getElementById('toggle-spatial');
-                if (toggleSpatialEl) toggleSpatialEl.checked = isSpatialEnabled;
-                document.getElementById('eq-sliders').classList.toggle('d-none', !isEQEnabled);
-                document.getElementById('global-vol-slider').value = globalVolumeMultiplier;
-                document.getElementById('global-vol-val').textContent = globalVolumeMultiplier + 'x';
+                // Propagate to UI DOM
+                const normEl = document.getElementById('toggle-normalization');
+                if (normEl) normEl.checked = enableNormalization;
+                
+                const crossEl = document.getElementById('crossfade-slider');
+                if (crossEl) {
+                   crossEl.value = crossfadeDuration;
+                   document.getElementById('crossfade-val').textContent = crossfadeDuration + 's';
+                }
+                
+                const eqToggleEl = document.getElementById('toggle-eq');
+                if (eqToggleEl) eqToggleEl.checked = isEQEnabled;
+                
+                const spatialToggleEl = document.getElementById('toggle-spatial');
+                if (spatialToggleEl) spatialToggleEl.checked = isSpatialEnabled;
+                
+                const eqSlidersContainer = document.getElementById('eq-sliders');
+                if (eqSlidersContainer) eqSlidersContainer.classList.toggle('d-none', !isEQEnabled);
+                
+                const volSliderEl = document.getElementById('global-vol-slider');
+                if (volSliderEl) {
+                   volSliderEl.value = globalVolumeMultiplier;
+                   document.getElementById('global-vol-val').textContent = globalVolumeMultiplier + 'x';
+                }
                 
                 const eqSliders = document.querySelectorAll('#eq-sliders .eq-band');
                 globalEQBands.forEach((val, i) => { if (eqSliders[i]) eqSliders[i].value = val; });
-              } catch(e){}
+                
+                // Immediately apply audio processing if active
+                if (audioCtx) {
+                   applyAudioSettings();
+                   toggleAudioEnhancements();
+                }
+              } catch(e) { 
+                console.error("Error parsing settings JSON during checkSession:", e); 
+              }
             }
+            
             const newNameInput = document.getElementById('new-name');
             if (newNameInput) newNameInput.value = currentUser.artist;
             if (uploadLimitText) uploadLimitText.textContent = data.upload_limit;
@@ -12064,7 +12404,11 @@ function perform_full_scan($db) {
           });
 
           audio.addEventListener('playing', () => {
-            updatePlayPauseIcons(false); 
+            updatePlayPauseIcons(false);
+            if (audioCtx) {
+              if (audioCtx.state === 'suspended') audioCtx.resume();
+              applyAudioSettings();
+            }
           });
 
           audio.addEventListener('canplay', () => {
@@ -12120,7 +12464,7 @@ function perform_full_scan($db) {
             loadView(e.state.viewConfig, false);
           } else {
             // Fallback to Home if state is lost
-            loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' }, false);
+            loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' }, false);
           }
         });
 
