@@ -682,6 +682,7 @@ function init_db($db) {
       image BLOB,
       last_modified INTEGER,
       bitrate INTEGER,
+      replaygain REAL DEFAULT 0,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
   ");
@@ -689,6 +690,7 @@ function init_db($db) {
   if ($music_table_exists) {
     if (!in_array('bitrate', $music_columns)) $db->exec("ALTER TABLE music ADD COLUMN bitrate INTEGER;");
     if (!in_array('lyrics', $music_columns)) $db->exec("ALTER TABLE music ADD COLUMN lyrics TEXT;");
+    if (!in_array('replaygain', $music_columns)) $db->exec("ALTER TABLE music ADD COLUMN replaygain REAL DEFAULT 0;");
   }
   
   $db->exec("
@@ -903,6 +905,34 @@ if (isset($_GET['action'])) {
   $action = $_GET['action'];
   $db = get_db();
   
+  // Rate Limiting API
+  try { 
+      $db->exec("CREATE TABLE IF NOT EXISTS api_rate_limits (ip TEXT PRIMARY KEY, hits INTEGER, last_reset INTEGER)"); 
+      $ip = $_SERVER['REMOTE_ADDR'];
+      $stmt_rl = $db->prepare("SELECT hits, last_reset FROM api_rate_limits WHERE ip = ?");
+      $stmt_rl->execute([$ip]);
+      $rl = $stmt_rl->fetch();
+      $now = time();
+      if ($rl) {
+        if ($now - $rl['last_reset'] > 60) {
+          $db->prepare("UPDATE api_rate_limits SET hits = 1, last_reset = ? WHERE ip = ?")->execute([$now, $ip]);
+        } else {
+          if ($rl['hits'] > 300) { // Max 300 requests per IP per minute
+            http_response_code(429);
+            die('{"status":"error", "message":"Rate limit exceeded. Try again in a minute."}');
+          }
+          $db->prepare("UPDATE api_rate_limits SET hits = hits + 1 WHERE ip = ?")->execute([$ip]);
+        }
+      } else {
+      $db->prepare("INSERT INTO api_rate_limits (ip, hits, last_reset) VALUES (?, 1, ?)")->execute([$ip, $now]);
+    }
+  } catch(Exception $e) {}
+
+  // Activity Feed Logging Initialization
+  try {
+    $db->exec("CREATE TABLE IF NOT EXISTS activity_feed (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT, target_name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+  } catch(Exception $e) {}
+
   try { $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;"); } catch(Exception $e) {}
   try { $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
   try { $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
@@ -1109,6 +1139,11 @@ if (isset($_GET['action'])) {
       } elseif ($user && $user['password_hash'] !== null && password_verify($password, $user['password_hash'])) {
         $_SESSION['user_id'] = $user['id'];
         $_SESSION['user_artist'] = $user['artist'];
+        
+        try {
+          $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'logged in', '')")->execute([$user['id']]);
+        } catch(Exception $e) {}
+
         unset($user['password_hash']);
         $user['profile_picture_url'] = "?action=get_profile_picture&id=" . $user['id'] . "&v=" . time();
         send_json(['status' => 'success', 'user' => $user, 'upload_limit' => get_upload_limit()]);
@@ -1341,6 +1376,18 @@ if (isset($_GET['action'])) {
           $duration = (int)($info['playtime_seconds'] ?? 0);
           $bitrate = (int)($info['audio']['bitrate'] ?? 0);
           $genre = trim($info['comments']['genre'][0] ?? '') ?: trim($_POST['genre'] ?? '') ?: 'Uploaded';
+          
+          $replaygain = 0;
+          if (!empty($info['tags']['id3v2']['TXXX'])) {
+            foreach($info['tags']['id3v2']['TXXX'] as $txxx) {
+              if (strtoupper($txxx['description'] ?? '') === 'REPLAYGAIN_TRACK_GAIN') {
+                $replaygain = (float)str_replace(' dB', '', $txxx['data']);
+              }
+            }
+          } elseif (!empty($info['comments']['replaygain_track_gain'][0])) {
+            $replaygain = (float)str_replace(' dB', '', $info['comments']['replaygain_track_gain'][0]);
+          }
+
           $raw_image_data = isset($info['comments']['picture'][0]['data']) ? $info['comments']['picture'][0]['data'] : null;
           $webp_image_data = process_image_to_webp($raw_image_data);
 
@@ -1348,8 +1395,12 @@ if (isset($_GET['action'])) {
           $actual_mtime = filemtime($filePath); // Get exact OS file modification time
           $is_private = intval($_POST['is_private'] ?? 0);
           
-          $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified, is_private) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-          $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $actual_mtime, $is_private]);
+          $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified, is_private, replaygain) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+          $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $actual_mtime, $is_private, $replaygain]);
+          
+          if ($is_private == 0) {
+            $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, ?, ?)")->execute([$user_id, 'uploaded a new song', $title]);
+          }
 
           $new_count = ($user_data['last_upload_date'] === $today) ? $daily_upload_count + 1 : 1;
           $update_stmt = $db->prepare("UPDATE users SET daily_upload_count = ?, last_upload_date = ? WHERE id = ?");
@@ -1933,6 +1984,11 @@ if (isset($_GET['action'])) {
         $stmt->execute([$user_id]);
         $max_order = $stmt->fetchColumn() ?? 0;
         $db->prepare("INSERT INTO favorites (user_id, song_id, sort_order) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $max_order + 1]);
+        
+        try { 
+          $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'favorited', (SELECT title FROM music WHERE id = ?))")->execute([$user_id, $song_id]); 
+        } catch(Exception $e) {}
+        
         send_json(['status' => 'added', 'is_favorite' => true]);
       }
       break;
@@ -1951,6 +2007,11 @@ if (isset($_GET['action'])) {
         send_json(['status' => 'unfollowed']);
       } else {
         $db->prepare("INSERT INTO follows (follower_id, following_id) VALUES (?, ?)")->execute([$user_id, $following_id]);
+        
+        try { 
+          $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'started following', (SELECT artist FROM users WHERE id = ?))")->execute([$user_id, $following_id]); 
+        } catch(Exception $e) {}
+        
         send_json(['status' => 'followed']);
       }
       break;
@@ -2457,7 +2518,7 @@ if (isset($_GET['action'])) {
     case 'get_song_data':
       $id = intval($_GET['id'] ?? 0);
       $stmt = $db->prepare("
-        SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, m.is_private,
+        SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, m.is_private, m.replaygain,
         CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
         uss.volume_multiplier, uss.eq_bands
         FROM music m 
@@ -2676,7 +2737,17 @@ if (isset($_GET['action'])) {
       $public_id = bin2hex(random_bytes(8));
       $stmt = $db->prepare("INSERT INTO playlists (user_id, name, public_id, is_private) VALUES (?, ?, ?, ?)");
       $stmt->execute([$user_id, $name, $public_id, $is_private]);
+      if ($is_private == 0) {
+          $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, ?, ?)")->execute([$user_id, 'created a playlist', $name]);
+      }
       send_json(['status' => 'success', 'message' => 'Playlist created.']);
+      break;
+
+    case 'get_activity_feed':
+      if (!$user_id) { send_json([]); }
+      $stmt = $db->prepare("SELECT action, target_name, created_at FROM activity_feed WHERE user_id = ? ORDER BY created_at DESC LIMIT 50");
+      $stmt->execute([$user_id]);
+      send_json($stmt->fetchAll());
       break;
 
     case 'edit_playlist':
@@ -2847,6 +2918,8 @@ if (isset($_GET['action'])) {
                 last_played = excluded.last_played
             ")->execute([$user_id, $song_id, $played_at_iso]);
             
+            $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'listened to', (SELECT title FROM music WHERE id = ?))")->execute([$user_id, $song_id]);
+
             $db->commit();
             break; // Success, break out of the loop!
             
@@ -4220,6 +4293,7 @@ function perform_full_scan($db) {
           <div class="dropdown logged-in-only">
             <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-mobile" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
+              <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#activity-modal"><i class="bi bi-bell-fill me-2"></i>My Activity</a></li>
               <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-mobile"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
               <li><a class="dropdown-item" href="#" id="sleep-timer-btn-mobile"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
               <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill me-2"></i>Settings</a></li>
@@ -4248,6 +4322,7 @@ function perform_full_scan($db) {
             <div class="dropdown logged-in-only d-none d-md-block">
               <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-desktop" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
               <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
+                <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#activity-modal"><i class="bi bi-bell-fill me-2"></i>My Activity</a></li>
                 <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
                 <li><a class="dropdown-item" href="#" id="sleep-timer-btn-desktop"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
                 <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill me-2"></i>Settings</a></li>
@@ -4454,8 +4529,11 @@ function perform_full_scan($db) {
               <!-- Wrapped the flexbox INSIDE the tab -->
               <div class="h-100 w-100 overflow-auto p-4 d-flex flex-column justify-content-evenly">
                 
-                <div class="d-flex justify-content-center align-items-center" style="flex-grow: 1; margin-bottom: 2rem;">
-                  <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="player-modal-art" alt="Album Art" style="width: 100%; max-width: 400px; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                <div class="d-flex flex-column justify-content-center align-items-center w-100" style="flex-grow: 1; margin-bottom: 2rem; min-height: 0;">
+                  <div class="position-relative shadow-lg" style="width: 100%; max-width: 400px; max-height: 45vh; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; margin: 0 auto;">
+                    <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="player-modal-art" alt="Album Art" style="width: 100%; height: 100%; object-fit: cover;">
+                    <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
+                  </div>
                 </div>
                 
                 <div class="text-start mb-3">
@@ -4506,8 +4584,11 @@ function perform_full_scan($db) {
           </div>
           <div class="modal-body d-flex h-100 overflow-hidden pt-1 gap-4 align-items-center">
             
-            <div class="w-50 d-flex flex-column align-items-center justify-content-center h-100">
-              <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="desktop-player-modal-art" class="rounded shadow-lg" style="width: 100%; max-width: 60vh; aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
+            <div class="w-50 d-flex flex-column align-items-center justify-content-center h-100 px-4" style="min-width: 0;">
+              <div class="position-relative shadow-lg mx-auto" style="width: 100%; max-width: 50vh; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; flex-shrink: 1;">
+                <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="desktop-player-modal-art" style="width: 100%; height: 100%; object-fit: cover; background-color: var(--ytm-surface-2);">
+                <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
+              </div>
               <div class="mb-3 text-center mt-4 w-100 px-4">
                 <h3 id="desktop-player-modal-title" class="fw-bold mb-1 text-truncate" style="max-width: 100%;">Song Title</h3>
                 <p id="desktop-player-modal-artist" class="text-secondary mb-0 text-truncate" style="cursor: pointer; max-width: 100%;">Artist Name</p>
@@ -4707,7 +4788,25 @@ function perform_full_scan($db) {
               <input class="form-check-input" type="checkbox" id="toggle-spatial">
               <label class="form-check-label" for="toggle-spatial">Enable Spatial Audio (3D HRTF)</label>
             </div>
+            <div class="mb-3">
+              <label class="form-label d-flex justify-content-between">
+                <span>Crossfade Duration</span>
+                <span id="crossfade-val">3.0s</span>
+              </label>
+              <input type="range" class="form-range" id="crossfade-slider" min="0" max="10" step="0.5" value="3.0">
+            </div>
             <div id="eq-sliders" class="d-none mb-4">
+               <div class="mb-3">
+                 <select class="form-select form-select-sm" id="eq-preset-select">
+                   <option value="Custom">Custom</option>
+                   <option value="Flat">Flat</option>
+                   <option value="Rock">Rock</option>
+                   <option value="Jazz">Jazz</option>
+                   <option value="Classical">Classical</option>
+                   <option value="Pop">Pop</option>
+                   <option value="Bass Boost">Bass Boost</option>
+                 </select>
+               </div>
                <div class="d-flex justify-content-between text-center small text-secondary">
                  <span>60Hz</span><span>230Hz</span><span>910Hz</span><span>3.6kHz</span><span>14kHz</span>
                </div>
@@ -4724,6 +4823,17 @@ function perform_full_scan($db) {
             <button type="button" class="btn btn-outline-danger w-100 mb-2" id="btn-delete-keep">Delete Account but Keep Data</button>
             <button type="button" class="btn btn-danger w-100" id="btn-delete-all">Permanently Delete Account & Data</button>
           </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal fade" id="activity-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title"><i class="bi bi-activity text-danger me-2"></i>Activity Feed</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-0" id="activity-modal-body"></div>
         </div>
       </div>
     </div>
@@ -5195,8 +5305,19 @@ function perform_full_scan($db) {
             </div>
             
             <div class="mb-3">
-              <label class="form-label">Per-Song Equalizer</label>
-              <div class="d-flex justify-content-between text-center small text-secondary">
+              <label class="form-label d-flex justify-content-between align-items-center">
+                <span>Per-Song Equalizer</span>
+                <select class="form-select form-select-sm w-auto" id="sas-eq-preset-select">
+                   <option value="Custom">Custom</option>
+                   <option value="Flat">Flat</option>
+                   <option value="Rock">Rock</option>
+                   <option value="Jazz">Jazz</option>
+                   <option value="Classical">Classical</option>
+                   <option value="Pop">Pop</option>
+                   <option value="Bass Boost">Bass Boost</option>
+                 </select>
+              </label>
+              <div class="d-flex justify-content-between text-center small text-secondary mt-3">
                  <span>60Hz</span><span>230Hz</span><span>910Hz</span><span>3.6kHz</span><span>14kHz</span>
               </div>
               <div class="d-flex justify-content-between mt-2 mb-4">
@@ -5302,6 +5423,30 @@ function perform_full_scan($db) {
         const shareModalText = document.getElementById('share-modal-text');
         const shareUrlInput = document.getElementById('share-url-input');
         const copyShareUrlBtn = document.getElementById('copy-share-url-btn');
+        const activityModalEl = document.getElementById('activity-modal');
+        
+        if (activityModalEl) {
+          activityModalEl.addEventListener('show.bs.modal', async () => {
+             const body = document.getElementById('activity-modal-body');
+             body.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary" role="status"></div></div>';
+             const feed = await fetchData('?action=get_activity_feed');
+             if (feed && feed.length > 0) {
+               body.innerHTML = '<ul class="list-group list-group-flush">' + feed.map(item => `
+                 <li class="list-group-item bg-transparent text-white border-secondary py-3">
+                   <div class="d-flex align-items-center gap-3">
+                     <div class="mt-1"><i class="bi bi-clock-history text-secondary fs-5"></i></div>
+                     <div>
+                       <div style="font-size: 0.95rem;">You ${escapeHTML(item.action)} ${item.target_name ? `<span class="text-info">${escapeHTML(item.target_name)}</span>` : ''}</div>
+                       <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(item.created_at)}</small>
+                     </div>
+                   </div>
+                 </li>
+               `).join('') + '</ul>';
+             } else {
+               body.innerHTML = '<p class="text-secondary text-center p-4">No recent activity.</p>';
+             }
+          });
+        }
 
         // API Modal logic
         const apiUrlInput = document.getElementById('api-url-input');
@@ -5642,7 +5787,8 @@ function perform_full_scan($db) {
         const audio = new Audio();
         const audioB = new Audio();
         
-        let audioCtx, sourceA, sourceB, gainA, gainB, perSongGain, compressor;
+        let audioCtx, sourceA, sourceB, gainA, gainB, perSongGain, compressor, analyser;
+        let visualizerDataArray;
         let eqBands = [];
         let spatialPanner, spatialBypass, spatialMix;
         let enableNormalization = true;
@@ -5653,11 +5799,20 @@ function perform_full_scan($db) {
         let crossfadeDuration = 3.0;
         let settingsSaveTimeout = null;
 
+        const EQ_PRESETS = {
+          'Flat': [0, 0, 0, 0, 0],
+          'Rock': [5, 3, -2, 4, 6],
+          'Jazz': [4, 2, -2, 2, 5],
+          'Classical': [5, 3, -2, 4, 4],
+          'Pop': [-2, 2, 5, 2, -2],
+          'Bass Boost': [8, 5, 0, 0, 0]
+        };
+
         const saveGlobalAudioSettings = () => {
           if (!currentUser) return;
           clearTimeout(settingsSaveTimeout);
           settingsSaveTimeout = setTimeout(() => {
-            const settings = { enableNormalization, isEQEnabled, isSpatialEnabled, globalVolumeMultiplier, globalEQBands };
+            const settings = { enableNormalization, isEQEnabled, isSpatialEnabled, globalVolumeMultiplier, globalEQBands, crossfadeDuration };
             fetchData('?action=save_global_settings', {
               method: 'POST', headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({ settings })
@@ -5704,7 +5859,11 @@ function perform_full_scan($db) {
           spatialPanner.connect(spatialMix);
           spatialMix.connect(compressor);
 
-          compressor.connect(audioCtx.destination);
+          analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 128;
+          visualizerDataArray = new Uint8Array(analyser.frequencyBinCount);
+          compressor.connect(analyser);
+          analyser.connect(audioCtx.destination);
 
           sourceA = audioCtx.createMediaElementSource(audio);
           sourceB = audioCtx.createMediaElementSource(audioB);
@@ -5727,6 +5886,12 @@ function perform_full_scan($db) {
           
           let targetVol = globalVolumeMultiplier;
           let targetEQ = [...globalEQBands];
+
+          // ReplayGain (Normalization) logic scale adjustments based on extracted database values
+          if (currentSong.replaygain) {
+             const rgLinear = Math.pow(10, currentSong.replaygain / 20);
+             targetVol *= Math.max(0.1, Math.min(rgLinear, 3.0));
+          }
 
           // Override with database song settings if they exist
           if (currentSong.volume_multiplier !== null && currentSong.volume_multiplier !== undefined) {
@@ -5788,9 +5953,29 @@ function perform_full_scan($db) {
             if (!audioCtx) initWebAudio();
             const bandIndex = parseInt(e.target.dataset.band);
             globalEQBands[bandIndex] = parseFloat(e.target.value);
+            document.getElementById('eq-preset-select').value = 'Custom';
             applyAudioSettings();
             saveGlobalAudioSettings();
           });
+        });
+
+        document.getElementById('crossfade-slider').addEventListener('input', (e) => {
+          crossfadeDuration = parseFloat(e.target.value);
+          document.getElementById('crossfade-val').textContent = crossfadeDuration + 's';
+          saveGlobalAudioSettings();
+        });
+
+        document.getElementById('eq-preset-select').addEventListener('change', (e) => {
+          if (e.target.value === 'Custom') return;
+          const preset = EQ_PRESETS[e.target.value];
+          if (preset) {
+            globalEQBands = [...preset];
+            const eqSliders = document.querySelectorAll('#eq-sliders .eq-band');
+            globalEQBands.forEach((val, i) => { if (eqSliders[i]) eqSliders[i].value = val; });
+            if (!audioCtx) initWebAudio();
+            applyAudioSettings();
+            saveGlobalAudioSettings();
+          }
         });
 
         document.body.addEventListener('click', initWebAudio, { once: true });
@@ -7158,6 +7343,7 @@ function perform_full_scan($db) {
           audio.play().catch(e => console.error("Audio play failed:", e));
           isPlaying = true;
           updatePlayerUI();
+          if (!visAnimId) drawVisualizer();
           
           if ('mediaSession' in navigator) {
             navigator.mediaSession.metadata = new MediaMetadata({
@@ -7210,27 +7396,7 @@ function perform_full_scan($db) {
             const img = new Image();
             img.crossOrigin = 'anonymous';
             img.onload = () => {
-              pipCtx.clearRect(0, 0, 500, 500);
-              pipCtx.drawImage(img, 0, 0, 500, 500);
-              
-              const gradient = pipCtx.createLinearGradient(0, 350, 0, 500);
-              gradient.addColorStop(0, 'transparent');
-              gradient.addColorStop(1, 'rgba(0,0,0,0.9)');
-              pipCtx.fillStyle = gradient;
-              pipCtx.fillRect(0, 350, 500, 150);
-              
-              pipCtx.fillStyle = '#ffffff';
-              pipCtx.font = 'bold 28px sans-serif';
-              pipCtx.shadowColor = "rgba(0,0,0,0.8)";
-              pipCtx.shadowBlur = 4;
-              const safeTitle = currentSong.title.length > 28 ? currentSong.title.substring(0, 25) + '...' : currentSong.title;
-              pipCtx.fillText(safeTitle, 20, 450);
-              
-              pipCtx.fillStyle = '#cccccc';
-              pipCtx.font = '22px sans-serif';
-              const safeArtist = currentSong.artist.length > 35 ? currentSong.artist.substring(0, 32) + '...' : currentSong.artist;
-              pipCtx.fillText(safeArtist, 20, 480);
-              
+              currentCoverImageObj = img;
               pipVideo.play().catch(()=>{});
             };
             img.src = imageUrl;
@@ -7520,11 +7686,274 @@ function perform_full_scan($db) {
           buildAndShowSongContextMenu(buttonEl, songData);
         };
         
+        let visAnimId;
+        let visTime = 0;
+        let cachedColor = { r: 255, g: 50, b: 50 }; // default theme red
+        let lastColorSongId = null;
+        let currentCoverImageObj = null;
+
+        const getAverageColor = (imgEl) => {
+          if (!imgEl || !imgEl.complete || imgEl.naturalWidth === 0) return { r: 255, g: 50, b: 50 };
+          try {
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCanvas.width = 10;
+            tempCanvas.height = 10;
+            tempCtx.drawImage(imgEl, 0, 0, 10, 10);
+            const data = tempCtx.getImageData(0, 0, 10, 10).data;
+            let r = 0, g = 0, b = 0, count = 0;
+            for (let i = 0; i < data.length; i += 4) {
+              const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
+              if (brightness > 15 && brightness < 240) { // Skip near-black and near-white
+                r += data[i]; g += data[i+1]; b += data[i+2];
+                count++;
+              }
+            }
+            if (count === 0) {
+              for (let i = 0; i < data.length; i += 4) { r += data[i]; g += data[i+1]; b += data[i+2]; }
+              count = data.length / 4;
+            }
+            return { r: Math.round(r / count), g: Math.round(g / count), b: Math.round(b / count) };
+          } catch (e) {
+            return { r: 255, g: 50, b: 50 };
+          }
+        };
+
+        const drawVisualizer = () => {
+          visTime += 1;
+          
+          // Locate canvases inside both Main DOM and Document PiP windows
+          let canvases = Array.from(document.querySelectorAll('.visualizer-canvas'));
+          if (docPipWindow) {
+            const pipCanvases = docPipWindow.document.querySelectorAll('.visualizer-canvas');
+            canvases = canvases.concat(Array.from(pipCanvases));
+          }
+          
+          let activeCanvas = null;
+          canvases.forEach(c => { if (c.offsetParent) activeCanvas = c; });
+
+          // Extract dominant color of current song cover art if it changed
+          if (currentSong && currentSong.id !== lastColorSongId) {
+            const activeImg = document.getElementById('player-art-desktop');
+            if (activeImg && activeImg.complete) {
+              cachedColor = getAverageColor(activeImg);
+              lastColorSongId = currentSong.id;
+            }
+          }
+
+          const activeBins = 24; // Lower bins stretching curves horizontally for extra gentle waves
+          let rawData = [];
+
+          if (isPlaying && analyser) {
+            analyser.getByteFrequencyData(visualizerDataArray);
+            for (let i = 0; i < activeBins; i++) {
+              rawData.push(visualizerDataArray[i]);
+            }
+          } else {
+            // Generate organic sinusoidal idle breathing movement during pause
+            for (let i = 0; i < activeBins; i++) {
+              const wave1 = Math.sin(i * 0.12 + visTime * 0.035) * 45;
+              const wave2 = Math.cos(i * 0.07 - visTime * 0.02) * 20;
+              rawData.push(Math.max(15, 65 + wave1 + wave2));
+            }
+          }
+
+          // Symmetrical mapping: treble on outer edges, deep bass in the center (perfectly horizontal)
+          const mirroredData = [];
+          for (let i = activeBins - 1; i >= 0; i--) { mirroredData.push(rawData[i]); }
+          for (let i = 0; i < activeBins; i++) { mirroredData.push(rawData[i]); }
+
+          const totalPoints = mirroredData.length;
+          
+          // GENTLE SMOOTHING: Moving average filter to form smooth liquid peaks
+          const smoothedData = [];
+          const smoothWindow = 2; 
+          for (let i = 0; i < mirroredData.length; i++) {
+            let sum = 0, count = 0;
+            for (let w = -smoothWindow; w <= smoothWindow; w++) {
+              if (mirroredData[i + w] !== undefined) {
+                sum += mirroredData[i + w];
+                count++;
+              }
+            }
+            smoothedData.push(sum / count);
+          }
+
+          const sliceWidths = canvases.map(c => c.offsetWidth / (totalPoints - 1));
+          const { r, g, b } = cachedColor;
+
+          // Process and Draw standard Page View & Document PiP canvases
+          canvases.forEach((canvas, cIdx) => {
+            if (!canvas.offsetParent) return; 
+            const ctx = canvas.getContext('2d');
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Darken bottom half slightly so translucent waves pop elegantly
+            const baseGrad = ctx.createLinearGradient(0, canvas.height * 0.5, 0, canvas.height);
+            baseGrad.addColorStop(0, 'transparent');
+            baseGrad.addColorStop(1, 'rgba(0, 0, 0, 0.55)');
+            ctx.fillStyle = baseGrad;
+            ctx.fillRect(0, canvas.height * 0.5, canvas.width, canvas.height * 0.5);
+
+            const sliceWidth = sliceWidths[cIdx];
+
+            const drawWave = (baseAmplitude, colorGrad, baseOffset, layerIdx) => {
+              ctx.beginPath();
+              ctx.moveTo(-50, canvas.height);
+              
+              // DYNAMIC RANDOMIZED BREATHING: Modulate amplitude and phase shifts over time per-layer
+              const waveBreathe = Math.sin(visTime * 0.012 * (layerIdx + 1) + layerIdx) * 0.15;
+              const amplitude = baseAmplitude * (1.0 + waveBreathe);
+              const xOffset = baseOffset + Math.cos(visTime * 0.008 * (layerIdx + 1)) * 35;
+
+              let firstVal = smoothedData[0] || 0;
+              let yStart = canvas.height - ((firstVal / 255) * canvas.height * amplitude);
+              ctx.lineTo(-50, yStart);
+
+              for(let i = 0; i < totalPoints - 1; i++) {
+                let val = smoothedData[i] || 0;
+                let nextVal = smoothedData[i + 1] || 0;
+
+                let xc = xOffset + (sliceWidth * i);
+                let yc = canvas.height - ((val / 255) * canvas.height * amplitude);
+                
+                let nextX = xOffset + (sliceWidth * (i + 1));
+                let nextY = canvas.height - ((nextVal / 255) * canvas.height * amplitude);
+                
+                let midX = (xc + nextX) / 2;
+                let midY = (yc + nextY) / 2;
+
+                ctx.quadraticCurveTo(xc, yc, midX, midY);
+              }
+              
+              ctx.lineTo(canvas.width + 50, canvas.height);
+              ctx.closePath();
+              ctx.fillStyle = colorGrad;
+              ctx.fill();
+            };
+
+            const makeGrad = (opacity, rOff = 0, gOff = 0, bOff = 0) => {
+              const gr = Math.max(0, Math.min(255, r + rOff));
+              const gg = Math.max(0, Math.min(255, g + gOff));
+              const gb = Math.max(0, Math.min(255, b + bOff));
+              const gInst = ctx.createLinearGradient(0, canvas.height * 0.5, 0, canvas.height);
+              gInst.addColorStop(0, `rgba(${gr}, ${gg}, ${gb}, ${opacity})`);
+              gInst.addColorStop(1, `rgba(${gr}, ${gg}, ${gb}, 0.0)`);
+              return gInst;
+            };
+
+            const waves = [
+              { amp: 0.50, grad: makeGrad(0.12, -40, -40, -40), xOff: -40 },
+              { amp: 0.46, grad: makeGrad(0.18, -20, -10, 20),  xOff: 30  }, 
+              { amp: 0.42, grad: makeGrad(0.24, 20, -20, -10),  xOff: -20 },
+              { amp: 0.38, grad: makeGrad(0.30, -10, 30, -20),  xOff: 40  },
+              { amp: 0.34, grad: makeGrad(0.38, 30, 10, 30),    xOff: -10 },
+              { amp: 0.30, grad: makeGrad(0.48, 10, -30, 40),   xOff: 20  },
+              { amp: 0.25, grad: makeGrad(0.60, 50, 50, 50),    xOff: 0   }
+            ];
+
+            waves.forEach((w, idx) => {
+              drawWave(w.amp, w.grad, w.xOff, idx);
+            });
+          });
+
+          // Draw on standard Video PiP canvas if active
+          if (document.pictureInPictureElement === pipVideo && currentCoverImageObj) {
+            pipCtx.clearRect(0, 0, 500, 500);
+            pipCtx.drawImage(currentCoverImageObj, 0, 0, 500, 500);
+
+            // Darken bottom half
+            const baseGrad = pipCtx.createLinearGradient(0, 250, 0, 500);
+            baseGrad.addColorStop(0, 'transparent');
+            baseGrad.addColorStop(1, 'rgba(0, 0, 0, 0.55)');
+            pipCtx.fillStyle = baseGrad;
+            pipCtx.fillRect(0, 250, 500, 250);
+
+            const pipSliceWidth = 500 / (totalPoints - 1);
+
+            const drawPipWave = (amplitude, colorGrad, xOffset) => {
+              pipCtx.beginPath();
+              pipCtx.moveTo(-50, 500);
+              
+              let firstVal = smoothedData[0] || 0;
+              let yStart = 500 - ((firstVal / 255) * 500 * amplitude);
+              pipCtx.lineTo(-50, yStart);
+
+              for(let i = 0; i < totalPoints - 1; i++) {
+                let val = smoothedData[i] || 0;
+                let nextVal = smoothedData[i + 1] || 0;
+
+                let xc = xOffset + (pipSliceWidth * i);
+                let yc = 500 - ((val / 255) * 500 * amplitude);
+                
+                let nextX = xOffset + (pipSliceWidth * (i + 1));
+                let nextY = 500 - ((nextVal / 255) * 500 * amplitude);
+                
+                let midX = (xc + nextX) / 2;
+                let midY = (yc + nextY) / 2;
+
+                pipCtx.quadraticCurveTo(xc, yc, midX, midY);
+              }
+              
+              pipCtx.lineTo(550, 500);
+              pipCtx.closePath();
+              pipCtx.fillStyle = colorGrad;
+              pipCtx.fill();
+            };
+
+            const makePipGrad = (opacity, rOff = 0, gOff = 0, bOff = 0) => {
+              const gr = Math.max(0, Math.min(255, r + rOff));
+              const gg = Math.max(0, Math.min(255, g + gOff));
+              const gb = Math.max(0, Math.min(255, b + bOff));
+              const gInst = pipCtx.createLinearGradient(0, 250, 0, 500);
+              gInst.addColorStop(0, `rgba(${gr}, ${gg}, ${gb}, ${opacity})`);
+              gInst.addColorStop(1, `rgba(${gr}, ${gg}, ${gb}, 0.0)`);
+              return gInst;
+            };
+
+            const waveBreathe = (idx) => Math.sin(visTime * 0.012 * (idx + 1) + idx) * 0.15;
+            const xSway = (idx) => Math.cos(visTime * 0.008 * (idx + 1)) * 35;
+
+            drawPipWave(0.50 * (1.0 + waveBreathe(0)), makePipGrad(0.12, -40, -40, -40), -40 + xSway(0));
+            drawPipWave(0.46 * (1.0 + waveBreathe(1)), makePipGrad(0.18, -20, -10, 20),  30 + xSway(1));
+            drawPipWave(0.42 * (1.0 + waveBreathe(2)), makePipGrad(0.24, 20, -20, -10),  -20 + xSway(2));
+            drawPipWave(0.38 * (1.0 + waveBreathe(3)), makePipGrad(0.30, -10, 30, -20),  40 + xSway(3));
+            drawPipWave(0.34 * (1.0 + waveBreathe(4)), makePipGrad(0.38, 30, 10, 30),    -10 + xSway(4));
+            drawPipWave(0.30 * (1.0 + waveBreathe(5)), makePipGrad(0.48, 10, -30, 40),   20 + xSway(5));
+            drawPipWave(0.25 * (1.0 + waveBreathe(6)), makePipGrad(0.60, 50, 50, 50),    0 + xSway(6));
+
+            // Overlay Metadata Text
+            const textGrad = pipCtx.createLinearGradient(0, 380, 0, 500);
+            textGrad.addColorStop(0, 'transparent');
+            textGrad.addColorStop(1, 'rgba(0,0,0,0.85)');
+            pipCtx.fillStyle = textGrad;
+            pipCtx.fillRect(0, 380, 500, 120);
+
+            pipCtx.fillStyle = '#ffffff';
+            pipCtx.font = 'bold 28px sans-serif';
+            pipCtx.shadowColor = "rgba(0,0,0,0.8)";
+            pipCtx.shadowBlur = 4;
+            const safeTitle = currentSong.title.length > 28 ? currentSong.title.substring(0, 25) + '...' : currentSong.title;
+            pipCtx.fillText(safeTitle, 20, 440);
+            
+            pipCtx.fillStyle = '#cccccc';
+            pipCtx.font = '22px sans-serif';
+            const safeArtist = currentSong.artist.length > 35 ? currentSong.artist.substring(0, 32) + '...' : currentSong.artist;
+            pipCtx.fillText(safeArtist, 20, 475);
+          }
+          
+          visAnimId = requestAnimationFrame(drawVisualizer);
+        };
+
         const togglePlayPause = () => {
           if (!currentSong) return;
           isPlaying = !isPlaying;
           isPlaying ? audio.play() : audio.pause();
           updatePlayPauseIcons();
+          if (!visAnimId) drawVisualizer();
         };
 
         const playNext = async () => {
@@ -8672,6 +9101,7 @@ function perform_full_scan($db) {
                 sasVolSlider.value = targetVol;
                 sasVolVal.textContent = sasVolSlider.value + 'x';
                 sasEqBands.forEach((band, i) => band.value = targetEQ[i] !== undefined ? targetEQ[i] : 0);
+                document.getElementById('sas-eq-preset-select').value = 'Custom';
                 
                 bootstrap.Modal.getOrCreateInstance(sasModalEl).show();
               }
@@ -8946,13 +9376,13 @@ function perform_full_scan($db) {
               }
               try {
                 docPipWindow = await window.documentPictureInPicture.requestWindow({
-                  width: 395,
+                  width: 365,
                   height: 780
                 });
 
                 docPipWindow.addEventListener('resize', () => {
-                  if (docPipWindow.innerWidth !== 395 || docPipWindow.innerHeight !== 780) {
-                    docPipWindow.resizeTo(395, 780);
+                  if (docPipWindow.innerWidth !== 365 || docPipWindow.innerHeight !== 780) {
+                    docPipWindow.resizeTo(365, 780);
                   }
                 });
 
@@ -9033,31 +9463,36 @@ function perform_full_scan($db) {
                       <button class="pip-tab-btn" id="pip-tab-lyrics">Lyrics</button>
                     </div>
                     
-                    <div class="pip-pane active" id="pip-pane-player" style="padding: 1rem 2rem 1.5rem 2rem; justify-content: space-evenly;">
-                      <div class="player-modal-art-wrapper" style="flex-grow: 1; display: flex; align-items: center; justify-content: center; margin-bottom: 2rem;">
-                        <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="pip-art" alt="Album Art" style="width: 100%; max-width: 400px; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
-                      </div>
-                      <div class="player-modal-track-info" style="text-align: left; margin-bottom: 1rem;">
-                        <h3 id="pip-title" class="title text-truncate" style="font-weight: 700; font-size: 1.5rem; margin-bottom: 0;">Song Title</h3>
-                        <p id="pip-artist" class="artist text-truncate" style="color: var(--ytm-secondary-text); font-size: 1rem; margin-bottom: 0;">Artist Name</p>
-                      </div>
-                      <div class="player-modal-progress" style="width: 100%; margin-bottom: 1rem;">
-                        <div class="progress-bar-container" id="pip-progress-container" style="height: 14px; border-radius: 2px; position: relative; margin-bottom: 0.2em;">
-                          <div class="progress-bar-bg" style="height: 4px; background-color: #404040; border-radius: 2px; position: absolute; top: 5px; left: 0; right: 0; pointer-events: none;"></div>
-                          <div class="progress-bar-fg" id="pip-progress-bar" style="height: 4px; background-color: var(--ytm-primary-text); border-radius: 2px; width: 0%; position: absolute; top: 5px; left: 0; pointer-events: none;"></div>
-                          <input type="range" id="pip-seek-slider" class="slide-range" min="0" max="100" value="0" step="0.1">
+                    <div class="pip-pane active mt-5" id="pip-pane-player" style="padding: 1rem 1.5rem 1.5rem 1.5rem; justify-content: space-evenly;">
+                      <div style="width: 100%; max-width: min(440px, 48vh); margin: 0 auto; display: flex; flex-direction: column; height: 100%; justify-content: space-evenly;">
+                        <div class="player-modal-art-wrapper" style="flex-grow: 1; display: flex; align-items: center; justify-content: center; margin-bottom: 1.5rem; min-height: 0;">
+                          <div class="position-relative shadow-lg" style="width: 100%; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden;">
+                            <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="pip-art" alt="Album Art" style="width: 100%; height: 100%; object-fit: cover;">
+                            <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
+                          </div>
                         </div>
-                        <div class="time-stamps" style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--ytm-secondary-text); margin-top: 0.5rem;">
-                          <span id="pip-current-time">0:00</span>
-                          <span id="pip-time-left">0:00</span>
+                        <div class="player-modal-track-info mt-5" style="text-align: left; margin-bottom: 1rem;">
+                          <h3 id="pip-title" class="title text-truncate" style="font-weight: 700; font-size: 1.5rem; margin-bottom: 0;">Song Title</h3>
+                          <p id="pip-artist" class="artist text-truncate" style="color: var(--ytm-secondary-text); font-size: 1rem; margin-bottom: 0;">Artist Name</p>
                         </div>
-                      </div>
-                      <div class="player-modal-controls" style="display: flex; justify-content: space-between; align-items: center; margin: 0 auto; width: 100%; max-width: 400px;">
-                        <button class="player-btn" id="pip-shuffle-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
-                        <button class="player-btn" id="pip-prev-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
-                        <button class="player-btn play-btn" id="pip-play-pause-btn" style="background: var(--ytm-surface); border: none; color: var(--ytm-primary-text); font-size: 3.5rem; width: 70px; height: 70px; border-radius: 50%;"></button>
-                        <button class="player-btn" id="pip-next-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
-                        <button class="player-btn" id="pip-repeat-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
+                        <div class="player-modal-progress" style="width: 100%; margin-bottom: 1rem;">
+                          <div class="progress-bar-container" id="pip-progress-container" style="height: 14px; border-radius: 2px; position: relative; margin-bottom: 0.2em;">
+                            <div class="progress-bar-bg" style="height: 4px; background-color: #404040; border-radius: 2px; position: absolute; top: 5px; left: 0; right: 0; pointer-events: none;"></div>
+                            <div class="progress-bar-fg" id="pip-progress-bar" style="height: 4px; background-color: var(--ytm-primary-text); border-radius: 2px; width: 0%; position: absolute; top: 5px; left: 0; pointer-events: none;"></div>
+                            <input type="range" id="pip-seek-slider" class="slide-range" min="0" max="100" value="0" step="0.1">
+                          </div>
+                          <div class="time-stamps" style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--ytm-secondary-text); margin-top: 0.5rem;">
+                            <span id="pip-current-time">0:00</span>
+                            <span id="pip-time-left">0:00</span>
+                          </div>
+                        </div>
+                        <div class="player-modal-controls" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                          <button class="player-btn" id="pip-shuffle-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
+                          <button class="player-btn" id="pip-prev-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
+                          <button class="player-btn play-btn" id="pip-play-pause-btn" style="background: var(--ytm-surface); border: none; color: var(--ytm-primary-text); font-size: 3.5rem; width: 70px; height: 70px; border-radius: 50%;"></button>
+                          <button class="player-btn" id="pip-next-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
+                          <button class="player-btn" id="pip-repeat-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
+                        </div>
                       </div>
                     </div>
                     
@@ -9664,6 +10099,7 @@ function perform_full_scan($db) {
         
         document.querySelectorAll('.sas-eq-band').forEach(slider => {
           slider.addEventListener('input', e => {
+            document.getElementById('sas-eq-preset-select').value = 'Custom';
             const activeId = document.getElementById('sas-song-id').value;
             if (currentSong && currentSong.id == activeId && audioCtx) {
               const bandIndex = parseInt(e.target.dataset.band);
@@ -9671,6 +10107,26 @@ function perform_full_scan($db) {
             }
           });
         });
+
+        const sasEqPresetSelect = document.getElementById('sas-eq-preset-select');
+        if (sasEqPresetSelect) {
+          sasEqPresetSelect.addEventListener('change', (e) => {
+            if (e.target.value === 'Custom') return;
+            const preset = EQ_PRESETS[e.target.value];
+            if (preset) {
+              const sasEqBands = document.querySelectorAll('.sas-eq-band');
+              preset.forEach((val, i) => { 
+                if (sasEqBands[i]) sasEqBands[i].value = val; 
+              });
+              const activeId = document.getElementById('sas-song-id').value;
+              if (currentSong && currentSong.id == activeId && audioCtx) {
+                preset.forEach((val, i) => {
+                  eqBands[i].gain.setTargetAtTime(val, audioCtx.currentTime, 0.1);
+                });
+              }
+            }
+          });
+        }
 
         const sasSaveBtn = document.getElementById('sas-save-btn');
         if (sasSaveBtn) {
@@ -9799,7 +10255,8 @@ function perform_full_scan($db) {
           cancelSleepTimer();
         });
 
-        const handleSleepTimer = () => {
+        const handleSleepTimer = (e) => {
+          if (e) e.preventDefault();
           if (sleepTimerInterval) {
             if (confirm(`Sleep timer is active. Cancel it?`)) {
               cancelSleepTimer();
@@ -10404,8 +10861,11 @@ function perform_full_scan($db) {
                 isSpatialEnabled = s.isSpatialEnabled !== undefined ? s.isSpatialEnabled : false;
                 globalVolumeMultiplier = s.globalVolumeMultiplier !== undefined ? s.globalVolumeMultiplier : 1.0;
                 globalEQBands = s.globalEQBands || [0, 0, 0, 0, 0];
+                crossfadeDuration = s.crossfadeDuration !== undefined ? s.crossfadeDuration : 3.0;
                 
                 document.getElementById('toggle-normalization').checked = enableNormalization;
+                document.getElementById('crossfade-slider').value = crossfadeDuration;
+                document.getElementById('crossfade-val').textContent = crossfadeDuration + 's';
                 document.getElementById('toggle-eq').checked = isEQEnabled;
                 const toggleSpatialEl = document.getElementById('toggle-spatial');
                 if (toggleSpatialEl) toggleSpatialEl.checked = isSpatialEnabled;
