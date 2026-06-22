@@ -4,6 +4,13 @@ if (isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEP
 }
 error_reporting(E_ALL & ~E_DEPRECATED);
 
+// MASS USE OPTIMIZATION: Force script into OPcache memory for max execution speed
+if (function_exists('opcache_is_script_cached') && function_exists('opcache_compile_file')) {
+  if (!@opcache_is_script_cached(__FILE__)) {
+    @opcache_compile_file(__FILE__);
+  }
+}
+
 if (isset($_GET['pwa'])) {
   if ($_GET['pwa'] == 'manifest') {
     header('Content-Type: application/json; charset=utf-8');
@@ -14,9 +21,9 @@ if (isset($_GET['pwa'])) {
       "start_url" => "./",
       "scope" => "./",
       "display" => "standalone",
-      "background_color" => "#030303",
-      "theme_color" => "#121212",
-      "description" => "A simple, fast music player with user accounts and uploads.",
+          "background_color" => "#050505",
+          "theme_color" => "#050505",
+          "description" => "A simple, fast music player with user accounts and uploads.",
       "icons" => [[
           "src" => "?action=get_app_icon&size=192",
           "sizes" => "192x192",
@@ -189,26 +196,21 @@ function get_db() {
   if ($db !== null) return $db; 
   
   try {
-    // MASS USE OPTIMIZATION: ATTR_PERSISTENT keeps the connection alive across thousands of requests
+    // Removed ATTR_PERSISTENT as it causes permanent database locking bugs in SQLite
     $db = new PDO('sqlite:' . DB_FILE, null, null, [
-      PDO::ATTR_TIMEOUT => 60,
-      PDO::ATTR_PERSISTENT => true 
+      PDO::ATTR_TIMEOUT => 15
     ]);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-    
-    // MASS USE OPTIMIZATION: Lower cache_size to 200MB per connection. 
-    // At scale, 2GB per persistent connection will crash your server's RAM instantly.
+      
+    // Optimized PRAGMAs for fast concurrent reads without locking the browser
     $db->exec("
       PRAGMA journal_mode=WAL; 
       PRAGMA synchronous=NORMAL; 
-      PRAGMA cache_size=-200000; /* 200MB of RAM for caching */
+      PRAGMA cache_size=-50000; /* 50MB of RAM for caching */
       PRAGMA temp_store=MEMORY; 
-      PRAGMA mmap_size=30000000000; 
       PRAGMA foreign_keys=ON;
-      PRAGMA busy_timeout=15000;
-      PRAGMA threads=8;
-      PRAGMA optimize;
+      PRAGMA busy_timeout=5000;
     ");
     
     $db->sqliteCreateFunction('match_artist', function($artist_field, $search_name) {
@@ -257,19 +259,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
     if (isset($_POST['delete_user']) && isset($_POST['user_id'])) {
-      $db = get_db();
-      $del_uid = (int)$_POST['user_id'];
-      $stmt = $db->prepare("SELECT file FROM music WHERE user_id = ?");
-      $stmt->execute([$del_uid]);
-      while ($row = $stmt->fetch()) {
-        if ($row['file'] && file_exists($row['file'])) @unlink($row['file']);
+          $db = get_db();
+          $del_uid = (int)$_POST['user_id'];
+          $stmt = $db->prepare("SELECT file FROM music WHERE user_id = ?");
+          $stmt->execute([$del_uid]);
+          while ($row = $stmt->fetch()) {
+            if ($row['file'] && file_exists($row['file'])) @unlink($row['file']);
+          }
+          $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$del_uid]);
+          $db->prepare("DELETE FROM users WHERE id = ?")->execute([$del_uid]);
+          header('Location: ' . $_SERVER['REQUEST_URI']);
+          exit;
+        }
+        
+        if (isset($_POST['reset_opcache'])) {
+          if (function_exists('opcache_reset')) {
+            opcache_reset();
+          }
+          header('Location: ?access=admin');
+          exit;
+        }
       }
-      $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM users WHERE id = ?")->execute([$del_uid]);
-      header('Location: ' . $_SERVER['REQUEST_URI']);
-      exit;
-    }
-  }
 
   if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
     if (password_verify($_POST['password'], ADMIN_PASSWORD_HASH)) {
@@ -386,7 +396,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       </nav>
       <main class="main-content">
         <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
-          <h1 class="content-title m-0">User Management</h1>
+          <div class="d-flex align-items-center gap-3">
+            <h1 class="content-title m-0">User Management</h1>
+            <form method="POST" action="" class="m-0">
+              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+              <button type="submit" name="reset_opcache" class="btn btn-sm btn-outline-warning" title="Clear PHP OPcache"><i class="bi bi-lightning-charge-fill"></i> Reset OPcache</button>
+            </form>
+          </div>
           <?php $search = $_GET['search'] ?? ''; ?>
           <?php $sort_admin = $_GET['sort'] ?? 'newest'; ?>
           <form method="GET" action="" class="d-flex w-100" style="max-width: 450px;">
@@ -908,8 +924,9 @@ if (isset($_GET['action'])) {
   $action = $_GET['action'];
   $db = get_db();
   
-  // Rate Limiting API
-  try { 
+  // Rate Limiting API - ONLY trigger write locks on POST requests or heavy actions to prevent locking concurrent reads on page load
+  if ($_SERVER['REQUEST_METHOD'] === 'POST' || in_array($action, ['search', 'full_scan'])) {
+    try { 
       $db->exec("CREATE TABLE IF NOT EXISTS api_rate_limits (ip TEXT PRIMARY KEY, hits INTEGER, last_reset INTEGER)"); 
       $ip = $_SERVER['REMOTE_ADDR'];
       $stmt_rl = $db->prepare("SELECT hits, last_reset FROM api_rate_limits WHERE ip = ?");
@@ -920,29 +937,30 @@ if (isset($_GET['action'])) {
         if ($now - $rl['last_reset'] > 60) {
           $db->prepare("UPDATE api_rate_limits SET hits = 1, last_reset = ? WHERE ip = ?")->execute([$now, $ip]);
         } else {
-          if ($rl['hits'] > 300) { // Max 300 requests per IP per minute
+          if ($rl['hits'] > 150) {
             http_response_code(429);
             die('{"status":"error", "message":"Rate limit exceeded. Try again in a minute."}');
           }
           $db->prepare("UPDATE api_rate_limits SET hits = hits + 1 WHERE ip = ?")->execute([$ip]);
         }
       } else {
-      $db->prepare("INSERT INTO api_rate_limits (ip, hits, last_reset) VALUES (?, 1, ?)")->execute([$ip, $now]);
-    }
-  } catch(Exception $e) {}
+        $db->prepare("INSERT INTO api_rate_limits (ip, hits, last_reset) VALUES (?, 1, ?)")->execute([$ip, $now]);
+      }
+    } catch(Exception $e) {}
+  }
 
-  // Activity Feed Logging Initialization
-  try {
-    $db->exec("CREATE TABLE IF NOT EXISTS activity_feed (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT, target_name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
-  } catch(Exception $e) {}
-
-  try { $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;"); } catch(Exception $e) {}
-  try { $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
-  try { $db->exec("ALTER TABLE playlists ADD COLUMN play_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
-  try { $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
-  
-  init_db($db); // Force the database upgrade
+  // Run database schema updates ONLY ONCE per session to prevent massive write-lock congestion on concurrent AJAX requests
   if (!isset($_SESSION['db_initialized'])) {
+    try {
+      $db->exec("CREATE TABLE IF NOT EXISTS activity_feed (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT, target_name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+    } catch(Exception $e) {}
+
+    try { $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE playlists ADD COLUMN play_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+    
+    init_db($db); 
     $_SESSION['db_initialized'] = true;
   }
 
@@ -1073,8 +1091,19 @@ if (isset($_GET['action'])) {
       ]);
       break;
 
+    case 'get_pwa_splash':
+      header('Content-Type: image/svg+xml');
+      header('Cache-Control: public, max-age=31536000, immutable');
+      header('Pragma: cache');
+      header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
+      echo '<?xml version="1.0" encoding="utf-8"?><svg width="100%" height="100%" viewBox="0 0 1000 1000" xmlns="http://www.w3.org/2000/svg"><rect width="1000" height="1000" fill="#050507"/><g transform="translate(380, 380) scale(10)"><rect width="24" height="24" rx="6" fill="#121212"/><path d="M0 24L24 0V24H0Z" fill="#1d1d22" clip-path="inset(0px round 6px)"/><path d="M4 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M16 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M7 7L7 16" stroke="#DF1463" stroke-width="1.7" stroke-linecap="round"/><path d="M13 7L13 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M19 7L19 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M10 4L10 19" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/></g></svg>';
+      exit;
+
     case 'get_app_icon':
       header('Content-Type: image/svg+xml');
+      header('Cache-Control: public, max-age=31536000, immutable');
+      header('Pragma: cache');
+      header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
       $size = intval($_GET['size'] ?? 192);
       echo '<?xml version="1.0" encoding="utf-8"?><svg width="'.$size.'px" height="'.$size.'px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="24" height="24" rx="6" fill="#F3F4F6"/><path d="M0 24L24 0V24H0Z" fill="#E5E7EB" clip-path="inset(0px round 6px)"/><path d="M4 10V13" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M16 10V13" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M7 7L7 16" stroke="#DF1463" stroke-width="1.7" stroke-linecap="round"/><path d="M13 7L13 16" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M19 7L19 16" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/><path d="M10 4L10 19" stroke="#000000" stroke-width="1.7" stroke-linecap="round"/></svg>';
       exit;
@@ -1227,6 +1256,9 @@ if (isset($_GET['action'])) {
       break;
       
     case 'get_profile_picture':
+      header('Cache-Control: public, max-age=31536000, immutable');
+      header('Pragma: cache');
+      header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
       $pic_user_id = (int)($_GET['id'] ?? 0);
       $stmt = $db->prepare("SELECT profile_picture, profile_picture_type FROM users WHERE id = ?");
       $stmt->execute([$pic_user_id]);
@@ -2657,6 +2689,9 @@ if (isset($_GET['action'])) {
       exit;
 
     case 'get_image':
+      header('Cache-Control: public, max-age=31536000, immutable');
+      header('Pragma: cache');
+      header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
       $id = intval($_GET['id'] ?? 0);
       $stmt = $db->prepare("SELECT image FROM music WHERE id = ?");
       $stmt->execute([$id]);
@@ -2712,27 +2747,27 @@ if (isset($_GET['action'])) {
       $pl = $stmt->fetch();
       
       if (!$pl || ($pl['user_id'] != $user_id && $is_super_admin == 0)) {
-          http_response_code(403); send_json(['status' => 'error', 'message' => 'Only the owner can manage collaborators.']);
+        http_response_code(403); send_json(['status' => 'error', 'message' => 'Only the owner can manage collaborators.']);
       }
       
       if ($action_type === 'list') {
-          $stmt_list = $db->prepare("SELECT u.id, u.artist, u.email FROM playlist_collaborators pc JOIN users u ON pc.user_id = u.id WHERE pc.playlist_id = ?");
-          $stmt_list->execute([$pl['id']]);
-          send_json(['status' => 'success', 'collaborators' => $stmt_list->fetchAll()]);
+        $stmt_list = $db->prepare("SELECT u.id, u.artist, u.email FROM playlist_collaborators pc JOIN users u ON pc.user_id = u.id WHERE pc.playlist_id = ?");
+        $stmt_list->execute([$pl['id']]);
+        send_json(['status' => 'success', 'collaborators' => $stmt_list->fetchAll()]);
       } elseif ($action_type === 'add') {
-          $target = $data['target'];
-          $stmt_find = $db->prepare("SELECT id FROM users WHERE email = ? OR artist = ? COLLATE NOCASE");
-          $stmt_find->execute([$target, $target]);
-          $collab_user = $stmt_find->fetchColumn();
-          if (!$collab_user) { send_json(['status' => 'error', 'message' => 'User not found. Check email or username.']); }
-          if ($collab_user == $user_id) { send_json(['status' => 'error', 'message' => 'You already own this playlist.']); }
+        $target = $data['target'];
+        $stmt_find = $db->prepare("SELECT id FROM users WHERE email = ? OR artist = ? COLLATE NOCASE");
+        $stmt_find->execute([$target, $target]);
+        $collab_user = $stmt_find->fetchColumn();
+        if (!$collab_user) { send_json(['status' => 'error', 'message' => 'User not found. Check email or username.']); }
+        if ($collab_user == $user_id) { send_json(['status' => 'error', 'message' => 'You already own this playlist.']); }
           
-          $db->prepare("INSERT OR IGNORE INTO playlist_collaborators (playlist_id, user_id) VALUES (?, ?)")->execute([$pl['id'], $collab_user]);
-          send_json(['status' => 'success', 'message' => 'Collaborator added successfully.']);
+        $db->prepare("INSERT OR IGNORE INTO playlist_collaborators (playlist_id, user_id) VALUES (?, ?)")->execute([$pl['id'], $collab_user]);
+        send_json(['status' => 'success', 'message' => 'Collaborator added successfully.']);
       } elseif ($action_type === 'remove') {
-          $remove_id = $data['collab_user_id'];
-          $db->prepare("DELETE FROM playlist_collaborators WHERE playlist_id = ? AND user_id = ?")->execute([$pl['id'], $remove_id]);
-          send_json(['status' => 'success', 'message' => 'Collaborator removed.']);
+        $remove_id = $data['collab_user_id'];
+        $db->prepare("DELETE FROM playlist_collaborators WHERE playlist_id = ? AND user_id = ?")->execute([$pl['id'], $remove_id]);
+        send_json(['status' => 'success', 'message' => 'Collaborator removed.']);
       }
       break;
 
@@ -3752,9 +3787,10 @@ function perform_full_scan($db) {
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="PHP Music">
     <meta name="application-name" content="PHP Music">
+    <link rel="apple-touch-startup-image" href="?action=get_pwa_splash">
     <title>PHP Music</title>
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
-    <meta name="theme-color" content="#121212"/>
+    <meta name="theme-color" content="#050505"/>
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
       (async function() {
