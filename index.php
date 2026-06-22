@@ -731,6 +731,9 @@ function init_db($db) {
   if (!in_array('is_private', $playlists_columns)) {
     $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;");
   }
+  if (!in_array('play_count', $playlists_columns)) {
+    $db->exec("ALTER TABLE playlists ADD COLUMN play_count INTEGER DEFAULT 0;");
+  }
   if (!in_array('is_private', $music_columns)) {
     $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;");
   }
@@ -935,6 +938,7 @@ if (isset($_GET['action'])) {
 
   try { $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;"); } catch(Exception $e) {}
   try { $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+  try { $db->exec("ALTER TABLE playlists ADD COLUMN play_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
   try { $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
   
   init_db($db); // Force the database upgrade
@@ -995,7 +999,7 @@ if (isset($_GET['action'])) {
       $stmt->execute([$seed_id]);
       $seed = $stmt->fetch();
       
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       
       if ($seed) {
         $radio_stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.genre = ? OR match_artist(m.artist, ?) = 1) AND m.id != ? ORDER BY RANDOM() LIMIT 15");
@@ -1014,7 +1018,7 @@ if (isset($_GET['action'])) {
       if (empty($ids)) { send_json([]); }
       
       $placeholders = implode(',', array_fill(0, count($ids), '?'));
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       
       $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id IN ($placeholders)");
       $params = array_merge([$user_id], $ids);
@@ -1618,7 +1622,7 @@ if (isset($_GET['action'])) {
       }
 
       $shelves = [];
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
 
       $discovery_songs_stmt = $db->prepare("
@@ -1763,7 +1767,7 @@ if (isset($_GET['action'])) {
       $params[] = $user_id;
       $where_sql = 'WHERE ' . implode(' AND ', $where_clauses);
       
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . $limit_clause);
       $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
@@ -1781,7 +1785,7 @@ if (isset($_GET['action'])) {
         'year_asc' => 'ORDER BY m.year ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC'
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['title_asc'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.user_id = ? " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.user_id = ? " . $order_by . $limit_clause);
       $stmt->execute([$user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -1809,7 +1813,7 @@ if (isset($_GET['action'])) {
       $is_all = isset($_GET['all']) && $_GET['all'] == '1';
       $current_limit = $is_all ? '' : $limit_clause;
 
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE os.user_id = ? " . $order_by . " " . $current_limit);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE os.user_id = ? " . $order_by . " " . $current_limit);
       $stmt->execute([$user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -1880,7 +1884,7 @@ if (isset($_GET['action'])) {
         $stmt_t_artist_match = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND match_artist(artist, ?) = 1 LIMIT 1");
         $stmt_ta_like = $db->prepare("SELECT id FROM music WHERE title LIKE ? COLLATE NOCASE AND artist LIKE ? COLLATE NOCASE LIMIT 1");
         $stmt_file = $db->prepare("SELECT id FROM music WHERE file LIKE ? OR file LIKE ? LIMIT 1");
-        $stmt_insert = $db->prepare("INSERT OR IGNORE INTO offline_songs (user_id, song_id, sort_order) VALUES (?, ?, ?)");
+        $stmt_insert = $db->prepare("REPLACE INTO offline_songs (user_id, song_id, sort_order) VALUES (?, ?, ?)");
         
         $stmt_order = $db->prepare("SELECT MAX(sort_order) FROM offline_songs WHERE user_id = ?");
         $stmt_order->execute([$user_id]);
@@ -1951,7 +1955,7 @@ if (isset($_GET['action'])) {
       $current_limit = $is_all ? '' : $limit_clause;
       
       $stmt = $db->prepare("
-        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT artist FROM users WHERE id = ps.added_by) as added_by_name
+        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.bitrate, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT artist FROM users WHERE id = ps.added_by) as added_by_name
         FROM music m
         JOIN playlist_songs ps ON m.id = ps.song_id
         JOIN playlists p ON ps.playlist_id = p.id
@@ -2258,6 +2262,9 @@ if (isset($_GET['action'])) {
         $details = $stmt_stats->fetch();
         
         $details['name'] = $user_details['artist'];
+        $stmt_followers = $db->prepare("SELECT COUNT(*) FROM follows WHERE following_id = ?");
+        $stmt_followers->execute([$user_id]);
+        $details['followers_count'] = $stmt_followers->fetchColumn();
         $details['image_url'] = '?action=get_profile_picture&id=' . $user_id;
         $details['public_id'] = null;
         $details['user_id'] = $user_id;
@@ -2274,7 +2281,7 @@ if (isset($_GET['action'])) {
         $order_by = $sort_map[$sort] ?? $sort_map['title_asc'];
 
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE m.user_id = ? {$order_by} {$limit_clause}
         ");
@@ -2283,7 +2290,7 @@ if (isset($_GET['action'])) {
       } elseif ($type === 'playlist') {
         if (empty($name)) { http_response_code(400); exit; }
         $stmt_details = $db->prepare("
-          SELECT p.name, p.public_id, p.user_id, p.is_private, u.artist as creator,
+          SELECT p.name, p.public_id, p.user_id, p.is_private, u.artist as creator, p.play_count,
           (SELECT COUNT(*) FROM playlist_songs WHERE playlist_id = p.id) as song_count,
           (SELECT SUM(m.duration) FROM music m JOIN playlist_songs ps ON m.id = ps.song_id WHERE ps.playlist_id = p.id) as total_duration,
           (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
@@ -2305,7 +2312,7 @@ if (isset($_GET['action'])) {
         ];
         $order_by = $sort_map[$sort] ?? $sort_map['manual_order'];
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m JOIN playlist_songs ps ON m.id = ps.song_id JOIN playlists p ON ps.playlist_id = p.id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE p.public_id = ? {$order_by} {$limit_clause}
         ");
@@ -2326,7 +2333,7 @@ if (isset($_GET['action'])) {
             'public_id' => $mix_public_id
           ];
           $stmt_songs = $db->prepare("
-            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
             FROM music m 
             JOIN mix_songs ms ON m.id = ms.song_id 
             LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
@@ -2374,6 +2381,9 @@ if (isset($_GET['action'])) {
           if ($artist_user_id) {
             $details['is_user'] = true;
             $details['user_id'] = $artist_user_id;
+            $stmt_followers = $db->prepare("SELECT COUNT(*) FROM follows WHERE following_id = ?");
+            $stmt_followers->execute([$artist_user_id]);
+            $details['followers_count'] = $stmt_followers->fetchColumn();
             $details['image_url'] = '?action=get_profile_picture&id=' . $artist_user_id;
             if ($user_id) {
               $stmt_follow = $db->prepare("SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?");
@@ -2395,7 +2405,7 @@ if (isset($_GET['action'])) {
         $default_sort = ($type === 'album') ? 'title_asc' : 'artist_asc';
         $order_by = $sort_map[$sort] ?? $sort_map[$default_sort];
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE {$field_cond} {$user_cond} {$order_by} {$limit_clause}
         ");
@@ -2438,7 +2448,7 @@ if (isset($_GET['action'])) {
           $query = '%' . $q . '%';
           $shelves = [];
 
-          $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+          $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
           $stmt_top = $db->prepare("
             SELECT {$song_fields} FROM music m 
             LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? 
@@ -2504,7 +2514,7 @@ if (isset($_GET['action'])) {
             $shelves[] = ['title' => 'Playlists', 'type' => 'playlists', 'items' => $playlists];
           }
 
-          $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+          $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
           $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY m.title ASC LIMIT 50");
           $stmt->execute([$user_id, $query, $query, $query, $user_id]);
       $songs = $stmt->fetchAll();
@@ -2896,6 +2906,7 @@ if (isset($_GET['action'])) {
       $data = json_decode(file_get_contents('php://input'), true);
       $song_id = intval($data['id'] ?? 0);
       $played_at_iso = $data['played_at'] ?? (new DateTime())->format(DateTime::ATOM);
+      $playlist_public_id = $data['playlist_public_id'] ?? null;
     
       if ($song_id > 0) {
         // MASS USE OPTIMIZATION: SQLite Write Retry Loop
@@ -2920,6 +2931,10 @@ if (isset($_GET['action'])) {
             
             $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'listened to', (SELECT title FROM music WHERE id = ?))")->execute([$user_id, $song_id]);
 
+            if ($playlist_public_id) {
+              $db->prepare("UPDATE playlists SET play_count = play_count + 1 WHERE public_id = ?")->execute([$playlist_public_id]);
+            }
+
             $db->commit();
             break; // Success, break out of the loop!
             
@@ -2941,7 +2956,7 @@ if (isset($_GET['action'])) {
       break;
       
     case 'get_trending':
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       $stmt = $db->prepare("
         SELECT {$song_fields}
         FROM music m
@@ -2965,7 +2980,8 @@ if (isset($_GET['action'])) {
       if (!$user_id) { send_json([]); }
       $stmt = $db->prepare("
         SELECT MAX(h.played_at) AS played_at, m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private,
-        CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+        CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
+        (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
         FROM history h
         JOIN music m ON h.song_id = m.id
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
@@ -2997,7 +3013,7 @@ if (isset($_GET['action'])) {
       }
 
       $shelves = [];
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
 
       $recent_songs_stmt = $db->prepare("
@@ -4093,10 +4109,11 @@ function perform_full_scan($db) {
       .song-artist:hover, .song-artist-name:hover { text-decoration: underline; }
       #multi-select-bar {
         position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
-        background: var(--ytm-surface-2); border-radius: 50px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5); padding: 10px 20px; z-index: 1010;
-        display: flex; gap: 15px; align-items: center; justify-content: center;
-        width: max-content;
+        background: rgba(40, 40, 40, 0.95); backdrop-filter: blur(10px);
+        border: 1px solid #555; border-radius: 50px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.8); padding: 12px 20px; z-index: 1010;
+        display: flex; align-items: center; justify-content: center;
+        width: max-content; max-width: 95vw; overflow: visible;
       }
       #synced-lyrics-container {
         text-align: center;
@@ -4447,11 +4464,26 @@ function perform_full_scan($db) {
       </div>
     </div>
 
-    <div id="multi-select-bar" class="d-none">
-      <span id="multi-select-count" class="badge bg-danger rounded-circle d-flex align-items-center justify-content-center" style="width: 24px; height: 24px;">0</span>
-      <button class="btn btn-sm btn-outline-light rounded-circle d-flex align-items-center justify-content-center" id="multi-cancel-btn" style="width: 36px; height: 36px;"><i class="bi bi-x-lg"></i></button>
-      <button class="btn btn-sm btn-outline-light rounded-circle d-flex align-items-center justify-content-center" id="multi-add-playlist-btn" style="width: 36px; height: 36px;"><i class="bi bi-music-note-list"></i></button>
-      <button class="btn btn-sm btn-outline-light rounded-circle d-flex align-items-center justify-content-center" id="multi-add-favorite-btn" style="width: 36px; height: 36px;"><i class="bi bi-heart-fill"></i></button>
+    <div id="multi-select-bar" class="d-none shadow-lg dropup">
+      <div class="d-flex align-items-center gap-2">
+        <span id="multi-select-count" class="badge bg-danger rounded-pill fs-6 px-3 py-2 me-1 shadow-sm">0</span>
+        <button class="btn btn-outline-light rounded-circle d-flex align-items-center justify-content-center border-0" id="multi-cancel-btn" title="Cancel" style="width: 44px; height: 44px; background: rgba(255,255,255,0.1);"><i class="bi bi-x-lg fs-5"></i></button>
+        <button class="btn btn-outline-light rounded-circle d-flex align-items-center justify-content-center border-0" id="multi-select-all-btn" title="Select All Loaded" style="width: 44px; height: 44px; background: rgba(255,255,255,0.1);"><i class="bi bi-check-all fs-4"></i></button>
+        
+        <div class="vr bg-secondary opacity-50 mx-1" style="width: 2px; min-height: 30px;"></div>
+        
+        <button class="btn btn-outline-light rounded-circle d-flex align-items-center justify-content-center border-0" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Actions" style="width: 44px; height: 44px; background: rgba(255,255,255,0.1);">
+          <i class="bi bi-three-dots-vertical fs-5"></i>
+        </button>
+        
+        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow-lg mb-2" style="background-color: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 12px; overflow: hidden;">
+          <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="multi-add-playlist-btn"><i class="bi bi-music-note-list fs-5 text-secondary"></i> Add to Playlist</button></li>
+          <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="multi-add-favorite-btn"><i class="bi bi-heart-fill fs-5 text-danger"></i> Add to Favorites</button></li>
+          <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="multi-offline-btn"><i class="bi bi-cloud-arrow-down-fill fs-5 text-info"></i> Re-cache / Offline</button></li>
+          <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
+          <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger" id="multi-remove-btn"><i class="bi bi-trash-fill fs-5"></i> Remove</button></li>
+        </ul>
+      </div>
     </div>
     <div class="player-bar d-none" id="player-bar">
       <div class="track-info d-none d-md-flex">
@@ -5271,7 +5303,8 @@ function perform_full_scan($db) {
                     <strong style="color: #ffffff !important;">Song List</strong>
                     <div class="song-list mt-2" style="background-color: var(--ytm-surface); border-radius: 12px; overflow: hidden;">
                       <div class="song-item small d-none d-md-grid pd-song-row" style="color: #ffffff !important;">
-                        <div style="color: #ffffff !important;">#</div><div style="color: #ffffff !important;">Title</div><div style="color: #ffffff !important;">Artist</div><div style="color: #ffffff !important;">Duration</div><div></div>
+                        <div style="color: #ffffff !important;" class="d-flex align-items-center"><input class="form-check-input me-2" type="checkbox" id="pd-select-all" checked> #</div>
+                        <div style="color: #ffffff !important;">Title</div><div style="color: #ffffff !important;">Artist</div><div style="color: #ffffff !important;">Duration</div><div></div>
                       </div>
                       <div id="pd-song-rows"></div>
                     </div>
@@ -5657,13 +5690,19 @@ function perform_full_scan($db) {
                   <i class="bi bi-soundwave playing-icon"></i>
                 </div>
                 <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
-                <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${song.artist}</div>
+                <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
+                  <div class="text-truncate">${song.artist}</div>
+                  <div class="text-secondary" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
+                </div>
                 <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
                 <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
                 <div class="song-more"><button class="more-btn" data-song-id="${song.id}"><i class="bi bi-three-dots-vertical"></i></button></div>
-                <div class="song-artist-mobile d-md-none w-100">
-                  <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
-                  <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
+                <div song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
+                  <div class="d-flex justify-content-between align-items-center w-100">
+                     <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
+                     <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
+                  </div>
+                  <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
                 </div>
               </div>`;
           });
@@ -6287,48 +6326,255 @@ function perform_full_scan($db) {
           updateMultiSelectUI();
         });
 
+        document.getElementById('multi-select-all-btn').addEventListener('click', () => {
+          const songItems = document.querySelectorAll('#content-area .song-item');
+          if (songItems.length === 0) return;
+          
+          let allSelected = true;
+          songItems.forEach(item => {
+            if (!selectedSongs.has(item.dataset.songId)) allSelected = false;
+          });
+
+          if (allSelected) {
+            selectedSongs.clear();
+            songItems.forEach(item => item.classList.remove('multi-selected'));
+          } else {
+            songItems.forEach(item => {
+              const songId = item.dataset.songId;
+              if (songId) {
+                selectedSongs.add(songId);
+                item.classList.add('multi-selected');
+              }
+            });
+          }
+          updateMultiSelectUI();
+        });
+
         document.getElementById('multi-add-favorite-btn').addEventListener('click', async () => {
           if (!currentUser || selectedSongs.size === 0) return;
           let added = 0;
+          
+          const favBtn = document.getElementById('multi-add-favorite-btn');
+          const originalBtnHtml = favBtn.innerHTML;
+          favBtn.innerHTML = '<i class="bi bi-hourglass-split text-danger" style="animation: spinner-border 1s linear infinite;"></i> <span class="text-white">Adding...</span>';
+          
           for (let songId of selectedSongs) {
-            const songEl = document.querySelector(`.song-item[data-song-id="${songId}"]`);
-            if (songEl && songEl.dataset.isFavorite === '0') {
-              await fetchData('?action=toggle_favorite', {
+            let isFav = false;
+            if (globalSongCache[songId]) {
+              isFav = globalSongCache[songId].is_favorite == 1;
+            } else {
+              const el = document.querySelector(`.song-item[data-song-id="${songId}"]`);
+              if (el && el.dataset.isFavorite === '1') isFav = true;
+            }
+
+            if (!isFav) {
+              const result = await fetchData('?action=toggle_favorite', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: songId })
+                body: JSON.stringify({ id: parseInt(songId) })
               });
-              songEl.dataset.isFavorite = '1';
-              added++;
+              
+              if (result && result.is_favorite) {
+                added++;
+                if (globalSongCache[songId]) globalSongCache[songId].is_favorite = 1;
+                
+                const songItemsInView = document.querySelectorAll(`.song-item[data-song-id="${songId}"]`);
+                songItemsInView.forEach(item => {
+                  item.dataset.isFavorite = "1";
+                });
+                
+                if (currentSong && currentSong.id == songId) {
+                  currentSong.is_favorite = 1;
+                  updateFavoriteIcons(true);
+                }
+              }
             }
           }
-          showToast(`Added ${added} new songs to favorites!`, 'success');
+          
+          favBtn.innerHTML = originalBtnHtml;
+          if (added > 0) {
+            showToast(`Added ${added} new songs to favorites!`, 'success');
+          } else {
+            showToast(`Selected songs are already in favorites.`, 'info');
+          }
           selectedSongs.clear();
           updateMultiSelectUI();
         });
 
-        document.getElementById('multi-add-playlist-btn').addEventListener('click', async () => {
-          songIdForPlaylist = Array.from(selectedSongs);
-          mixIdForPlaylist = null;
-          const playlists = await fetchData(`?action=get_user_playlists&sort=modified_desc`);
+        const recacheOfflineSong = async (id) => {
+          let tco = document.querySelector('.toast-container');
+          if (!tco) {
+            tco = document.createElement('div');
+            tco.className = 'toast-container position-fixed bottom-0 end-0 p-3';
+            tco.style.zIndex = "1100";
+            document.body.appendChild(tco);
+          }
+          const pToast = document.createElement('div');
+          pToast.className = 'toast align-items-center text-white bg-warning text-dark border-0 show mb-2';
+          pToast.innerHTML = `<div class="d-flex"><div class="toast-body" id="re-offline-progress-${id}">Re-caching song (0%)...</div></div>`;
+          tco.appendChild(pToast);
+
+          try {
+            const cache = await caches.open('php-music-offline');
+            
+            await cache.delete(`?action=get_stream&id=${id}`);
+            await cache.delete(`?action=get_image&id=${id}`);
+            await cache.delete(`?action=get_song_data&id=${id}`);
+            
+            await cache.add(`?action=get_image&id=${id}`);
+            await cache.add(`?action=get_song_data&id=${id}`);
+
+            const response = await fetch(`?action=get_stream&id=${id}`);
+            const contentLength = response.headers.get('content-length');
+            
+            if (!contentLength) {
+              await cache.put(`?action=get_stream&id=${id}`, response.clone());
+            } else {
+              const total = parseInt(contentLength, 10);
+              let loaded = 0;
+              const reader = response.body.getReader();
+              const stream = new ReadableStream({
+                async start(controller) {
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    loaded += value.length;
+                    const pct = Math.round((loaded / total) * 100);
+                    const pctText = document.getElementById(`re-offline-progress-${id}`);
+                    if(pctText) pctText.innerText = `Re-caching song (${pct}%)...`;
+                    controller.enqueue(value);
+                  }
+                  controller.close();
+                }
+              });
+              const newResponse = new Response(stream, { headers: response.headers, status: response.status, statusText: response.statusText });
+              await cache.put(`?action=get_stream&id=${id}`, newResponse);
+            }
+            
+            pToast.classList.replace('bg-warning', 'bg-success');
+            pToast.classList.replace('text-dark', 'text-white');
+            document.getElementById(`re-offline-progress-${id}`).innerText = 'Successfully re-cached!';
+            setTimeout(() => pToast.remove(), 3000);
+            
+            const itemRow = document.querySelector(`.song-item[data-song-id="${id}"]`);
+            if(itemRow) {
+              itemRow.classList.remove('offline-missing');
+              itemRow.style.opacity = '1';
+              const warningIcon = itemRow.querySelector('.offline-missing-icon');
+              if(warningIcon) warningIcon.remove();
+            }
+            offlineSongsSet.add(parseInt(id));
+          } catch(e) {
+            pToast.classList.replace('bg-warning', 'bg-danger');
+            pToast.classList.replace('text-dark', 'text-white');
+            document.getElementById(`re-offline-progress-${id}`).innerText = 'Failed to re-cache.';
+            setTimeout(() => pToast.remove(), 3000);
+          }
+        };
+
+        document.getElementById('multi-offline-btn').addEventListener('click', async () => {
+          if (!currentUser || selectedSongs.size === 0) return;
+          let processed = 0;
+          const songIdsArray = Array.from(selectedSongs);
+          
+          const offlineBtn = document.getElementById('multi-offline-btn');
+          offlineBtn.disabled = true;
+          const originalBtnHtml = offlineBtn.innerHTML;
+          offlineBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Processing...';
+          
+          for (let songId of songIdsArray) {
+            if (!offlineSongsSet.has(parseInt(songId))) {
+               await fetchData('?action=toggle_offline', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: parseInt(songId) }) });
+            }
+            await recacheOfflineSong(parseInt(songId));
+            processed++;
+          }
+          
+          offlineBtn.disabled = false;
+          offlineBtn.innerHTML = originalBtnHtml;
+          showToast(`Processed ${processed} songs for offline playback!`, 'success');
+          selectedSongs.clear();
+          updateMultiSelectUI();
+        });
+
+        document.getElementById('multi-remove-btn').addEventListener('click', async () => {
+          if (!currentUser || selectedSongs.size === 0) return;
+          if (['playlist_songs', 'get_favorites', 'get_offline_songs'].indexOf(currentView.type) === -1) {
+            showToast('This action is only available inside a Playlist, Favorites, or Offline Library.', 'error');
+            return;
+          }
+          if (!confirm('Are you sure you want to remove the selected songs from this view?')) return;
+
+          let removed = 0;
+          for (let songId of selectedSongs) {
+            if (currentView.type === 'playlist_songs') {
+              await fetchData('?action=remove_from_playlist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ song_id: parseInt(songId), playlist_public_id: decodeURIComponent(currentView.param) }) });
+              removed++;
+            } else if (currentView.type === 'get_favorites') {
+              await fetchData('?action=toggle_favorite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: parseInt(songId) }) });
+              if (globalSongCache[songId]) globalSongCache[songId].is_favorite = 0;
+              if (currentSong && currentSong.id == songId) {
+                currentSong.is_favorite = 0;
+                updateFavoriteIcons(false);
+              }
+              removed++;
+            } else if (currentView.type === 'get_offline_songs') {
+              await fetchData('?action=toggle_offline', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: parseInt(songId) }) });
+              try {
+                const cache = await caches.open('php-music-offline');
+                await cache.delete(`?action=get_stream&id=${songId}`);
+                await cache.delete(`?action=get_image&id=${songId}`);
+                await cache.delete(`?action=get_song_data&id=${songId}`);
+              } catch (e) {}
+              offlineSongsSet.delete(parseInt(songId));
+              removed++;
+            }
+          }
+
+          showToast(`Removed ${removed} songs.`, 'success');
+          selectedSongs.clear();
+          updateMultiSelectUI();
+          loadView(currentView); 
+        });
+
+        const buildPlaylistModalContent = (playlists) => {
+          let html = `
+            <div class="mb-3 d-flex gap-2">
+              <input type="text" id="quick-create-playlist-input" class="form-control bg-transparent text-white border-secondary" placeholder="New Playlist Name">
+              <button class="btn btn-danger" id="quick-create-playlist-btn"><i class="bi bi-plus"></i></button>
+            </div>
+          `;
           if (playlists && playlists.length > 0) {
-            addToPlaylistModalBody.innerHTML = `
+            html += `
               <div class="list-group list-group-flush">
                 ${playlists.map(p => `
-                  <button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-3 add-to-playlist-item my-1 p-2 rounded bg-transparent text-white border border-secondary" data-playlist-id="${p.id}">
+                  <button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-3 add-to-playlist-item my-1 p-2 rounded ${p.is_added == 1 ? 'bg-secondary text-white border-0 opacity-75' : 'bg-transparent text-white border border-secondary'}" data-playlist-id="${p.id}" ${p.is_added == 1 ? 'disabled' : ''}>
                     <img src="?action=get_image&id=${p.image_id || 0}" class="rounded" style="width: 48px; height: 48px; object-fit: cover; background-color: var(--ytm-surface-2);">
                     <div class="d-flex flex-column flex-grow-1 text-start overflow-hidden">
                       <span class="text-truncate fw-medium">${escapeHTML(p.name)}</span>
-                      <span class="small text-secondary">${p.song_count} songs</span>
+                      <span class="small ${p.is_added == 1 ? 'text-white-50' : 'text-secondary'}">${p.song_count} songs</span>
                     </div>
-                    <i class="bi bi-plus-circle fs-5"></i>
+                    ${p.is_added == 1 ? '<span class="badge bg-success">Already Added</span>' : '<i class="bi bi-plus-circle fs-5"></i>'}
                   </button>
                 `).join('')}
               </div>
             `;
           } else {
-            addToPlaylistModalBody.innerHTML = `<p class="text-secondary text-center p-4">No playlists found. Create one first!</p>`;
+            html += `<p class="text-secondary text-center p-4">No playlists found. Create one above!</p>`;
           }
+          return html;
+        };
+
+        const reRenderPlaylistModal = async () => {
+           const songId = (songIdForPlaylist && songIdForPlaylist.length === 1) ? songIdForPlaylist[0] : '0';
+           const playlists = await fetchData(`?action=get_user_playlists&song_id=${songId}&sort=modified_desc`);
+           addToPlaylistModalBody.innerHTML = buildPlaylistModalContent(playlists);
+        };
+
+        document.getElementById('multi-add-playlist-btn').addEventListener('click', async () => {
+          songIdForPlaylist = Array.from(selectedSongs);
+          mixIdForPlaylist = null;
+          await reRenderPlaylistModal();
           addToPlaylistModal.show();
           selectedSongs.clear();
           updateMultiSelectUI();
@@ -6337,6 +6583,12 @@ function perform_full_scan($db) {
         const renderViewDetailsHeader = (details, type) => {
           let typeText = type.charAt(0).toUpperCase() + type.slice(1);
           let statsText = `${details.song_count || 0} songs &bull; ${formatTime(details.total_duration || 0)}`;
+          if (details.play_count !== undefined) {
+             statsText += ` &bull; ${details.play_count || 0} plays`;
+          }
+          if (details.followers_count !== undefined) {
+            statsText += ` &bull; ${details.followers_count || 0} followers`;
+          }
           let shareButtonHTML = '', copyButtonHTML = '', downloadButtonHTML = '', downloadExportPlaylistZipButtonHTML = '';
           
           let shareId = '';
@@ -6508,8 +6760,9 @@ function perform_full_scan($db) {
               </div>
               <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${escapeHTML(song.title)}</div></div>
               <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
-                ${escapeHTML(song.artist)}
-                ${song.added_by_name ? `<br><span style="font-size: 0.7rem; color: var(--ytm-secondary-text);">Added by: ${escapeHTML(song.added_by_name)}</span>` : ''}
+                <div class="text-truncate">${escapeHTML(song.artist)}</div>
+                <div class="text-secondary" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
+                ${song.added_by_name ? `<div style="font-size: 0.7rem; color: var(--ytm-secondary-text); margin-top: 2px;">Added by: ${escapeHTML(song.added_by_name)}</div>` : ''}
               </div>
               <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${escapeHTML(song.album)}</div>
               ${isHistory ? `<div class="d-none d-md-block">${playedAtHTML}</div>` : ''}
@@ -6519,10 +6772,13 @@ function perform_full_scan($db) {
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>
               </div>
-              <div class="song-artist-mobile d-md-none w-100">
-                <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${escapeHTML(song.artist)}</span>
-                ${isHistory ? playedAtHTML : ''}
-                <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
+              <div song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
+                <div class="d-flex justify-content-between align-items-center w-100">
+                   <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${escapeHTML(song.artist)}</span>
+                   ${isHistory ? playedAtHTML : ''}
+                   <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
+                </div>
+                <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
               </div>
             </div>
           `}).join('');
@@ -6594,9 +6850,13 @@ function perform_full_scan($db) {
         const renderGrid = (items, type, append = false) => {
           if (!append) contentArea.innerHTML = '';
           if (type === 'get_user_playlists' && !append && currentUser) {
-            contentArea.innerHTML = `<div class="p-3 d-flex gap-2">
-                <button class="btn btn-danger" id="create-new-playlist-btn"><i class="bi bi-plus-lg"></i> Create Playlist</button>
-                <button class="btn btn-outline-light" id="import-playlist-btn"><i class="bi bi-box-arrow-in-down"></i> Import Playlist</button>
+            contentArea.innerHTML = `
+              <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-music-note-list text-danger me-3 fs-3"></i> Manage Playlists</div>
+                <div class="d-flex gap-2 flex-wrap">
+                  <button class="btn btn-danger rounded-pill px-4 fw-medium shadow-sm" id="create-new-playlist-btn"><i class="bi bi-plus-lg me-1"></i> Create</button>
+                  <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-playlist-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
+                </div>
               </div>`;
           }
           if (!items || items.length === 0) {
@@ -6773,7 +7033,10 @@ function perform_full_scan($db) {
                     <i class="bi bi-soundwave playing-icon"></i>
                   </div>
                   <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
-                  <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${song.artist}</div>
+                  <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
+                    <div class="text-truncate">${song.artist}</div>
+                    <div class="text-secondary" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
+                  </div>
                   <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
                   <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
                   <div class="song-more">
@@ -6781,9 +7044,12 @@ function perform_full_scan($db) {
                       <i class="bi bi-three-dots-vertical"></i>
                     </button>
                   </div>
-                  <div class="song-artist-mobile d-md-none w-100">
-                    <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
-                    <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
+                  <div song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
+                    <div class="d-flex justify-content-between align-items-center w-100">
+                       <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
+                       <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
+                    </div>
+                    <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
                   </div>
                 </div>
               `}).join('');
@@ -7135,21 +7401,26 @@ function perform_full_scan($db) {
             case 'get_offline_songs':
               updateContentTitle('Offline Music', !!currentUser);
               if (currentUser) {
-                contentArea.innerHTML = `<div class="p-3 d-flex gap-2">
-                  <a href="?action=export_offline" class="btn btn-outline-light" id="export-offline-btn"><i class="bi bi-box-arrow-up"></i> Export Offline</a>
-                  <button class="btn btn-outline-light" id="import-offline-btn"><i class="bi bi-box-arrow-in-down"></i> Import Offline</button>
-                </div>`;
+                contentArea.innerHTML = `
+                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-cloud-arrow-down-fill text-info me-3 fs-3"></i> Offline Library</div>
+                    <div class="d-flex gap-2 flex-wrap">
+                      <button class="btn btn-warning rounded-pill px-4 fw-medium shadow-sm text-dark" id="recache-all-offline-btn"><i class="bi bi-arrow-repeat me-1"></i> Re-cache All</button>
+                      <a href="?action=export_offline" class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-offline-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</a>
+                      <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-offline-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
+                    </div>
+                  </div>`;
                 
                 const allData = await fetchData(`?action=get_offline_songs&sort=${currentView.sort}&all=1`, {}, true);
                 if (allData && allData.length > 0) {
-                   offlineViewSongsData = allData;
-                   data = offlineViewSongsData.slice(0, PAGE_SIZE);
-                   renderSongs(data, true);
-                   if (offlineViewSongsData.length <= PAGE_SIZE) allContentloaded = true;
+                  offlineViewSongsData = allData;
+                  data = offlineViewSongsData.slice(0, PAGE_SIZE);
+                  renderSongs(data, true);
+                  if (offlineViewSongsData.length <= PAGE_SIZE) allContentloaded = true;
                 } else {
-                   offlineViewSongsData = [];
-                   renderSongs([], true);
-                   allContentloaded = true;
+                  offlineViewSongsData = [];
+                  renderSongs([], true);
+                  allContentloaded = true;
                 }
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your offline music.</div>`;
@@ -7158,10 +7429,14 @@ function perform_full_scan($db) {
             case 'get_favorites':
               updateContentTitle('Favorites', !!currentUser);
               if (currentUser) {
-                contentArea.innerHTML = `<div class="p-3 d-flex gap-2">
-                  <a href="?action=export_favorites" class="btn btn-outline-light" id="export-favorites-btn"><i class="bi bi-box-arrow-up"></i> Export Favorites</a>
-                  <button class="btn btn-outline-light" id="import-favorites-btn"><i class="bi bi-box-arrow-in-down"></i> Import Favorites</button>
-                </div>`;
+                contentArea.innerHTML = `
+                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-heart-fill text-danger me-3 fs-3"></i> My Favorites</div>
+                    <div class="d-flex gap-2 flex-wrap">
+                      <a href="?action=export_favorites" class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-favorites-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</a>
+                      <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-favorites-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
+                    </div>
+                  </div>`;
                 data = await fetchData(`?action=get_favorites&${pageParams.toString()}`);
                 renderSongs(data, true);
               } else {
@@ -7270,7 +7545,12 @@ function perform_full_scan($db) {
           if (!currentUser) return;
           const played_at_iso = new Date().toISOString();
           const url = '?action=log_play';
-          const data = JSON.stringify({ id: songId, played_at: played_at_iso });
+          
+          const payload = { id: songId, played_at: played_at_iso };
+          if (window.activeQueueContext && window.activeQueueContext.type === 'playlist_songs') {
+            payload.playlist_public_id = decodeURIComponent(window.activeQueueContext.param);
+          }
+          const data = JSON.stringify(payload);
           
           if (navigator.sendBeacon) {
             const blob = new Blob([data], { type: 'application/json; charset=UTF-8' });
@@ -8058,6 +8338,7 @@ function perform_full_scan($db) {
           
           originalQueue = fetchedQueue;
           queue = [...originalQueue];
+          window.activeQueueContext = { type: contextView.type, param: contextView.param };
           
           if (isShuffle) { isShuffle = false; toggleShuffle(); }
           
@@ -8448,25 +8729,7 @@ function perform_full_scan($db) {
             e.stopPropagation();
             mixIdForPlaylist = addMixBtn.dataset.mixId;
             songIdForPlaylist = null;
-            const playlists = await fetchData(`?action=get_user_playlists&sort=modified_desc`);
-            if (playlists && playlists.length > 0) {
-              addToPlaylistModalBody.innerHTML = `
-                <div class="list-group list-group-flush">
-                  ${playlists.map(p => `
-                    <button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-3 add-to-playlist-item my-1 p-2 rounded bg-transparent text-white border border-secondary" data-playlist-id="${p.id}">
-                      <img src="?action=get_image&id=${p.image_id || 0}" class="rounded" style="width: 48px; height: 48px; object-fit: cover; background-color: var(--ytm-surface-2);">
-                      <div class="d-flex flex-column flex-grow-1 text-start overflow-hidden">
-                        <span class="text-truncate fw-medium">${escapeHTML(p.name)}</span>
-                        <span class="small text-secondary">${p.song_count} songs</span>
-                      </div>
-                      <i class="bi bi-plus-circle fs-5"></i>
-                    </button>
-                  `).join('')}
-                </div>
-              `;
-            } else {
-              addToPlaylistModalBody.innerHTML = `<p class="text-secondary text-center p-4">No playlists found. Create one first!</p>`;
-            }
+            await reRenderPlaylistModal();
             addToPlaylistModal.show();
             return;
           }
@@ -8526,6 +8789,25 @@ function perform_full_scan($db) {
           if (exportFavoritesBtn) {
             return;
           }
+          const recacheAllBtn = target.closest('#recache-all-offline-btn');
+          if (recacheAllBtn) {
+             if (!confirm("Are you sure you want to re-download all offline songs? This might take a while and consume data.")) return;
+             if (offlineViewSongsData && offlineViewSongsData.length > 0) {
+                const processAll = async () => {
+                   recacheAllBtn.disabled = true;
+                   recacheAllBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Processing...';
+                   for (const song of offlineViewSongsData) {
+                      await recacheOfflineSong(parseInt(song.id));
+                   }
+                   recacheAllBtn.disabled = false;
+                   recacheAllBtn.innerHTML = '<i class="bi bi-arrow-repeat"></i> Re-cache All';
+                   showToast('Finished re-caching all offline songs!', 'success');
+                };
+                processAll();
+             }
+             return;
+          }
+
           const importOfflineBtn = target.closest('#import-offline-btn');
           if (importOfflineBtn) {
             const importOfflineModalEl = document.getElementById('import-offline-modal');
@@ -8794,74 +9076,7 @@ function perform_full_scan($db) {
               }
               break;
             case 'recache_offline':
-              let tco = document.querySelector('.toast-container');
-              if (!tco) {
-                tco = document.createElement('div');
-                tco.className = 'toast-container position-fixed bottom-0 end-0 p-3';
-                tco.style.zIndex = "1100";
-                document.body.appendChild(tco);
-              }
-              const pToast = document.createElement('div');
-              pToast.className = 'toast align-items-center text-white bg-warning text-dark border-0 show';
-              pToast.innerHTML = `<div class="d-flex"><div class="toast-body" id="re-offline-progress-${id}">Re-caching song (0%)...</div></div>`;
-              tco.appendChild(pToast);
-
-              try {
-                const cache = await caches.open('php-music-offline');
-                
-                await cache.delete(`?action=get_stream&id=${id}`);
-                await cache.delete(`?action=get_image&id=${id}`);
-                await cache.delete(`?action=get_song_data&id=${id}`);
-                
-                await cache.add(`?action=get_image&id=${id}`);
-                await cache.add(`?action=get_song_data&id=${id}`);
-
-                const response = await fetch(`?action=get_stream&id=${id}`);
-                const contentLength = response.headers.get('content-length');
-                
-                if (!contentLength) {
-                  await cache.put(`?action=get_stream&id=${id}`, response.clone());
-                } else {
-                  const total = parseInt(contentLength, 10);
-                  let loaded = 0;
-                  const reader = response.body.getReader();
-                  const stream = new ReadableStream({
-                    async start(controller) {
-                      while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-                        loaded += value.length;
-                        const pct = Math.round((loaded / total) * 100);
-                        const pctText = document.getElementById(`re-offline-progress-${id}`);
-                        if(pctText) pctText.innerText = `Re-caching song (${pct}%)...`;
-                        controller.enqueue(value);
-                      }
-                      controller.close();
-                    }
-                  });
-                  const newResponse = new Response(stream, { headers: response.headers, status: response.status, statusText: response.statusText });
-                  await cache.put(`?action=get_stream&id=${id}`, newResponse);
-                }
-                
-                pToast.classList.replace('bg-warning', 'bg-success');
-                pToast.classList.replace('text-dark', 'text-white');
-                document.getElementById(`re-offline-progress-${id}`).innerText = 'Successfully re-cached!';
-                setTimeout(() => pToast.remove(), 3000);
-                
-                // Remove warning icon if it exists in the UI
-                const itemRow = document.querySelector(`.song-item[data-song-id="${id}"]`);
-                if(itemRow) {
-                  itemRow.classList.remove('offline-missing');
-                  itemRow.style.opacity = '1';
-                  const warningIcon = itemRow.querySelector('.offline-missing-icon');
-                  if(warningIcon) warningIcon.remove();
-                }
-              } catch(e) {
-                pToast.classList.replace('bg-warning', 'bg-danger');
-                pToast.classList.replace('text-dark', 'text-white');
-                document.getElementById(`re-offline-progress-${id}`).innerText = 'Failed to re-cache.';
-                setTimeout(() => pToast.remove(), 3000);
-              }
+              await recacheOfflineSong(parseInt(id));
               break;
             case 'save_to_device':
               try {
@@ -8887,25 +9102,7 @@ function perform_full_scan($db) {
             case 'add_to_playlist':
               songIdForPlaylist = [parseInt(id)];
               mixIdForPlaylist = null;
-              const playlists = await fetchData(`?action=get_user_playlists&song_id=${parseInt(id)}&sort=modified_desc`);
-              if (playlists && playlists.length > 0) {
-                addToPlaylistModalBody.innerHTML = `
-                  <div class="list-group list-group-flush">
-                    ${playlists.map(p => `
-                      <button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-3 add-to-playlist-item my-1 p-2 rounded ${p.is_added == 1 ? 'bg-secondary text-white border-0 opacity-75' : 'bg-transparent text-white border border-secondary'}" data-playlist-id="${p.id}" ${p.is_added == 1 ? 'disabled' : ''}>
-                        <img src="?action=get_image&id=${p.image_id || 0}" class="rounded" style="width: 48px; height: 48px; object-fit: cover; background-color: var(--ytm-surface-2);">
-                        <div class="d-flex flex-column flex-grow-1 text-start overflow-hidden">
-                          <span class="text-truncate fw-medium">${escapeHTML(p.name)}</span>
-                          <span class="small ${p.is_added == 1 ? 'text-white-50' : 'text-secondary'}">${p.song_count} songs</span>
-                        </div>
-                        ${p.is_added == 1 ? '<span class="badge bg-success">Already Added</span>' : '<i class="bi bi-plus-circle fs-5"></i>'}
-                      </button>
-                    `).join('')}
-                  </div>
-                `;
-              } else {
-                addToPlaylistModalBody.innerHTML = `<p class="text-secondary text-center p-4">No playlists found. Create one first!</p>`;
-              }
+              await reRenderPlaylistModal();
               addToPlaylistModal.show();
               break;
             case 'remove_from_playlist':
@@ -9155,6 +9352,22 @@ function perform_full_scan($db) {
         
         if (addToPlaylistModalBody) {
           addToPlaylistModalBody.addEventListener('click', async e => {
+            const createBtn = e.target.closest('#quick-create-playlist-btn');
+            if (createBtn) {
+               const nameInput = document.getElementById('quick-create-playlist-input');
+               const name = nameInput.value.trim();
+               if (!name) return showToast('Playlist name cannot be empty', 'error');
+               const data = await fetchData('?action=create_playlist', {
+                  method: 'POST', headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({ name: name, is_private: 0 })
+               });
+               if (data && data.status === 'success') {
+                  showToast('Playlist created', 'success');
+                  await reRenderPlaylistModal();
+               }
+               return;
+            }
+
             const item = e.target.closest('.add-to-playlist-item');
             if (!item || item.disabled) return;
             const playlistId = item.dataset.playlistId;
@@ -9916,8 +10129,11 @@ function perform_full_scan($db) {
                     if(modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).hide();
                     importOfflineForm.reset();
                     fetchData('?action=get_offline_ids').then(ids => {
-                        if(ids) offlineSongsSet = new Set(ids.map(id => parseInt(id)));
-                        loadView(currentView);
+                      if(ids) offlineSongsSet = new Set(ids.map(id => parseInt(id)));
+                      currentView.sort = 'manual_order';
+                      const sortSelectEl = document.getElementById('sort-select');
+                      if (sortSelectEl) sortSelectEl.value = 'manual_order';
+                      loadView(currentView);
                     });
                   }
                 }
@@ -10683,7 +10899,10 @@ function perform_full_scan($db) {
             const globalIdx = start + idx;
             return `
               <div class="song-item pd-song-row" style="color: #ffffff !important;">
-                <div class="text-secondary small d-none d-md-block" style="color: #ffffff !important;">${globalIdx + 1}</div>
+                <div class="text-secondary small d-flex align-items-center" style="color: #ffffff !important;">
+                  <input class="form-check-input pd-song-checkbox me-2" type="checkbox" data-id="${song.id}" ${song.pdSelected !== false ? 'checked' : ''}>
+                  <span class="d-none d-md-inline">${globalIdx + 1}</span>
+                </div>
                 <div class="title-col text-truncate" title="${pdEscapeHtml(song.title)}" style="color: #ffffff !important;">${pdEscapeHtml(pdTruncate(song.title, 60))}</div>
                 <div class="artist-col text-truncate d-none d-md-block" title="${pdEscapeHtml(song.artist)}" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : 'Unknown')}</div>
                 <div class="duration-col d-none d-md-block" style="color: #ffffff !important;">${formatTime(song.duration)}</div>
@@ -10699,7 +10918,33 @@ function perform_full_scan($db) {
             btn.removeEventListener('click', handleManualDl);
             btn.addEventListener('click', handleManualDl);
           });
+          document.querySelectorAll('.pd-song-checkbox').forEach(chk => {
+            chk.addEventListener('change', (e) => {
+              const s = pdAllSongs.find(song => song.id === parseInt(e.target.dataset.id));
+              if (s) s.pdSelected = e.target.checked;
+              updatePdSelectAllState();
+            });
+          });
         };
+
+        const updatePdSelectAllState = () => {
+          const selectAllChk = document.getElementById('pd-select-all');
+          if (selectAllChk) {
+            const allSelected = pdAllSongs.every(s => s.pdSelected !== false);
+            selectAllChk.checked = allSelected;
+          }
+        };
+
+        const selectAllChk = document.getElementById('pd-select-all');
+        if (selectAllChk) {
+          selectAllChk.addEventListener('change', (e) => {
+            const isChecked = e.target.checked;
+            pdAllSongs.forEach(s => s.pdSelected = isChecked);
+            pdRenderSongRows();
+            const pdModalBody = document.querySelector('#playlist-downloader-modal .modal-body');
+            if (pdModalBody) pdModalBody.dispatchEvent(new Event('scroll'));
+          });
+        }
 
         const pdStopAutoDownload = () => {
           if (!pdIsDownloading) return;
@@ -10720,22 +10965,24 @@ function perform_full_scan($db) {
           pdStartAutoBtn.innerHTML = '<i class="bi bi-stop-fill" style="color: #ffffff !important;"></i> Stop Download';
           pdStartAutoBtn.disabled = false;
           
-          pdLog('🚀 Starting sequential download of ALL songs. Click "Stop Download" to cancel.');
-          for (let i = 0; i < pdAllSongs.length; i++) {
+          const songsToDownload = pdAllSongs.filter(s => s.pdSelected !== false);
+          pdLog(`🚀 Starting sequential download of ${songsToDownload.length} selected songs. Click "Stop Download" to cancel.`);
+          
+          for (let i = 0; i < songsToDownload.length; i++) {
             if (pdStopRequested) {
-              pdLog(`⏹️ Download stopped by user after ${i}/${pdAllSongs.length} songs.`);
+              pdLog(`⏹️ Download stopped by user after ${i}/${songsToDownload.length} songs.`);
               break;
             }
-            await pdDownloadSong(pdAllSongs[i], true, i, pdAllSongs.length);
+            await pdDownloadSong(songsToDownload[i], true, i, songsToDownload.length);
           }
           
           pdStartAutoBtn.removeEventListener('click', pdStopAutoDownload);
           pdStartAutoBtn.addEventListener('click', pdStartAutoDownload);
           pdStartAutoBtn.classList.replace('btn-warning', 'btn-danger');
-          pdStartAutoBtn.innerHTML = '<i class="bi bi-play-fill" style="color: #ffffff !important;"></i> Download All Songs (Sequential)';
+          pdStartAutoBtn.innerHTML = '<i class="bi bi-play-fill" style="color: #ffffff !important;"></i> Download Selected Songs (Sequential)';
           pdStartAutoBtn.disabled = false;
           
-          if (!pdStopRequested) pdLog(`✅ All ${pdAllSongs.length} songs have been sent for download!`);
+          if (!pdStopRequested) pdLog(`✅ All ${songsToDownload.length} selected songs have been sent for download!`);
           pdIsDownloading = false;
           pdStopRequested = false;
         };
@@ -10751,11 +10998,21 @@ function perform_full_scan($db) {
           try {
             const data = await fetchData(`?action=get_playlist_songs&public_id=${publicId}&sort=manual_order&all=1`);
             if (data && data.length > 0) {
-              pdAllSongs = data;
+              pdAllSongs = data.map(s => ({...s, pdSelected: true}));
               pdCurrentPage = 1;
+              
+              let totalSizeBytes = pdAllSongs.reduce((sum, song) => sum + ((song.duration || 0) * (song.bitrate || 128000) / 8), 0);
+              const formatBytes = (bytes) => {
+                if (bytes === 0) return '0 Bytes';
+                const k = 1024;
+                const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+              };
+              
               pdResultsCard.classList.remove('d-none');
-              pdPlaylistTitle.innerHTML = `<i class="bi bi-music-note-beamed" style="color: #ffffff !important;"></i> Playlist loaded <span class="badge bg-secondary ms-2">${pdAllSongs.length} songs</span>`;
-              pdLog(`✅ Successfully loaded ${pdAllSongs.length} songs.`);
+              pdPlaylistTitle.innerHTML = `<i class="bi bi-music-note-beamed" style="color: #ffffff !important;"></i> Playlist loaded <span class="badge bg-secondary ms-2">${pdAllSongs.length} songs</span> <span class="badge bg-info ms-2">~${formatBytes(totalSizeBytes)}</span>`;
+              pdLog(`✅ Successfully loaded ${pdAllSongs.length} songs (~${formatBytes(totalSizeBytes)}).`);
               pdRenderSongRows();
               const loader = document.getElementById('pd-infinite-scroll-loader');
               if (loader) {
@@ -10810,7 +11067,10 @@ function perform_full_scan($db) {
                 const globalIdx = start + idx;
                 return `
                   <div class="song-item pd-song-row" style="color: #ffffff !important;">
-                    <div class="text-secondary small d-none d-md-block" style="color: #ffffff !important;">${globalIdx + 1}</div>
+                    <div class="text-secondary small d-flex align-items-center" style="color: #ffffff !important;">
+                      <input class="form-check-input pd-song-checkbox me-2" type="checkbox" data-id="${song.id}" ${song.pdSelected !== false ? 'checked' : ''}>
+                      <span class="d-none d-md-inline">${globalIdx + 1}</span>
+                    </div>
                     <div class="title-col text-truncate" title="${pdEscapeHtml(song.title)}" style="color: #ffffff !important;">${pdEscapeHtml(pdTruncate(song.title, 60))}</div>
                     <div class="artist-col text-truncate d-none d-md-block" title="${pdEscapeHtml(song.artist)}" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : 'Unknown')}</div>
                     <div class="duration-col d-none d-md-block" style="color: #ffffff !important;">${formatTime(song.duration)}</div>
@@ -10823,6 +11083,13 @@ function perform_full_scan($db) {
               document.querySelectorAll('.pd-manual-dl').forEach(btn => {
                 btn.removeEventListener('click', handleManualDl);
                 btn.addEventListener('click', handleManualDl);
+              });
+              document.querySelectorAll('.pd-song-checkbox').forEach(chk => {
+                chk.addEventListener('change', (e) => {
+                  const s = pdAllSongs.find(song => song.id === parseInt(e.target.dataset.id));
+                  if (s) s.pdSelected = e.target.checked;
+                  updatePdSelectAllState();
+                });
               });
               const loader = document.getElementById('pd-infinite-scroll-loader');
               if (loader) {
