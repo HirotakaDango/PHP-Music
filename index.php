@@ -184,7 +184,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '3.7');
+define('APP_VERSION', '3.8');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -594,6 +594,7 @@ if (isset($_GET['share_type'])) {
         ];
       }
       break;
+
     case 'album':
       $album_name = $_GET['album_name'] ?? $_GET['id'] ?? null;
       $artist_id = $_GET['artist_id'] ?? null;
@@ -608,6 +609,7 @@ if (isset($_GET['share_type'])) {
         }
       }
       break;
+
     case 'artist':
       $share_id = $_GET['id'] ?? null;
       if (is_numeric($share_id)) {
@@ -621,6 +623,7 @@ if (isset($_GET['share_type'])) {
         $view_config = ['type' => 'artist_songs', 'param' => $share_id, 'sort' => 'album_asc'];
       }
       break;
+
     case 'playlist':
       $share_id = $_GET['id'] ?? null;
       $stmt = $db_for_share->prepare("SELECT id FROM playlists WHERE public_id = ?");
@@ -629,6 +632,7 @@ if (isset($_GET['share_type'])) {
         $view_config = ['type' => 'playlist_songs', 'param' => $share_id, 'sort' => 'manual_order'];
       }
       break;
+
     case 'mix':
       $share_id = $_GET['id'] ?? null;
       $stmt = $db_for_share->prepare("SELECT id FROM mixes WHERE public_id = ?");
@@ -661,7 +665,8 @@ function init_db($db) {
       profile_picture BLOB,
       profile_picture_type TEXT,
       backup_key TEXT,
-      banned INTEGER DEFAULT 0
+      banned INTEGER DEFAULT 0,
+      settings TEXT
     );
   ");
   $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS users_artist_idx ON users(artist);");
@@ -706,6 +711,8 @@ function init_db($db) {
       image BLOB,
       last_modified INTEGER,
       bitrate INTEGER,
+      lyrics TEXT,
+      is_private INTEGER DEFAULT 0,
       replaygain REAL DEFAULT 0,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
@@ -758,13 +765,10 @@ function init_db($db) {
   if (!in_array('play_count', $playlists_columns)) {
     $db->exec("ALTER TABLE playlists ADD COLUMN play_count INTEGER DEFAULT 0;");
   }
-  if (!in_array('is_private', $music_columns)) {
+  if ($music_table_exists && !in_array('is_private', $music_columns)) {
     $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;");
   }
-  $playlist_songs_cols = $db->query("PRAGMA table_info(playlist_songs);")->fetchAll(PDO::FETCH_COLUMN, 1);
-  if (!in_array('added_by', $playlist_songs_cols)) {
-    $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;");
-  }
+
   $db->exec("
     CREATE TABLE IF NOT EXISTS playlist_collaborators (
       playlist_id INTEGER NOT NULL,
@@ -774,17 +778,24 @@ function init_db($db) {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
   ");
+
   $db->exec("
     CREATE TABLE IF NOT EXISTS playlist_songs (
       playlist_id INTEGER NOT NULL,
       song_id INTEGER NOT NULL,
       sort_order INTEGER,
       added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      added_by INTEGER,
       PRIMARY KEY (playlist_id, song_id),
       FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
       FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
     );
   ");
+
+  $playlist_songs_cols = $db->query("PRAGMA table_info(playlist_songs);")->fetchAll(PDO::FETCH_COLUMN, 1);
+  if (!in_array('added_by', $playlist_songs_cols)) {
+    $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;");
+  }
 
   $db->exec("
     CREATE TABLE IF NOT EXISTS mixes (
@@ -886,8 +897,10 @@ function init_db($db) {
 
   $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
   if (!$stmt->fetch()) {
-    $db->prepare("INSERT INTO users (email, artist, password_hash, verified) VALUES (?, ?, ?, ?)")
-      ->execute(['musiclibrary@mail.com', 'Music Library', password_hash('musiclibrary', PASSWORD_DEFAULT), 'yes']);
+    $initial = 'M';
+    $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#121212">' . htmlspecialchars($initial) . '</text></svg>';
+    $db->prepare("INSERT INTO users (email, artist, password_hash, verified, profile_picture, profile_picture_type) VALUES (?, ?, ?, ?, ?, 'image/svg+xml')")
+      ->execute(['musiclibrary@mail.com', 'Music Library', password_hash('musiclibrary', PASSWORD_DEFAULT), 'yes', $svg]);
   }
 }
 
@@ -913,7 +926,7 @@ function get_upload_limit() {
   return "Max file size: " . min($max_upload, $max_post);
 }
 
-function process_image_to_webp($imageData, $target_width = 500, $quality = 75) {
+function process_image_to_webp($imageData, $target_width = 640, $quality = 78) {
   if (!$imageData || !function_exists('imagecreatefromstring') || !function_exists('imagewebp')) return null;
   $sourceImage = @imagecreatefromstring($imageData);
   if (!$sourceImage) return null;
@@ -924,20 +937,31 @@ function process_image_to_webp($imageData, $target_width = 500, $quality = 75) {
   $src_x = (int)(($src_w - $min_dim) / 2);
   $src_y = (int)(($src_h - $min_dim) / 2);
 
-  $resizedImage = imagecreatetruecolor($target_width, $target_width);
+  // Prevent upscaling small images to retain pristine quality
+  $final_width = min($min_dim, $target_width);
+
+  $resizedImage = imagecreatetruecolor($final_width, $final_width);
   imagealphablending($resizedImage, false);
   imagesavealpha($resizedImage, true);
-  imagecopyresampled($resizedImage, $sourceImage, 0, 0, $src_x, $src_y, $target_width, $target_width, $min_dim, $min_dim);
+  imagecopyresampled($resizedImage, $sourceImage, 0, 0, $src_x, $src_y, $final_width, $final_width, $min_dim, $min_dim);
 
   ob_start();
   imagewebp($resizedImage, null, $quality);
   $webpData = ob_get_clean();
+  
+  // Strict 70KB limit enforcer. If it exceeds 71,680 bytes, aggressively compress it.
+  if (strlen($webpData) > 71680) {
+    ob_start();
+    imagewebp($resizedImage, null, 55); 
+    $webpData = ob_get_clean();
+  }
+
   imagedestroy($sourceImage);
   imagedestroy($resizedImage);
   return $webpData;
 }
 
-function process_image_to_jpeg($imageData, $target_width = 500, $quality = 85) {
+function process_image_to_jpeg($imageData, $target_width = 640, $quality = 82) {
   if (!$imageData || !function_exists('imagecreatefromstring') || !function_exists('imagejpeg')) return null;
   $sourceImage = @imagecreatefromstring($imageData);
   if (!$sourceImage) return null;
@@ -948,12 +972,21 @@ function process_image_to_jpeg($imageData, $target_width = 500, $quality = 85) {
   $src_x = (int)(($src_w - $min_dim) / 2);
   $src_y = (int)(($src_h - $min_dim) / 2);
 
-  $resizedImage = imagecreatetruecolor($target_width, $target_width);
-  imagecopyresampled($resizedImage, $sourceImage, 0, 0, $src_x, $src_y, $target_width, $target_width, $min_dim, $min_dim);
+  $final_width = min($min_dim, $target_width);
+
+  $resizedImage = imagecreatetruecolor($final_width, $final_width);
+  imagecopyresampled($resizedImage, $sourceImage, 0, 0, $src_x, $src_y, $final_width, $final_width, $min_dim, $min_dim);
 
   ob_start();
   imagejpeg($resizedImage, null, $quality);
   $jpegData = ob_get_clean();
+  
+  if (strlen($jpegData) > 71680) {
+    ob_start();
+    imagejpeg($resizedImage, null, 60);
+    $jpegData = ob_get_clean();
+  }
+
   imagedestroy($sourceImage);
   imagedestroy($resizedImage);
   return $jpegData;
@@ -1180,9 +1213,20 @@ if (isset($_GET['action'])) {
       }
 
       $hash = password_hash($password, PASSWORD_DEFAULT);
-      $stmt = $db->prepare("INSERT INTO users (email, artist, password_hash) VALUES (?, ?, ?)");
-      $stmt->execute([$email, $artist, $hash]);
-      send_json(['status' => 'success', 'message' => 'Registration successful. An admin will verify your account soon.']);
+      
+      $initial = mb_strtoupper(mb_substr($artist, 0, 1, 'UTF-8'));
+      $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#121212">' . htmlspecialchars($initial) . '</text></svg>';
+      
+      $stmt = $db->prepare("INSERT INTO users (email, artist, password_hash, profile_picture, profile_picture_type) VALUES (?, ?, ?, ?, 'image/svg+xml')");
+      $stmt->execute([$email, $artist, $hash, $svg]);
+      
+      // Automatically log the user in
+      $new_user_id = $db->lastInsertId();
+      $_SESSION['user_id'] = $new_user_id;
+      $_SESSION['user_artist'] = $artist;
+      try { $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'logged in', '')")->execute([$new_user_id]); } catch(Exception $e) {}
+      
+      send_json(['status' => 'success', 'message' => 'Registration successful. You are now logged in!']);
       break;
 
     case 'login':
@@ -1320,7 +1364,8 @@ if (isset($_GET['action'])) {
         echo $song_img;
       } else {
         header('Content-Type: image/svg+xml');
-        echo '<svg xmlns="http://www.w3.org/2000/svg" fill="#404040" viewBox="0 0 16 16"><path d="M11 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0"/><path fill-rule="evenodd" d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8m8-7a7 7 0 0 0-5.468 11.37C3.242 11.226 4.805 10 8 10s4.757 1.225 5.468 2.37A7 7 0 0 0 8 1"/></svg>';
+        $initial = $artist_name ? mb_strtoupper(mb_substr($artist_name, 0, 1, 'UTF-8')) : '?';
+        echo '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#121212">' . htmlspecialchars($initial) . '</text></svg>';
       }
       exit;
 
@@ -1372,9 +1417,18 @@ if (isset($_GET['action'])) {
           http_response_code(409); send_json(['status' => 'error', 'message' => 'Email or Artist already taken.']);
         }
         $hash = password_hash($n_password, PASSWORD_DEFAULT);
-        $db->prepare("UPDATE users SET email = ?, artist = ?, password_hash = ?, backup_key = NULL WHERE id = ?")
-           ->execute([$n_email, $n_artist, $hash, $r_user_id]);
-        send_json(['status' => 'success', 'message' => 'Account restored successfully. Please log in.']);
+        $initial = mb_strtoupper(mb_substr($n_artist, 0, 1, 'UTF-8'));
+        $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#121212">' . htmlspecialchars($initial) . '</text></svg>';
+        
+        $db->prepare("UPDATE users SET email = ?, artist = ?, password_hash = ?, backup_key = NULL, profile_picture = ?, profile_picture_type = 'image/svg+xml' WHERE id = ?")
+           ->execute([$n_email, $n_artist, $hash, $svg, $r_user_id]);
+           
+        // Automatically log the user in
+        $_SESSION['user_id'] = $r_user_id;
+        $_SESSION['user_artist'] = $n_artist;
+        try { $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'logged in', '')")->execute([$r_user_id]); } catch(Exception $e) {}
+        
+        send_json(['status' => 'success', 'message' => 'Account restored successfully. You are now logged in!']);
       } else {
         http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or expired backup key.']);
       }
@@ -1632,6 +1686,13 @@ if (isset($_GET['action'])) {
           if ($webp_data) {
             $update_fields[] = "image = ?";
             $update_params[] = $webp_data;
+            
+            // Backup the cover to physical disk so it survives database deletions
+            if ($jpeg_data && file_exists($song['file'])) {
+                $file_info = pathinfo($song['file']);
+                $cover_path = $file_info['dirname'] . '/' . $file_info['filename'] . '.jpg';
+                @file_put_contents($cover_path, $jpeg_data);
+            }
           }
         }
 
@@ -1690,11 +1751,16 @@ if (isset($_GET['action'])) {
     case 'get_explore':
       // MASS USE OPTIMIZATION: 5-Minute Micro-Cache for heavy Discovery queries
       $cache_file = sys_get_temp_dir() . '/phpmusic_explore_cache_' . ($user_id ? $user_id : 'guest') . '.json';
-      if (file_exists($cache_file) && (time() - filemtime($cache_file)) < 300) {
-        // Serve from cache instantly
-        header('Content-Type: application/json; charset=utf-8'); // <--- ADD THIS LINE
-        echo file_get_contents($cache_file);
-        exit;
+      if (file_exists($cache_file)) {
+        $cached_content = @file_get_contents($cache_file);
+        if (!empty($cached_content) && (time() - filemtime($cache_file)) < 300) {
+          $decoded = json_decode($cached_content);
+          if ($decoded && isset($decoded->shelves)) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo $cached_content;
+            exit;
+          }
+        }
       }
 
       $shelves = [];
@@ -1834,10 +1900,12 @@ if (isset($_GET['action'])) {
 
       // MASS USE OPTIMIZATION: Save the generated response to the cache file before sending
       $final_json = json_encode(['shelves' => $shelves], JSON_INVALID_UTF8_SUBSTITUTE);
-      @file_put_contents($cache_file, $final_json);
+      if ($final_json) {
+        @file_put_contents($cache_file, $final_json);
+      }
       
       header('Content-Type: application/json; charset=utf-8');
-      echo $final_json;
+      echo $final_json ?: '{"shelves":[]}';
       exit;
     
     case 'get_songs':
@@ -3182,9 +3250,104 @@ if (isset($_GET['action'])) {
 
     case 'get_activity_feed':
       if (!$user_id) { send_json([]); }
-      $stmt = $db->prepare("SELECT action, target_name, created_at FROM activity_feed WHERE user_id = ? ORDER BY created_at DESC LIMIT 50");
-      $stmt->execute([$user_id]);
-      send_json($stmt->fetchAll());
+      
+      try { $db->exec("ALTER TABLE users ADD COLUMN last_notif_clear DATETIME;"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE users ADD COLUMN last_notif_read DATETIME;"); } catch(Exception $e) {}
+      
+      $stmt_times = $db->prepare("SELECT last_notif_clear, last_notif_read FROM users WHERE id = ?");
+      $stmt_times->execute([$user_id]);
+      $times = $stmt_times->fetch();
+      $last_clear = $times['last_notif_clear'] ?: '2000-01-01 00:00:00';
+      $last_read = $times['last_notif_read'] ?: '2000-01-01 00:00:00';
+      
+      $feed = [];
+      
+      // 1. My standard activity
+      $stmt = $db->prepare("SELECT 'activity' as type, action, target_name, created_at FROM activity_feed WHERE user_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT 50");
+      $stmt->execute([$user_id, $last_clear]);
+      $feed = array_merge($feed, $stmt->fetchAll());
+      
+      // 2. Incoming Comments and Replies
+      $stmt2 = $db->prepare("
+        SELECT 
+          'comment_notif' as type,
+          c.id as comment_id,
+          c.song_id,
+          c.content,
+          c.created_at,
+          u.artist as commenter_name,
+          m.title as song_title,
+          CASE 
+            WHEN c.parent_id IS NOT NULL THEN 'reply'
+            ELSE 'comment'
+          END as notif_type
+        FROM song_comments c
+        JOIN users u ON c.user_id = u.id
+        JOIN music m ON c.song_id = m.id
+        LEFT JOIN song_comments pc ON c.parent_id = pc.id
+        WHERE ((m.user_id = ? AND c.parent_id IS NULL AND c.user_id != ?) 
+           OR (c.parent_id IS NOT NULL AND pc.user_id = ? AND c.user_id != ?))
+           AND c.created_at > ?
+        ORDER BY c.created_at DESC LIMIT 50
+      ");
+      $stmt2->execute([$user_id, $user_id, $user_id, $user_id, $last_clear]);
+      $feed = array_merge($feed, $stmt2->fetchAll());
+      
+      // Sort all notifications by date
+      usort($feed, function($a, $b) {
+        return strtotime($b['created_at']) - strtotime($a['created_at']);
+      });
+      
+      // Add unread status flags
+      $final_feed = array_slice($feed, 0, 50);
+      foreach ($final_feed as &$item) {
+        $item['is_unread'] = (strtotime($item['created_at']) > strtotime($last_read));
+      }
+      unset($item);
+      
+      send_json($final_feed);
+      break;
+
+    case 'clear_activity_feed':
+      if (!$user_id) { http_response_code(403); exit; }
+      try { $db->exec("ALTER TABLE users ADD COLUMN last_notif_clear DATETIME;"); } catch(Exception $e) {}
+      $db->prepare("UPDATE users SET last_notif_clear = CURRENT_TIMESTAMP WHERE id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'get_unread_notif_count':
+      if (!$user_id) { send_json(['count' => 0]); }
+      try { $db->exec("ALTER TABLE users ADD COLUMN last_notif_read DATETIME;"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE users ADD COLUMN last_notif_clear DATETIME;"); } catch(Exception $e) {}
+      
+      $stmt_times = $db->prepare("SELECT last_notif_read, last_notif_clear FROM users WHERE id = ?");
+      $stmt_times->execute([$user_id]);
+      $times = $stmt_times->fetch();
+      $last_read = $times['last_notif_read'] ?: '2000-01-01 00:00:00';
+      $last_clear = $times['last_notif_clear'] ?: '2000-01-01 00:00:00';
+      $threshold = max($last_read, $last_clear);
+
+      $stmt2 = $db->prepare("
+          SELECT COUNT(*)
+          FROM song_comments c
+          JOIN music m ON c.song_id = m.id
+          LEFT JOIN song_comments pc ON c.parent_id = pc.id
+          WHERE ((m.user_id = ? AND c.parent_id IS NULL AND c.user_id != ?) 
+             OR (c.parent_id IS NOT NULL AND pc.user_id = ? AND c.user_id != ?))
+             AND c.created_at > ?
+      ");
+      $stmt2->execute([$user_id, $user_id, $user_id, $user_id, $threshold]);
+      $count = $stmt2->fetchColumn();
+      
+      send_json(['count' => (int)$count]);
+      break;
+
+    case 'mark_notifs_read':
+      if (!$user_id) { http_response_code(403); exit; }
+      try { $db->exec("ALTER TABLE users ADD COLUMN last_notif_read DATETIME;"); } catch(Exception $e) {}
+      $db->prepare("UPDATE users SET last_notif_read = CURRENT_TIMESTAMP WHERE id = ?")->execute([$user_id]);
+      send_json(['status' => 'success']);
       break;
 
     case 'edit_playlist':
@@ -3433,10 +3596,16 @@ if (isset($_GET['action'])) {
       
       // MASS USE OPTIMIZATION: 5-Minute Micro-Cache for heavy Recommendation queries
       $rec_cache_file = sys_get_temp_dir() . '/phpmusic_rec_cache_' . $user_id . '.json';
-      if (file_exists($rec_cache_file) && (time() - filemtime($rec_cache_file)) < 300) {
-        header('Content-Type: application/json; charset=utf-8'); // <--- ADD THIS LINE
-        echo file_get_contents($rec_cache_file);
-        exit;
+      if (file_exists($rec_cache_file)) {
+        $cached_content = @file_get_contents($rec_cache_file);
+        if (!empty($cached_content) && (time() - filemtime($rec_cache_file)) < 300) {
+          $decoded = json_decode($cached_content);
+          if ($decoded && isset($decoded->shelves)) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo $cached_content;
+            exit;
+          }
+        }
       }
 
       $shelves = [];
@@ -3708,10 +3877,12 @@ if (isset($_GET['action'])) {
 
       // MASS USE OPTIMIZATION: Save to cache
       $final_rec_json = json_encode(['shelves' => $shelves], JSON_INVALID_UTF8_SUBSTITUTE);
-      @file_put_contents($rec_cache_file, $final_rec_json);
+      if ($final_rec_json) {
+        @file_put_contents($rec_cache_file, $final_rec_json);
+      }
       
       header('Content-Type: application/json; charset=utf-8');
-      echo $final_rec_json;
+      echo $final_rec_json ?: '{"shelves":[]}';
       exit;
 
     case 'export_favorites':
@@ -4065,11 +4236,16 @@ function perform_full_scan($db) {
   $files_to_update = [];
 
   foreach (array_intersect_key($files_on_disk, $db_files) as $filePath => $mtime) {
-    if ($mtime > $db_files[$filePath]) {
+    // SMART DIFF: Only update if the timestamp doesn't match perfectly.
+    // This is blazing fast, but still catches files moved between servers/drives!
+    if ($mtime != $db_files[$filePath]) {
       $files_to_update[$filePath] = $mtime;
     }
   }
 
+  $unchanged_count = count(array_intersect_key($files_on_disk, $db_files)) - count($files_to_update);
+
+  echo " - Existing (Unchanged): " . $unchanged_count . "\n";
   echo " - To add: " . count($files_to_add) . "\n";
   echo " - To update: " . count($files_to_update) . "\n";
   echo " - To delete: " . count($files_to_delete) . "\n\n";
@@ -4082,16 +4258,26 @@ function perform_full_scan($db) {
   echo "Step 6: Processing changes...\n";
   
   $getID3 = new getID3;
+  // EXTREME OPTIMIZATION: Disable heavy hashing and extra parsing
   $getID3->option_md5_data = false;
   $getID3->option_md5_data_source = false;
+  $getID3->option_sha1_data = false;
+  $getID3->option_tags_html = false;
 
   $insert_stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-  $update_stmt = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, image = COALESCE(?, image), last_modified = ? WHERE file = ?");
+  $update_stmt_with_image = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, image = ?, last_modified = ? WHERE file = ?");
+  $update_stmt_no_image = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, last_modified = ? WHERE file = ?");
   $delete_stmt = $db->prepare("DELETE FROM music WHERE file = ?");
   
-  $find_user_stmt = $db->prepare("SELECT id FROM users WHERE artist = ?");
+  // EXTREME OPTIMIZATION: Cache Users in RAM to skip 1000s of SELECT queries
+  $user_cache = [];
+  $stmt_all_users = $db->query("SELECT id, artist FROM users");
+  while ($row = $stmt_all_users->fetch()) {
+      $user_cache[strtolower($row['artist'])] = $row['id'];
+  }
+  
   $check_email_stmt = $db->prepare("SELECT id FROM users WHERE email = ?");
-  $insert_user_stmt = $db->prepare("INSERT INTO users (email, artist, password_hash, verified) VALUES (?, ?, ?, 'no')");
+  $insert_user_stmt = $db->prepare("INSERT INTO users (email, artist, password_hash, verified, profile_picture, profile_picture_type) VALUES (?, ?, ?, 'no', ?, 'image/svg+xml')");
 
   $processed_count = 0;
   $total_to_process = count($files_to_process) + count($files_to_delete);
@@ -4128,21 +4314,51 @@ function perform_full_scan($db) {
         $duration = (int)($info['playtime_seconds'] ?? 0);
         $bitrate = (int)($info['audio']['bitrate'] ?? 0);
         $raw_image_data = $info['comments']['picture'][0]['data'] ?? null;
+        
+        // Advanced Fallback: Check local directory for cover image files if ID3 tag is missing
+        if (!$raw_image_data) {
+          $file_info = pathinfo($filePath);
+          $dir = $file_info['dirname'];
+          $filename = $file_info['filename'];
+            
+          $possible_covers = [
+            $filename . '.jpg',
+            $filename . '.png',
+            'cover.jpg',
+            'cover.png',
+            'folder.jpg',
+            'folder.png',
+            'artwork.jpg'
+          ];
+            
+          foreach ($possible_covers as $cfile) {
+            $cpath = $dir . '/' . $cfile;
+              if (file_exists($cpath)) {
+                $raw_image_data = @file_get_contents($cpath);
+              if ($raw_image_data) break;
+            }
+          }
+        }
+        
         $webp_image_data = process_image_to_webp($raw_image_data);
         
         $is_update = isset($db_files[$filePath]);
 
         if ($is_update) {
-            $update_stmt->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime, $filePath]);
+            if ($webp_image_data !== null) {
+                $update_stmt_with_image->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime, $filePath]);
+            } else {
+                $update_stmt_no_image->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $mtime, $filePath]);
+            }
         } else {
             $file_user_id = $library_user_id;
             $main_artist = trim(preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $artist_tag)[0]);
 
             if ($main_artist !== 'Unknown Artist' && !empty($main_artist)) {
-              $find_user_stmt->execute([$main_artist]);
-              $found_user_id = $find_user_stmt->fetchColumn();
-              if ($found_user_id) {
-                $file_user_id = $found_user_id;
+              $artist_lower = strtolower($main_artist);
+              // Read from RAM cache instead of hitting the database!
+              if (isset($user_cache[$artist_lower])) {
+                $file_user_id = $user_cache[$artist_lower];
               } else {
                 echo " -> New artist found: '{$main_artist}'. Creating account.\n";
                 $sanitized_artist_base = sanitize_for_path($main_artist);
@@ -4158,8 +4374,13 @@ function perform_full_scan($db) {
                   $email = $sanitized_artist_base . $counter . '@mail.com';
                 }
                 
-                $insert_user_stmt->execute([$email, $main_artist, $hash]);
+                $initial = mb_strtoupper(mb_substr($main_artist, 0, 1, 'UTF-8'));
+                $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#121212">' . htmlspecialchars($initial) . '</text></svg>';
+                
+                $insert_user_stmt->execute([$email, $main_artist, $hash, $svg]);
                 $file_user_id = $db->lastInsertId();
+                // Add the new user to RAM Cache
+                $user_cache[$artist_lower] = $file_user_id; 
                 echo " -> Account created with ID: {$file_user_id}, Email: {$email}\n";
               }
             }
@@ -4172,6 +4393,14 @@ function perform_full_scan($db) {
 
       unset($info);
       unset($webp_image_data);
+      unset($raw_image_data);
+      
+      // OPTIMIZATION: Periodically dump SQLite WAL memory to disk to prevent RAM exhaustion
+      if ($processed_count % 200 === 0) {
+          $db->commit();
+          gc_collect_cycles();
+          $db->beginTransaction();
+      }
     }
 
     foreach ($files_to_delete as $filePath => $mtime) {
@@ -4576,7 +4805,7 @@ function perform_full_scan($db) {
       .player-modal-extra-controls { display: flex; justify-content: space-between; align-items: center; }
       .add-to-playlist-item { cursor: pointer; }
       .add-to-playlist-item:hover { background-color: var(--ytm-surface-2); }
-      .song-artist:hover, .song-artist-name:hover { text-decoration: underline; }
+      .song-artist:hover, .song-artist-name:hover, .hover-underline:hover { text-decoration: underline; }
       #multi-select-bar {
         position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
         background: rgba(40, 40, 40, 0.95); backdrop-filter: blur(10px);
@@ -4741,6 +4970,10 @@ function perform_full_scan($db) {
               <i class="bi bi-question-circle-fill"></i>
               <span>How to use</span>
             </a>
+            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#shortcuts-modal">
+              <i class="bi bi-keyboard-fill"></i>
+              <span>Shortcuts</span>
+            </a>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#playlist-downloader-modal">
               <i class="bi bi-cloud-arrow-down-fill"></i>
               <span>Downloader</span>
@@ -4761,9 +4994,17 @@ function perform_full_scan($db) {
               <i class="bi bi-code-slash"></i>
               <span>Get API</span>
             </a>
+            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#license-modal">
+              <i class="bi bi-file-earmark-text-fill"></i>
+              <span>License</span>
+            </a>
             <a href="#" class="nav-link" id="check-update-btn">
               <i class="bi bi-arrow-clockwise"></i>
               <span>Check Update</span>
+            </a>
+            <a href="https://github.com/HirotakaDango/PHP-Music/archive/refs/heads/main.zip" target="_blank" class="dl-independent" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;border-left:3px solid transparent;gap:1rem;text-decoration:none;padding:0.75rem 1.5rem;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'">
+              <i class="bi bi-file-earmark-zip-fill" style="font-size:1.25rem;width:24px;text-align:center;"></i>
+              <span>Download Source Code</span>
             </a>
             <a href="#" class="nav-link" id="clear-cache-btn">
               <i class="bi bi-eraser-fill"></i>
@@ -4792,7 +5033,10 @@ function perform_full_scan($db) {
           <div class="dropdown logged-in-only">
             <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-mobile" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
-              <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#activity-modal"><i class="bi bi-bell-fill me-2"></i>My Activity</a></li>
+              <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#activity-modal">
+                <span><i class="bi bi-bell-fill me-2"></i>My Activity</span>
+                <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
+              </a></li>
               <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-mobile"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
               <li><a class="dropdown-item" href="#" id="sleep-timer-btn-mobile"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
               <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill me-2"></i>Settings</a></li>
@@ -4821,7 +5065,10 @@ function perform_full_scan($db) {
             <div class="dropdown logged-in-only d-none d-md-block">
               <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-desktop" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
               <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
-                <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#activity-modal"><i class="bi bi-bell-fill me-2"></i>My Activity</a></li>
+                <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#activity-modal">
+                <span><i class="bi bi-bell-fill me-2"></i>My Activity</span>
+                <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
+              </a></li>
                 <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
                 <li><a class="dropdown-item" href="#" id="sleep-timer-btn-desktop"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
                 <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill me-2"></i>Settings</a></li>
@@ -4843,103 +5090,524 @@ function perform_full_scan($db) {
             <h5 class="modal-title text-white"><i class="bi bi-info-circle-fill text-danger me-2"></i>Comprehensive User Guide</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body text-light" style="line-height: 1.6;">
+          <div class="modal-body text-light p-4" style="line-height: 1.7; font-size: 0.95rem;">
             
-            <h6 class="text-white mb-2"><i class="bi bi-play-circle-fill me-2"></i>1. Basic Playback & Navigation</h6>
-            <ul class="small mb-4">
-              <li class="mb-1"><strong>Play a Song:</strong> Simply click or tap on any song in the list to start playback immediately.</li>
-              <li class="mb-1"><strong>Player Controls:</strong> Use the bottom player bar to pause, play, shuffle, and toggle repeat modes (Repeat All, Repeat One, Repeat Off).</li>
-              <li class="mb-1"><strong>Seek Gestures:</strong> Click and hold (long press) the <strong>Next</strong> or <strong>Previous</strong> buttons to fast-forward or rewind the current track in 5-second increments.</li>
-              <li class="mb-1"><strong>Fullscreen Player:</strong> Click on the track artwork or title in the mobile player bar to open the expanded, fullscreen player view.</li>
-            </ul>
+            <div class="text-center mb-5 mt-2">
+              <i class="bi bi-journal-album text-danger" style="font-size: 4rem;"></i>
+              <h2 class="fw-bold mt-3 text-white">The Ultimate Guide</h2>
+              <p class="text-secondary">Master every advanced feature, gesture, and tool available in the PHP Music platform.</p>
+            </div>
 
-            <h6 class="text-white mb-2"><i class="bi bi-ui-checks-grid me-2"></i>2. Multi-Select Mode</h6>
-            <ul class="small mb-4">
-              <li class="mb-1"><strong>Activation:</strong> Click and hold (long press) on any song row for exactly 1 second to enter multi-select mode.</li>
-              <li class="mb-1"><strong>Selecting:</strong> Once activated, tap any other songs to add or remove them from your selection. A floating action bar will appear at the bottom.</li>
-              <li class="mb-1"><strong>Bulk Actions:</strong> Use the floating bar to add all selected songs directly to a specific playlist or your favorites in one click.</li>
-              <li class="mb-1"><strong>Note:</strong> Drag-and-drop sorting is temporarily disabled while multi-select mode is active.</li>
-            </ul>
+            <!-- SECTION 1: PLAYBACK & NAVIGATION -->
+            <div class="card bg-transparent border-secondary mb-4">
+              <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0 text-white"><i class="bi bi-play-circle-fill text-danger me-2"></i> 1. Playback & Core Navigation</h5>
+              </div>
+              <div class="card-body">
+                <ul class="list-unstyled mb-0">
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-mouse-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Instant Playback</strong><br>
+                        <span class="text-secondary">Simply click or tap on any song row in any list, album, or playlist. The audio will immediately stream, and the persistent player bar will appear at the bottom of your screen.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-arrows-collapse"></i></div>
+                      <div>
+                        <strong class="text-white">Fullscreen Mode & Visualizer</strong><br>
+                        <span class="text-secondary">Click the square album artwork inside the bottom player bar. This triggers the immersive Fullscreen Player, which features an audio-reactive visualizer that bounces to the beat, synced lyrics, and the Up Next queue.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-fast-forward-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Seek Gestures</strong><br>
+                        <span class="text-secondary">Click and hold (long press) the <strong>Next</strong> <i class="bi bi-skip-end-fill"></i> or <strong>Previous</strong> <i class="bi bi-skip-start-fill"></i> buttons. This will seamlessly fast-forward or rewind the currently playing track in precise 5-second increments.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-pip"></i></div>
+                      <div>
+                        <strong class="text-white">Picture-in-Picture (PiP) Mini Player</strong><br>
+                        <span class="text-secondary">On desktop, click the <i class="bi bi-pip"></i> icon to detach the player into a floating window. It stays visible over all other tabs and applications, complete with interactive playback controls and real-time scrolling lyrics!</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-0">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-moon-stars-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Sleep Timer & Wake Lock</strong><br>
+                        <span class="text-secondary">Open your profile dropdown (top right) and select "Sleep Timer". Enter the number of minutes, and the music will gracefully pause when time is up. You can optionally toggle the <i class="bi bi-display"></i> Wake Lock icon to physically prevent your phone screen from dimming while you read lyrics.</span>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </div>
 
-            <h6 class="text-white mb-2"><i class="bi bi-three-dots-vertical me-2"></i>3. Context Menus & Actions</h6>
-            <ul class="small mb-4">
-              <li class="mb-1"><strong>Accessing:</strong> Click the three vertical dots <i class="bi bi-three-dots-vertical"></i> on the right side of any song or playlist.</li>
-              <li class="mb-1"><strong>Navigation:</strong> Instantly jump to the track's Artist or Album view.</li>
-              <li class="mb-1"><strong>Information:</strong> View deeply embedded Metadata (Bitrate, Duration, Year) or read the embedded Lyrics.</li>
-              <li class="mb-1"><strong>Sharing:</strong> Generate a shareable link to send specific songs, albums, or playlists to friends via WhatsApp, Telegram, or Twitter.</li>
-            </ul>
+            <!-- SECTION 2: AUDIO ENGINE -->
+            <div class="card bg-transparent border-secondary mb-4">
+              <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0 text-white"><i class="bi bi-sliders text-info me-2"></i> 2. The Advanced Audio Engine</h5>
+              </div>
+              <div class="card-body">
+                <ul class="list-unstyled mb-0">
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-soundwave"></i></div>
+                      <div>
+                        <strong class="text-white">5-Band Equalizer & Crossfade</strong><br>
+                        <span class="text-secondary">Inside the <i class="bi bi-gear-fill"></i> Settings menu, toggle the Equalizer to sculpt the frequencies (Bass, Mids, Treble). You can also adjust the Crossfade slider to seamlessly blend the end of one song into the beginning of the next!</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-arrow-down-up"></i></div>
+                      <div>
+                        <strong class="text-white">Volume Normalization (AGC)</strong><br>
+                        <span class="text-secondary">Enabled by default, Automatic Gain Control ensures that quiet songs and loud songs play at the exact same volume level, eliminating the need to constantly adjust your speakers.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-headset"></i></div>
+                      <div>
+                        <strong class="text-white">3D Spatial Audio (HRTF)</strong><br>
+                        <span class="text-secondary">Enable this toggle in Settings to process the stereo signal through a Head-Related Transfer Function, simulating a surround-sound room environment for headphone users.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-0">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-toggles"></i></div>
+                      <div>
+                        <strong class="text-white">Per-Song Overrides</strong><br>
+                        <span class="text-secondary">If a specific song was mastered poorly, open its Context Menu <i class="bi bi-three-dots-vertical"></i> and click "Audio Settings (This Song)". You can set a unique volume multiplier and EQ curve that will permanently trigger <i>only</i> when that specific song plays!</span>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </div>
 
-            <h6 class="text-white mb-2"><i class="bi bi-sort-down me-2"></i>4. Custom Sorting & Ordering</h6>
-            <ul class="small mb-4">
-              <li class="mb-1"><strong>Drag and Drop:</strong> In your <em>Favorites</em> and <em>Playlists</em> (when sorted by "My Order"), click and drag a song to manually reposition it. The new order saves automatically.</li>
-              <li class="mb-1"><strong>Sort Dropdowns:</strong> Use the dropdown menu at the top right of most views to sort by Title (A-Z), Artist, Album, Year, or Recently Added.</li>
-            </ul>
+            <!-- SECTION 3: MULTI-SELECT & BULK ACTIONS -->
+            <div class="card bg-transparent border-secondary mb-4">
+              <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0 text-white"><i class="bi bi-ui-checks-grid text-success me-2"></i> 3. Multi-Select Mode</h5>
+              </div>
+              <div class="card-body">
+                <ul class="list-unstyled mb-0">
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-hand-index-thumb-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Activating Selection Mode</strong><br>
+                        <span class="text-secondary">To manage many songs at once, press and hold (long-click) on any song row for exactly 1 second. A translucent red highlight will appear, and a floating toolbar will slide up from the bottom of your screen.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-check2-square"></i></div>
+                      <div>
+                        <strong class="text-white">Selecting Multiple Tracks</strong><br>
+                        <span class="text-secondary">Once activated, you can tap on any other song rows to add them to your selection bundle. You can also click the <i class="bi bi-check-all"></i> icon in the floating bar to instantly select every track currently loaded on the screen.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-0">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-layers-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Bulk Actions</strong><br>
+                        <span class="text-secondary">Click the three dots <i class="bi bi-three-dots-vertical"></i> on the floating bar. From here, you can instantly inject all selected tracks into a Playlist, dump them into your Favorites, forcefully Cache them for Offline playback, or Bulk Delete them!</span>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </div>
 
-            <h6 class="text-white mb-2"><i class="bi bi-cloud-upload-fill me-2"></i>5. Uploading & Managing Music</h6>
-            <ul class="small mb-4">
-              <li class="mb-1"><strong>Verification:</strong> Only verified users can upload music. Admins manage verification via the Admin Panel.</li>
-              <li class="mb-1"><strong>Limits & Formats:</strong> You can upload up to 10 tracks per day. Supported formats include MP3, FLAC, M4A, WAV, and OGG.</li>
-              <li class="mb-1"><strong>Editing Metadata:</strong> Open the context menu on a song you uploaded and select "Edit Info". You can change the Title, Artist, Album, Genre, Lyrics, and even upload a new 1:1 Cover Art Image.</li>
-            </ul>
+            <!-- SECTION 4: PLAYLISTS & SORTING -->
+            <div class="card bg-transparent border-secondary mb-4">
+              <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0 text-white"><i class="bi bi-music-note-list text-warning me-2"></i> 4. Playlists & Organization</h5>
+              </div>
+              <div class="card-body">
+                <ul class="list-unstyled mb-0">
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-lock-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Public vs. Private Playlists</strong><br>
+                        <span class="text-secondary">When creating a playlist, you can toggle privacy. Public playlists can be searched and viewed by anyone, while Private playlists are strictly visible only to your account.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-people-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Collaborative Sessions</strong><br>
+                        <span class="text-secondary">Open your playlist's menu and select "Make Collaborative". You can then click "Manage Collaborators" and invite friends by typing their exact Username or Email. They will instantly gain the ability to add, reorder, and remove tracks in your playlist!</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-arrows-move"></i></div>
+                      <div>
+                        <strong class="text-white">Drag and Drop Sorting</strong><br>
+                        <span class="text-secondary">When viewing your Playlists, Favorites, or Offline library, ensure the sort dropdown is set to "My Order". You can then seamlessly drag and drop songs up and down the list. The database saves your new arrangement automatically!</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-0">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-sort-down-alt"></i></div>
+                      <div>
+                        <strong class="text-white">Intelligent Filtering</strong><br>
+                        <span class="text-secondary">Use the Sort Dropdown located at the top right of the interface to instantly reorganize massive lists by Title, Artist, Album, Release Year, or Recently Added.</span>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </div>
 
-            <h6 class="text-white mb-2"><i class="bi bi-box-arrow-down me-2"></i>6. Data Portability & Offline Usage</h6>
-            <ul class="small mb-4">
-              <li class="mb-1"><strong>Import/Export:</strong> Go to the Playlists or Favorites view and click the Export button to download a `.json` backup of your list. You can restore it anytime using the Import button.</li>
-              <li class="mb-1"><strong>Playlist Downloader:</strong> Open the Downloader tool from the sidebar, input a Playlist Public ID, and the app will sequentially download all MP3 files to your local device.</li>
-              <li class="mb-1"><strong>Install App (PWA):</strong> Click "Install App" in the sidebar to add PHP Music to your home screen. It will cache assets for much faster loading and a native app feel.</li>
-            </ul>
+            <!-- SECTION 5: OFFLINE CACHING & PWA -->
+            <div class="card bg-transparent border-secondary mb-4">
+              <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0 text-white"><i class="bi bi-cloud-arrow-down-fill text-primary me-2"></i> 5. Offline Library & Caching</h5>
+              </div>
+              <div class="card-body">
+                <ul class="list-unstyled mb-0">
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-phone-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Installing the App (PWA)</strong><br>
+                        <span class="text-secondary">Click "Install App" in the sidebar. This registers PHP Music as a Progressive Web App directly onto your Home Screen, bypassing the browser UI, accelerating load times via Service Workers, and enabling true disconnected offline usage.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-cloud-check-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Downloading Tracks</strong><br>
+                        <span class="text-secondary">Open a song's menu and select "Make Available Offline". The audio stream and album art will physically download into your browser's encrypted Storage Quota. A green checkmark <i class="bi bi-cloud-check-fill text-success"></i> will confirm it is secure.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-0">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-exclamation-triangle-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Cache Management & Warnings</strong><br>
+                        <span class="text-secondary">If your device runs extremely low on storage, iOS/Android might silently delete cache chunks. If a song shows a warning <i class="bi bi-cloud-slash-fill text-warning"></i>, simply click "Re-download Cache" to repair the file, or use "Re-cache All" in the Offline view.</span>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </div>
 
-            <h6 class="text-white mb-2"><i class="bi bi-shield-exclamation me-2"></i>7. Disclaimers & Legal</h6>
-            <ul class="small mb-4 text-white">
-              <li class="mb-1"><strong>Copyright Responsibility:</strong> Users are solely responsible for the audio files they upload. Ensure you have the explicit right or permission to use, stream, and distribute the content.</li>
-              <li class="mb-1"><strong>Personal Use Only:</strong> Features like the Playlist Downloader and streaming are intended strictly for personal, private, and non-commercial use.</li>
-              <li class="mb-1"><strong>Data Integrity:</strong> While we offer robust backup features via JSON export/import, this application and its services are provided "as-is" without any warranties. Please keep secure local copies of your original music files.</li>
-              <li class="mb-1"><strong>Content Moderation:</strong> Administrators reserve the right to indefinitely ban accounts, remove files, or delete metadata that violates copyright laws, platform terms, or community guidelines without prior notice.</li>
-            </ul>
+            <!-- SECTION 6: SOCIAL & COMMUNITY -->
+            <div class="card bg-transparent border-secondary mb-4">
+              <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0 text-white"><i class="bi bi-people-fill text-secondary me-2"></i> 6. Community & Interaction</h5>
+              </div>
+              <div class="card-body">
+                <ul class="list-unstyled mb-0">
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-chat-quote-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Global Community Feed</strong><br>
+                        <span class="text-secondary">Access the Community tab to broadcast text posts to all users on the server. You can edit, delete, and Like/Dislike posts globally.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-chat-left-text-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Song Threads & Mentions</strong><br>
+                        <span class="text-secondary">Every single track contains a dedicated comment section. Open the song menu and click "View Comments". You can reply to specific users, use <code>@Username</code> to tag them, and vote on track popularity.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-person-plus-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Following Users</strong><br>
+                        <span class="text-secondary">Click the "Follow" button on any user's profile. Their newly uploaded songs and albums will automatically surface in your personalized "For You" feed!</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-0">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-journal-check"></i></div>
+                      <div>
+                        <strong class="text-white">Personal Notes</strong><br>
+                        <span class="text-secondary">Need to write down a lyric draft or a diary entry while listening? Use the Personal Notes tab. These notes are completely private, heavily encrypted in the database, and timestamped upon modification.</span>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </div>
 
-            <h6 class="text-white mb-2">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-danger me-2" viewBox="0 0 16 16"><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/></svg>8. Interface Icons & Buttons Dictionary
-            </h6>
-            <ul class="small mb-0 text-white" style="list-style: none; padding-left: 0;">
-              <li class="mb-3 d-flex align-items-start">
-                <span style="min-width: 45px;" class="text-white text-center me-2">
-                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/></svg> / 
-                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/></svg>
-                </span>
-                <span><strong>Play / Pause:</strong> Tap to start or pause the currently selected audio track.</span>
-              </li>
-              <li class="mb-3 d-flex align-items-start">
-                <span style="min-width: 45px;" class="text-white text-center me-2">
-                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M4 4a.5.5 0 0 1 1 0v3.248l6.267-3.636c.54-.313 1.233.066 1.233.696v7.384c0 .63-.692 1.01-1.233.696L5 8.752V12a.5.5 0 0 1-1 0V4z"/></svg> / 
-                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M12.5 4a.5.5 0 0 0-1 0v3.248L5.233 3.612C4.693 3.3 4 3.678 4 4.308v7.384c0 .63.692 1.01 1.233.696L11.5 8.752V12a.5.5 0 0 0 1 0V4z"/></svg>
-                </span>
-                <span><strong>Previous / Next:</strong> Skip backward or forward in the queue. Press and hold to rewind/fast-forward the current song.</span>
-              </li>
-              <li class="mb-3 d-flex align-items-start">
-                <span style="min-width: 45px;" class="text-white text-center me-2">
-                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M0 3.5A.5.5 0 0 1 .5 3H1c2.202 0 3.827 1.24 4.874 2.418.49.552.865 1.102 1.126 1.532.26-.43.636-.98 1.126-1.532C9.173 4.24 10.798 3 13 3v1c-1.798 0-3.173 1.01-4.126 2.082A9.624 9.624 0 0 0 7.556 8a9.624 9.624 0 0 0 1.317 1.918C9.828 10.99 11.204 12 13 12v1c-2.202 0-3.827-1.24-4.874-2.418A10.595 10.595 0 0 1 7 9.05c-.26.43-.636.98-1.126 1.532C4.827 11.76 3.202 13 1 13H.5a.5.5 0 0 1 0-1H1c1.798 0 3.173-1.01 4.126-2.082A9.624 9.624 0 0 0 6.444 8a9.624 9.624 0 0 0-1.317-1.918C4.172 5.01 2.796 4 1 4H.5a.5.5 0 0 1-.5-.5z"/><path d="M13 5.466V1.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384l-2.36 1.966a.25.25 0 0 1-.41-.192zm0 9v-3.932a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384l-2.36 1.966a.25.25 0 0 1-.41-.192z"/></svg>
-                </span>
-                <span><strong>Shuffle:</strong> Mixes up the current play queue in a random order.</span>
-              </li>
-              <li class="mb-3 d-flex align-items-start">
-                <span style="min-width: 45px;" class="text-white text-center me-2">
-                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M11 5.466V4H5a4 4 0 0 0-3.584 5.777.5.5 0 1 1-.896.446A5 5 0 0 1 5 3h6V1.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384l-2.36 1.966a.25.25 0 0 1-.41-.192Zm3.81.086a.5.5 0 0 1 .67.225A5 5 0 0 1 11 13H5v1.466a.25.25 0 0 1-.41.192l-2.36-1.966a.25.25 0 0 1 0-.384l2.36-1.966a.25.25 0 0 1 .41.192V12h6a4 4 0 0 0 3.585-5.777.5.5 0 0 1 .225-.67Z"/></svg>
-                </span>
-                <span><strong>Repeat:</strong> Toggles between Repeat Off, Repeat All, and Repeat One.</span>
-              </li>
-              <li class="mb-3 d-flex align-items-start">
-                <span style="min-width: 45px;" class="text-white text-center me-2">
-                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/></svg>
-                </span>
-                <span><strong>Context Menu (More):</strong> Opens advanced options like Sharing, Lyrics, Metadata, and adding to playlists.</span>
-              </li>
-              <li class="mb-3 d-flex align-items-start">
-                <span style="min-width: 45px;" class="text-white text-center me-2">
-                  <svg width="20" height="20" fill="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="m8 2.748-.717-.737C5.6.281 2.514.878 1.4 3.053c-.523 1.023-.641 2.5.314 4.385.92 1.815 2.834 3.989 6.286 6.357 3.452-2.368 5.365-4.542 6.286-6.357.955-1.886.838-3.362.314-4.385C13.486.878 10.4.28 8.717 2.01zM8 15C-7.333 4.868 3.279-3.04 7.824 1.143q.09.083.176.171a3 3 0 0 1 .176-.17C12.72-3.042 23.333 4.867 8 15"/></svg>
-                </span>
-                <span><strong>Favorite:</strong> Toggles saving a song to your personal Favorites library.</span>
-              </li>
-            </ul>
+            <!-- SECTION 7: UPLOADING & METADATA -->
+            <div class="card bg-transparent border-secondary mb-4">
+              <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0 text-white"><i class="bi bi-file-earmark-music-fill text-muted me-2"></i> 7. Uploading & Deep Metadata</h5>
+              </div>
+              <div class="card-body">
+                <ul class="list-unstyled mb-0">
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-upload"></i></div>
+                      <div>
+                        <strong class="text-white">Upload Pipeline</strong><br>
+                        <span class="text-secondary">Verified users can upload up to 10 tracks daily. The system accepts MP3, FLAC, M4A, OGG, and WAV. The server automatically parses the ID3 Tags (Title, Artist, Album, Genre) and extracts embedded Cover Art during upload.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-pencil-square"></i></div>
+                      <div>
+                        <strong class="text-white">Live Metadata Editor</strong><br>
+                        <span class="text-secondary">If the automated ID3 parsing is incorrect, click "Edit Info" on any song you uploaded. You can dynamically overwrite the database fields and attach a new cover art file (which will be perfectly 1:1 cropped using the CropperJS engine).</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-0">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-mic-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Synchronized LRC Lyrics</strong><br>
+                        <span class="text-secondary">When editing Metadata, you can paste standard <code>[mm:ss.xx]</code> LRC format strings into the Lyrics box. The player engine will automatically parse these timestamps and scroll the lyrics perfectly to the audio track during playback!</span>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            <!-- SECTION 8: PORTABILITY & BACKUPS -->
+            <div class="card bg-transparent border-secondary mb-4">
+              <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0 text-white"><i class="bi bi-box-arrow-up text-info me-2"></i> 8. Data Portability & Downloads</h5>
+              </div>
+              <div class="card-body">
+                <ul class="list-unstyled mb-0">
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-filetype-json"></i></div>
+                      <div>
+                        <strong class="text-white">JSON Library Exports</strong><br>
+                        <span class="text-secondary">Never lose your curated lists. Navigate to any Playlist, your Favorites, or your Offline Library, and click the Export button. The server generates a lightweight `.json` manifest that can be imported to perfectly reconstruct the list anywhere.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-hdd-network-fill"></i></div>
+                      <div>
+                        <strong class="text-white">The Playlist Downloader</strong><br>
+                        <span class="text-secondary">Open the Downloader tool from the sidebar. Paste the Public ID of any playlist, and the system will queue all tracks. Click "Start Sequential Download" to rip the physical MP3s directly to your hard drive, one by one.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-0">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-shield-lock-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Cryptographic Account Backups</strong><br>
+                        <span class="text-secondary">In Settings, you can choose to "Delete Account but Keep Data". The server destroys your email/password logic, turns you into an anonymous ghost account, and provides a complex Backup Key. Keep this key safe—you can enter it into the "Restore Account" module later to reclaim your exact library under a totally different name!</span>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            <!-- SECTION 9: DEVELOPER & ADMIN TOOLS -->
+            <div class="card bg-transparent border-secondary mb-4">
+              <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0 text-white"><i class="bi bi-terminal-fill text-light me-2"></i> 9. Developer & Power-User Tools</h5>
+              </div>
+              <div class="card-body">
+                <ul class="list-unstyled mb-0">
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-code-slash"></i></div>
+                      <div>
+                        <strong class="text-white">Open API Endpoints</strong><br>
+                        <span class="text-secondary">Click "Get API" in the sidebar. This tool reveals all the internal backend URL hooks (e.g., <code>?action=get_songs</code>). You can copy these endpoints to write python scripts, discord bots, or external UI interfaces that tap directly into your PHP Music database.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-hdd-stack-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Full Library Scan</strong><br>
+                        <span class="text-secondary">If a server administrator physically drags thousands of MP3s into the server folder using FTP, they can trigger a "Scan All" from the sidebar. The engine sweeps the directory tree, analyzes every ID3 tag, and aggressively injects them into the SQLite database.</span>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="mb-0">
+                    <div class="d-flex align-items-start gap-3">
+                      <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-eraser-fill"></i></div>
+                      <div>
+                        <strong class="text-white">Clear Application Cache</strong><br>
+                        <span class="text-secondary">If the player starts acting buggy or storage quota is overloaded, click "Clear Cache" in the sidebar. This securely unregisters Service Workers, deletes old Offline caches, resets DOM memory, and forces a hard reload of the interface.</span>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            <!-- SECTION 10: ICONS DICTIONARY -->
+            <div class="card bg-transparent border-secondary mb-4">
+              <div class="card-header bg-dark border-secondary">
+                <h5 class="mb-0 text-white"><i class="bi bi-info-circle-fill text-primary me-2"></i> 10. Core Icon Dictionary</h5>
+              </div>
+              <div class="card-body">
+                <div class="row g-3">
+                  <div class="col-12 col-md-6 d-flex align-items-center gap-3">
+                    <div class="p-2 bg-dark rounded text-white fs-5" style="min-width: 45px; text-align: center;"><i class="bi bi-play-fill"></i></div>
+                    <span class="text-secondary"><strong>Play / Pause:</strong> Tap to toggle audio playback state.</span>
+                  </div>
+                  <div class="col-12 col-md-6 d-flex align-items-center gap-3">
+                    <div class="p-2 bg-dark rounded text-white fs-5" style="min-width: 45px; text-align: center;"><i class="bi bi-skip-start-fill"></i></div>
+                    <span class="text-secondary"><strong>Prev / Next:</strong> Skip tracks, or hold to scrub the timeline.</span>
+                  </div>
+                  <div class="col-12 col-md-6 d-flex align-items-center gap-3">
+                    <div class="p-2 bg-dark rounded text-white fs-5" style="min-width: 45px; text-align: center;"><i class="bi bi-shuffle"></i></div>
+                    <span class="text-secondary"><strong>Shuffle:</strong> Randomize the play queue securely.</span>
+                  </div>
+                  <div class="col-12 col-md-6 d-flex align-items-center gap-3">
+                    <div class="p-2 bg-dark rounded text-white fs-5" style="min-width: 45px; text-align: center;"><i class="bi bi-repeat"></i></div>
+                    <span class="text-secondary"><strong>Repeat:</strong> Cycle (Off → Repeat All → Repeat One).</span>
+                  </div>
+                  <div class="col-12 col-md-6 d-flex align-items-center gap-3">
+                    <div class="p-2 bg-dark rounded text-white fs-5" style="min-width: 45px; text-align: center;"><i class="bi bi-three-dots-vertical"></i></div>
+                    <span class="text-secondary"><strong>Context Menu:</strong> Access sharing, metadata, and playlist tools.</span>
+                  </div>
+                  <div class="col-12 col-md-6 d-flex align-items-center gap-3">
+                    <div class="p-2 bg-dark rounded text-white fs-5" style="min-width: 45px; text-align: center;"><i class="bi bi-heart-fill"></i></div>
+                    <span class="text-secondary"><strong>Favorite:</strong> Pin a song globally to your profile collection.</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- SECTION 11: LEGAL -->
+            <div class="card bg-transparent border-danger">
+              <div class="card-header bg-dark border-danger">
+                <h5 class="mb-0 text-danger"><i class="bi bi-shield-exclamation text-danger me-2"></i> 11. Disclaimers & Fair Use</h5>
+              </div>
+              <div class="card-body">
+                <p class="text-secondary mb-2"><strong>Copyright Responsibility:</strong> Users are solely responsible for the audio files they upload. Ensure you have the explicit right, license, or explicit permission from the original artist to use, stream, and distribute the content on this instance.</p>
+                <p class="text-secondary mb-2"><strong>Personal Use Only:</strong> Advanced scraping utilities, including the Playlist Downloader, Open API, and high-quality streaming engines, are intended strictly for personal, private, and entirely non-commercial listening curation.</p>
+                <p class="text-secondary mb-0"><strong>Content Moderation:</strong> Instance administrators reserve the unconditional right to instantly terminate sessions, indefinitely ban accounts, remove files, or delete altered metadata that violates copyright laws or general community guidelines without any prior notice.</p>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="shortcuts-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-keyboard-fill text-info me-2"></i>Keyboard Shortcuts</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-light">
+            <p class="text-secondary mb-4 small">Control the music player instantly without using your mouse.</p>
+            
+            <div class="d-flex flex-column gap-3">
+              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
+                <div class="d-flex align-items-center gap-2">
+                  <svg width="70" height="36" viewBox="0 0 70 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="70" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
+                    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SPACE</text>
+                  </svg>
+                </div>
+                <span class="fw-medium text-secondary">Play / Pause</span>
+              </div>
+
+              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
+                <div class="d-flex align-items-center gap-2">
+                  <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
+                    <path d="M14 12L22 18L14 24V12Z" fill="#ffffff"/>
+                  </svg>
+                </div>
+                <span class="fw-medium text-secondary">Next Track (Right Arrow)</span>
+              </div>
+
+              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
+                <div class="d-flex align-items-center gap-2">
+                  <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
+                    <path d="M22 12L14 18L22 24V12Z" fill="#ffffff"/>
+                  </svg>
+                </div>
+                <span class="fw-medium text-secondary">Previous Track (Left Arrow)</span>
+              </div>
+
+              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
+                <div class="d-flex align-items-center gap-2">
+                  <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
+                    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">M</text>
+                  </svg>
+                </div>
+                <span class="fw-medium text-secondary">Mute / Unmute</span>
+              </div>
+
+              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
+                <div class="d-flex align-items-center gap-2">
+                  <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
+                    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">S</text>
+                  </svg>
+                </div>
+                <span class="fw-medium text-secondary">Toggle Shuffle</span>
+              </div>
+
+              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
+                <div class="d-flex align-items-center gap-2">
+                  <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
+                    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">R</text>
+                  </svg>
+                </div>
+                <span class="fw-medium text-secondary">Toggle Repeat Mode</span>
+              </div>
+            </div>
 
           </div>
         </div>
@@ -5427,9 +6095,12 @@ function perform_full_scan($db) {
     <div class="modal fade" id="activity-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
-          <div class="modal-header border-0 pb-2">
-            <h5 class="modal-title"><i class="bi bi-activity text-danger me-2"></i>Activity Feed</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          <div class="modal-header border-0 pb-2 d-flex justify-content-between align-items-center">
+            <h5 class="modal-title mb-0"><i class="bi bi-activity text-danger me-2"></i>Activity Feed</h5>
+            <div>
+              <button class="btn btn-sm btn-outline-secondary me-3" id="clear-activity-btn">Clear All</button>
+              <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
           </div>
           <div class="modal-body p-0" id="activity-modal-body"></div>
         </div>
@@ -5820,6 +6491,43 @@ function perform_full_scan($db) {
       </div>
     </div>
 
+    <div class="modal fade" id="license-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-shield-check text-success me-2"></i> Software License</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-light">
+            <div class="p-3 rounded" style="background: rgba(0,0,0,0.2); font-family: 'Courier New', Courier, monospace; font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap;">MIT License
+
+Copyright (c) 2026 赤葦だんご
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.</div>
+          </div>
+          <div class="modal-footer border-0">
+            <button type="button" class="btn btn-secondary w-100" data-bs-dismiss="modal">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="playlist-downloader-modal" tabindex="-1">
       <div class="modal-dialog modal-fullscreen">
         <div class="modal-content" style="background-color: var(--ytm-bg);">
@@ -6025,25 +6733,96 @@ function perform_full_scan($db) {
         const activityModalEl = document.getElementById('activity-modal');
         
         if (activityModalEl) {
-          activityModalEl.addEventListener('show.bs.modal', async () => {
-             const body = document.getElementById('activity-modal-body');
+          const body = document.getElementById('activity-modal-body');
+          
+          const loadActivityFeed = async () => {
              body.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary" role="status"></div></div>';
              const feed = await fetchData('?action=get_activity_feed');
              if (feed && feed.length > 0) {
-               body.innerHTML = '<ul class="list-group list-group-flush">' + feed.map(item => `
-                 <li class="list-group-item bg-transparent text-white border-secondary py-3">
-                   <div class="d-flex align-items-center gap-3">
-                     <div class="mt-1"><i class="bi bi-clock-history text-secondary fs-5"></i></div>
-                     <div>
-                       <div style="font-size: 0.95rem;">You ${escapeHTML(item.action)} ${item.target_name ? `<span class="text-info">${escapeHTML(item.target_name)}</span>` : ''}</div>
-                       <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(item.created_at)}</small>
-                     </div>
-                   </div>
-                 </li>
-               `).join('') + '</ul>';
+               body.innerHTML = '<ul class="list-group list-group-flush">' + feed.map(item => {
+                 if (item.type === 'comment_notif') {
+                   const isReply = item.notif_type === 'reply';
+                   const unreadBadge = item.is_unread ? '<span class="badge bg-danger ms-2" style="font-size: 0.65rem;">New</span>' : '';
+                   const bgClass = item.is_unread ? 'bg-dark' : 'bg-transparent';
+
+                   const actionText = isReply 
+                     ? `<span class="fw-bold">${escapeHTML(item.commenter_name)}</span> replied to your comment on <span class="text-info">${escapeHTML(item.song_title)}</span>${unreadBadge}`
+                     : `<span class="fw-bold">${escapeHTML(item.commenter_name)}</span> commented on your song <span class="text-info">${escapeHTML(item.song_title)}</span>${unreadBadge}`;
+                     
+                   const cleanContent = item.content.replace(/<[^>]*>?/gm, ''); // Strip HTML tags entirely for notifications
+
+                   return `
+                     <li class="list-group-item ${bgClass} text-white border-secondary py-3">
+                       <div class="d-flex align-items-start gap-3">
+                         <div class="mt-1"><i class="bi bi-chat-dots-fill text-primary fs-5"></i></div>
+                         <div class="flex-grow-1" style="min-width: 0;">
+                           <div style="font-size: 0.95rem;">${actionText}</div>
+                           <div class="text-secondary fst-italic my-1 text-truncate" style="font-size: 0.9rem; border-left: 2px solid #555; padding-left: 8px;">"${escapeHTML(cleanContent)}"</div>
+                           <div class="d-flex justify-content-between align-items-center mt-2">
+                             <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(item.created_at)}</small>
+                             <button class="btn btn-sm btn-outline-light notif-reply-btn" data-song-id="${item.song_id}" data-comment-id="${item.comment_id}" data-username="${escapeHTML(item.commenter_name)}">
+                               <i class="bi bi-reply-fill"></i> Reply
+                             </button>
+                           </div>
+                         </div>
+                       </div>
+                     </li>
+                   `;
+                 } else {
+                   const unreadBadge = item.is_unread ? '<span class="badge bg-danger ms-2" style="font-size: 0.65rem;">New</span>' : '';
+                   const bgClass = item.is_unread ? 'bg-dark' : 'bg-transparent';
+                   return `
+                     <li class="list-group-item ${bgClass} text-white border-secondary py-3">
+                       <div class="d-flex align-items-center gap-3">
+                         <div class="mt-1"><i class="bi bi-clock-history text-secondary fs-5"></i></div>
+                         <div>
+                           <div style="font-size: 0.95rem;">You ${escapeHTML(item.action)} ${item.target_name ? `<span class="text-info">${escapeHTML(item.target_name)}</span>` : ''}${unreadBadge}</div>
+                           <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(item.created_at)}</small>
+                         </div>
+                       </div>
+                     </li>
+                   `;
+                 }
+               }).join('') + '</ul>';
+               
+               // Automatically mark all notifications as read when the feed is opened
+               setTimeout(async () => {
+                 document.querySelectorAll('.notif-badge').forEach(b => b.classList.add('d-none'));
+                 await fetchData('?action=mark_notifs_read', { method: 'POST' });
+                 updateNotifBadge();
+               }, 1500);
+               
              } else {
                body.innerHTML = '<p class="text-secondary text-center p-4">No recent activity.</p>';
              }
+          };
+
+          activityModalEl.addEventListener('show.bs.modal', loadActivityFeed);
+          
+          const clearBtn = document.getElementById('clear-activity-btn');
+          if (clearBtn) {
+            clearBtn.addEventListener('click', async () => {
+              if (confirm('Are you sure you want to clear all your notifications?')) {
+                const res = await fetchData('?action=clear_activity_feed', { method: 'POST' });
+                if (res && res.status === 'success') {
+                  showToast('Notifications cleared.', 'success');
+                  loadActivityFeed();
+                  updateNotifBadge();
+                }
+              }
+            });
+          }
+          
+          body.addEventListener('click', (e) => {
+            const replyBtn = e.target.closest('.notif-reply-btn');
+            if (replyBtn) {
+              const songId = parseInt(replyBtn.dataset.songId);
+              const commentId = parseInt(replyBtn.dataset.commentId);
+              const username = replyBtn.dataset.username;
+              
+              bootstrap.Modal.getInstance(activityModalEl).hide();
+              window.openCommentsModal(songId, commentId, username);
+            }
           });
         }
 
@@ -9572,11 +10351,22 @@ function perform_full_scan($db) {
         }
         let activeCommentSongId = null;
         
-        window.openCommentsModal = async (songId) => {
+        window.openCommentsModal = async (songId, replyCommentId = null, replyUsername = null) => {
           activeCommentSongId = songId;
           const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('comments-modal'));
           await window.refreshComments();
           modal.show();
+          
+          if (replyCommentId && replyUsername) {
+            setTimeout(() => {
+              document.getElementById('comment-parent-id').value = replyCommentId;
+              const input = document.getElementById('comment-input');
+              input.placeholder = "Replying to comment...";
+              const cleanedUsername = replyUsername.replace(/\s+/g, '');
+              input.value = `@${cleanedUsername} `;
+              input.focus();
+            }, 500); // Wait for modal to finish animating
+          }
         };
 
         window.refreshComments = async () => {
@@ -9600,8 +10390,10 @@ function perform_full_scan($db) {
             return comments.filter(c => c.parent_id == parent).map(c => `
               <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: ${parent ? '20px' : '0'};">
                 <div class="d-flex align-items-center gap-2 mb-1">
-                  <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
-                  <strong>${escapeHTML(c.artist)}</strong>
+                  <div class="d-flex align-items-center gap-2 user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="cursor: pointer;" title="View Profile">
+                    <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
+                    <strong class="hover-underline">${escapeHTML(c.artist)}</strong>
+                  </div>
                   <small class="text-secondary">${timeAgo(c.created_at)}</small>
                 </div>
                 <div style="font-size: 0.9rem;" class="mb-1">${c.content}</div>
@@ -9612,7 +10404,7 @@ function perform_full_scan($db) {
                   <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="dislike">
                     <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
                   </button>
-                  <button class="btn btn-link btn-sm text-secondary p-0 reply-btn" data-id="${c.id}">Reply</button>
+                  <button class="btn btn-link btn-sm text-secondary p-0 reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
                   ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com')) ? `
                     <button class="btn btn-link btn-sm text-secondary p-0 edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content).replace(/"/g, '&quot;')}"><i class="bi bi-pencil"></i></button>
                     <button class="btn btn-link btn-sm text-danger p-0 delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
@@ -9631,11 +10423,24 @@ function perform_full_scan($db) {
             commentsList.parentNode.replaceChild(newCommentsList, commentsList);
             
             newCommentsList.addEventListener('click', async (e) => {
+              const userLink = e.target.closest('.user-profile-link');
+              if (userLink) {
+                const userId = userLink.dataset.userid;
+                const artistName = decodeURIComponent(userLink.dataset.artist);
+                bootstrap.Modal.getInstance(document.getElementById('comments-modal')).hide();
+                loadView({ type: 'artist_songs', param: artistName, sort: 'album_asc', filter_user_id: userId, artist_name: '' });
+                return;
+              }
               const replyBtn = e.target.closest('.reply-btn');
               if (replyBtn) {
                 document.getElementById('comment-parent-id').value = replyBtn.dataset.id;
                 const input = document.getElementById('comment-input');
                 input.placeholder = "Replying to comment...";
+                const username = replyBtn.dataset.username;
+                if (username) {
+                  const cleanedUsername = username.replace(/\s+/g, ''); // Removes spaces so @ works properly
+                  input.value = `@${cleanedUsername} `;
+                }
                 input.focus();
                 return;
               }
@@ -11164,6 +11969,11 @@ function perform_full_scan($db) {
             bootstrap.Modal.getInstance(document.getElementById('register-modal')).hide();
             registerForm.reset();
             showToast(data.message, 'success');
+            
+            // Refresh session & automatically stay on the current page logged in
+            cachedExploreData = null;
+            await checkSession();
+            loadView(currentView);
           }
         });
         
@@ -11182,6 +11992,11 @@ function perform_full_scan($db) {
               bootstrap.Modal.getInstance(document.getElementById('restore-modal')).hide();
               restoreForm.reset();
               showToast(data.message, 'success');
+              
+              // Refresh session & automatically stay on the current page logged in
+              cachedExploreData = null;
+              await checkSession();
+              loadView(currentView);
             }
           });
         }
@@ -11581,18 +12396,26 @@ function perform_full_scan($db) {
           });
         }
 
-        const handleLogout = async () => {
+        const handleLogout = async (e) => {
+          if (e) e.preventDefault(); // Stop browser from adding '#' to URL and breaking the view
           await fetchData('?action=logout');
           currentUser = null;
           cachedExploreData = null;
           updateUIForAuthState();
-          loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
+          
+          const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists'];
+          
+          if (authRequiredViews.includes(currentView.type)) {
+            loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
+          } else {
+            loadView(currentView);
+          }
         };
         
         document.getElementById('profile-dropdown-logout-desktop').addEventListener('click', handleLogout);
         document.getElementById('profile-dropdown-logout-mobile').addEventListener('click', handleLogout);
-        document.getElementById('profile-dropdown-stats-desktop').addEventListener('click', () => loadView({type: 'get_user_stats'}));
-        document.getElementById('profile-dropdown-stats-mobile').addEventListener('click', () => loadView({type: 'get_user_stats'}));
+        document.getElementById('profile-dropdown-stats-desktop').addEventListener('click', (e) => { e.preventDefault(); loadView({type: 'get_user_stats'}); });
+        document.getElementById('profile-dropdown-stats-mobile').addEventListener('click', (e) => { e.preventDefault(); loadView({type: 'get_user_stats'}); });
         
         const sleepTimerBubble = document.getElementById('sleep-timer-bubble');
         const sleepTimerCountdown = document.getElementById('sleep-timer-countdown');
@@ -11888,7 +12711,13 @@ function perform_full_scan($db) {
               showToast('Account deleted. Backup key downloaded.', 'success');
               bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
               await checkSession();
-              loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
+              
+              const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists'];
+              if (authRequiredViews.includes(currentView.type)) {
+                loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
+              } else {
+                loadView(currentView);
+              }
             }
           });
         }
@@ -11901,7 +12730,13 @@ function perform_full_scan($db) {
               showToast('Account and data permanently deleted.', 'success');
               bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
               await checkSession();
-              loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
+              
+              const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists'];
+              if (authRequiredViews.includes(currentView.type)) {
+                loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
+              } else {
+                loadView(currentView);
+              }
             }
           });
         }
@@ -12289,6 +13124,17 @@ function perform_full_scan($db) {
           });
         }
 
+        const updateNotifBadge = async () => {
+          if (!currentUser) return;
+          const data = await fetchData('?action=get_unread_notif_count');
+          const badges = document.querySelectorAll('.notif-badge');
+          if (data && data.count > 0) {
+            badges.forEach(b => { b.textContent = data.count; b.classList.remove('d-none'); });
+          } else {
+            badges.forEach(b => b.classList.add('d-none'));
+          }
+        };
+
         function updateUIForAuthState() {
           const isLoggedIn = !!currentUser;
           document.body.classList.toggle('logged-in', isLoggedIn);
@@ -12368,6 +13214,7 @@ function perform_full_scan($db) {
             if(offIds) offlineSongsSet = new Set(offIds.map(id => parseInt(id)));
             const llIds = await fetchData('?action=get_listen_later_ids');
             if(llIds) listenLaterSet = new Set(llIds.map(id => parseInt(id)));
+            updateNotifBadge();
           } else {
             currentUser = null;
           }
@@ -12474,12 +13321,49 @@ function perform_full_scan($db) {
             e.preventDefault();
           }
         });
+
         document.addEventListener('keydown', e => {
+          // Anti-inspect
           if (e.key === 'F12' || 
              (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'C' || e.key === 'J')) || 
              (e.ctrlKey && e.key === 'U')) {
               e.preventDefault();
               return false;
+          }
+
+          // Stop if user is typing in an input field
+          if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+          // Global Player Shortcuts (Only if a song is loaded)
+          if (!currentSong) return;
+
+          switch (e.code) {
+            case 'Space':
+              e.preventDefault(); // Prevents the page from scrolling down
+              togglePlayPause();
+              break;
+            case 'ArrowRight':
+              e.preventDefault();
+              playNext();
+              break;
+            case 'ArrowLeft':
+              e.preventDefault();
+              playPrev();
+              break;
+            case 'KeyM':
+              e.preventDefault();
+              if (playerElements.volumeBtn) playerElements.volumeBtn.click();
+              break;
+            case 'KeyS':
+              e.preventDefault();
+              toggleShuffle();
+              break;
+            case 'KeyR':
+              e.preventDefault();
+              repeatMode = (repeatMode === 'none') ? 'all' : (repeatMode === 'all') ? 'one' : 'none';
+              localStorage.setItem('repeatMode', repeatMode);
+              updateRepeatIcons();
+              break;
           }
         });
 
