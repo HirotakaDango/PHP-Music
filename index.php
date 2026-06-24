@@ -217,7 +217,7 @@ set_time_limit(0);
 
 // ULTRA-SCALE CONCURRENCY: Release the PHP session write-lock early for read-only requests.
 // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
-$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post'];
+$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab'];
 $current_action = $_GET['action'] ?? '';
 
 if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
@@ -3347,7 +3347,7 @@ if (isset($_GET['action'])) {
       }
       
       $stmt = $db->prepare("
-        SELECT p.id, p.name, p.public_id, p.is_collaborative, p.is_private, COUNT(ps.song_id) as song_count,
+        SELECT p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, COUNT(ps.song_id) as song_count,
         (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
         {$is_added_sql}
         FROM playlists p LEFT JOIN playlist_songs ps ON p.id = ps.playlist_id
@@ -3358,6 +3358,41 @@ if (isset($_GET['action'])) {
       $stmt->execute([$user_id]);
       send_json($stmt->fetchAll());
       break;
+
+    case 'get_collab_playlists':
+      if (!$user_id) { send_json([]); }
+      $sort_key = $_GET['sort'] ?? 'name_asc';
+      $sort_map = [
+        'name_asc' => 'ORDER BY p.name COLLATE NOCASE ASC',
+        'name_desc' => 'ORDER BY p.name COLLATE NOCASE DESC',
+        'modified_desc' => 'ORDER BY COALESCE((SELECT MAX(added_at) FROM playlist_songs WHERE playlist_id = p.id), p.created_at) DESC',
+        'modified_asc' => 'ORDER BY COALESCE((SELECT MAX(added_at) FROM playlist_songs WHERE playlist_id = p.id), p.created_at) ASC',
+      ];
+      $order_by = $sort_map[$sort_key] ?? $sort_map['name_asc'];
+      
+      $stmt = $db->prepare("
+        SELECT p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, u.artist as creator, COUNT(ps.song_id) as song_count,
+        (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
+        FROM playlists p 
+        JOIN playlist_collaborators pc ON p.id = pc.playlist_id
+        JOIN users u ON p.user_id = u.id
+        LEFT JOIN playlist_songs ps ON p.id = ps.playlist_id
+        WHERE pc.user_id = ?
+        GROUP BY p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id, u.artist
+        {$order_by} {$limit_clause}
+      ");
+      $stmt->execute([$user_id]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'leave_collab':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $public_id = $data['public_id'];
+      $stmt = $db->prepare("DELETE FROM playlist_collaborators WHERE user_id = ? AND playlist_id = (SELECT id FROM playlists WHERE public_id = ?)");
+      $stmt->execute([$user_id, $public_id]);
+      send_json(['status' => 'success', 'message' => 'You have left the collaboration.']);
+      break;
       
     case 'manage_collaborators':
       if (!$user_id) { http_response_code(403); exit; }
@@ -3365,11 +3400,33 @@ if (isset($_GET['action'])) {
       $public_id = $data['public_id'];
       $action_type = $data['collab_action']; 
       
-      $stmt = $db->prepare("SELECT id, user_id FROM playlists WHERE public_id = ?");
+      if ($action_type === 'search') {
+        $q = '%' . ($data['query'] ?? '') . '%';
+        $stmt = $db->prepare("SELECT id, artist FROM users WHERE artist LIKE ? OR email LIKE ? LIMIT 10");
+        $stmt->execute([$q, $q]);
+        send_json(['status' => 'success', 'users' => $stmt->fetchAll()]);
+      }
+      
+      $stmt = $db->prepare("SELECT id, user_id, is_collaborative FROM playlists WHERE public_id = ?");
       $stmt->execute([$public_id]);
       $pl = $stmt->fetch();
       
-      if (!$pl || ($pl['user_id'] != $user_id && $is_super_admin == 0)) {
+      if (!$pl) {
+        http_response_code(404); send_json(['status' => 'error', 'message' => 'Playlist not found.']);
+      }
+      
+      if ($action_type === 'join') {
+        if (!$pl['is_collaborative']) {
+          send_json(['status' => 'error', 'message' => 'This playlist is not open for collaboration.']);
+        }
+        if ($pl['user_id'] == $user_id) {
+          send_json(['status' => 'error', 'message' => 'You are already the owner.']);
+        }
+        $db->prepare("INSERT OR IGNORE INTO playlist_collaborators (playlist_id, user_id) VALUES (?, ?)")->execute([$pl['id'], $user_id]);
+        send_json(['status' => 'success', 'message' => 'Joined playlist successfully!']);
+      }
+      
+      if ($pl['user_id'] != $user_id && $is_super_admin == 0) {
         http_response_code(403); send_json(['status' => 'error', 'message' => 'Only the owner can manage collaborators.']);
       }
       
@@ -3378,11 +3435,16 @@ if (isset($_GET['action'])) {
         $stmt_list->execute([$pl['id']]);
         send_json(['status' => 'success', 'collaborators' => $stmt_list->fetchAll()]);
       } elseif ($action_type === 'add') {
-        $target = $data['target'];
-        $stmt_find = $db->prepare("SELECT id FROM users WHERE email = ? OR artist = ? COLLATE NOCASE");
-        $stmt_find->execute([$target, $target]);
-        $collab_user = $stmt_find->fetchColumn();
-        if (!$collab_user) { send_json(['status' => 'error', 'message' => 'User not found. Check email or username.']); }
+        $target_id = $data['target_id'] ?? null;
+        if ($target_id) {
+          $collab_user = $target_id;
+        } else {
+          $target = $data['target'];
+          $stmt_find = $db->prepare("SELECT id FROM users WHERE email = ? OR artist = ? COLLATE NOCASE");
+          $stmt_find->execute([$target, $target]);
+          $collab_user = $stmt_find->fetchColumn();
+        }
+        if (!$collab_user) { send_json(['status' => 'error', 'message' => 'User not found.']); }
         if ($collab_user == $user_id) { send_json(['status' => 'error', 'message' => 'You already own this playlist.']); }
           
         $db->prepare("INSERT OR IGNORE INTO playlist_collaborators (playlist_id, user_id) VALUES (?, ?)")->execute([$pl['id'], $collab_user]);
@@ -4792,9 +4854,17 @@ function perform_full_scan($db) {
         display: grid; grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px;
         align-items: center; gap: 1rem; padding: 0.5rem 1rem; font-size: 0.9rem; color: var(--ytm-secondary-text);
       }
-      .song-item.history-item { grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 80px 40px; }
+      .song-item.history-item { grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 80px 40px !important; }
       .song-list-header { font-weight: 500; }
-      .song-item .song-artist-mobile { display: none; }
+      .song-item .song-artist-mobile { display: none !important; }
+      /* Clean, spacious layout for the constrained Desktop Player Modal queue */
+      #desktop-player-queue-list .song-item {
+        grid-template-columns: 40px minmax(0, 3fr) minmax(0, 2fr) 80px 40px !important;
+      }
+      #desktop-player-queue-list .song-item .song-album,
+      #desktop-player-queue-list .song-item .song-views {
+        display: none !important;
+      }
       .song-item.ghost { opacity: 0.4; }
       .song-item:hover { background-color: var(--ytm-surface-2); }
       .song-item.multi-selected { background-color: rgba(255, 0, 0, 0.2) !important; }
@@ -4816,6 +4886,7 @@ function perform_full_scan($db) {
       .playlist-more-btn {
         position: absolute; top: 0.5rem; right: 0.5rem; background: transparent !important;
         border: none; padding: 0.25rem; font-size: 1.25rem; line-height: 1; cursor: pointer;
+        z-index: 10; color: #ffffff; text-shadow: 0 2px 6px rgba(0,0,0,0.9);
       }
       .context-menu {
         display: none; position: fixed; background-color: var(--ytm-surface-2); border-radius: 4px;
@@ -5153,6 +5224,10 @@ function perform_full_scan($db) {
             <a href="#" class="nav-link" data-view="get_user_playlists">
               <i class="bi bi-music-note-beamed"></i>
               <span>Playlists</span>
+            </a>
+            <a href="#" class="nav-link" data-view="get_collab_playlists">
+              <i class="bi bi-people-fill"></i>
+              <span>Shared with me</span>
             </a>
             <a href="#" class="nav-link" data-view="get_offline_songs">
               <i class="bi bi-cloud-arrow-down-fill"></i>
@@ -6461,12 +6536,36 @@ function perform_full_scan($db) {
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body">
-            <div class="input-group mb-3">
-              <input type="text" id="collab-input" class="form-control" placeholder="Enter exact Username or Email">
-              <button class="btn btn-danger" id="collab-add-btn">Add User</button>
+            <div class="position-relative mb-3">
+              <div class="input-group">
+                <input type="text" id="collab-input" class="form-control" placeholder="Search Artist Name...">
+                <button class="btn btn-danger" id="collab-add-btn">Add User</button>
+              </div>
+              <div id="collab-search-dropdown" class="search-dropdown d-none w-100" style="top: 100%; position: absolute; z-index: 2000; background-color: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 0 0 8px 8px; max-height: 250px; overflow-y: auto;"></div>
             </div>
-            <h6 class="text-secondary mt-4">Current Collaborators</h6>
+            <button class="btn btn-outline-light w-100 mb-3" id="collab-copy-link-btn"><i class="bi bi-link-45deg"></i> Copy Invite Link</button>
+            <h6 class="text-secondary mt-2">Current Collaborators</h6>
             <div id="collab-list" class="list-group list-group-flush bg-transparent"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="collab-invite-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-secondary">
+            <h5 class="modal-title text-white">Collaboration Invite</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-center p-4">
+            <i class="bi bi-envelope-paper-heart text-danger mb-3" style="font-size: 3rem; display: block;"></i>
+            <h5 class="text-white mb-2">You've been invited!</h5>
+            <p class="text-secondary mb-4">You have been invited to collaborate on the playlist <strong id="invite-playlist-name" class="text-white"></strong> by <strong id="invite-playlist-creator" class="text-white"></strong>.</p>
+            <div class="d-flex gap-2 justify-content-center">
+              <button class="btn btn-outline-secondary px-4" data-bs-dismiss="modal" id="invite-reject-btn">Decline</button>
+              <button class="btn btn-danger px-4" id="invite-accept-btn">Accept & Join</button>
+            </div>
           </div>
         </div>
       </div>
@@ -7399,8 +7498,7 @@ SOFTWARE.</div>
                 <div class="song-views d-none d-md-block text-truncate" title="${song.play_count || 0} views">${formatSongCount(song.play_count || 0)}</div>
                 <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
                 <div class="song-more"><button class="more-btn" data-song-id="${song.id}"><i class="bi bi-three-dots-vertical"></i></button></div>
-                <div class="song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
-                  <div class="song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
+                <div class="song-artist-mobile w-100 flex-column align-items-start">
                   <div class="d-flex justify-content-between align-items-center w-100">
                      <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
                      <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
@@ -8532,6 +8630,7 @@ SOFTWARE.</div>
                     ${details.playlists.map(p => `
                       <div class="col">
                         <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
+                          ${(currentUser && (currentUser.id == details.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${details.user_id}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
                           <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
                             <img src="?action=get_image&id=${p.image_id || 0}" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
                             ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ''}
@@ -8631,7 +8730,7 @@ SOFTWARE.</div>
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>
               </div>
-              <div class="song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
+              <div class="song-artist-mobile w-100 flex-column align-items-start">
                 <div class="d-flex justify-content-between align-items-center w-100">
                    <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${escapeHTML(song.artist)}</span>
                    ${isHistory ? playedAtHTML : ''}
@@ -8725,6 +8824,11 @@ SOFTWARE.</div>
                   <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-playlist-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
                 </div>
               </div>`;
+          } else if (type === 'get_collab_playlists' && !append && currentUser) {
+            contentArea.innerHTML = `
+              <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-people-fill text-info me-3 fs-3"></i> Shared With Me</div>
+              </div>`;
           }
           if (!items || items.length === 0) {
             if (!append && type !== 'get_user_playlists') {
@@ -8773,9 +8877,9 @@ SOFTWARE.</div>
                 titleClass = 'text-center';
                 subtextClass = 'text-center';
                 imgSrc = `?action=get_profile_picture&id=`;
-              } else if (type === 'get_user_playlists') {
+              } else if (type === 'get_user_playlists' || type === 'get_collab_playlists') {
                 name = item.name;
-                subtext = `${formatSongCount(item.song_count)} songs`;
+                subtext = type === 'get_collab_playlists' ? `by ${item.creator} • ${formatSongCount(item.song_count)} songs` : `${formatSongCount(item.song_count)} songs`;
                 imageId = item.image_id;
                 dataType = 'playlist';
                 dataValue = item.public_id;
@@ -8799,14 +8903,14 @@ SOFTWARE.</div>
               const useridAttr = item.user_id ? `data-userid="${item.user_id}"` : (type === 'get_following' ? `data-userid="${item.id}"` : '');
               const artistNameAttr = (type === 'get_albums' && item.artist) ? `data-artistname="${encodeURIComponent(item.artist)}"` : '';
 
-              const moreButton = (type === 'get_user_playlists') ? `
-                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}">
+              const moreButton = (type === 'get_user_playlists' || type === 'get_collab_playlists') ? `
+                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}" data-owner-id="${item.owner_id || ''}">
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>` : '';
 
-              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists' || type === 'get_following' || type === 'get_genres' || type === 'get_years') {
+              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_collab_playlists' || type === 'get_artists' || type === 'get_following' || type === 'get_genres' || type === 'get_years') {
                 let songCountBadge = '';
-                if ((type === 'get_albums' || type === 'get_user_playlists') && item.song_count !== undefined) {
+                if ((type === 'get_albums' || type === 'get_user_playlists' || type === 'get_collab_playlists') && item.song_count !== undefined) {
                   songCountBadge = `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(item.song_count)}</div>`;
                 }
                 // Determine whether it needs circle or standard card rounded corners
@@ -8922,7 +9026,7 @@ SOFTWARE.</div>
                       <i class="bi bi-three-dots-vertical"></i>
                     </button>
                   </div>
-                  <div class="song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
+                  <div class="song-artist-mobile w-100 flex-column align-items-start">
                     <div class="d-flex justify-content-between align-items-center w-100">
                        <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
                        <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
@@ -9018,7 +9122,7 @@ SOFTWARE.</div>
         };
         
         const setupSortOptions = (viewType) => {
-          const isSortable = ['get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists'].includes(viewType);
+          const isSortable = ['get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists', 'get_collab_playlists'].includes(viewType);
           
           if (isSortable) {
             let options = {};
@@ -9067,6 +9171,7 @@ SOFTWARE.</div>
                 options = { 'name_asc': 'Name (A-Z)', 'name_desc': 'Name (Z-A)' };
                 break;
               case 'get_user_playlists':
+              case 'get_collab_playlists':
                 options = {
                   'name_asc': 'Name (A-Z)', 'name_desc': 'Name (Z-A)',
                   'modified_desc': 'Date Modified (Newest)', 'modified_asc': 'Date Modified (Oldest)'
@@ -9168,6 +9273,7 @@ SOFTWARE.</div>
             case 'get_genres':
             case 'get_years':
             case 'get_user_playlists':
+            case 'get_collab_playlists':
             case 'get_following':
               data = await fetchData(`?action=${type}&${params.toString()}`);
               renderGrid(data, type, true);
@@ -9668,9 +9774,11 @@ SOFTWARE.</div>
             case 'get_genres':
             case 'get_years':
             case 'get_user_playlists':
+            case 'get_collab_playlists':
               let title = currentView.type.replace('get_', '');
               title = title.charAt(0).toUpperCase() + title.slice(1);
               if (title === 'User_playlists') title = 'Playlists';
+              if (title === 'Collab_playlists') title = 'Shared with me';
               updateContentTitle(title);
               pageParams.delete('page');
               data = await fetchData(`?action=${currentView.type}&${pageParams.toString()}`);
@@ -10091,25 +10199,31 @@ SOFTWARE.</div>
             return;
           }
           contextMenuItemEl = buttonEl;
-          const { publicId, name, isCollab, isPrivate } = playlistData;
+          const { publicId, name, isCollab, isPrivate, ownerId } = playlistData;
           
           let menuItems = '';
           
-          if (!isPrivate) {
-            const collabText = isCollab ? 'Make Private' : 'Make Collaborative';
-            const collabIcon = isCollab ? '<i class="bi bi-lock-fill"></i>' : '<i class="bi bi-globe"></i>';
-            
-            menuItems += `<li class="context-menu-item" data-action="toggle_collab" data-public-id="${publicId}">${collabIcon} ${collabText}</li>`;
-              
-            if (isCollab) {
-              menuItems += `<li class="context-menu-item" data-action="manage_collab" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-people-fill"></i> Manage Collaborators</li>`;
+          const isOwner = currentUser && (currentUser.id == ownerId || currentUser.email === 'musiclibrary@mail.com');
+
+          if (isOwner) {
+            if (!isPrivate) {
+              const collabText = isCollab ? 'Make Private' : 'Make Collaborative';
+              const collabIcon = isCollab ? '<i class="bi bi-lock-fill"></i>' : '<i class="bi bi-globe"></i>';
+              menuItems += `<li class="context-menu-item" data-action="toggle_collab" data-public-id="${publicId}">${collabIcon} ${collabText}</li>`;
+              if (isCollab) {
+                menuItems += `<li class="context-menu-item" data-action="manage_collab" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-people-fill"></i> Manage Collaborators</li>`;
+              }
             }
+            menuItems += `<li class="context-menu-item" data-action="edit_playlist" data-public-id="${publicId}" data-name="${name}" data-is-private="${isPrivate}"><i class="bi bi-pencil-fill"></i> Edit Playlist</li>`;
+            menuItems += `<li class="context-menu-item" data-action="export_playlist" data-public-id="${publicId}"><i class="bi bi-box-arrow-up"></i> Export Playlist</li>`;
+            menuItems += `<li class="context-menu-item text-danger" data-action="delete_playlist" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-trash-fill"></i> Delete Playlist</li>`;
+          } else {
+            // User is just a collaborator
+            menuItems += `<li class="context-menu-item" data-action="export_playlist" data-public-id="${publicId}"><i class="bi bi-box-arrow-up"></i> Export Playlist</li>`;
+            menuItems += `<li class="context-menu-item text-warning" data-action="leave_collab" data-public-id="${publicId}"><i class="bi bi-box-arrow-left"></i> Leave Collab</li>`;
           }
-          
+            
           menuItems += `
-            <li class="context-menu-item" data-action="edit_playlist" data-public-id="${publicId}" data-name="${name}" data-is-private="${isPrivate}"><i class="bi bi-pencil-fill"></i> Edit Playlist</li>
-            <li class="context-menu-item" data-action="export_playlist" data-public-id="${publicId}"><i class="bi bi-box-arrow-up"></i> Export Playlist</li>
-            <li class="context-menu-item text-danger" data-action="delete_playlist" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-trash-fill"></i> Delete Playlist</li>
             <hr class="dropdown-divider bg-secondary mx-2 my-1">
             <li class="context-menu-item" data-action="close_menu"><i class="bi bi-x-lg"></i> Close Menu</li>`;
             
@@ -11315,7 +11429,8 @@ SOFTWARE.</div>
               publicId: playlistMoreBtn.dataset.publicId, 
               name: playlistMoreBtn.dataset.name,
               isCollab: parseInt(playlistMoreBtn.dataset.isCollab || 0),
-              isPrivate: parseInt(playlistMoreBtn.dataset.isPrivate || 0)
+              isPrivate: parseInt(playlistMoreBtn.dataset.isPrivate || 0),
+              ownerId: playlistMoreBtn.dataset.ownerId
             };
             buildAndShowPlaylistContextMenu(playlistMoreBtn, playlistData);
             return;
@@ -11832,6 +11947,9 @@ SOFTWARE.</div>
               const collabModalEl = document.getElementById('collab-modal');
               if (collabModalEl) {
                 const collabModal = new bootstrap.Modal(collabModalEl);
+                const collabInput = document.getElementById('collab-input');
+                const collabDropdown = document.getElementById('collab-search-dropdown');
+                let selectedCollabUserId = null;
                 
                 const loadCollabs = async () => {
                   const res = await fetchData('?action=manage_collaborators', {
@@ -11843,9 +11961,12 @@ SOFTWARE.</div>
                     if(res.collaborators.length === 0) listEl.innerHTML = '<p class="text-secondary small">No collaborators yet.</p>';
                     else listEl.innerHTML = res.collaborators.map(c => `
                       <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
-                        <div>
-                          <div><i class="bi bi-person-fill text-secondary me-2"></i>${escapeHTML(c.artist)}</div>
-                          <div class="small text-secondary">${escapeHTML(c.email)}</div>
+                        <div class="d-flex align-items-center gap-3">
+                          <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                          <div>
+                            <div>${escapeHTML(c.artist)}</div>
+                            <div class="small text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</div>
+                          </div>
                         </div>
                         <button class="btn btn-sm btn-outline-danger collab-remove-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
                       </div>
@@ -11853,17 +11974,116 @@ SOFTWARE.</div>
                   }
                 };
 
+                let collabSearchTimeout;
+                collabInput.oninput = (e) => {
+                  clearTimeout(collabSearchTimeout);
+                  selectedCollabUserId = null;
+                  const q = e.target.value.trim();
+                  if (q === '') {
+                    collabDropdown.classList.add('d-none');
+                    return;
+                  }
+                  collabSearchTimeout = setTimeout(async () => {
+                    const res = await fetchData('?action=manage_collaborators', {
+                      method: 'POST', headers: {'Content-Type': 'application/json'},
+                      body: JSON.stringify({ public_id: publicId, collab_action: 'search', query: q })
+                    });
+                    if (res && res.status === 'success') {
+                      if (res.users.length > 0) {
+                        collabDropdown.innerHTML = res.users.map(u => `
+                          <div class="search-dropdown-item collab-user-item" data-id="${u.id}" data-artist="${escapeHTML(u.artist)}">
+                            <img src="?action=get_profile_picture&id=${u.id}" class="search-dropdown-img rounded-circle">
+                            <div class="search-dropdown-text">
+                              <div class="search-dropdown-title">${escapeHTML(u.artist)}</div>
+                              <div class="search-dropdown-subtitle">ID: ${u.id}</div>
+                            </div>
+                          </div>
+                        `).join('');
+                        collabDropdown.classList.remove('d-none');
+                      } else {
+                        collabDropdown.innerHTML = '<div class="p-3 text-secondary text-center small">No users found</div>';
+                        collabDropdown.classList.remove('d-none');
+                      }
+                    }
+                  }, 300);
+                };
+
+                // Handle dropdown clicks natively on the element
+                collabDropdown.onclick = (e) => {
+                  const item = e.target.closest('.collab-user-item');
+                  if (item) {
+                    selectedCollabUserId = item.dataset.id;
+                    collabInput.value = item.dataset.artist;
+                    collabDropdown.classList.add('d-none');
+                  }
+                };
+
+                // Close dropdown if clicked outside
+                document.addEventListener('click', (e) => {
+                  if (collabDropdown && !collabDropdown.contains(e.target) && e.target !== collabInput) {
+                    collabDropdown.classList.add('d-none');
+                  }
+                });
+
                 document.getElementById('collab-add-btn').onclick = async () => {
-                  const target = document.getElementById('collab-input').value.trim();
-                  if(!target) return;
+                  const target = collabInput.value.trim();
+                  if(!target && !selectedCollabUserId) return;
+                  
+                  const reqBody = { public_id: publicId, collab_action: 'add' };
+                  if (selectedCollabUserId) reqBody.target_id = selectedCollabUserId;
+                  else reqBody.target = target;
+                  
                   const res = await fetchData('?action=manage_collaborators', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ public_id: publicId, collab_action: 'add', target })
+                    body: JSON.stringify(reqBody)
                   });
-                  if (res) { showToast(res.message, res.status); loadCollabs(); document.getElementById('collab-input').value = ''; }
+                  if (res) { 
+                    showToast(res.message, res.status); 
+                    if (res.status === 'success') {
+                      loadCollabs(); 
+                      collabInput.value = '';
+                      selectedCollabUserId = null;
+                    }
+                  }
                 };
+
+                const copyLinkBtn = document.getElementById('collab-copy-link-btn');
+                if (copyLinkBtn) {
+                  // Clean up previous event listeners if necessary
+                  const newCopyBtn = copyLinkBtn.cloneNode(true);
+                  copyLinkBtn.parentNode.replaceChild(newCopyBtn, copyLinkBtn);
+                  
+                  newCopyBtn.addEventListener('click', () => {
+                    const inviteUrl = window.location.origin + window.location.pathname + '?collab_invite=' + publicId;
+                    const onSuccess = () => {
+                      newCopyBtn.innerHTML = '<i class="bi bi-check-lg"></i> Link Copied!';
+                      newCopyBtn.classList.replace('btn-outline-light', 'btn-success');
+                      setTimeout(() => {
+                        newCopyBtn.innerHTML = '<i class="bi bi-link-45deg"></i> Copy Invite Link';
+                        newCopyBtn.classList.replace('btn-success', 'btn-outline-light');
+                      }, 2000);
+                    };
+                    const onError = () => showToast('Failed to copy link.', 'error');
+
+                    if (navigator.clipboard && window.isSecureContext) {
+                      navigator.clipboard.writeText(inviteUrl).then(onSuccess).catch(onError);
+                    } else {
+                      const textArea = document.createElement("textarea");
+                      textArea.value = inviteUrl;
+                      textArea.style.position = "fixed";
+                      textArea.style.opacity = "0";
+                      document.body.appendChild(textArea);
+                      textArea.focus();
+                      textArea.select();
+                      try {
+                        if (document.execCommand('copy')) onSuccess();
+                        else onError();
+                      } catch (err) { onError(); }
+                      document.body.removeChild(textArea);
+                    }
+                  });
+                }
                 
-                // Add event listener for removes (ensure we don't attach multiple times)
                 collabModalEl.onclick = async (evt) => {
                   const removeBtn = evt.target.closest('.collab-remove-btn');
                   if (removeBtn) {
@@ -11899,6 +12119,23 @@ SOFTWARE.</div>
                 if (result.status === 'success') {
                   showToast('Playlist deleted successfully.', 'success');
                   loadView(currentView);
+                }
+              }
+              break;
+            case 'leave_collab':
+              if (confirm(`Are you sure you want to leave this collaboration?`)) {
+                const result = await fetchData('?action=leave_collab', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ public_id: publicId })
+                });
+                if (result && result.status === 'success') {
+                  showToast(result.message, 'success');
+                  if (currentView.type === 'get_collab_playlists') {
+                     loadView(currentView);
+                  } else {
+                     loadView({ type: 'get_collab_playlists', param: '', sort: 'name_asc', filter_user_id: '' });
+                  }
                 }
               }
               break;
@@ -13116,7 +13353,7 @@ SOFTWARE.</div>
           cachedExploreData = null;
           updateUIForAuthState();
           
-          const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists'];
+          const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists', 'get_collab_playlists'];
           
           if (authRequiredViews.includes(currentView.type)) {
             loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
@@ -13425,7 +13662,7 @@ SOFTWARE.</div>
               bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
               await checkSession();
               
-              const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists'];
+              const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists', 'get_collab_playlists'];
               if (authRequiredViews.includes(currentView.type)) {
                 loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
               } else {
@@ -13444,7 +13681,7 @@ SOFTWARE.</div>
               bootstrap.Modal.getInstance(document.getElementById('settings-modal')).hide();
               await checkSession();
               
-              const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists'];
+              const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists', 'get_collab_playlists'];
               if (authRequiredViews.includes(currentView.type)) {
                 loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
               } else {
@@ -14027,6 +14264,56 @@ SOFTWARE.</div>
           }
 
           await checkSession();
+
+          // Intercept Invite Link before normal rendering
+          const urlParams = new URLSearchParams(window.location.search);
+          const inviteId = urlParams.get('collab_invite');
+          if (inviteId) {
+            if (!currentUser) {
+              showToast("Please log in to accept the collaboration invite.", "warning");
+              const loginModal = new bootstrap.Modal(document.getElementById('login-modal'));
+              loginModal.show();
+            } else {
+              const playlistInfo = await fetchData(`?action=get_view_data&type=playlist&name=${encodeURIComponent(inviteId)}&sort=manual_order`);
+              if (playlistInfo && playlistInfo.details) {
+                if (playlistInfo.details.user_id == currentUser.id) {
+                  showToast("Are you try to befriend yourself because you don't have a friend?", "warning");
+                  window.history.replaceState({}, document.title, window.location.pathname);
+                } else if (playlistInfo.details.is_private && playlistInfo.details.user_id !== currentUser.id) {
+                    // Falls through safely
+                } else {
+                  const inviteModalEl = document.getElementById('collab-invite-modal');
+                  if (inviteModalEl) {
+                    document.getElementById('invite-playlist-name').textContent = playlistInfo.details.name;
+                    document.getElementById('invite-playlist-creator').textContent = playlistInfo.details.creator;
+                    const inviteModal = new bootstrap.Modal(inviteModalEl);
+                    
+                    document.getElementById('invite-accept-btn').onclick = async () => {
+                      const res = await fetchData('?action=manage_collaborators', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ public_id: inviteId, collab_action: 'join' })
+                      });
+                      if (res) {
+                        showToast(res.message, res.status);
+                        inviteModal.hide();
+                        window.history.replaceState({}, document.title, window.location.pathname);
+                        loadView({ type: 'playlist_songs', param: inviteId, sort: 'manual_order', filter_user_id: '' });
+                      }
+                    };
+                    
+                    document.getElementById('invite-reject-btn').onclick = () => {
+                      window.history.replaceState({}, document.title, window.location.pathname);
+                    };
+                    
+                    inviteModal.show();
+                  }
+                }
+              } else {
+                showToast("Invalid or expired invite link.", "error");
+                window.history.replaceState({}, document.title, window.location.pathname);
+              }
+            }
+          }
 
           if (window.initialView) {
             history.replaceState({ viewConfig: window.initialView }, "");
