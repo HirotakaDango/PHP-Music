@@ -4,6 +4,50 @@ if (isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEP
 }
 error_reporting(E_ALL & ~E_DEPRECATED);
 
+// GLOBAL CORS ENABLER: Bulletproof cross-origin API access and preflight requests
+$http_origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_X_ORIGIN'] ?? '';
+
+// Fallback to Referer if Origin is missing (common in FastCGI/Nginx proxy setups)
+if (!$http_origin && isset($_SERVER['HTTP_REFERER'])) {
+  $parsed_url = parse_url($_SERVER['HTTP_REFERER']);
+  if (isset($parsed_url['host'])) {
+    $http_origin = ($parsed_url['scheme'] ?? 'https') . '://' . $parsed_url['host'];
+    if (isset($parsed_url['port'])) {
+      $http_origin .= ':' . $parsed_url['port'];
+    }
+  }
+}
+
+if ($http_origin) {
+  // If a specific origin is detected, securely reflect it back to permit cookies/sessions
+  header("Access-Control-Allow-Origin: $http_origin");
+  header("Access-Control-Allow-Credentials: true");
+} else {
+  // Wildcard fallback if absolutely no origin can be determined
+  header("Access-Control-Allow-Origin: *");
+}
+
+// Expose headers so external JS clients can read streams and downloads properly
+header("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, Content-Type, Content-Disposition");
+
+// Force Allowed Methods and Headers on ALL responses (not just OPTIONS) 
+// This fixes strict browser enforcement on standard GET/POST requests.
+header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+
+// Reflect requested headers or provide a robust default
+if (isset($_SERVER['HTTP_ACCESS_CONTROL_REQUEST_HEADERS'])) {
+  header("Access-Control-Allow-Headers: {$_SERVER['HTTP_ACCESS_CONTROL_REQUEST_HEADERS']}");
+} else {
+  header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Range, Accept-Ranges, Cache-Control");
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+  header("Access-Control-Max-Age: 86400"); // Cache preflight for 24 hours
+  header("Content-Length: 0");             // Prevent Safari from hanging
+  header("Content-Type: text/plain");      // Define response format
+  exit(0);
+}
+
 // MASS USE OPTIMIZATION: Force script into OPcache memory for max execution speed
 if (function_exists('opcache_is_script_cached') && function_exists('opcache_compile_file')) {
   if (!@opcache_is_script_cached(__FILE__)) {
@@ -184,7 +228,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '3.8');
+define('APP_VERSION', '3.9');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -1021,19 +1065,27 @@ if (isset($_GET['action'])) {
     } catch(Exception $e) {}
   }
 
-  // Run database schema updates ONLY ONCE per session to prevent massive write-lock congestion on concurrent AJAX requests
-  if (!isset($_SESSION['db_initialized'])) {
+  // Run database schema updates ONLY ONCE per version/session to prevent massive write-lock congestion on concurrent AJAX requests
+  if (!isset($_SESSION['db_initialized']) || $_SESSION['db_initialized'] !== APP_VERSION) {
     try {
       $db->exec("CREATE TABLE IF NOT EXISTS activity_feed (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT, target_name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
     } catch(Exception $e) {}
+    
+    try {
+      $db->exec("CREATE TABLE IF NOT EXISTS user_song_settings (
+        user_id INTEGER NOT NULL, song_id INTEGER NOT NULL, volume_multiplier REAL DEFAULT 1.0, eq_bands TEXT,
+        PRIMARY KEY (user_id, song_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+      );");
+    } catch(Exception $e) {}
 
     try { $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE community_posts ADD COLUMN parent_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE playlists ADD COLUMN play_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     
     init_db($db); 
-    $_SESSION['db_initialized'] = true;
+    $_SESSION['db_initialized'] = APP_VERSION;
   }
 
   header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
@@ -1053,6 +1105,15 @@ if (isset($_GET['action'])) {
   $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
   $offset = ($page - 1) * PAGE_SIZE;
   $limit_clause = " LIMIT " . PAGE_SIZE . " OFFSET " . $offset;
+
+  function format_user_text($text) {
+    $text = htmlspecialchars($text ?? '', ENT_QUOTES, 'UTF-8');
+    // Unwrap existing [url] tags to prevent double-wrapping during edits
+    $text = preg_replace('/\[url\]\s*(.*?)\s*\[\/url\]/i', '$1', $text);
+    // Automatically wrap URLs (http, https, www, or naked domains with multiple dots like phpmusic.rf.gd) in [url] tags safely
+    $text = preg_replace('/(?<!\S)(https?:\/\/[^\s]+|(?:www\.)?(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}(?:\/[^\s]*)?)/i', '[url] $1 [/url]', $text);
+    return $text;
+  }
 
   switch ($action) {
     case 'toggle_collaborative':
@@ -1803,7 +1864,9 @@ if (isset($_GET['action'])) {
           if ($p !== '') {
             $key = strtolower($row['album'] . ':::' . $p);
             if (!isset($discovery_albums[$key])) {
-              $discovery_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+              $discovery_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+            } else {
+              $discovery_albums[$key]['song_count']++;
             }
           }
         }
@@ -1886,7 +1949,9 @@ if (isset($_GET['action'])) {
             if ($p !== '') {
               $key = strtolower($row['album'] . ':::' . $p);
               if (!isset($rec_followed_albums[$key])) {
-                $rec_followed_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+                $rec_followed_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+              } else {
+                $rec_followed_albums[$key]['song_count']++;
               }
             }
           }
@@ -2216,9 +2281,19 @@ if (isset($_GET['action'])) {
     case 'get_notes':
       if (!$user_id) { send_json([]); }
       $sort_key = $_GET['sort'] ?? 'newest';
+      $search = $_GET['q'] ?? '';
       $order_by = ['newest' => 'ORDER BY created_at DESC', 'oldest' => 'ORDER BY created_at ASC', 'modified' => 'ORDER BY updated_at DESC'][$sort_key] ?? 'ORDER BY created_at DESC';
-      $stmt = $db->prepare("SELECT * FROM personal_notes WHERE user_id = ? $order_by $limit_clause");
-      $stmt->execute([$user_id]);
+      
+      $where = "WHERE user_id = ?";
+      $params = [$user_id];
+      if ($search !== '') {
+        $where .= " AND (title LIKE ? OR content LIKE ?)";
+        $params[] = "%$search%";
+        $params[] = "%$search%";
+      }
+      
+      $stmt = $db->prepare("SELECT * FROM personal_notes $where $order_by $limit_clause");
+      $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
     
@@ -2227,7 +2302,7 @@ if (isset($_GET['action'])) {
       $data = json_decode(file_get_contents('php://input'), true);
       $note_id = $data['id'] ?? null;
       $title = htmlspecialchars($data['title']);
-      $content = htmlspecialchars($data['content']);
+      $content = format_user_text($data['content']);
       if ($note_id) {
         $db->prepare("UPDATE personal_notes SET title = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")->execute([$title, $content, $note_id, $user_id]);
       } else {
@@ -2244,15 +2319,54 @@ if (isset($_GET['action'])) {
 
     case 'get_song_comments':
       $song_id = intval($_GET['song_id']);
-      $comments = $db->prepare("
+      $sort = $_GET['sort'] ?? 'newest';
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * 25;
+      
+      $order_by = "ORDER BY c.created_at DESC";
+      if ($sort === 'oldest') $order_by = "ORDER BY c.created_at ASC";
+      if ($sort === 'most_liked') $order_by = "ORDER BY like_count DESC, c.created_at DESC";
+      if ($sort === 'most_replied') $order_by = "ORDER BY (SELECT COUNT(*) FROM song_comments WHERE parent_id = c.id) DESC, c.created_at DESC";
+
+      $root_stmt = $db->prepare("
         SELECT c.*, u.artist, u.profile_picture_type, u.id as u_id,
         (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'like') as like_count,
         (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'dislike') as dislike_count,
         (SELECT reaction FROM comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
-        FROM song_comments c JOIN users u ON c.user_id = u.id WHERE c.song_id = ? ORDER BY c.created_at ASC
+        FROM song_comments c JOIN users u ON c.user_id = u.id 
+        WHERE c.song_id = ? AND c.parent_id IS NULL $order_by LIMIT 25 OFFSET ?
       ");
-      $comments->execute([$user_id ?? 0, $song_id]);
-      
+      $root_stmt->execute([$user_id ?? 0, $song_id, $offset]);
+      $roots = $root_stmt->fetchAll();
+
+      $root_ids = array_column($roots, 'id');
+      $replies_filtered = [];
+      if (!empty($root_ids)) {
+          $placeholders = implode(',', array_fill(0, count($root_ids), '?'));
+          $reply_stmt = $db->prepare("
+            SELECT c.*, u.artist, u.profile_picture_type, u.id as u_id,
+            (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'like') as like_count,
+            (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'dislike') as dislike_count,
+            (SELECT reaction FROM comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
+            FROM song_comments c JOIN users u ON c.user_id = u.id 
+            WHERE c.song_id = ? AND c.parent_id IN ($placeholders)
+            ORDER BY c.created_at ASC
+          ");
+          $params = array_merge([$user_id ?? 0, $song_id], $root_ids);
+          $reply_stmt->execute($params);
+          $all_replies = $reply_stmt->fetchAll();
+
+          $rcounts = [];
+          foreach ($all_replies as $r) {
+              $pid = $r['parent_id'];
+              if (!isset($rcounts[$pid])) $rcounts[$pid] = 0;
+              if ($rcounts[$pid] < 25) { // Strict limit of 25 replies per comment
+                  $replies_filtered[] = $r;
+                  $rcounts[$pid]++;
+              }
+          }
+      }
+
       $likes = $db->prepare("SELECT reaction, COUNT(*) as c FROM song_reactions WHERE song_id = ? GROUP BY reaction");
       $likes->execute([$song_id]);
       $reaction_counts = ['like'=>0, 'dislike'=>0];
@@ -2264,7 +2378,7 @@ if (isset($_GET['action'])) {
         $stmt->execute([$user_id, $song_id]);
         $my_reaction = $stmt->fetchColumn();
       }
-      send_json(['comments' => $comments->fetchAll(), 'reactions' => $reaction_counts, 'my_reaction' => $my_reaction]);
+      send_json(['comments' => array_merge($roots, $replies_filtered), 'reactions' => $reaction_counts, 'my_reaction' => $my_reaction]);
       break;
 
     case 'toggle_song_reaction':
@@ -2300,8 +2414,7 @@ if (isset($_GET['action'])) {
     case 'add_song_comment':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
-      $content = htmlspecialchars($data['content']);
-      $content = preg_replace('/@(\w+)/', '<strong class="text-info">@$1</strong>', $content);
+      $content = format_user_text($data['content']);
       $parent_id = empty($data['parent_id']) ? null : intval($data['parent_id']);
       $db->prepare("INSERT INTO song_comments (user_id, song_id, parent_id, content) VALUES (?, ?, ?, ?)")->execute([$user_id, $data['song_id'], $parent_id, $content]);
       send_json(['status' => 'success']);
@@ -2310,8 +2423,7 @@ if (isset($_GET['action'])) {
     case 'edit_song_comment':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
-      $content = htmlspecialchars($data['content']);
-      $content = preg_replace('/@(\w+)/', '<strong class="text-info">@$1</strong>', $content);
+      $content = format_user_text($data['content']);
       $db->prepare("UPDATE song_comments SET content = ? WHERE id = ? AND user_id = ?")->execute([$content, intval($data['comment_id']), $user_id]);
       send_json(['status' => 'success']);
       break;
@@ -2325,28 +2437,74 @@ if (isset($_GET['action'])) {
 
     case 'get_community':
       $sort_key = $_GET['sort'] ?? 'newest';
+      $search = $_GET['q'] ?? '';
       $order_by = 'ORDER BY p.created_at DESC';
       $join_cond = "";
+      $where_cond = "WHERE p.parent_id IS NULL";
+      $params = [$user_id ?? 0];
+      
+      if ($search !== '') {
+        $where_cond .= " AND p.content LIKE ?";
+        $params[] = "%$search%";
+      }
+
       if ($sort_key === 'most_liked') {
         $order_by = 'ORDER BY like_count DESC, p.created_at DESC';
+      } elseif ($sort_key === 'most_replied') {
+        $order_by = 'ORDER BY reply_count DESC, p.created_at DESC';
       } elseif ($sort_key === 'following' && $user_id) {
-        $join_cond = "JOIN follows f ON f.following_id = p.user_id AND f.follower_id = $user_id";
+        $join_cond = "JOIN follows f ON f.following_id = p.user_id AND f.follower_id = " . intval($user_id);
       }
-      $stmt = $db->prepare("
+      
+      $root_stmt = $db->prepare("
         SELECT p.*, u.artist, 
         (SELECT COUNT(*) FROM community_reactions WHERE post_id = p.id AND reaction = 'like') as like_count,
         (SELECT COUNT(*) FROM community_reactions WHERE post_id = p.id AND reaction = 'dislike') as dislike_count,
+        (SELECT COUNT(*) FROM community_posts WHERE parent_id = p.id) as reply_count,
         (SELECT reaction FROM community_reactions WHERE post_id = p.id AND user_id = ?) as my_reaction 
-        FROM community_posts p JOIN users u ON p.user_id = u.id $join_cond $order_by $limit_clause
+        FROM community_posts p JOIN users u ON p.user_id = u.id $join_cond $where_cond $order_by $limit_clause
       ");
-      $stmt->execute([$user_id ?? 0]);
-      send_json($stmt->fetchAll());
+      $root_stmt->execute($params);
+      $roots = $root_stmt->fetchAll();
+      
+      $root_ids = array_column($roots, 'id');
+      $replies_filtered = [];
+      if (!empty($root_ids)) {
+        $placeholders = implode(',', array_fill(0, count($root_ids), '?'));
+        $reply_stmt = $db->prepare("
+          SELECT p.*, u.artist, 
+          (SELECT COUNT(*) FROM community_reactions WHERE post_id = p.id AND reaction = 'like') as like_count,
+          (SELECT COUNT(*) FROM community_reactions WHERE post_id = p.id AND reaction = 'dislike') as dislike_count,
+          (SELECT COUNT(*) FROM community_posts WHERE parent_id = p.id) as reply_count,
+          (SELECT reaction FROM community_reactions WHERE post_id = p.id AND user_id = ?) as my_reaction 
+          FROM community_posts p JOIN users u ON p.user_id = u.id
+          WHERE p.parent_id IN ($placeholders)
+          ORDER BY p.created_at ASC
+        ");
+        $reply_params = array_merge([$user_id ?? 0], $root_ids);
+        $reply_stmt->execute($reply_params);
+        $all_replies = $reply_stmt->fetchAll();
+          
+        $rcounts = [];
+        foreach ($all_replies as $r) {
+          $pid = $r['parent_id'];
+          if (!isset($rcounts[$pid])) $rcounts[$pid] = 0;
+          if ($rcounts[$pid] < 25) { // Strict limit of 25 replies per post
+            $replies_filtered[] = $r;
+            $rcounts[$pid]++;
+          }
+        }
+      }
+      
+      send_json(array_merge($roots, $replies_filtered));
       break;
 
     case 'create_community_post':
       if (!$user_id) { http_response_code(403); exit; }
-      $content = htmlspecialchars(json_decode(file_get_contents('php://input'), true)['content']);
-      $db->prepare("INSERT INTO community_posts (user_id, content) VALUES (?, ?)")->execute([$user_id, $content]);
+      $data = json_decode(file_get_contents('php://input'), true);
+      $content = format_user_text($data['content']);
+      $parent_id = empty($data['parent_id']) ? null : intval($data['parent_id']);
+      $db->prepare("INSERT INTO community_posts (user_id, parent_id, content) VALUES (?, ?, ?)")->execute([$user_id, $parent_id, $content]);
       send_json(['status' => 'success']);
       break;
 
@@ -2623,8 +2781,11 @@ if (isset($_GET['action'])) {
                 'artist' => $p,
                 'user_id' => $row['user_id'],
                 'id' => $row['id'],
-                'year' => $row['year']
+                'year' => $row['year'],
+                'song_count' => 1
               ];
+            } else {
+              $albums[$key]['song_count']++;
             }
           }
         }
@@ -2668,7 +2829,7 @@ if (isset($_GET['action'])) {
     case 'edit_community_post':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
-      $db->prepare("UPDATE community_posts SET content = ? WHERE id = ? AND user_id = ?")->execute([htmlspecialchars($data['content']), intval($data['id']), $user_id]);
+      $db->prepare("UPDATE community_posts SET content = ? WHERE id = ? AND user_id = ?")->execute([format_user_text($data['content']), intval($data['id']), $user_id]);
       send_json(['status' => 'success']);
       break;
 
@@ -2857,7 +3018,7 @@ if (isset($_GET['action'])) {
             } else {
               $details['is_following'] = false;
             }
-            $stmt_playlists = $db->prepare("SELECT p.name, p.public_id, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id FROM playlists p WHERE p.user_id = ? AND (p.is_private = 0 OR {$is_super_admin} = 1) ORDER BY p.created_at DESC");
+            $stmt_playlists = $db->prepare("SELECT p.name, p.public_id, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count FROM playlists p WHERE p.user_id = ? AND (p.is_private = 0 OR {$is_super_admin} = 1) ORDER BY p.created_at DESC");
             $stmt_playlists->execute([$artist_user_id]);
             $details['playlists'] = $stmt_playlists->fetchAll();
           }
@@ -2977,7 +3138,9 @@ if (isset($_GET['action'])) {
           if ($p !== '') {
             $key = strtolower($row['album'] . ':::' . $p);
             if (!isset($search_albums[$key])) {
-              $search_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+              $search_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+            } else {
+              $search_albums[$key]['song_count']++;
             }
           }
         }
@@ -2988,7 +3151,7 @@ if (isset($_GET['action'])) {
         $shelves[] = ['title' => 'Albums', 'type' => 'albums', 'items' => $search_albums];
       }
 
-      $stmt = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, u.artist as creator, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id FROM playlists p JOIN users u ON p.user_id = u.id WHERE p.name LIKE ? AND (p.is_private = 0 OR p.user_id = ? OR {$is_super_admin} = 1) ORDER BY p.name ASC LIMIT 15");
+      $stmt = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, u.artist as creator, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count FROM playlists p JOIN users u ON p.user_id = u.id WHERE p.name LIKE ? AND (p.is_private = 0 OR p.user_id = ? OR {$is_super_admin} = 1) ORDER BY p.name ASC LIMIT 15");
       $stmt->execute([$query, $user_id]);
       $playlists = $stmt->fetchAll();
       if (count($playlists) > 0) {
@@ -3293,6 +3456,25 @@ if (isset($_GET['action'])) {
       $stmt2->execute([$user_id, $user_id, $user_id, $user_id, $last_clear]);
       $feed = array_merge($feed, $stmt2->fetchAll());
       
+      // 3. Incoming Community Replies
+      $stmt3 = $db->prepare("
+        SELECT 
+          'community_notif' as type,
+          cp.id as post_id,
+          cp.content,
+          cp.created_at,
+          u.artist as commenter_name,
+          '' as song_title,
+          'community_reply' as notif_type
+        FROM community_posts cp
+        JOIN users u ON cp.user_id = u.id
+        JOIN community_posts parent_post ON cp.parent_id = parent_post.id
+        WHERE parent_post.user_id = ? AND cp.user_id != ? AND cp.created_at > ?
+        ORDER BY cp.created_at DESC LIMIT 50
+      ");
+      $stmt3->execute([$user_id, $user_id, $last_clear]);
+      $feed = array_merge($feed, $stmt3->fetchAll());
+      
       // Sort all notifications by date
       usort($feed, function($a, $b) {
         return strtotime($b['created_at']) - strtotime($a['created_at']);
@@ -3380,7 +3562,7 @@ if (isset($_GET['action'])) {
         send_json(['status' => 'success', 'message' => 'Playlist deleted.']);
       } else {
         http_response_code(403);
-        send_json(['status' => 'error', 'message' => 'Permission denied or playlist not found.']);
+        send_json(['status' => 'error', 'message' => "You're not the owner of this playlist."]);
       }
       break;
 
@@ -3650,7 +3832,9 @@ if (isset($_GET['action'])) {
             if ($p !== '' && strcasecmp($p, $top_artist) === 0) {
               $key = strtolower($row['album'] . ':::' . $p);
               if (!isset($artist_albums[$key])) {
-                $artist_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+                $artist_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+              } else {
+                $artist_albums[$key]['song_count']++;
               }
             }
           }
@@ -3699,7 +3883,8 @@ if (isset($_GET['action'])) {
 
       $recent_playlists_stmt = $db->prepare("
         SELECT p.name, p.public_id, p.is_collaborative, p.is_private, u.artist as creator,
-        (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
+        (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id,
+        (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count
         FROM playlists p JOIN users u ON p.user_id = u.id
         WHERE p.user_id = :user_id
         ORDER BY p.created_at DESC LIMIT 5
@@ -3739,7 +3924,9 @@ if (isset($_GET['action'])) {
           if ($p !== '') {
             $key = strtolower($row['album'] . ':::' . $p);
             if (!isset($discovery_albums[$key])) {
-              $discovery_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+              $discovery_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+            } else {
+              $discovery_albums[$key]['song_count']++;
             }
           }
         }
@@ -3830,7 +4017,8 @@ if (isset($_GET['action'])) {
           'public_id' => $public_id,
           'name' => $name,
           'creator' => 'PHP-Music',
-          'image_id' => $img_id
+          'image_id' => $img_id,
+          'song_count' => count($song_ids)
         ];
       }
       if (!empty($mixes)) {
@@ -3865,7 +4053,9 @@ if (isset($_GET['action'])) {
           if ($p !== '') {
             $key = strtolower($row['album'] . ':::' . $p);
             if (!isset($latest_followed_albums[$key])) {
-              $latest_followed_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id']];
+              $latest_followed_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+            } else {
+              $latest_followed_albums[$key]['song_count']++;
             }
           }
         }
@@ -4519,10 +4709,11 @@ function perform_full_scan($db) {
       ::-webkit-scrollbar-track { background: var(--ytm-surface); }
       ::-webkit-scrollbar-thumb { background: var(--ytm-surface-2); border-radius: 4px; }
       ::-webkit-scrollbar-thumb:hover { background: #555; }
-      .nav-tabs { border-bottom-color: var(--ytm-surface-2); }
-      .nav-tabs .nav-link { color: var(--ytm-secondary-text); border: none; border-bottom: 2px solid transparent; padding: 0.75rem 1.5rem; font-weight: 500; cursor: pointer; background: transparent; }
-      .nav-tabs .nav-link:hover { border-color: transparent; color: var(--ytm-primary-text); }
-      .nav-tabs .nav-link.active { background-color: transparent; color: var(--ytm-primary-text); border-color: transparent; border-bottom-color: var(--ytm-accent); }
+      .nav-tabs { border-bottom-color: var(--ytm-surface-2) !important; }
+      .nav-tabs .nav-link { color: var(--ytm-secondary-text) !important; border: none !important; border-bottom: 2px solid transparent !important; padding: 0.75rem 1.5rem; font-weight: 500; cursor: pointer; background: transparent !important; transition: color 0.2s, border-color 0.2s; }
+      .nav-tabs .nav-link:hover { color: var(--ytm-primary-text) !important; border-bottom: 2px solid rgba(255,255,255,0.2) !important; }
+      /* Locks the active tab highlight so it never vanishes */
+      .nav-tabs .nav-link.active { background-color: transparent !important; color: var(--ytm-primary-text) !important; border-bottom: 2px solid var(--ytm-accent) !important; font-weight: bold !important; text-shadow: 0 0 10px rgba(255,255,255,0.3); }
       .app-container { display: flex; height: 100%; }
       .sidebar {
         width: 240px; background-color: var(--ytm-bg);
@@ -4556,7 +4747,7 @@ function perform_full_scan($db) {
           position: sticky; top: 0; background-color: var(--ytm-bg);
           z-index: 1010; padding-top: 1.5rem; padding-bottom: 1.5rem;
         }
-        .song-item.history-item { grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px; }
+        .song-item.history-item { grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 80px 40px; }
       }
       .song-item { cursor: pointer; border-radius: 0.5em; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
       .offcanvas-body .nav-link { padding: 0.75rem 1.5rem; }
@@ -4594,10 +4785,16 @@ function perform_full_scan($db) {
       .search-bar.input-group .btn:hover { background-color: #383838; color: var(--ytm-primary-text); }
       .content-title { font-size: 2rem; font-weight: 700; margin-bottom: 0; }
       .song-list-header, .song-item {
-        display: grid; grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) 80px 40px;
+        display: grid; grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px;
         align-items: center; gap: 1rem; padding: 0.5rem 1rem; font-size: 0.9rem; color: var(--ytm-secondary-text);
       }
+      .song-list-header, .song-item {
+        display: grid; grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px;
+        align-items: center; gap: 1rem; padding: 0.5rem 1rem; font-size: 0.9rem; color: var(--ytm-secondary-text);
+      }
+      .song-item.history-item { grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 80px 40px; }
       .song-list-header { font-weight: 500; }
+      .song-item .song-artist-mobile { display: none; }
       .song-item.ghost { opacity: 0.4; }
       .song-item:hover { background-color: var(--ytm-surface-2); }
       .song-item.multi-selected { background-color: rgba(255, 0, 0, 0.2) !important; }
@@ -4776,14 +4973,44 @@ function perform_full_scan($db) {
         .song-item .song-album, .song-item .song-artist, .song-item .song-duration { display: none; }
         .song-item .song-thumb, .song-item .song-indicator-wrapper { grid-row: 1 / span 2; }
         .song-item .song-title-wrapper { grid-column: 2; grid-row: 1; min-width: 0; }
-        .song-item .song-artist-mobile { display: flex !important; justify-content: space-between; align-items: center; grid-column: 2; grid-row: 2; font-size: 0.8rem; color: var(--ytm-secondary-text); gap: 0.5rem; min-width: 0; }
+        .song-item .song-artist-mobile { display: flex !important; flex-direction: column; align-items: flex-start; justify-content: center; grid-column: 2; grid-row: 2; font-size: 0.8rem; color: var(--ytm-secondary-text); min-width: 0; gap: 0; }
         .song-duration-mobile { display: block !important; flex-shrink: 0; }
         .song-item .song-more { grid-column: 3; grid-row: 1 / span 2; }
         .view-details-header { flex-direction: column; align-items: center; text-align: center; }
         .song-list-header { border-bottom: 1px solid var(--ytm-surface-2); }
       }
       .loader { text-align: center; padding: 3rem; font-size: 1.2rem; color: var(--ytm-secondary-text); }
-      .player-modal-content { background-color: var(--ytm-bg); color: var(--ytm-primary-text); }
+      /* Solid dark base blocks the main page from bleeding through */
+      .player-modal-content { position: relative; overflow: hidden; background-color: #050505 !important; color: var(--ytm-primary-text); transition: color 0.4s ease; }
+      /* The blurred cover image sits inside the modal */
+      .dynamic-blur-bg { position: absolute; top: -60px; left: -60px; right: -60px; bottom: -60px; background-size: cover; background-position: center; filter: blur(45px) brightness(0.4); opacity: 0.85; z-index: 0; transition: background-image 0.8s ease, filter 0.4s ease; pointer-events: none; }
+      
+      /* Dynamic Light Theme Overrides for Player Modals */
+      .player-modal-content.theme-light-bg { background-color: #ffffff !important; color: #000000 !important; }
+      .player-modal-content.theme-light-bg .dynamic-blur-bg { filter: blur(50px) brightness(1.05); opacity: 0.85; }
+      .player-modal-content.theme-light-bg .text-white { color: #000000 !important; }
+      .player-modal-content.theme-light-bg .text-secondary { color: #444444 !important; font-weight: 500; }
+      .player-modal-content.theme-light-bg .player-btn { color: #333333 !important; }
+      .player-modal-content.theme-light-bg .player-btn:hover,
+      .player-modal-content.theme-light-bg .player-btn.active { color: #000000 !important; }
+      .player-modal-content.theme-light-bg .play-btn { background-color: #000000 !important; color: #ffffff !important; }
+      .player-modal-content.theme-light-bg .play-btn .bi { color: #ffffff !important; }
+      .player-modal-content.theme-light-bg .progress-bar-bg { background-color: rgba(0, 0, 0, 0.2) !important; }
+      .player-modal-content.theme-light-bg .progress-bar-fg { background-color: #000000 !important; }
+      .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg { background-color: var(--ytm-accent) !important; }
+      .player-modal-content.theme-light-bg .progress-bar-fg::after { background-color: #000000 !important; }
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link { color: rgba(0,0,0,0.6) !important; font-weight: 600 !important; border-bottom: 2px solid transparent !important; }
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link:hover { color: #000000 !important; border-bottom: 2px solid rgba(0,0,0,0.2) !important; }
+      /* Locks the active tab highlight in Light Mode */
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link.active { color: #000000 !important; border-bottom: 2px solid #000000 !important; font-weight: 800 !important; text-shadow: none !important; }
+      .player-modal-content.theme-light-bg .song-item .song-title { color: #000000 !important; font-weight: 600; }
+      .player-modal-content.theme-light-bg .song-item:hover { background-color: rgba(0,0,0,0.08) !important; }
+      .player-modal-content.theme-light-bg .lyric-line { color: rgba(0,0,0,0.6) !important; }
+      .player-modal-content.theme-light-bg .lyric-line:hover { color: #000000 !important; }
+      .player-modal-content.theme-light-bg .lyric-line.active { color: var(--ytm-accent) !important; text-shadow: none; font-weight: 800; }
+      .player-modal-content.theme-light-bg #dp-tabs-content { background-color: rgba(255, 255, 255, 0.6) !important; border-color: rgba(0, 0, 0, 0.15) !important; }
+      
+      .player-modal-header, .player-modal-body { position: relative; z-index: 1; }
       .player-modal-header { border-bottom: 0; justify-content: space-between; align-items: center; }
       .player-modal-header .player-btn { padding: 0.5rem; color: var(--ytm-primary-text); }
       .player-modal-header .player-btn .bi { font-size: 1.75rem; }
@@ -5692,7 +5919,8 @@ function perform_full_scan($db) {
 
     <div class="modal fade" id="player-modal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-fullscreen">
-        <div class="modal-content" style="background-color: var(--ytm-bg); color: var(--ytm-primary-text);">
+        <div class="modal-content player-modal-content">
+          <div class="dynamic-blur-bg" id="mobile-player-bg"></div>
           
           <div class="modal-header border-0 pb-0 d-flex justify-content-between align-items-center">
             <button type="button" class="btn player-btn text-white" data-bs-dismiss="modal"><i class="bi bi-chevron-down fs-2"></i></button>
@@ -5755,7 +5983,8 @@ function perform_full_scan($db) {
 
     <div class="modal fade" id="desktop-player-modal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-fullscreen">
-        <div class="modal-content" style="background-color: var(--ytm-bg); color: var(--ytm-primary-text);">
+        <div class="modal-content player-modal-content">
+          <div class="dynamic-blur-bg" id="desktop-player-bg"></div>
           <div class="modal-header player-modal-header py-0 px-4 border-0">
             <button type="button" class="btn player-btn text-white" data-bs-dismiss="modal" aria-label="Close">
               <i class="bi bi-chevron-down fs-2"></i>
@@ -5788,7 +6017,7 @@ function perform_full_scan($db) {
                 </li>
               </ul>
               
-              <div class="tab-content flex-grow-1 overflow-hidden d-flex flex-column mb-4 rounded" style="background-color: var(--ytm-surface);" id="dp-tabs-content">
+              <div class="tab-content flex-grow-1 overflow-hidden d-flex flex-column mb-4 rounded" style="background-color: rgba(18, 18, 18, 0.4); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.05);" id="dp-tabs-content">
                 
                 <div class="tab-pane fade show active h-100 overflow-auto" id="dp-queue-pane" role="tabpanel">
                    <div id="desktop-player-queue-list" class="p-2">
@@ -5836,6 +6065,14 @@ function perform_full_scan($db) {
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <select id="comments-sort-select" class="form-select form-select-sm w-auto bg-dark text-white border-secondary">
+                <option value="newest">Newest</option>
+                <option value="oldest">Oldest</option>
+                <option value="most_liked">Most Liked</option>
+                <option value="most_replied">Most Replied</option>
+              </select>
+            </div>
             <div class="d-flex justify-content-center gap-4 mb-4">
               <button class="btn btn-outline-light d-flex align-items-center gap-2" id="song-like-btn">
                 <i class="bi bi-hand-thumbs-up"></i> <span id="song-like-count">0</span>
@@ -5844,17 +6081,75 @@ function perform_full_scan($db) {
                 <i class="bi bi-hand-thumbs-down"></i> <span id="song-dislike-count">0</span>
               </button>
             </div>
-            <form id="comment-form" class="mb-4 d-flex gap-2">
+            <form id="comment-form" class="mb-2 d-flex gap-2">
               <input type="hidden" id="comment-parent-id" value="">
-              <input type="text" id="comment-input" class="form-control bg-dark text-white border-secondary" placeholder="Add a comment... (use @ to mention)" required>
+              <input type="text" id="comment-input" class="form-control bg-dark text-white border-secondary" placeholder="Add a comment... (use @ to mention)" maxlength="2000" required>
               <button type="submit" class="btn btn-danger"><i class="bi bi-send"></i></button>
             </form>
+            <div class="d-flex justify-content-end mb-4">
+              <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+            </div>
             <div id="comments-list" class="d-flex flex-column gap-3"></div>
+            <div class="text-center mt-4 mb-2 d-none" id="load-more-comments-container">
+              <button class="btn btn-outline-light btn-sm px-4 rounded-pill" id="load-more-comments-btn">Load More Comments</button>
+            </div>
           </div>
         </div>
       </div>
     </div>
     
+    <div class="modal fade" id="view-note-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+        <div class="modal-content" style="background-color: var(--ytm-surface);">
+          <div class="modal-header border-secondary">
+            <h5 class="modal-title text-white fw-bold" id="view-note-title"></h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-white" style="white-space: pre-wrap; font-size: 1.05rem; line-height: 1.6;" id="view-note-content"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="view-note-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+        <div class="modal-content" style="background-color: var(--ytm-surface);">
+          <div class="modal-header border-secondary">
+            <h5 class="modal-title text-white fw-bold" id="view-note-title"></h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-white" style="white-space: pre-wrap; font-size: 1.05rem; line-height: 1.6;" id="view-note-content"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="bbcode-info-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-info-circle text-info me-2"></i> Formatting Help</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-light">
+            <p class="text-secondary small mb-3">You can use special formatting in your text!</p>
+            <ul class="list-group list-group-flush rounded">
+              <li class="list-group-item bg-dark text-white border-secondary">
+                <strong>Auto Links:</strong><br>
+                <span class="text-secondary small">URLs like <code>phpmusic.rf.gd</code> or <code>https://example.com</code> will automatically become clickable links.</span>
+              </li>
+              <li class="list-group-item bg-dark text-white border-secondary">
+                <strong>Manual Links:</strong><br>
+                <span class="text-secondary small">Use <code>[url] yourlink.com [/url]</code> to explicitly create a clickable link.</span>
+              </li>
+              <li class="list-group-item bg-dark text-white border-secondary">
+                <strong>Mentions:</strong><br>
+                <span class="text-secondary small">Use <code>@Username</code> (without spaces) to link directly to a user's profile.</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="note-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content" style="background-color: var(--ytm-surface);">
@@ -5866,7 +6161,10 @@ function perform_full_scan($db) {
             <form id="note-form">
               <input type="hidden" id="note-id">
               <input type="text" id="note-title" class="form-control bg-dark text-white border-secondary mb-3" placeholder="Title" required>
-              <textarea id="note-content" class="form-control bg-dark text-white border-secondary mb-3" rows="6" placeholder="Write your note here..." required></textarea>
+              <textarea id="note-content" class="form-control bg-dark text-white border-secondary mb-2" rows="6" placeholder="Write your note here..." maxlength="25000" required></textarea>
+              <div class="d-flex justify-content-end mb-3">
+                <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+              </div>
               <button type="submit" class="btn btn-danger w-100">Save Note</button>
             </form>
           </div>
@@ -5968,7 +6266,10 @@ function perform_full_scan($db) {
           <div class="modal-body">
             <form id="edit-comment-form">
               <input type="hidden" id="edit-comment-id">
-              <input type="text" id="edit-comment-input" class="form-control bg-dark text-white border-secondary mb-3" required>
+              <input type="text" id="edit-comment-input" class="form-control bg-dark text-white border-secondary mb-2" maxlength="2000" required>
+              <div class="d-flex justify-content-end mb-3">
+                <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+              </div>
               <button type="submit" class="btn btn-danger w-100">Save Changes</button>
             </form>
           </div>
@@ -5986,7 +6287,10 @@ function perform_full_scan($db) {
           <div class="modal-body">
             <form id="edit-post-form">
               <input type="hidden" id="edit-post-id">
-              <textarea id="edit-post-input" class="form-control bg-dark text-white border-secondary mb-3" rows="4" placeholder="Edit your post..." required></textarea>
+              <textarea id="edit-post-input" class="form-control bg-dark text-white border-secondary mb-2" rows="4" placeholder="Edit your post..." maxlength="2000" required></textarea>
+              <div class="d-flex justify-content-end mb-3">
+                <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+              </div>
               <button type="submit" class="btn btn-info text-dark fw-bold w-100">Save Changes</button>
             </form>
           </div>
@@ -6736,65 +7040,76 @@ SOFTWARE.</div>
           const body = document.getElementById('activity-modal-body');
           
           const loadActivityFeed = async () => {
-             body.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary" role="status"></div></div>';
-             const feed = await fetchData('?action=get_activity_feed');
-             if (feed && feed.length > 0) {
-               body.innerHTML = '<ul class="list-group list-group-flush">' + feed.map(item => {
-                 if (item.type === 'comment_notif') {
-                   const isReply = item.notif_type === 'reply';
-                   const unreadBadge = item.is_unread ? '<span class="badge bg-danger ms-2" style="font-size: 0.65rem;">New</span>' : '';
-                   const bgClass = item.is_unread ? 'bg-dark' : 'bg-transparent';
+            body.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary" role="status"></div></div>';
+            const feed = await fetchData('?action=get_activity_feed');
+            if (feed && feed.length > 0) {
+              body.innerHTML = '<ul class="list-group list-group-flush">' + feed.map(item => {
+                if (item.type === 'comment_notif' || item.type === 'community_notif') {
+                  const isCommunity = item.type === 'community_notif';
+                  const isReply = item.notif_type === 'reply' || item.notif_type === 'community_reply';
+                  const unreadBadge = item.is_unread ? '<span class="badge bg-danger ms-2" style="font-size: 0.65rem;">New</span>' : '';
+                  const bgClass = item.is_unread ? 'bg-dark' : 'bg-transparent';
 
-                   const actionText = isReply 
-                     ? `<span class="fw-bold">${escapeHTML(item.commenter_name)}</span> replied to your comment on <span class="text-info">${escapeHTML(item.song_title)}</span>${unreadBadge}`
-                     : `<span class="fw-bold">${escapeHTML(item.commenter_name)}</span> commented on your song <span class="text-info">${escapeHTML(item.song_title)}</span>${unreadBadge}`;
+                  let actionText = '';
+                  let iconHTML = '';
+                  let replyBtnHTML = '';
+
+                  if (isCommunity) {
+                    actionText = `<span class="fw-bold">${escapeHTML(item.commenter_name)}</span> replied to your community post${unreadBadge}`;
+                    iconHTML = `<i class="bi bi-people-fill text-info fs-5"></i>`;
+                    replyBtnHTML = `<button class="btn btn-sm btn-outline-light notif-comm-reply-btn" data-post-id="${item.post_id}" data-username="${escapeHTML(item.commenter_name)}"><i class="bi bi-reply-fill"></i> Reply</button>`;
+                  } else {
+                    actionText = isReply 
+                      ? `<span class="fw-bold">${escapeHTML(item.commenter_name)}</span> replied to your comment on <span class="text-info">${escapeHTML(item.song_title)}</span>${unreadBadge}`
+                      : `<span class="fw-bold">${escapeHTML(item.commenter_name)}</span> commented on your song <span class="text-info">${escapeHTML(item.song_title)}</span>${unreadBadge}`;
+                    iconHTML = `<i class="bi bi-chat-dots-fill text-primary fs-5"></i>`;
+                    replyBtnHTML = `<button class="btn btn-sm btn-outline-light notif-reply-btn" data-song-id="${item.song_id}" data-comment-id="${item.comment_id}" data-username="${escapeHTML(item.commenter_name)}"><i class="bi bi-reply-fill"></i> Reply</button>`;
+                  }
                      
-                   const cleanContent = item.content.replace(/<[^>]*>?/gm, ''); // Strip HTML tags entirely for notifications
+                  const cleanContent = parseUserText(item.content).replace(/<[^>]*>?/gm, ''); // Parse BBCode then strip HTML entirely for notifications
 
-                   return `
-                     <li class="list-group-item ${bgClass} text-white border-secondary py-3">
-                       <div class="d-flex align-items-start gap-3">
-                         <div class="mt-1"><i class="bi bi-chat-dots-fill text-primary fs-5"></i></div>
-                         <div class="flex-grow-1" style="min-width: 0;">
-                           <div style="font-size: 0.95rem;">${actionText}</div>
-                           <div class="text-secondary fst-italic my-1 text-truncate" style="font-size: 0.9rem; border-left: 2px solid #555; padding-left: 8px;">"${escapeHTML(cleanContent)}"</div>
-                           <div class="d-flex justify-content-between align-items-center mt-2">
-                             <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(item.created_at)}</small>
-                             <button class="btn btn-sm btn-outline-light notif-reply-btn" data-song-id="${item.song_id}" data-comment-id="${item.comment_id}" data-username="${escapeHTML(item.commenter_name)}">
-                               <i class="bi bi-reply-fill"></i> Reply
-                             </button>
-                           </div>
-                         </div>
-                       </div>
-                     </li>
-                   `;
-                 } else {
-                   const unreadBadge = item.is_unread ? '<span class="badge bg-danger ms-2" style="font-size: 0.65rem;">New</span>' : '';
-                   const bgClass = item.is_unread ? 'bg-dark' : 'bg-transparent';
-                   return `
-                     <li class="list-group-item ${bgClass} text-white border-secondary py-3">
-                       <div class="d-flex align-items-center gap-3">
-                         <div class="mt-1"><i class="bi bi-clock-history text-secondary fs-5"></i></div>
-                         <div>
-                           <div style="font-size: 0.95rem;">You ${escapeHTML(item.action)} ${item.target_name ? `<span class="text-info">${escapeHTML(item.target_name)}</span>` : ''}${unreadBadge}</div>
-                           <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(item.created_at)}</small>
-                         </div>
-                       </div>
-                     </li>
-                   `;
-                 }
-               }).join('') + '</ul>';
+                  return `
+                    <li class="list-group-item ${bgClass} text-white border-secondary py-3">
+                      <div class="d-flex align-items-start gap-3">
+                        <div class="mt-1">${iconHTML}</div>
+                        <div class="flex-grow-1" style="min-width: 0;">
+                          <div style="font-size: 0.95rem;">${actionText}</div>
+                          <div class="text-secondary fst-italic my-1 text-truncate" style="font-size: 0.9rem; border-left: 2px solid #555; padding-left: 8px;">"${cleanContent}"</div>
+                          <div class="d-flex justify-content-between align-items-center mt-2">
+                            <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(item.created_at)}</small>
+                            ${replyBtnHTML}
+                          </div>
+                        </div>
+                      </div>
+                    </li>
+                  `;
+                } else {
+                  const unreadBadge = item.is_unread ? '<span class="badge bg-danger ms-2" style="font-size: 0.65rem;">New</span>' : '';
+                  const bgClass = item.is_unread ? 'bg-dark' : 'bg-transparent';
+                  return `
+                    <li class="list-group-item ${bgClass} text-white border-secondary py-3">
+                      <div class="d-flex align-items-center gap-3">
+                        <div class="mt-1"><i class="bi bi-clock-history text-secondary fs-5"></i></div>
+                        <div>
+                          <div style="font-size: 0.95rem;">You ${escapeHTML(item.action)} ${item.target_name ? `<span class="text-info">${escapeHTML(item.target_name)}</span>` : ''}${unreadBadge}</div>
+                          <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(item.created_at)}</small>
+                        </div>
+                      </div>
+                    </li>
+                  `;
+                }
+              }).join('') + '</ul>';
                
-               // Automatically mark all notifications as read when the feed is opened
-               setTimeout(async () => {
-                 document.querySelectorAll('.notif-badge').forEach(b => b.classList.add('d-none'));
-                 await fetchData('?action=mark_notifs_read', { method: 'POST' });
-                 updateNotifBadge();
-               }, 1500);
+              // Automatically mark all notifications as read when the feed is opened
+              setTimeout(async () => {
+                document.querySelectorAll('.notif-badge').forEach(b => b.classList.add('d-none'));
+                await fetchData('?action=mark_notifs_read', { method: 'POST' });
+                updateNotifBadge();
+              }, 1500);
                
-             } else {
-               body.innerHTML = '<p class="text-secondary text-center p-4">No recent activity.</p>';
-             }
+            } else {
+              body.innerHTML = '<p class="text-secondary text-center p-4">No recent activity.</p>';
+            }
           };
 
           activityModalEl.addEventListener('show.bs.modal', loadActivityFeed);
@@ -6822,6 +7137,24 @@ SOFTWARE.</div>
               
               bootstrap.Modal.getInstance(activityModalEl).hide();
               window.openCommentsModal(songId, commentId, username);
+              return;
+            }
+            const commReplyBtn = e.target.closest('.notif-comm-reply-btn');
+            if (commReplyBtn) {
+              bootstrap.Modal.getInstance(activityModalEl).hide();
+              loadView({ type: 'get_community', param: '', sort: 'newest', filter_user_id: '', artist_name: '' });
+              setTimeout(() => {
+                const input = document.getElementById('community-post-input');
+                const parentId = document.getElementById('community-parent-id');
+                if (input && parentId) {
+                  parentId.value = commReplyBtn.dataset.postId;
+                  input.placeholder = "Replying to post...";
+                  const username = commReplyBtn.dataset.username.replace(/\s+/g, '');
+                  input.value = `@${username} `;
+                  input.focus();
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }
+              }, 800);
             }
           });
         }
@@ -6919,14 +7252,37 @@ SOFTWARE.</div>
 
         if (copyApiBtn) {
           copyApiBtn.addEventListener('click', () => {
-            navigator.clipboard.writeText(apiUrlInput.value).then(() => {
+            const onSuccess = () => {
               copyApiBtn.textContent = 'Copied!';
               copyApiBtn.classList.replace('btn-danger', 'btn-success');
               setTimeout(() => {
                 copyApiBtn.textContent = 'Copy';
                 copyApiBtn.classList.replace('btn-success', 'btn-danger');
               }, 2000);
-            }).catch(() => showToast('Failed to copy API link.', 'error'));
+            };
+            const onError = () => showToast('Failed to copy API link.', 'error');
+
+            if (navigator.clipboard && window.isSecureContext) {
+              navigator.clipboard.writeText(apiUrlInput.value).then(onSuccess).catch(onError);
+            } else {
+              const textArea = document.createElement("textarea");
+              textArea.value = apiUrlInput.value;
+              textArea.style.position = "fixed";
+              textArea.style.top = "0";
+              textArea.style.left = "0";
+              textArea.style.opacity = "0";
+              document.body.appendChild(textArea);
+              textArea.focus();
+              textArea.select();
+              try {
+                const successful = document.execCommand('copy');
+                if (successful) onSuccess();
+                else onError();
+              } catch (err) {
+                onError();
+              }
+              document.body.removeChild(textArea);
+            }
           });
         }
 
@@ -7037,17 +7393,19 @@ SOFTWARE.</div>
                 <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
                 <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
                   <div class="text-truncate">${song.artist}</div>
-                  <div class="text-secondary" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
+                  <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
                 </div>
                 <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
+                <div class="song-views d-none d-md-block text-truncate" title="${song.play_count || 0} views">${formatSongCount(song.play_count || 0)}</div>
                 <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
                 <div class="song-more"><button class="more-btn" data-song-id="${song.id}"><i class="bi bi-three-dots-vertical"></i></button></div>
-                <div song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
+                <div class="song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
+                  <div class="song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
                   <div class="d-flex justify-content-between align-items-center w-100">
                      <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
                      <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
                   </div>
-                  <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
+                  <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
                 </div>
               </div>`;
           });
@@ -7425,6 +7783,7 @@ SOFTWARE.</div>
         document.body.addEventListener('click', initWebAudio, { once: true });
         let currentView = { type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' };
         let currentUser = null;
+        let currentViewOwnerId = null;
         let currentSong = null;
         let queue = [];
         let originalQueue = [];
@@ -7527,6 +7886,24 @@ SOFTWARE.</div>
           const sec = Math.floor(seconds % 60).toString().padStart(2, '0');
           return `${min}:${sec}`;
         };
+
+        const formatSongCount = (count) => {
+          let num = parseInt(count, 10);
+          if (isNaN(num)) return '0';
+          if (num >= 1000000000000) {
+            return (num / 1000000000000).toFixed(1).replace(/\.0$/, '') + 't';
+          }
+          if (num >= 1000000000) {
+            return (num / 1000000000).toFixed(1).replace(/\.0$/, '') + 'b';
+          }
+          if (num >= 1000000) {
+            return (num / 1000000).toFixed(1).replace(/\.0$/, '') + 'm';
+          }
+          if (num >= 1000) {
+            return (num / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+          }
+          return num.toString();
+        };
         
         const parseLRC = (lrc) => {
           if (!lrc) return [];
@@ -7547,8 +7924,53 @@ SOFTWARE.</div>
           return parsed.sort((a, b) => a.time - b.time);
         };
         
-        const escapeHTML = str => str.replace(/[&<>'"]/g, tag => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[tag]));
+        const escapeHTML = str => {
+          if (!str) return '';
+          return str.replace(/[&<>'"]/g, tag => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[tag]));
+        };
         
+        // Safely decodes HTML entities back into symbols (like I&#039;m -> I'm) before pasting them into Input fields.
+        const decodeHTML = (html) => {
+          if (!html) return '';
+          const txt = document.createElement("textarea");
+          txt.innerHTML = html;
+          return txt.value;
+        };
+
+        // Parses DB content to active HTML at runtime (Applies [url] and @mentions)
+        const parseUserText = (text) => {
+          if (!text) return '';
+          let parsed = text;
+          // Safely transform explicit [url] tags into active clickable links, auto-appending https:// if missing!
+          parsed = parsed.replace(/\[url\]\s*([^\s<>\[\]]+)\s*\[\/url\]/gi, function(match, url) {
+            let href = url.match(/^https?:\/\//i) ? url : 'https://' + url;
+            return `<a href="${href}" target="_blank" class="text-info text-decoration-none hover-underline">${url}</a>`;
+          });
+          // Convert mentions
+          parsed = parsed.replace(/@([\w\.\-_]+)/g, '<strong class="text-info mention-link" data-artist="$1" style="cursor:pointer;" title="Go to Profile">@$1</strong>');
+          return parsed;
+        };
+
+        // Global Event listener for toggling nested replies in Comments/Community
+        document.addEventListener('click', e => {
+          const toggleBtn = e.target.closest('.toggle-replies-btn');
+          if (toggleBtn) {
+            const targetId = toggleBtn.dataset.target;
+            const container = document.getElementById(targetId);
+            if (container) {
+              container.classList.toggle('d-none');
+              const icon = toggleBtn.querySelector('i');
+              if (container.classList.contains('d-none')) {
+                icon.classList.replace('bi-chevron-up', 'bi-chevron-down');
+                toggleBtn.innerHTML = `<i class="bi bi-chevron-down"></i> View ${container.children.length} replies`;
+              } else {
+                icon.classList.replace('bi-chevron-down', 'bi-chevron-up');
+                toggleBtn.innerHTML = `<i class="bi bi-chevron-up"></i> Hide replies`;
+              }
+            }
+          }
+        });
+
         const timeAgo = (isoString) => {
           if (!isoString) return '';
           const date = new Date(isoString);
@@ -7667,7 +8089,6 @@ SOFTWARE.</div>
         let startX = 0, startY = 0;
 
         const startHold = (e) => {
-          if (!currentUser) return;
           const songItem = e.target.closest('.song-item');
           if (!songItem || e.target.closest('.song-more')) return;
           
@@ -7679,6 +8100,10 @@ SOFTWARE.</div>
           
           holdTimer = setTimeout(() => {
             if (isDragging) return;
+            if (!currentUser) {
+              showToast('Please log in to use multi-select mode.', 'error');
+              return;
+            }
             multiSelectMode = true;
             if (sortable) {
               sortable.option("disabled", true);
@@ -7717,7 +8142,11 @@ SOFTWARE.</div>
           const moreBtn = e.target.closest('.song-more');
           if (songItem || e.target.closest('.shelf-item')) {
             e.preventDefault();
-            if (songItem && !moreBtn && currentUser) {
+            if (songItem && !moreBtn) {
+              if (!currentUser) {
+                showToast('Please log in to use multi-select mode.', 'error');
+                return;
+              }
               if (!multiSelectMode) {
                 multiSelectMode = true;
                 if (sortable) sortable.option("disabled", true);
@@ -7992,8 +8421,9 @@ SOFTWARE.</div>
         });
         
         const renderViewDetailsHeader = (details, type, songsList = []) => {
+          currentViewOwnerId = details ? details.user_id : null;
           let typeText = type.charAt(0).toUpperCase() + type.slice(1);
-          let statsText = `${details.song_count || 0} songs &bull; ${formatTime(details.total_duration || 0)}`;
+          let statsText = `${formatSongCount(details.song_count || 0)} songs &bull; ${formatTime(details.total_duration || 0)}`;
           if (details.play_count !== undefined) {
             statsText += ` &bull; ${details.play_count || 0} plays`;
           }
@@ -8102,7 +8532,10 @@ SOFTWARE.</div>
                     ${details.playlists.map(p => `
                       <div class="col">
                         <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
-                          <img src="?action=get_image&id=${p.image_id || 0}" class="card-img-top rounded" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
+                          <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
+                            <img src="?action=get_image&id=${p.image_id || 0}" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
+                            ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ''}
+                          </div>
                           <div class="card-body px-0 py-2">
                             <h5 class="card-title fs-6 fw-normal text-truncate">${escapeHTML(p.name)}</h5>
                           </div>
@@ -8156,8 +8589,8 @@ SOFTWARE.</div>
             songList = document.createElement('div');
             songList.className = 'song-list';
             const isHistory = currentView.type === 'get_history';
-            const header = `<div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) ${isHistory ? 'minmax(0, 2fr)' : ''} 80px 40px;">
-              <div></div><div>Title</div><div>Artist</div><div>Album</div>${isHistory ? '<div>Played</div>' : ''}<div>Time</div><div></div>
+            const header = `<div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) ${isHistory ? 'minmax(0, 2fr)' : ''} 80px 40px;">
+              <div></div><div>Title</div><div>Artist</div><div>Album</div><div>Views</div>${isHistory ? '<div>Played</div>' : ''}<div>Time</div><div></div>
             </div>`;
             targetContainer.insertAdjacentHTML('beforeend', header);
             targetContainer.appendChild(songList);
@@ -8169,7 +8602,7 @@ SOFTWARE.</div>
             globalSongCache[song.id] = song;
             const isNowPlaying = currentSong && currentSong.id === song.id;
             const isHistory = currentView.type === 'get_history';
-            const playedAtHTML = isHistory ? `<div class="played-at-text">${timeAgo(song.played_at)}</div>` : '';
+            const playedAtHTML = isHistory ? `<div class="played-at-text text-truncate" title="${timeAgo(song.played_at)}">${timeAgo(song.played_at)}</div>` : '';
             return `
             <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''} ${isHistory ? 'history-item' : ''}" 
               data-song-id="${song.id}" 
@@ -8186,24 +8619,25 @@ SOFTWARE.</div>
               <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${escapeHTML(song.title)}</div></div>
               <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
                 <div class="text-truncate">${escapeHTML(song.artist)}</div>
-                <div class="text-secondary" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
+                <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
                 ${song.added_by_name ? `<div style="font-size: 0.7rem; color: var(--ytm-secondary-text); margin-top: 2px;">Added by: ${escapeHTML(song.added_by_name)}</div>` : ''}
               </div>
               <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${escapeHTML(song.album)}</div>
-              ${isHistory ? `<div class="d-none d-md-block">${playedAtHTML}</div>` : ''}
+              <div class="song-views d-none d-md-block text-truncate" title="${song.play_count || 0} views">${formatSongCount(song.play_count || 0)}</div>
+              ${isHistory ? `<div class="d-none d-md-block text-truncate">${playedAtHTML}</div>` : ''}
               <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
               <div class="song-more">
                 <button class="more-btn" data-song-id="${song.id}">
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>
               </div>
-              <div song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
+              <div class="song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
                 <div class="d-flex justify-content-between align-items-center w-100">
                    <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${escapeHTML(song.artist)}</span>
                    ${isHistory ? playedAtHTML : ''}
                    <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
                 </div>
-                <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
+                <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
               </div>
             </div>
           `}).join('');
@@ -8250,6 +8684,14 @@ SOFTWARE.</div>
               },
               onEnd: async (evt) => {
                 isDragging = false;
+                
+                const isSuperAdmin = currentUser && currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com';
+                if (isSortablePlaylist && (!currentUser || (currentViewOwnerId !== currentUser.id && !isSuperAdmin))) {
+                  showToast("You're not the owner of this playlist.", "error");
+                  loadView(currentView);
+                  return;
+                }
+                
                 const songItems = Array.from(songList.querySelectorAll('.song-item'));
                 const newOrderIds = songItems.map(item => item.dataset.songId);
                 
@@ -8333,7 +8775,7 @@ SOFTWARE.</div>
                 imgSrc = `?action=get_profile_picture&id=`;
               } else if (type === 'get_user_playlists') {
                 name = item.name;
-                subtext = `${item.song_count} songs`;
+                subtext = `${formatSongCount(item.song_count)} songs`;
                 imageId = item.image_id;
                 dataType = 'playlist';
                 dataValue = item.public_id;
@@ -8363,10 +8805,19 @@ SOFTWARE.</div>
                 </button>` : '';
 
               if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_artists' || type === 'get_following' || type === 'get_genres' || type === 'get_years') {
+                let songCountBadge = '';
+                if ((type === 'get_albums' || type === 'get_user_playlists') && item.song_count !== undefined) {
+                  songCountBadge = `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(item.song_count)}</div>`;
+                }
+                // Determine whether it needs circle or standard card rounded corners
+                let borderStyle = (imgClass === 'rounded-circle') ? 'border-radius: 50%;' : 'border-radius: 6px;';
                 return `<div class="col">
                   <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} ${artistNameAttr} style="cursor: pointer;">
                     ${moreButton}
-                    <img src="${imgSrc}${imageId || 0}" class="card-img-top ${imgClass}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);">
+                    <div style="position: relative; display: block; ${borderStyle} overflow: hidden;">
+                      <img src="${imgSrc}${imageId || 0}" class="card-img-top" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
+                      ${songCountBadge}
+                    </div>
                     <div class="card-body px-0 py-2">
                       <h5 class="card-title fs-6 fw-normal text-truncate ${titleClass}">
                         ${type === 'get_user_playlists' && item.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1"></i>' : ''}${escapeHTML(name)}
@@ -8437,8 +8888,8 @@ SOFTWARE.</div>
 
               let songList = document.createElement('div');
               songList.className = 'song-list';
-              const header = `<div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) 80px 40px;">
-                <div></div><div>Title</div><div>Artist</div><div>Album</div><div>Time</div><div></div>
+              const header = `<div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px;">
+                <div></div><div>Title</div><div>Artist</div><div>Album</div><div>Views</div><div>Time</div><div></div>
               </div>`;
               targetPane.insertAdjacentHTML('beforeend', header);
               
@@ -8461,21 +8912,22 @@ SOFTWARE.</div>
                   <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
                   <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
                     <div class="text-truncate">${song.artist}</div>
-                    <div class="text-secondary" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
+                    <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
                   </div>
                   <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
+                  <div class="song-views d-none d-md-block text-truncate" title="${song.play_count || 0} views">${formatSongCount(song.play_count || 0)}</div>
                   <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
                   <div class="song-more">
                     <button class="more-btn" data-song-id="${song.id}">
                       <i class="bi bi-three-dots-vertical"></i>
                     </button>
                   </div>
-                  <div song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
+                  <div class="song-artist-mobile d-md-none w-100 d-flex flex-column align-items-start">
                     <div class="d-flex justify-content-between align-items-center w-100">
                        <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
                        <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
                     </div>
-                    <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${song.play_count || 0}</div>
+                    <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
                   </div>
                 </div>
               `}).join('');
@@ -8495,7 +8947,10 @@ SOFTWARE.</div>
             } else if (shelf.type === 'albums') {
               itemsHTML = shelf.items.map(album => `
                 <div class="shelf-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
-                  <img src="?action=get_image&id=${album.id || 0}" alt="${escapeHTML(album.album)}">
+                  <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
+                    <img src="?action=get_image&id=${album.id || 0}" alt="${escapeHTML(album.album)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
+                    ${album.song_count ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(album.song_count)}</div>` : ''}
+                  </div>
                   <div class="item-title">${escapeHTML(album.album)}</div>
                   <div class="item-subtitle">${escapeHTML(album.artist)}</div>
                 </div>
@@ -8503,7 +8958,10 @@ SOFTWARE.</div>
             } else if (shelf.type === 'playlists' || shelf.type === 'mixes') {
               itemsHTML = shelf.items.map(playlist => `
                 <div class="shelf-item" data-${shelf.type === 'mixes' ? 'mix' : 'playlist'}="${encodeURIComponent(playlist.public_id)}">
-                  <img src="?action=get_image&id=${playlist.image_id || 0}" alt="${escapeHTML(playlist.name)}">
+                  <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
+                    <img src="?action=get_image&id=${playlist.image_id || 0}" alt="${escapeHTML(playlist.name)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
+                    ${playlist.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(playlist.song_count)}</div>` : ''}
+                  </div>
                   <div class="item-title">${escapeHTML(playlist.name)}</div>
                   <div class="item-subtitle">by ${escapeHTML(playlist.creator)}</div>
                 </div>
@@ -8724,7 +9182,7 @@ SOFTWARE.</div>
                       <div class="card h-100 bg-dark text-white border-secondary">
                         <div class="card-body">
                           <h5 class="card-title fw-bold text-truncate">${escapeHTML(n.title)}</h5>
-                          <p class="card-text text-secondary small" style="white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">${escapeHTML(n.content)}</p>
+                          <p class="card-text text-secondary small" style="white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">${parseUserText(n.content)}</p>
                         </div>
                         <div class="card-footer border-secondary d-flex justify-content-between align-items-center">
                           <small class="text-secondary">${timeAgo(n.updated_at)}</small>
@@ -8747,10 +9205,10 @@ SOFTWARE.</div>
                     <div class="card bg-transparent border-secondary text-white">
                       <div class="card-body">
                         <div class="d-flex justify-content-between align-items-start mb-3">
-                          <div class="d-flex align-items-center gap-3">
+                          <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="cursor: pointer;" title="View Profile">
                             <img src="?action=get_profile_picture&id=${p.user_id}" style="width:40px; height:40px; border-radius:50%; object-fit:cover;">
                             <div>
-                              <div class="fw-bold">${escapeHTML(p.artist)}</div>
+                              <div class="fw-bold hover-underline">${escapeHTML(p.artist)}</div>
                               <small class="text-secondary">${timeAgo(p.created_at)}</small>
                             </div>
                           </div>
@@ -8778,7 +9236,11 @@ SOFTWARE.</div>
               allContentloaded = true;
           }
           
-          if (!data || data.length < PAGE_SIZE) {
+          let countCheck = data ? data.length : 0;
+          if (data && currentView.type === 'get_community') {
+            countCheck = data.filter(i => i.parent_id == null).length; // Only count root items for infinite scroll bounds
+          }
+          if (!data || countCheck < PAGE_SIZE && currentView.type !== 'search') {
             allContentloaded = true;
           }
 
@@ -8826,6 +9288,7 @@ SOFTWARE.</div>
           currentPage = 1;
           allContentloaded = false;
           isLoadingMore = false;
+          currentViewOwnerId = null;
           showLoader();
 
           currentView = viewConfig;
@@ -8974,19 +9437,36 @@ SOFTWARE.</div>
               if (currentUser) {
                 contentArea.innerHTML = `
                   <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
-                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-journal-text text-primary me-3 fs-3"></i> My Notes</div>
-                    <button class="btn btn-primary rounded-pill px-4 fw-medium shadow-sm new-note-btn"><i class="bi bi-plus-lg me-1"></i> New Note</button>
+                    <div class="d-flex w-100 justify-content-between align-items-center mb-3">
+                      <div class="text-white fw-bold fs-5 d-flex align-items-center"><i class="bi bi-journal-text text-primary me-3 fs-3"></i> My Notes</div>
+                      <button class="btn btn-primary rounded-pill px-4 fw-medium shadow-sm new-note-btn"><i class="bi bi-plus-lg me-1"></i> New Note</button>
+                    </div>
+                    <div class="w-100 position-relative">
+                      <input type="text" id="notes-search-input" class="form-control bg-dark text-white border-secondary" placeholder="Search notes..." value="${escapeHTML(currentView.searchQuery || '')}">
+                    </div>
                   </div>
                   <div id="notes-grid" class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4 mx-md-1 mb-4"></div>`;
+                
+                document.getElementById('notes-search-input').addEventListener('input', (e) => {
+                  clearTimeout(window.notesSearchTimeout);
+                  window.notesSearchTimeout = setTimeout(() => {
+                    currentView.searchQuery = e.target.value;
+                    loadView(currentView);
+                  }, 400);
+                });
+                
+                if (currentView.searchQuery) pageParams.append('q', currentView.searchQuery);
                 const notes = await fetchData(`?action=get_notes&${pageParams.toString()}`);
                 const grid = document.getElementById('notes-grid');
                 if (notes && notes.length > 0) {
-                  grid.innerHTML = notes.map(n => `
+                  grid.innerHTML = notes.map(n => {
+                    const truncContent = n.content.length > 300 ? n.content.substring(0, 300) + '...' : n.content;
+                    return `
                     <div class="col">
                       <div class="card h-100 bg-dark text-white border-secondary">
-                        <div class="card-body">
+                        <div class="card-body view-note-trigger" data-title="${escapeHTML(n.title)}" data-content="${escapeHTML(n.content)}" style="cursor: pointer;">
                           <h5 class="card-title fw-bold text-truncate">${escapeHTML(n.title)}</h5>
-                          <p class="card-text text-secondary small" style="white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">${escapeHTML(n.content)}</p>
+                          <p class="card-text text-secondary small" style="white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">${parseUserText(truncContent)}</p>
                         </div>
                         <div class="card-footer border-secondary d-flex justify-content-between align-items-center">
                           <small class="text-secondary">${timeAgo(n.updated_at)}</small>
@@ -8996,9 +9476,10 @@ SOFTWARE.</div>
                           </div>
                         </div>
                       </div>
-                    </div>`).join('');
+                    </div>`;
+                  }).join('');
                 } else {
-                  grid.innerHTML = '<div class="col-12 text-center text-secondary py-5">No notes found. Create your first note!</div>';
+                  grid.innerHTML = '<div class="col-12 text-center text-secondary py-5">No notes found.</div>';
                 }
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your notes.</div>`;
@@ -9011,56 +9492,138 @@ SOFTWARE.</div>
                 contentArea.innerHTML = `
                   <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
                     <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-people text-info me-3 fs-3"></i> Community</div>
+                    <div class="d-flex gap-2 align-items-center w-100 mt-2">
+                      <input type="text" id="community-search-input" class="form-control bg-dark text-white border-secondary" placeholder="Search posts..." value="${escapeHTML(currentView.searchQuery || '')}">
+                      <select id="community-sort-select" class="form-select bg-dark text-white border-secondary w-auto">
+                        <option value="newest" ${currentView.sort === 'newest' ? 'selected' : ''}>Newest</option>
+                        <option value="most_liked" ${currentView.sort === 'most_liked' ? 'selected' : ''}>Most Liked</option>
+                        <option value="most_replied" ${currentView.sort === 'most_replied' ? 'selected' : ''}>Most Replied</option>
+                        <option value="following" ${currentView.sort === 'following' ? 'selected' : ''}>Following</option>
+                      </select>
+                    </div>
                   </div>
                   <div class="mx-md-3 mb-5">
-                    <form id="community-post-form" class="d-flex gap-2">
-                      <input type="text" id="community-post-input" class="form-control bg-dark text-white border-secondary" placeholder="What's on your mind?" required>
+                    <form id="community-post-form" class="d-flex gap-2 mb-2">
+                      <input type="hidden" id="community-parent-id" value="">
+                      <input type="text" id="community-post-input" class="form-control bg-dark text-white border-secondary" placeholder="What's on your mind? (use @ to mention)" maxlength="2000" required>
                       <button type="submit" class="btn btn-info text-dark fw-bold px-4">Post</button>
                     </form>
+                    <div class="d-flex justify-content-end">
+                      <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+                    </div>
                   </div>
                   <div id="community-feed" class="d-flex flex-column gap-3 mx-md-3 mb-4"></div>`;
                   
-                document.getElementById('community-post-form').addEventListener('submit', async e => {
-                  e.preventDefault();
-                  const input = document.getElementById('community-post-input');
-                  await fetchData('?action=create_community_post', { method:'POST', body: JSON.stringify({content: input.value}) });
-                  input.value = '';
+                document.getElementById('community-search-input').addEventListener('input', (e) => {
+                  clearTimeout(window.communitySearchTimeout);
+                  window.communitySearchTimeout = setTimeout(() => {
+                    currentView.searchQuery = e.target.value;
+                    loadView(currentView);
+                  }, 400);
+                });
+                
+                document.getElementById('community-sort-select').addEventListener('change', (e) => {
+                  currentView.sort = e.target.value;
                   loadView(currentView);
                 });
 
+                document.getElementById('community-post-form').addEventListener('submit', async e => {
+                  e.preventDefault();
+                  const input = document.getElementById('community-post-input');
+                  const parentId = document.getElementById('community-parent-id').value;
+                  await fetchData('?action=create_community_post', { method:'POST', body: JSON.stringify({content: input.value, parent_id: parentId || null}) });
+                  input.value = '';
+                  document.getElementById('community-parent-id').value = '';
+                  input.placeholder = "What's on your mind? (use @ to mention)";
+                  loadView(currentView);
+                });
+
+                if (currentView.searchQuery) pageParams.append('q', currentView.searchQuery);
                 const posts = await fetchData(`?action=get_community&${pageParams.toString()}`);
                 const feed = document.getElementById('community-feed');
+                
                 if (posts && posts.length > 0) {
-                  feed.innerHTML = posts.map(p => `
-                    <div class="card bg-transparent border-secondary text-white">
-                      <div class="card-body">
-                        <div class="d-flex justify-content-between align-items-start mb-3">
-                          <div class="d-flex align-items-center gap-3">
-                            <img src="?action=get_profile_picture&id=${p.user_id}" style="width:40px; height:40px; border-radius:50%; object-fit:cover;">
-                            <div>
-                              <div class="fw-bold">${escapeHTML(p.artist)}</div>
-                              <small class="text-secondary">${timeAgo(p.created_at)}</small>
+                  const buildCommunityTree = (postsList, parent = null) => {
+                    const children = postsList.filter(p => p.parent_id == parent);
+                    if (children.length === 0) return '';
+                    
+                    if (parent === null) {
+                      return children.map(p => `
+                        <div class="card bg-transparent border-secondary text-white mb-2">
+                          <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-start mb-2">
+                              <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="cursor: pointer;" title="View Profile">
+                                <img src="?action=get_profile_picture&id=${p.user_id}" style="width:32px; height:32px; border-radius:50%; object-fit:cover;">
+                                <div>
+                                  <div class="fw-bold fs-6 hover-underline">${p.artist}</div>
+                                  <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(p.created_at)}</small>
+                                </div>
+                              </div>
+                              ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                              <div>
+                                <button class="btn btn-sm btn-outline-light me-1 edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i></button>
+                                <button class="btn btn-sm btn-outline-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>
+                              </div>` : ''}
                             </div>
+                            <div class="mb-2" style="font-size: 1rem; white-space: pre-wrap;">${parseUserText(p.content)}</div>
+                            <div class="d-flex gap-3 align-items-center">
+                              <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'like' ? 'text-info' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="like">
+                                <i class="bi ${p.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'}"></i> <span>${p.like_count}</span>
+                              </button>
+                              <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'dislike' ? 'text-danger' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="dislike">
+                                <i class="bi ${p.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'}"></i> <span>${p.dislike_count}</span>
+                              </button>
+                              <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none community-reply-btn" data-id="${p.id}" data-username="${escapeHTML(p.artist)}">Reply</button>
+                            </div>
+                            <div class="mt-2">${buildCommunityTree(postsList, p.id)}</div>
                           </div>
-                          ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `
-                          <div>
-                            <button class="btn btn-sm btn-outline-light me-1 edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i></button>
-                            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>
-                          </div>` : ''}
+                        </div>`).join('');
+                    } else {
+                      const repliesHtml = children.map(p => `
+                        <div class="card bg-transparent border-secondary text-white mb-2 ms-4 border-start border-top-0 border-bottom-0 border-end-0 rounded-0">
+                          <div class="card-body py-2">
+                            <div class="d-flex justify-content-between align-items-start mb-2">
+                              <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="cursor: pointer;" title="View Profile">
+                                <img src="?action=get_profile_picture&id=${p.user_id}" style="width:32px; height:32px; border-radius:50%; object-fit:cover;">
+                                <div>
+                                  <div class="fw-bold fs-6 hover-underline">${p.artist}</div>
+                                  <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(p.created_at)}</small>
+                                </div>
+                              </div>
+                              ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                              <div>
+                                <button class="btn btn-sm btn-outline-light me-1 edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i></button>
+                                <button class="btn btn-sm btn-outline-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>
+                              </div>` : ''}
+                            </div>
+                            <div class="mb-2" style="font-size: 1rem; white-space: pre-wrap;">${parseUserText(p.content)}</div>
+                            <div class="d-flex gap-3 align-items-center">
+                              <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'like' ? 'text-info' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="like">
+                                <i class="bi ${p.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'}"></i> <span>${p.like_count}</span>
+                              </button>
+                              <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'dislike' ? 'text-danger' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="dislike">
+                                <i class="bi ${p.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'}"></i> <span>${p.dislike_count}</span>
+                              </button>
+                              <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none community-reply-btn" data-id="${p.id}" data-username="${escapeHTML(p.artist)}">Reply</button>
+                            </div>
+                            <div class="mt-2">${buildCommunityTree(postsList, p.id)}</div>
+                          </div>
+                        </div>`).join('');
+                      
+                      return `
+                        <button class="btn btn-link btn-sm text-info p-0 text-decoration-none toggle-replies-btn ms-4 mb-2" data-target="comm-reply-container-${parent}">
+                          <i class="bi bi-chevron-down"></i> View ${children.length} replies
+                        </button>
+                        <div id="comm-reply-container-${parent}" class="d-none">
+                          ${repliesHtml}
                         </div>
-                        <p class="mb-3" style="font-size: 1.05rem;">${escapeHTML(p.content)}</p>
-                        <div class="d-flex gap-3">
-                          <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'like' ? 'text-info' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="like">
-                            <i class="bi ${p.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'} fs-5"></i> <span>${p.like_count}</span>
-                          </button>
-                          <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'dislike' ? 'text-danger' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="dislike">
-                            <i class="bi ${p.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'} fs-5"></i> <span>${p.dislike_count}</span>
-                          </button>
-                        </div>
-                      </div>
-                    </div>`).join('');
+                      `;
+                    }
+                  };
+                  
+                  feed.innerHTML = buildCommunityTree(posts);
                 } else {
-                  feed.innerHTML = '<div class="text-center text-secondary py-5">No posts yet. Be the first!</div>';
+                  feed.innerHTML = '<div class="text-center text-secondary py-5">No posts found. Be the first!</div>';
                 }
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to view the community.</div>`;
@@ -9144,7 +9707,11 @@ SOFTWARE.</div>
               break;
           }
 
-          if (data && data.length < PAGE_SIZE && currentView.type !== 'search') {
+          let countCheckView = data ? data.length : 0;
+          if (data && currentView.type === 'get_community') {
+            countCheckView = data.filter(i => i.parent_id == null).length; // Only count root items
+          }
+          if (data && countCheckView < PAGE_SIZE && currentView.type !== 'search') {
             allContentloaded = true;
           }
           if (viewConfig.highlight) {
@@ -9269,7 +9836,36 @@ SOFTWARE.</div>
             document.body.classList.add('player-visible');
           }
           const imageUrl = `?action=get_image&id=${currentSong.id}&v=${currentSong.last_modified || 0}`;
+          
+          // Apply dynamic blurred background to modals
+          const mobileBg = document.getElementById('mobile-player-bg');
+          const desktopBg = document.getElementById('desktop-player-bg');
+          if (mobileBg) mobileBg.style.backgroundImage = `url('${imageUrl}')`;
+          if (desktopBg) desktopBg.style.backgroundImage = `url('${imageUrl}')`;
+
           playerElements.art.forEach(el => el.src = imageUrl);
+
+          // Clear previous theme instantly on track change to prevent getting stuck
+          document.querySelectorAll('.player-modal-content').forEach(modal => {
+             modal.classList.remove('theme-light-bg');
+          });
+
+          // Dynamically adjust modal text theme based on cover brightness
+          const themeImg = new Image();
+          themeImg.crossOrigin = 'anonymous';
+          themeImg.onload = () => {
+            const rgb = getAverageColor(themeImg);
+            const brightness = Math.round(((parseInt(rgb.r) * 299) + (parseInt(rgb.g) * 587) + (parseInt(rgb.b) * 114)) / 1000);
+             
+            // If brightness is high (light cover art), trigger light mode
+            if (brightness > 130) {
+              document.querySelectorAll('.player-modal-content').forEach(modal => {
+                modal.classList.add('theme-light-bg');
+              });
+            }
+          };
+          // Append timestamp to bypass stubborn browser caches that prevent onload triggering
+          themeImg.src = imageUrl + '&t=' + new Date().getTime();
           playerElements.title.forEach(el => el.textContent = currentSong.title);
           playerElements.artist.forEach(el => el.textContent = currentSong.artist);
           document.title = `${currentSong.title} • ${currentSong.artist}`;
@@ -10350,13 +10946,14 @@ SOFTWARE.</div>
           });
         }
         let activeCommentSongId = null;
-        
+        let currentCommentsPage = 1;
+
         window.openCommentsModal = async (songId, replyCommentId = null, replyUsername = null) => {
           activeCommentSongId = songId;
           const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('comments-modal'));
-          await window.refreshComments();
+          await window.refreshComments(true);
           modal.show();
-          
+
           if (replyCommentId && replyUsername) {
             setTimeout(() => {
               document.getElementById('comment-parent-id').value = replyCommentId;
@@ -10365,159 +10962,248 @@ SOFTWARE.</div>
               const cleanedUsername = replyUsername.replace(/\s+/g, '');
               input.value = `@${cleanedUsername} `;
               input.focus();
-            }, 500); // Wait for modal to finish animating
+            }, 500);
           }
         };
 
-        window.refreshComments = async () => {
+        window.refreshComments = async (reset = false) => {
           if (!activeCommentSongId) return;
-          const data = await fetchData(`?action=get_song_comments&song_id=${activeCommentSongId}`);
+          if (reset === true || typeof reset !== 'boolean') currentCommentsPage = 1;
+          const sortVal = document.getElementById('comments-sort-select') ? document.getElementById('comments-sort-select').value : 'newest';
+
+          const loadMoreBtn = document.getElementById('load-more-comments-btn');
+          if (loadMoreBtn && !reset) loadMoreBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+
+          const data = await fetchData(`?action=get_song_comments&song_id=${activeCommentSongId}&sort=${sortVal}&page=${currentCommentsPage}`);
           document.getElementById('song-like-count').textContent = data.reactions.like || 0;
           document.getElementById('song-dislike-count').textContent = data.reactions.dislike || 0;
-          
+
           const lBtn = document.getElementById('song-like-btn');
           const dBtn = document.getElementById('song-dislike-btn');
-          if(lBtn) {
+          if (lBtn) {
             lBtn.classList.toggle('active', data.my_reaction === 'like');
             lBtn.classList.toggle('text-info', data.my_reaction === 'like');
           }
-          if(dBtn) {
+          if (dBtn) {
             dBtn.classList.toggle('active', data.my_reaction === 'dislike');
             dBtn.classList.toggle('text-danger', data.my_reaction === 'dislike');
           }
-          
+
           const buildTree = (comments, parent = null) => {
-            return comments.filter(c => c.parent_id == parent).map(c => `
-              <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: ${parent ? '20px' : '0'};">
-                <div class="d-flex align-items-center gap-2 mb-1">
-                  <div class="d-flex align-items-center gap-2 user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="cursor: pointer;" title="View Profile">
-                    <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
-                    <strong class="hover-underline">${escapeHTML(c.artist)}</strong>
+            const children = comments.filter(c => c.parent_id == parent);
+            if (children.length === 0) return '';
+            
+            if (parent === null) {
+              return children.map(c => `
+                <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: 0;">
+                  <div class="d-flex align-items-center gap-2 mb-1">
+                    <div class="d-flex align-items-center gap-2 user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="cursor: pointer;" title="View Profile">
+                      <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
+                      <strong class="hover-underline">${c.artist}</strong>
+                    </div>
+                    <small class="text-secondary">${timeAgo(c.created_at)}</small>
                   </div>
-                  <small class="text-secondary">${timeAgo(c.created_at)}</small>
+                  <div style="font-size: 0.9rem; white-space: pre-wrap;" class="mb-1">${parseUserText(c.content)}</div>
+                  <div class="d-flex align-items-center gap-3">
+                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="like">
+                      <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-info' : 'bi-hand-thumbs-up'}"></i> ${c.like_count || 0}
+                    </button>
+                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="dislike">
+                      <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
+                    </button>
+                    <button class="btn btn-link btn-sm text-secondary p-0 reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
+                    ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                      <button class="btn btn-link btn-sm text-secondary p-0 edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
+                      <button class="btn btn-link btn-sm text-danger p-0 delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
+                    ` : ''}
+                  </div>
+                  <div class="mt-2">${buildTree(comments, c.id)}</div>
                 </div>
-                <div style="font-size: 0.9rem;" class="mb-1">${c.content}</div>
-                <div class="d-flex align-items-center gap-3">
-                  <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="like">
-                    <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-info' : 'bi-hand-thumbs-up'}"></i> ${c.like_count || 0}
-                  </button>
-                  <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="dislike">
-                    <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
-                  </button>
-                  <button class="btn btn-link btn-sm text-secondary p-0 reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
-                  ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com')) ? `
-                    <button class="btn btn-link btn-sm text-secondary p-0 edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content).replace(/"/g, '&quot;')}"><i class="bi bi-pencil"></i></button>
-                    <button class="btn btn-link btn-sm text-danger p-0 delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
-                  ` : ''}
+              `).join('');
+            } else {
+              const repliesHtml = children.map(c => `
+                <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: 20px;">
+                  <div class="d-flex align-items-center gap-2 mb-1">
+                    <div class="d-flex align-items-center gap-2 user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="cursor: pointer;" title="View Profile">
+                      <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
+                      <strong class="hover-underline">${c.artist}</strong>
+                    </div>
+                    <small class="text-secondary">${timeAgo(c.created_at)}</small>
+                  </div>
+                  <div style="font-size: 0.9rem; white-space: pre-wrap;" class="mb-1">${parseUserText(c.content)}</div>
+                  <div class="d-flex align-items-center gap-3">
+                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="like">
+                      <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-info' : 'bi-hand-thumbs-up'}"></i> ${c.like_count || 0}
+                    </button>
+                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="dislike">
+                      <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
+                    </button>
+                    <button class="btn btn-link btn-sm text-secondary p-0 reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
+                    ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                      <button class="btn btn-link btn-sm text-secondary p-0 edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
+                      <button class="btn btn-link btn-sm text-danger p-0 delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
+                    ` : ''}
+                  </div>
+                  <div class="mt-2">${buildTree(comments, c.id)}</div>
                 </div>
-                <div class="mt-2">${buildTree(comments, c.id)}</div>
-              </div>
-            `).join('');
+              `).join('');
+
+              return `
+                <button class="btn btn-link btn-sm text-info p-0 text-decoration-none toggle-replies-btn mb-2" data-target="comment-reply-container-${parent}">
+                  <i class="bi bi-chevron-down"></i> View ${children.length} replies
+                </button>
+                <div id="comment-reply-container-${parent}" class="d-none">
+                  ${repliesHtml}
+                </div>
+              `;
+            }
           };
-          
+
           const commentsList = document.getElementById('comments-list');
-          if(commentsList) {
-            commentsList.innerHTML = buildTree(data.comments) || '<p class="text-secondary text-center mt-3">No comments yet.</p>';
-            
-            const newCommentsList = commentsList.cloneNode(true);
-            commentsList.parentNode.replaceChild(newCommentsList, commentsList);
-            
-            newCommentsList.addEventListener('click', async (e) => {
-              const userLink = e.target.closest('.user-profile-link');
-              if (userLink) {
-                const userId = userLink.dataset.userid;
-                const artistName = decodeURIComponent(userLink.dataset.artist);
-                bootstrap.Modal.getInstance(document.getElementById('comments-modal')).hide();
-                loadView({ type: 'artist_songs', param: artistName, sort: 'album_asc', filter_user_id: userId, artist_name: '' });
-                return;
+          if (commentsList) {
+            const newHtml = buildTree(data.comments) || (reset ? '<p class="text-secondary text-center mt-3">No comments yet.</p>' : '');
+            if (reset) {
+              commentsList.innerHTML = newHtml;
+            } else {
+              commentsList.insertAdjacentHTML('beforeend', newHtml);
+            }
+
+            const btnContainer = document.getElementById('load-more-comments-container');
+            if (btnContainer) {
+              const rootCount = data.comments.filter(c => c.parent_id == null).length;
+              if (rootCount >= 25) {
+                btnContainer.classList.remove('d-none');
+                if (loadMoreBtn) loadMoreBtn.innerHTML = 'Load More Comments';
+              } else {
+                btnContainer.classList.add('d-none');
               }
-              const replyBtn = e.target.closest('.reply-btn');
-              if (replyBtn) {
-                document.getElementById('comment-parent-id').value = replyBtn.dataset.id;
-                const input = document.getElementById('comment-input');
-                input.placeholder = "Replying to comment...";
-                const username = replyBtn.dataset.username;
-                if (username) {
-                  const cleanedUsername = username.replace(/\s+/g, ''); // Removes spaces so @ works properly
-                  input.value = `@${cleanedUsername} `;
-                }
-                input.focus();
-                return;
-              }
-              const reactBtn = e.target.closest('.comment-react-btn');
-              if (reactBtn) {
-                if (!currentUser) return showToast('Please login', 'error');
-                await fetchData('?action=toggle_comment_reaction', { method:'POST', body: JSON.stringify({comment_id: reactBtn.dataset.id, reaction: reactBtn.dataset.reaction}) });
-                window.refreshComments();
-                return;
-              }
-              const editBtn = e.target.closest('.edit-comment-btn');
-              if (editBtn) {
-                document.getElementById('edit-comment-id').value = editBtn.dataset.id;
-                document.getElementById('edit-comment-input').value = editBtn.dataset.content.replace(/<strong class="text-info">@\w+<\/strong>/g, (m) => m.replace(/<[^>]*>?/gm, ''));
-                bootstrap.Modal.getOrCreateInstance(document.getElementById('edit-comment-modal')).show();
-                return;
-              }
-              const deleteBtn = e.target.closest('.delete-comment-btn');
-              if (deleteBtn) {
-                if (confirm('Delete this comment?')) {
-                  await fetchData('?action=delete_song_comment', { method:'POST', body: JSON.stringify({comment_id: deleteBtn.dataset.id}) });
-                  window.refreshComments();
-                }
-                return;
-              }
-            });
+            }
           }
         };
 
+        // Attach global listener for comments modals once
+        if (!window.commentsGlobalListenerAttached) {
+          window.commentsGlobalListenerAttached = true;
+
+          document.addEventListener('click', async (e) => {
+            const mentionLink = e.target.closest('.mention-link');
+            if (mentionLink) {
+              e.stopPropagation();
+              bootstrap.Modal.getInstance(document.getElementById('comments-modal')).hide();
+              const artistName = mentionLink.dataset.artist;
+              loadView({ type: 'artist_songs', param: artistName, sort: 'album_asc', filter_user_id: '', artist_name: '' });
+              hideMobileSidebar();
+              return;
+            }
+            const userLink = e.target.closest('.user-profile-link');
+            if (userLink) {
+              const userId = userLink.dataset.userid;
+              const artistName = decodeURIComponent(userLink.dataset.artist);
+              const commentsModal = bootstrap.Modal.getInstance(document.getElementById('comments-modal'));
+              if (commentsModal) commentsModal.hide();
+              loadView({ type: 'artist_songs', param: artistName, sort: 'album_asc', filter_user_id: userId, artist_name: '' });
+              return;
+            }
+            const replyBtn = e.target.closest('.reply-btn');
+            if (replyBtn) {
+              document.getElementById('comment-parent-id').value = replyBtn.dataset.id;
+              const input = document.getElementById('comment-input');
+              input.placeholder = "Replying to comment...";
+              const username = replyBtn.dataset.username;
+              if (username) {
+                const cleanedUsername = username.replace(/\s+/g, ''); // Removes spaces so @ works properly
+                input.value = `@${cleanedUsername} `;
+              }
+              input.focus();
+              return;
+            }
+            const reactBtn = e.target.closest('.comment-react-btn');
+            if (reactBtn) {
+              if (!currentUser) return showToast('Please login', 'error');
+              await fetchData('?action=toggle_comment_reaction', { method: 'POST', body: JSON.stringify({ comment_id: reactBtn.dataset.id, reaction: reactBtn.dataset.reaction }) });
+              window.refreshComments(true);
+              return;
+            }
+            const editBtn = e.target.closest('.edit-comment-btn');
+            if (editBtn) {
+              document.getElementById('edit-comment-id').value = editBtn.dataset.id;
+              document.getElementById('edit-comment-input').value = decodeHTML(editBtn.dataset.content);
+              bootstrap.Modal.getOrCreateInstance(document.getElementById('edit-comment-modal')).show();
+              return;
+            }
+            const deleteBtn = e.target.closest('.delete-comment-btn');
+            if (deleteBtn) {
+              if (confirm('Delete this comment?')) {
+                await fetchData('?action=delete_song_comment', { method: 'POST', body: JSON.stringify({ comment_id: deleteBtn.dataset.id }) });
+                window.refreshComments(true);
+              }
+              return;
+            }
+          });
+
+          document.getElementById('load-more-comments-btn')?.addEventListener('click', () => {
+            currentCommentsPage++;
+            window.refreshComments(false);
+          });
+        }
+
         window.handleReaction = async (reaction) => {
           if (!currentUser) return showToast('Please login', 'error');
-          await fetchData('?action=toggle_song_reaction', { method:'POST', body: JSON.stringify({song_id: activeCommentSongId, reaction}) });
-          window.refreshComments();
+          await fetchData('?action=toggle_song_reaction', { method: 'POST', body: JSON.stringify({ song_id: activeCommentSongId, reaction: reaction }) });
+          window.refreshComments(true);
         };
 
         const songLikeBtn = document.getElementById('song-like-btn');
         const songDislikeBtn = document.getElementById('song-dislike-btn');
         const commentForm = document.getElementById('comment-form');
         const editCommentForm = document.getElementById('edit-comment-form');
-        
+        const editPostForm = document.getElementById('edit-post-form');
+
         if (songLikeBtn) {
-          const newLikeBtn = songLikeBtn.cloneNode(true);
-          songLikeBtn.parentNode.replaceChild(newLikeBtn, songLikeBtn);
-          newLikeBtn.addEventListener('click', () => window.handleReaction('like'));
+          songLikeBtn.addEventListener('click', () => window.handleReaction('like'));
         }
         if (songDislikeBtn) {
-          const newDislikeBtn = songDislikeBtn.cloneNode(true);
-          songDislikeBtn.parentNode.replaceChild(newDislikeBtn, songDislikeBtn);
-          newDislikeBtn.addEventListener('click', () => window.handleReaction('dislike'));
+          songDislikeBtn.addEventListener('click', () => window.handleReaction('dislike'));
         }
-        
+
         if (commentForm) {
-          const newCommentForm = commentForm.cloneNode(true);
-          commentForm.parentNode.replaceChild(newCommentForm, commentForm);
-          newCommentForm.addEventListener('submit', async e => {
+          commentForm.addEventListener('submit', async e => {
             e.preventDefault();
             if (!currentUser) return showToast('Please login', 'error');
             const input = document.getElementById('comment-input');
-            await fetchData('?action=add_song_comment', { method:'POST', body: JSON.stringify({song_id: activeCommentSongId, parent_id: document.getElementById('comment-parent-id').value || null, content: input.value}) });
+            await fetchData('?action=add_song_comment', { method: 'POST', body: JSON.stringify({ song_id: activeCommentSongId, parent_id: document.getElementById('comment-parent-id').value || null, content: input.value }) });
             input.value = '';
             document.getElementById('comment-parent-id').value = '';
             input.placeholder = "Add a comment... (use @ to mention)";
-            window.refreshComments();
+            window.refreshComments(true);
           });
         }
-        
+
         if (editCommentForm) {
-          const newEditCommentForm = editCommentForm.cloneNode(true);
-          editCommentForm.parentNode.replaceChild(newEditCommentForm, editCommentForm);
-          newEditCommentForm.addEventListener('submit', async e => {
+          editCommentForm.addEventListener('submit', async e => {
             e.preventDefault();
             const id = document.getElementById('edit-comment-id').value;
             const content = document.getElementById('edit-comment-input').value;
-            await fetchData('?action=edit_song_comment', { method:'POST', body: JSON.stringify({comment_id: id, content}) });
+            await fetchData('?action=edit_song_comment', { method: 'POST', body: JSON.stringify({ comment_id: id, content: content }) });
             bootstrap.Modal.getInstance(document.getElementById('edit-comment-modal')).hide();
-            window.refreshComments();
+            window.refreshComments(true);
           });
+        }
+
+        if (editPostForm) {
+          editPostForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const id = document.getElementById('edit-post-id').value;
+            const content = document.getElementById('edit-post-input').value;
+            await fetchData('?action=edit_community_post', { method: 'POST', body: JSON.stringify({ id: id, content: content }) });
+            bootstrap.Modal.getInstance(document.getElementById('edit-post-modal')).hide();
+            loadView(currentView);
+          });
+        }
+
+        const commentsSortSelect = document.getElementById('comments-sort-select');
+        if (commentsSortSelect) {
+          commentsSortSelect.addEventListener('change', () => window.refreshComments(true));
         }
 
         window.openNoteModal = (id = '', title = '', content = '') => {
@@ -10535,9 +11221,7 @@ SOFTWARE.</div>
 
         const noteForm = document.getElementById('note-form');
         if (noteForm) {
-          const newNoteForm = noteForm.cloneNode(true);
-          noteForm.parentNode.replaceChild(newNoteForm, noteForm);
-          newNoteForm.addEventListener('submit', async e => {
+          noteForm.addEventListener('submit', async e => {
             e.preventDefault();
             const id = document.getElementById('note-id').value;
             const title = document.getElementById('note-title').value;
@@ -10554,6 +11238,15 @@ SOFTWARE.</div>
         };
         contentArea.addEventListener('click', async e => {
           const target = e.target;
+
+          const mentionLink = target.closest('.mention-link');
+          if (mentionLink) {
+            e.stopPropagation();
+            const artistName = mentionLink.dataset.artist;
+            loadView({ type: 'artist_songs', param: artistName, sort: 'album_asc', filter_user_id: '', artist_name: '' });
+            hideMobileSidebar();
+            return;
+          }
 
           if (multiSelectMode) {
             const songItem = target.closest('.song-item');
@@ -10793,6 +11486,14 @@ SOFTWARE.</div>
               return;
             }
           }
+          const viewNoteTrigger = target.closest('.view-note-trigger');
+          if (viewNoteTrigger) {
+             e.stopPropagation();
+             document.getElementById('view-note-title').innerHTML = decodeHTML(viewNoteTrigger.dataset.title);
+             document.getElementById('view-note-content').innerHTML = parseUserText(viewNoteTrigger.dataset.content);
+             bootstrap.Modal.getOrCreateInstance(document.getElementById('view-note-modal')).show();
+             return;
+          }
           const newNoteBtn = target.closest('.new-note-btn');
           if (newNoteBtn) {
             e.stopPropagation();
@@ -10802,7 +11503,7 @@ SOFTWARE.</div>
           const editNoteBtn = target.closest('.edit-note-btn');
           if (editNoteBtn) {
             e.stopPropagation();
-            openNoteModal(editNoteBtn.dataset.id, editNoteBtn.dataset.title, editNoteBtn.dataset.content);
+            openNoteModal(editNoteBtn.dataset.id, decodeHTML(editNoteBtn.dataset.title), decodeHTML(editNoteBtn.dataset.content));
             return;
           }
           const deleteNoteBtn = target.closest('.delete-note-btn');
@@ -10821,8 +11522,8 @@ SOFTWARE.</div>
           if (editPostBtn) {
             e.stopPropagation();
             document.getElementById('edit-post-id').value = editPostBtn.dataset.id;
-            document.getElementById('edit-post-input').value = editPostBtn.dataset.content;
-            new bootstrap.Modal(document.getElementById('edit-post-modal')).show();
+            document.getElementById('edit-post-input').value = decodeHTML(editPostBtn.dataset.content);
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('edit-post-modal')).show();
             return;
           }
           const deletePostBtn = target.closest('.delete-post-btn');
@@ -10831,6 +11532,18 @@ SOFTWARE.</div>
             if(confirm('Delete this post?')) {
               fetchData('?action=delete_community_post', { method:'POST', body: JSON.stringify({id: deletePostBtn.dataset.id}) }).then(() => loadView(currentView));
             }
+            return;
+          }
+          const communityReplyBtn = target.closest('.community-reply-btn');
+          if (communityReplyBtn) {
+            e.stopPropagation();
+            document.getElementById('community-parent-id').value = communityReplyBtn.dataset.id;
+            const input = document.getElementById('community-post-input');
+            input.placeholder = "Replying to post...";
+            const username = communityReplyBtn.dataset.username.replace(/\s+/g, '');
+            input.value = `@${username} `;
+            input.focus();
+            window.scrollTo({ top: 0, behavior: 'smooth' });
             return;
           }
           const seeAllButton = target.closest('.shelf-header button');
@@ -12838,17 +13551,37 @@ SOFTWARE.</div>
 
         if (copyShareUrlBtn) {
           copyShareUrlBtn.addEventListener('click', () => {
-            navigator.clipboard.writeText(shareUrlInput.value).then(() => {
+            const onSuccess = () => {
               copyShareUrlBtn.textContent = 'Copied!';
               copyShareUrlBtn.disabled = true;
               setTimeout(() => {
                 copyShareUrlBtn.textContent = 'Copy';
                 copyShareUrlBtn.disabled = false;
               }, 2000);
-            }).catch(err => {
-              console.error('Failed to copy: ', err);
-              showToast('Failed to copy link.', 'error');
-            });
+            };
+            const onError = () => showToast('Failed to copy link.', 'error');
+
+            if (navigator.clipboard && window.isSecureContext) {
+              navigator.clipboard.writeText(shareUrlInput.value).then(onSuccess).catch(onError);
+            } else {
+              const textArea = document.createElement("textarea");
+              textArea.value = shareUrlInput.value;
+              textArea.style.position = "fixed";
+              textArea.style.top = "0";
+              textArea.style.left = "0";
+              textArea.style.opacity = "0";
+              document.body.appendChild(textArea);
+              textArea.focus();
+              textArea.select();
+              try {
+                const successful = document.execCommand('copy');
+                if (successful) onSuccess();
+                else onError();
+              } catch (err) {
+                onError();
+              }
+              document.body.removeChild(textArea);
+            }
           });
         }
 
