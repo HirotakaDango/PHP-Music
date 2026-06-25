@@ -4,6 +4,14 @@ if (isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEP
 }
 error_reporting(E_ALL & ~E_DEPRECATED);
 
+// ANTI-SCRAPING FIREWALL: Aggressively block bots, scrapers, headless browsers, and API tools
+$user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+$bot_patterns = '/(python|curl|wget|bot|spider|crawl|scraper|scrapy|phantom|headless|selenium|puppet|puppeteer|java|libwww|httpclient|postman|insomnia|slurp|facebookexternalhit)/i';
+if (empty($user_agent) || preg_match($bot_patterns, $user_agent)) {
+  http_response_code(403);
+  die("Access Denied: Automated scraping and bot activity are strictly prohibited.");
+}
+
 // GLOBAL CORS ENABLER: Bulletproof cross-origin API access and preflight requests
 $http_origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_X_ORIGIN'] ?? '';
 
@@ -217,7 +225,7 @@ set_time_limit(0);
 
 // ULTRA-SCALE CONCURRENCY: Release the PHP session write-lock early for read-only requests.
 // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
-$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab'];
+$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification'];
 $current_action = $_GET['action'] ?? '';
 
 if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
@@ -228,7 +236,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '3.9');
+define('APP_VERSION', '4.0');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -307,27 +315,40 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
     if (isset($_POST['delete_user']) && isset($_POST['user_id'])) {
-          $db = get_db();
-          $del_uid = (int)$_POST['user_id'];
-          $stmt = $db->prepare("SELECT file FROM music WHERE user_id = ?");
-          $stmt->execute([$del_uid]);
-          while ($row = $stmt->fetch()) {
-            if ($row['file'] && file_exists($row['file'])) @unlink($row['file']);
-          }
-          $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$del_uid]);
-          $db->prepare("DELETE FROM users WHERE id = ?")->execute([$del_uid]);
-          header('Location: ' . $_SERVER['REQUEST_URI']);
-          exit;
-        }
-        
-        if (isset($_POST['reset_opcache'])) {
-          if (function_exists('opcache_reset')) {
-            opcache_reset();
-          }
-          header('Location: ?access=admin');
-          exit;
-        }
+      $db = get_db();
+      $del_uid = (int)$_POST['user_id'];
+      $stmt = $db->prepare("SELECT file FROM music WHERE user_id = ?");
+      $stmt->execute([$del_uid]);
+      while ($row = $stmt->fetch()) {
+        if ($row['file'] && file_exists($row['file'])) @unlink($row['file']);
       }
+      $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM play_counts WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM favorites WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM offline_songs WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM playlists WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM playlist_collaborators WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$del_uid]);
+
+      $new_email = 'deleted_' . $del_uid . '_' . time() . '@mail.com';
+      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', password_hash = NULL, backup_key = NULL, profile_picture = NULL WHERE id = ?")->execute([$new_email, $del_uid]);
+
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+        
+    if (isset($_POST['reset_opcache'])) {
+      if (function_exists('opcache_reset')) {
+        opcache_reset();
+      }
+      header('Location: ?access=admin');
+      exit;
+    }
+  }
 
   if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
     if (password_verify($_POST['password'], ADMIN_PASSWORD_HASH)) {
@@ -458,6 +479,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <select name="sort" class="form-select me-2" style="width: auto;" onchange="this.form.submit()">
               <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest</option>
               <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+              <option value="pending" <?php echo $sort_admin === 'pending' ? 'selected' : ''; ?>>Pending Requests</option>
               <option value="verified" <?php echo $sort_admin === 'verified' ? 'selected' : ''; ?>>Verified</option>
               <option value="unverified" <?php echo $sort_admin === 'unverified' ? 'selected' : ''; ?>>Unverified</option>
               <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned</option>
@@ -477,11 +499,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
               $offset = ($page - 1) * ADMIN_PAGE_SIZE;
               
-              $where = '';
+              $where_clauses = [];
               $params = [];
               if ($search !== '') {
-                $where = "WHERE id = ? OR email LIKE ? OR artist LIKE ?";
+                $where_clauses[] = "(id = ? OR email LIKE ? OR artist LIKE ?)";
                 $params = [$search, "%$search%", "%$search%"];
+              }
+              if ($sort_admin === 'pending') {
+                $where_clauses[] = "verified = 'pending'";
+              }
+              
+              $where = '';
+              if (count($where_clauses) > 0) {
+                $where = "WHERE " . implode(' AND ', $where_clauses);
               }
               
               $total_users_stmt = $db->prepare("SELECT COUNT(id) FROM users $where");
@@ -492,6 +522,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $admin_sort_map = [
                 'newest' => 'ORDER BY id DESC',
                 'oldest' => 'ORDER BY id ASC',
+                'pending' => "ORDER BY id DESC",
                 'verified' => "ORDER BY verified DESC, id ASC",
                 'unverified' => "ORDER BY verified ASC, id ASC",
                 'banned' => "ORDER BY banned DESC, id ASC",
@@ -519,9 +550,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <div class="user-item-email-desktop text-truncate"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
               <div class="user-item-artist-desktop text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
               <div class="user-item-verified-desktop">
-                <span class="badge <?php echo $user['verified'] === 'yes' ? 'bg-success' : 'bg-secondary'; ?>">
-                  <?php echo htmlspecialchars(strtoupper($user['verified'])); ?>
-                </span>
+                <?php if ($user['verified'] === 'yes'): ?>
+                  <span class="badge bg-success">YES</span>
+                <?php elseif ($user['verified'] === 'pending'): ?>
+                  <span class="badge bg-info text-dark">PENDING</span>
+                <?php else: ?>
+                  <span class="badge bg-secondary">NO</span>
+                <?php endif; ?>
                 <?php if ($user['banned']): ?>
                 <span class="badge bg-danger">BANNED</span>
                 <?php endif; ?>
@@ -537,8 +572,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <form method="POST" action="?access=admin&page=<?php echo $page; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>" class="d-inline">
                   <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
                   <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
-                  <button type="submit" name="toggle_verify" class="btn <?php echo $user['verified'] === 'yes' ? 'btn-warning' : 'btn-success'; ?>">
-                    <?php echo $user['verified'] === 'yes' ? 'Un-verify' : 'Verify'; ?>
+                  <button type="submit" name="toggle_verify" class="btn <?php echo $user['verified'] === 'yes' ? 'btn-warning' : ($user['verified'] === 'pending' ? 'btn-info text-dark fw-bold' : 'btn-success'); ?>">
+                    <?php echo $user['verified'] === 'yes' ? 'Un-verify' : ($user['verified'] === 'pending' ? 'Approve Request' : 'Verify'); ?>
                   </button>
                   <button type="submit" name="toggle_ban" class="btn <?php echo $user['banned'] ? 'btn-secondary' : 'btn-warning'; ?>">
                     <?php echo $user['banned'] ? 'Unban' : 'Ban'; ?>
@@ -553,7 +588,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </div>
                 <div>
                   <span class="label">Verified</span>
-                  <span class="badge <?php echo $user['verified'] === 'yes' ? 'bg-success' : 'bg-secondary'; ?>"><?php echo htmlspecialchars(strtoupper($user['verified'])); ?></span>
+                  <span class="badge <?php echo $user['verified'] === 'yes' ? 'bg-success' : ($user['verified'] === 'pending' ? 'bg-info text-dark' : 'bg-secondary'); ?>"><?php echo htmlspecialchars(strtoupper($user['verified'])); ?></span>
                 </div>
                 <div>
                   <span class="label">Last Upload</span>
@@ -942,7 +977,9 @@ function init_db($db) {
   $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
   if (!$stmt->fetch()) {
     $initial = 'M';
-    $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#121212">' . htmlspecialchars($initial) . '</text></svg>';
+    $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
+    $bg_color = $colors[array_rand($colors)];
+    $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="'.$bg_color.'"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#ffffff">' . htmlspecialchars($initial) . '</text></svg>';
     $db->prepare("INSERT INTO users (email, artist, password_hash, verified, profile_picture, profile_picture_type) VALUES (?, ?, ?, ?, ?, 'image/svg+xml')")
       ->execute(['musiclibrary@mail.com', 'Music Library', password_hash('musiclibrary', PASSWORD_DEFAULT), 'yes', $svg]);
   }
@@ -1276,7 +1313,9 @@ if (isset($_GET['action'])) {
       $hash = password_hash($password, PASSWORD_DEFAULT);
       
       $initial = mb_strtoupper(mb_substr($artist, 0, 1, 'UTF-8'));
-      $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#121212">' . htmlspecialchars($initial) . '</text></svg>';
+      $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
+      $bg_color = $colors[array_rand($colors)];
+      $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="'.$bg_color.'"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#ffffff">' . htmlspecialchars($initial) . '</text></svg>';
       
       $stmt = $db->prepare("INSERT INTO users (email, artist, password_hash, profile_picture, profile_picture_type) VALUES (?, ?, ?, ?, 'image/svg+xml')");
       $stmt->execute([$email, $artist, $hash, $svg]);
@@ -1426,7 +1465,11 @@ if (isset($_GET['action'])) {
       } else {
         header('Content-Type: image/svg+xml');
         $initial = $artist_name ? mb_strtoupper(mb_substr($artist_name, 0, 1, 'UTF-8')) : '?';
-        echo '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#121212">' . htmlspecialchars($initial) . '</text></svg>';
+        $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
+        // Generate deterministic color based on artist name so it stays consistent between reloads
+        $color_index = hexdec(substr(md5($artist_name), 0, 6)) % count($colors);
+        $bg_color = $colors[$color_index];
+        echo '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="'.$bg_color.'"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#ffffff">' . htmlspecialchars($initial) . '</text></svg>';
       }
       exit;
 
@@ -1436,7 +1479,20 @@ if (isset($_GET['action'])) {
       $stmt->execute([$user_id]);
       while ($row = $stmt->fetch()) { if ($row['file'] && file_exists($row['file'])) @unlink($row['file']); }
       $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$user_id]);
-      $db->prepare("DELETE FROM users WHERE id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM play_counts WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM favorites WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM offline_songs WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM playlists WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM playlist_collaborators WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$user_id]);
+
+      $new_email = 'deleted_' . $user_id . '_' . time() . '@mail.com';
+      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', password_hash = NULL, backup_key = NULL, profile_picture = NULL WHERE id = ?")->execute([$new_email, $user_id]);
+      
       session_destroy();
       send_json(['status' => 'success']);
       break;
@@ -1447,7 +1503,7 @@ if (isset($_GET['action'])) {
       $hash = password_hash($raw_str, PASSWORD_DEFAULT);
       $final_key = $user_id . '-' . $raw_str;
       $new_email = 'deleted_' . $user_id . '_' . time() . '@mail.com';
-      $new_artist = 'Anonymous User ' . $user_id;
+      $new_artist = 'Deleted User';
       $db->prepare("UPDATE users SET email = ?, artist = ?, password_hash = NULL, backup_key = ?, profile_picture = NULL WHERE id = ?")
          ->execute([$new_email, $new_artist, $hash, $user_id]);
       session_destroy();
@@ -1479,7 +1535,9 @@ if (isset($_GET['action'])) {
         }
         $hash = password_hash($n_password, PASSWORD_DEFAULT);
         $initial = mb_strtoupper(mb_substr($n_artist, 0, 1, 'UTF-8'));
-        $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#121212">' . htmlspecialchars($initial) . '</text></svg>';
+        $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
+        $bg_color = $colors[array_rand($colors)];
+        $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="'.$bg_color.'"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#ffffff">' . htmlspecialchars($initial) . '</text></svg>';
         
         $db->prepare("UPDATE users SET email = ?, artist = ?, password_hash = ?, backup_key = NULL, profile_picture = ?, profile_picture_type = 'image/svg+xml' WHERE id = ?")
            ->execute([$n_email, $n_artist, $hash, $svg, $r_user_id]);
@@ -1496,8 +1554,24 @@ if (isset($_GET['action'])) {
       break;
 
     case 'full_scan':
+      if (!$is_super_admin) { http_response_code(403); exit; }
       perform_full_scan($db);
       exit;
+
+    case 'request_verification':
+      if (!$user_id) { http_response_code(403); exit; }
+      $stmt = $db->prepare("SELECT verified FROM users WHERE id = ?");
+      $stmt->execute([$user_id]);
+      $current = $stmt->fetchColumn();
+      if ($current === 'no') {
+        $db->prepare("UPDATE users SET verified = 'pending' WHERE id = ?")->execute([$user_id]);
+        send_json(['status' => 'success', 'message' => 'Verification request sent to admin.']);
+      } else if ($current === 'pending') {
+        send_json(['status' => 'error', 'message' => 'Verification request is already pending.']);
+      } else {
+        send_json(['status' => 'error', 'message' => 'Account is already verified.']);
+      }
+      break;
 
     case 'upload_song':
       if (!$user_id) { http_response_code(403); exit; }
@@ -1845,7 +1919,7 @@ if (isset($_GET['action'])) {
       }
       
       $discovery_stmt = $db->prepare("
-        SELECT m.album, m.artist, m.user_id, m.id FROM music m
+        SELECT m.album, m.artist, m.user_id, m.id, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m
         WHERE m.album != 'Unknown Album' AND m.album != '' AND m.album IS NOT NULL " . ($user_id ? "AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)" : "") . "
         ORDER BY RANDOM() LIMIT 100
       ");
@@ -1864,9 +1938,10 @@ if (isset($_GET['action'])) {
           if ($p !== '') {
             $key = strtolower($row['album'] . ':::' . $p);
             if (!isset($discovery_albums[$key])) {
-              $discovery_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+              $discovery_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1, 'total_plays' => $row['pc']];
             } else {
               $discovery_albums[$key]['song_count']++;
+              $discovery_albums[$key]['total_plays'] += $row['pc'];
             }
           }
         }
@@ -1934,7 +2009,7 @@ if (isset($_GET['action'])) {
         }
 
         $rec_followed_albums_stmt = $db->prepare("
-          SELECT m.album, m.artist, m.user_id, m.id FROM music m
+          SELECT m.album, m.artist, m.user_id, m.id, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m
           WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id) AND m.album != 'Unknown Album' AND m.album != '' AND m.album IS NOT NULL
           ORDER BY RANDOM() LIMIT 100
         ");
@@ -1949,9 +2024,10 @@ if (isset($_GET['action'])) {
             if ($p !== '') {
               $key = strtolower($row['album'] . ':::' . $p);
               if (!isset($rec_followed_albums[$key])) {
-                $rec_followed_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+                $rec_followed_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1, 'total_plays' => $row['pc']];
               } else {
                 $rec_followed_albums[$key]['song_count']++;
+                $rec_followed_albums[$key]['total_plays'] += $row['pc'];
               }
             }
           }
@@ -2210,7 +2286,7 @@ if (isset($_GET['action'])) {
 
     case 'get_following':
       if (!$user_id) { send_json([]); }
-      $stmt = $db->prepare("SELECT u.artist as name, u.id as id FROM follows f JOIN users u ON f.following_id = u.id WHERE f.follower_id = ? ORDER BY u.artist COLLATE NOCASE ASC " . $limit_clause);
+      $stmt = $db->prepare("SELECT u.artist as name, u.id as id FROM follows f JOIN users u ON f.following_id = u.id WHERE f.follower_id = ? AND u.banned = 0 AND u.email NOT LIKE 'deleted_%' ORDER BY u.artist COLLATE NOCASE ASC " . $limit_clause);
       $stmt->execute([$user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -2329,7 +2405,9 @@ if (isset($_GET['action'])) {
       if ($sort === 'most_replied') $order_by = "ORDER BY (SELECT COUNT(*) FROM song_comments WHERE parent_id = c.id) DESC, c.created_at DESC";
 
       $root_stmt = $db->prepare("
-        SELECT c.*, u.artist, u.profile_picture_type, u.id as u_id,
+        SELECT c.*, u.profile_picture_type, u.id as u_id,
+        CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as artist,
+        CASE WHEN u.banned = 1 OR u.email LIKE 'deleted_%' THEN 1 ELSE 0 END as is_disabled,
         (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'like') as like_count,
         (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'dislike') as dislike_count,
         (SELECT reaction FROM comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
@@ -2342,29 +2420,31 @@ if (isset($_GET['action'])) {
       $root_ids = array_column($roots, 'id');
       $replies_filtered = [];
       if (!empty($root_ids)) {
-          $placeholders = implode(',', array_fill(0, count($root_ids), '?'));
-          $reply_stmt = $db->prepare("
-            SELECT c.*, u.artist, u.profile_picture_type, u.id as u_id,
-            (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'like') as like_count,
-            (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'dislike') as dislike_count,
-            (SELECT reaction FROM comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
-            FROM song_comments c JOIN users u ON c.user_id = u.id 
-            WHERE c.song_id = ? AND c.parent_id IN ($placeholders)
-            ORDER BY c.created_at ASC
-          ");
-          $params = array_merge([$user_id ?? 0, $song_id], $root_ids);
-          $reply_stmt->execute($params);
-          $all_replies = $reply_stmt->fetchAll();
+        $placeholders = implode(',', array_fill(0, count($root_ids), '?'));
+        $reply_stmt = $db->prepare("
+          SELECT c.*, u.profile_picture_type, u.id as u_id,
+          CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as artist,
+          CASE WHEN u.banned = 1 OR u.email LIKE 'deleted_%' THEN 1 ELSE 0 END as is_disabled,
+          (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'like') as like_count,
+          (SELECT COUNT(*) FROM comment_reactions WHERE comment_id = c.id AND reaction = 'dislike') as dislike_count,
+          (SELECT reaction FROM comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
+          FROM song_comments c JOIN users u ON c.user_id = u.id 
+          WHERE c.song_id = ? AND c.parent_id IN ($placeholders)
+          ORDER BY c.created_at ASC
+        ");
+        $params = array_merge([$user_id ?? 0, $song_id], $root_ids);
+        $reply_stmt->execute($params);
+        $all_replies = $reply_stmt->fetchAll();
 
-          $rcounts = [];
-          foreach ($all_replies as $r) {
-              $pid = $r['parent_id'];
-              if (!isset($rcounts[$pid])) $rcounts[$pid] = 0;
-              if ($rcounts[$pid] < 25) { // Strict limit of 25 replies per comment
-                  $replies_filtered[] = $r;
-                  $rcounts[$pid]++;
-              }
+        $rcounts = [];
+        foreach ($all_replies as $r) {
+          $pid = $r['parent_id'];
+          if (!isset($rcounts[$pid])) $rcounts[$pid] = 0;
+          if ($rcounts[$pid] < 25) { // Strict limit of 25 replies per comment
+            $replies_filtered[] = $r;
+            $rcounts[$pid]++;
           }
+        }
       }
 
       $likes = $db->prepare("SELECT reaction, COUNT(*) as c FROM song_reactions WHERE song_id = ? GROUP BY reaction");
@@ -2457,7 +2537,9 @@ if (isset($_GET['action'])) {
       }
       
       $root_stmt = $db->prepare("
-        SELECT p.*, u.artist, 
+        SELECT p.*, 
+        CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as artist,
+        CASE WHEN u.banned = 1 OR u.email LIKE 'deleted_%' THEN 1 ELSE 0 END as is_disabled,
         (SELECT COUNT(*) FROM community_reactions WHERE post_id = p.id AND reaction = 'like') as like_count,
         (SELECT COUNT(*) FROM community_reactions WHERE post_id = p.id AND reaction = 'dislike') as dislike_count,
         (SELECT COUNT(*) FROM community_posts WHERE parent_id = p.id) as reply_count,
@@ -2472,7 +2554,9 @@ if (isset($_GET['action'])) {
       if (!empty($root_ids)) {
         $placeholders = implode(',', array_fill(0, count($root_ids), '?'));
         $reply_stmt = $db->prepare("
-          SELECT p.*, u.artist, 
+          SELECT p.*, 
+          CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as artist,
+          CASE WHEN u.banned = 1 OR u.email LIKE 'deleted_%' THEN 1 ELSE 0 END as is_disabled,
           (SELECT COUNT(*) FROM community_reactions WHERE post_id = p.id AND reaction = 'like') as like_count,
           (SELECT COUNT(*) FROM community_reactions WHERE post_id = p.id AND reaction = 'dislike') as dislike_count,
           (SELECT COUNT(*) FROM community_posts WHERE parent_id = p.id) as reply_count,
@@ -2702,6 +2786,7 @@ if (isset($_GET['action'])) {
         'year_desc' => 'ORDER BY m.year DESC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'year_asc' => 'ORDER BY m.year ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'history_desc' => 'ORDER BY MAX(h.played_at) DESC',
+        'history_asc' => 'ORDER BY MAX(h.played_at) ASC',
         'trending' => 'ORDER BY COALESCE(pc.total_plays, 0) DESC, m.id DESC LIMIT 100',
         'random' => 'ORDER BY RANDOM()',
       ];
@@ -2763,7 +2848,7 @@ if (isset($_GET['action'])) {
     case 'get_albums':
       $sort_key = $_GET['sort'] ?? 'album_asc';
       
-      $stmt = $db->prepare("SELECT album, artist, user_id, id, year FROM music WHERE album != '' AND album != 'Unknown Album' AND album IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) ORDER BY id DESC");
+      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, m.id, m.year, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m WHERE m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY m.id DESC");
       $stmt->execute([$user_id]);
       $rows = $stmt->fetchAll();
       
@@ -2782,10 +2867,12 @@ if (isset($_GET['action'])) {
                 'user_id' => $row['user_id'],
                 'id' => $row['id'],
                 'year' => $row['year'],
-                'song_count' => 1
+                'song_count' => 1,
+                'total_plays' => $row['pc']
               ];
             } else {
               $albums[$key]['song_count']++;
+              $albums[$key]['total_plays'] += $row['pc'];
             }
           }
         }
@@ -2814,7 +2901,7 @@ if (isset($_GET['action'])) {
       break;
     
     case 'get_years':
-      $stmt = $db->prepare("SELECT CAST(year AS TEXT) as name, MAX(id) as id FROM music WHERE year IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY year ORDER BY year DESC" . $limit_clause);
+      $stmt = $db->prepare("SELECT CAST(year AS TEXT) as name, MAX(id) as id FROM music WHERE year IS NOT NULL AND year > 0 AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY year ORDER BY year DESC" . $limit_clause);
       $stmt->execute([$user_id ?? 0]);
       send_json($stmt->fetchAll());
       break;
@@ -2863,7 +2950,7 @@ if (isset($_GET['action'])) {
 
         if (!$user_details) { http_response_code(404); exit; }
 
-        $stmt_stats = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration FROM music WHERE user_id = ?");
+        $stmt_stats = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, SUM((SELECT COALESCE(SUM(play_count), 0) FROM play_counts WHERE song_id = music.id)) as play_count FROM music WHERE user_id = ?");
         $stmt_stats->execute([$user_id]);
         $details = $stmt_stats->fetch();
         
@@ -2947,11 +3034,15 @@ if (isset($_GET['action'])) {
           ");
           $stmt_songs->execute([$user_id, $mix_row['id'], $user_id]);
           $songs = $stmt_songs->fetchAll();
-          foreach($songs as $s) { $details['total_duration'] += $s['duration']; }
+          $details['play_count'] = 0;
+          foreach($songs as $s) { 
+            $details['total_duration'] += $s['duration']; 
+            $details['play_count'] += $s['play_count'] ? $s['play_count'] : 0;
+          }
           $details['song_count'] = count($songs);
         }
       } elseif (in_array($type, ['artist', 'album', 'genre', 'year'])) {
-        if (empty($name)) { http_response_code(400); exit; }
+        if ($name === '') { http_response_code(400); exit; }
         $field = $type;
         $filter_user_id = $_GET['filter_user_id'] ?? '';
         $artist_name = $_GET['artist_name'] ?? '';
@@ -2986,7 +3077,7 @@ if (isset($_GET['action'])) {
         }
 
         // Advanced Fallback: Fetch basic stats first
-        $stmt_details = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, MAX(user_id) as user_id FROM music m WHERE {$field_cond} {$user_cond}");
+        $stmt_details = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, MAX(user_id) as user_id, SUM((SELECT COALESCE(SUM(play_count), 0) FROM play_counts WHERE song_id = m.id)) as play_count FROM music m WHERE {$field_cond} {$user_cond}");
         $stmt_details->execute($user_params);
         $details = $stmt_details->fetch();
         
@@ -3000,11 +3091,16 @@ if (isset($_GET['action'])) {
         $details['public_id'] = null;
 
         if ($type === 'artist') {
-          $stmt_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
+          $stmt_user = $db->prepare("SELECT id, banned, email FROM users WHERE artist = ? COLLATE NOCASE");
           $stmt_user->execute([$name]);
-          $artist_user_id = $stmt_user->fetchColumn();
+          $artist_user = $stmt_user->fetch();
 
-          if ($artist_user_id) {
+          if ($artist_user) {
+            if ($artist_user['banned'] == 1 || strpos((string)$artist_user['email'], 'deleted_') === 0) {
+              http_response_code(404);
+              send_json(['status' => 'error', 'message' => 'User not found or this user already deleted.']);
+            }
+            $artist_user_id = $artist_user['id'];
             $details['is_user'] = true;
             $details['user_id'] = $artist_user_id;
             $stmt_followers = $db->prepare("SELECT COUNT(*) FROM follows WHERE following_id = ?");
@@ -3072,46 +3168,51 @@ if (isset($_GET['action'])) {
     case 'search':
       $q = $_GET['q'] ?? '';
       $query = '%' . $q . '%';
-      $shelves = [];
-
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
-      $stmt_top = $db->prepare("
-        SELECT {$song_fields} FROM music m 
-        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? 
-        WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)
-        ORDER BY 
-          CASE 
-            WHEN m.title LIKE ? THEN 1 
-            WHEN m.artist LIKE ? THEN 2 
-            WHEN m.album LIKE ? THEN 3 
-            ELSE 4 
-          END ASC, m.id DESC 
-        LIMIT 1
-      ");
-      $stmt_top->execute([$user_id, $query, $query, $query, $user_id, $q, $q, $q]);
-      $top_result = $stmt_top->fetch();
       
-      if ($top_result) {
-        $shelves[] = ['title' => 'Top Result', 'type' => 'top_result', 'items' => [$top_result]];
+      // Parse Filters
+      $f_date = $_GET['f_date'] ?? '';
+      $f_dur = $_GET['f_dur'] ?? '';
+      $f_sort = $_GET['f_sort'] ?? 'relevance';
+      
+      $time_now = time();
+      $date_cond_m = ""; $date_cond_p = "";
+      if ($f_date === 'today') { $date_cond_m = " AND m.last_modified >= " . ($time_now - 86400); $date_cond_p = " AND p.created_at >= datetime('now', '-1 day')"; }
+      elseif ($f_date === 'week') { $date_cond_m = " AND m.last_modified >= " . ($time_now - 604800); $date_cond_p = " AND p.created_at >= datetime('now', '-7 days')"; }
+      elseif ($f_date === 'month') { $date_cond_m = " AND m.last_modified >= " . ($time_now - 2592000); $date_cond_p = " AND p.created_at >= datetime('now', '-1 month')"; }
+      elseif ($f_date === 'year') { $date_cond_m = " AND m.last_modified >= " . ($time_now - 31536000); $date_cond_p = " AND p.created_at >= datetime('now', '-1 year')"; }
+
+      $dur_cond_m = "";
+      if ($f_dur === 'short') { $dur_cond_m = " AND m.duration < 240"; }
+      elseif ($f_dur === 'long') { $dur_cond_m = " AND m.duration > 1200"; }
+
+      $shelves = [];
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as play_count";
+
+      // 1. TOP RESULT (Only if no specific sort is overriding)
+      if ($f_sort === 'relevance' || $f_sort === '') {
+        $stmt_top = $db->prepare("
+          SELECT {$song_fields} FROM music m 
+          LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? 
+          WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)
+          $date_cond_m $dur_cond_m
+          ORDER BY CASE WHEN m.title LIKE ? THEN 1 WHEN m.artist LIKE ? THEN 2 WHEN m.album LIKE ? THEN 3 ELSE 4 END ASC, m.id DESC LIMIT 1
+        ");
+        $stmt_top->execute([$user_id, $query, $query, $query, $user_id, $q, $q, $q]);
+        $top_result = $stmt_top->fetch();
+        if ($top_result) $shelves[] = ['title' => 'Top Result', 'type' => 'top_result', 'items' => [$top_result]];
       }
 
-      $artists = [];
-      $added_artists = [];
-      
+      // 2. ARTISTS (Bypass date/duration filters since they don't apply to profiles)
+      $artists = []; $added_artists = [];
       $stmt = $db->prepare("SELECT id, artist as name FROM users WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL ORDER BY artist ASC LIMIT 15");
       $stmt->execute([$query]);
-      $user_artists = $stmt->fetchAll();
-      
-      foreach ($user_artists as $ua) {
+      foreach ($stmt->fetchAll() as $ua) {
         $artists[] = ['name' => $ua['name'], 'id' => $ua['id'], 'is_user' => true];
         $added_artists[strtolower($ua['name'])] = true;
       }
-
       $stmt = $db->prepare("SELECT DISTINCT artist, MAX(id) as id FROM music WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY artist LIMIT 15");
       $stmt->execute([$query, $user_id]);
-      $music_artists = $stmt->fetchAll();
-      
-      foreach ($music_artists as $ma) {
+      foreach ($stmt->fetchAll() as $ma) {
         $parts = preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $ma['artist']);
         foreach ($parts as $p) {
           $p = trim($p);
@@ -3121,16 +3222,16 @@ if (isset($_GET['action'])) {
           }
         }
       }
-      
-      if (count($artists) > 0) {
-        $shelves[] = ['title' => 'Artists', 'type' => 'artists', 'items' => array_slice($artists, 0, 15)];
-      }
+      if (count($artists) > 0) $shelves[] = ['title' => 'Artists', 'type' => 'artists', 'items' => array_slice($artists, 0, 15)];
 
-      $stmt = $db->prepare("SELECT album, artist, user_id, id FROM music WHERE album LIKE ? AND album != '' AND album != 'Unknown Album' AND album IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) ORDER BY id DESC");
+      // 3. ALBUMS (Dynamically aggregated and filtered)
+      $stmt = $db->prepare("
+        SELECT m.album, m.artist, m.user_id, m.id, m.duration, m.last_modified, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc
+        FROM music m WHERE m.album LIKE ? AND m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) $date_cond_m
+      ");
       $stmt->execute([$query, $user_id]);
-      $search_albums_rows = $stmt->fetchAll();
       $search_albums = [];
-      foreach ($search_albums_rows as $row) {
+      foreach ($stmt->fetchAll() as $row) {
         $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
         if (!is_array($parts)) $parts = [$row['artist']];
         foreach ($parts as $part) {
@@ -3138,33 +3239,65 @@ if (isset($_GET['action'])) {
           if ($p !== '') {
             $key = strtolower($row['album'] . ':::' . $p);
             if (!isset($search_albums[$key])) {
-              $search_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+              $search_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1, 'total_plays' => $row['pc'], 'sum_dur' => $row['duration'], 'max_date' => $row['last_modified']];
             } else {
-              $search_albums[$key]['song_count']++;
+              $search_albums[$key]['song_count']++; $search_albums[$key]['total_plays'] += $row['pc'];
+              $search_albums[$key]['sum_dur'] += $row['duration']; $search_albums[$key]['max_date'] = max($search_albums[$key]['max_date'], $row['last_modified']);
             }
           }
         }
       }
-      usort($search_albums, function($a, $b) { return strcasecmp($a['album'], $b['album']); });
+      if ($f_dur === 'short') $search_albums = array_filter($search_albums, function($a) { return $a['sum_dur'] < 240; });
+      elseif ($f_dur === 'long') $search_albums = array_filter($search_albums, function($a) { return $a['sum_dur'] > 1200; });
+      
+      usort($search_albums, function($a, $b) use ($f_sort) {
+        if ($f_sort === 'date') return $b['max_date'] <=> $a['max_date'];
+        if ($f_sort === 'views') return $b['total_plays'] <=> $a['total_plays'];
+        return strcasecmp($a['album'], $b['album']);
+      });
       $search_albums = array_slice($search_albums, 0, 15);
-      if (count($search_albums) > 0) {
-        $shelves[] = ['title' => 'Albums', 'type' => 'albums', 'items' => $search_albums];
-      }
+      if (count($search_albums) > 0) $shelves[] = ['title' => 'Albums', 'type' => 'albums', 'items' => array_values($search_albums)];
 
-      $stmt = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, u.artist as creator, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count FROM playlists p JOIN users u ON p.user_id = u.id WHERE p.name LIKE ? AND (p.is_private = 0 OR p.user_id = ? OR {$is_super_admin} = 1) ORDER BY p.name ASC LIMIT 15");
+      // 4. PLAYLISTS
+      $stmt = $db->prepare("
+        SELECT p.name, p.public_id, p.is_collaborative, p.is_private, p.play_count, p.created_at, u.artist as creator, 
+        (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, 
+        (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count,
+        (SELECT SUM(m.duration) FROM playlist_songs ps JOIN music m ON ps.song_id = m.id WHERE ps.playlist_id = p.id) as total_duration
+        FROM playlists p JOIN users u ON p.user_id = u.id 
+        WHERE p.name LIKE ? AND (p.is_private = 0 OR p.user_id = ? OR {$is_super_admin} = 1) $date_cond_p
+      ");
       $stmt->execute([$query, $user_id]);
       $playlists = $stmt->fetchAll();
-      if (count($playlists) > 0) {
-        $shelves[] = ['title' => 'Playlists', 'type' => 'playlists', 'items' => $playlists];
-      }
+      if ($f_dur === 'short') $playlists = array_filter($playlists, function($p) { return $p['total_duration'] < 240; });
+      elseif ($f_dur === 'long') $playlists = array_filter($playlists, function($p) { return $p['total_duration'] > 1200; });
+      usort($playlists, function($a, $b) use ($f_sort) {
+        if ($f_sort === 'date') return strtotime($b['created_at']) <=> strtotime($a['created_at']);
+        if ($f_sort === 'views') return $b['play_count'] <=> $a['play_count'];
+        return strcasecmp($a['name'], $b['name']);
+      });
+      $playlists = array_slice($playlists, 0, 15);
+      if (count($playlists) > 0) $shelves[] = ['title' => 'Playlists', 'type' => 'playlists', 'items' => array_values($playlists)];
 
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
-      $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY m.title ASC LIMIT 50");
-      $stmt->execute([$user_id, $query, $query, $query, $user_id]);
-      $songs = $stmt->fetchAll();
-      if (count($songs) > 0) {
-        $shelves[] = ['title' => 'Songs', 'type' => 'songs_list', 'items' => $songs];
+      // 5. SONGS
+      $order_m = "ORDER BY m.title ASC";
+      $song_params = [$user_id, $query, $query, $query, $user_id];
+      if ($f_sort === 'relevance' || $f_sort === '') {
+        $order_m = "ORDER BY CASE WHEN m.title LIKE ? THEN 1 WHEN m.artist LIKE ? THEN 2 WHEN m.album LIKE ? THEN 3 ELSE 4 END ASC, m.id DESC";
+        $song_params[] = $q; $song_params[] = $q; $song_params[] = $q;
+      } elseif ($f_sort === 'date') {
+        $order_m = "ORDER BY m.last_modified DESC";
+      } elseif ($f_sort === 'views') {
+        $order_m = "ORDER BY play_count DESC";
+      } elseif ($f_sort === 'likes') {
+        $order_m = "ORDER BY like_count DESC";
       }
+      
+      $song_fields_search = $song_fields . ", (SELECT COUNT(*) FROM favorites WHERE song_id = m.id) as like_count";
+      $stmt = $db->prepare("SELECT {$song_fields_search} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) $date_cond_m $dur_cond_m $order_m LIMIT 50");
+      $stmt->execute($song_params);
+      $songs = $stmt->fetchAll();
+      if (count($songs) > 0) $shelves[] = ['title' => 'Songs', 'type' => 'songs_list', 'items' => $songs];
 
       send_json(['shelves' => $shelves]);
       break;
@@ -3347,12 +3480,12 @@ if (isset($_GET['action'])) {
       }
       
       $stmt = $db->prepare("
-        SELECT p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, COUNT(ps.song_id) as song_count,
+        SELECT p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, p.play_count, COUNT(ps.song_id) as song_count,
         (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
         {$is_added_sql}
         FROM playlists p LEFT JOIN playlist_songs ps ON p.id = ps.playlist_id
         WHERE p.user_id = ?
-        GROUP BY p.id, p.name, p.public_id
+        GROUP BY p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id, p.play_count
         {$order_by} {$limit_clause}
       ");
       $stmt->execute([$user_id]);
@@ -3371,14 +3504,14 @@ if (isset($_GET['action'])) {
       $order_by = $sort_map[$sort_key] ?? $sort_map['name_asc'];
       
       $stmt = $db->prepare("
-        SELECT p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, u.artist as creator, COUNT(ps.song_id) as song_count,
+        SELECT p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, u.artist as creator, p.play_count, COUNT(ps.song_id) as song_count,
         (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
         FROM playlists p 
         JOIN playlist_collaborators pc ON p.id = pc.playlist_id
         JOIN users u ON p.user_id = u.id
         LEFT JOIN playlist_songs ps ON p.id = ps.playlist_id
         WHERE pc.user_id = ?
-        GROUP BY p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id, u.artist
+        GROUP BY p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id, u.artist, p.play_count
         {$order_by} {$limit_clause}
       ");
       $stmt->execute([$user_id]);
@@ -3500,7 +3633,7 @@ if (isset($_GET['action'])) {
           c.song_id,
           c.content,
           c.created_at,
-          u.artist as commenter_name,
+          CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as commenter_name,
           m.title as song_title,
           CASE 
             WHEN c.parent_id IS NOT NULL THEN 'reply'
@@ -3525,7 +3658,7 @@ if (isset($_GET['action'])) {
           cp.id as post_id,
           cp.content,
           cp.created_at,
-          u.artist as commenter_name,
+          CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as commenter_name,
           '' as song_title,
           'community_reply' as notif_type
         FROM community_posts cp
@@ -3812,6 +3945,16 @@ if (isset($_GET['action'])) {
     
     case 'get_history':
       if (!$user_id) { send_json([]); }
+      $sort_key = $_GET['sort'] ?? 'history_desc';
+      $sort_map = [
+        'history_desc' => 'ORDER BY played_at DESC',
+        'history_asc'  => 'ORDER BY played_at ASC',
+        'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
+        'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
+        'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
+      ];
+      $order_by = $sort_map[$sort_key] ?? $sort_map['history_desc'];
+      
       $stmt = $db->prepare("
         SELECT MAX(h.played_at) AS played_at, m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified,
         CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
@@ -3821,7 +3964,7 @@ if (isset($_GET['action'])) {
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
         WHERE h.user_id = ?
         GROUP BY m.id
-        ORDER BY played_at DESC
+        {$order_by}
         {$limit_clause}
       ");
       $stmt->execute([$user_id, $user_id]);
@@ -3878,7 +4021,7 @@ if (isset($_GET['action'])) {
 
       if ($top_artist) {
         $more_from_artist_stmt = $db->prepare("
-          SELECT m.album, m.artist, m.user_id, m.id FROM music m
+          SELECT m.album, m.artist, m.user_id, m.id, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m
           JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 200) r ON m.id = r.id
           WHERE match_artist(m.artist, :artist_name) = 1 AND m.album != 'Unknown Album' AND m.album != '' AND m.album IS NOT NULL
           AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)
@@ -3894,9 +4037,10 @@ if (isset($_GET['action'])) {
             if ($p !== '' && strcasecmp($p, $top_artist) === 0) {
               $key = strtolower($row['album'] . ':::' . $p);
               if (!isset($artist_albums[$key])) {
-                $artist_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+                $artist_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1, 'total_plays' => $row['pc']];
               } else {
                 $artist_albums[$key]['song_count']++;
+                $artist_albums[$key]['total_plays'] += $row['pc'];
               }
             }
           }
@@ -3944,7 +4088,7 @@ if (isset($_GET['action'])) {
       }
 
       $recent_playlists_stmt = $db->prepare("
-        SELECT p.name, p.public_id, p.is_collaborative, p.is_private, u.artist as creator,
+        SELECT p.name, p.public_id, p.is_collaborative, p.is_private, u.artist as creator, p.play_count,
         (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id,
         (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count
         FROM playlists p JOIN users u ON p.user_id = u.id
@@ -3971,7 +4115,7 @@ if (isset($_GET['action'])) {
       }
       
       $discovery_stmt = $db->prepare("
-        SELECT m.album, m.artist, m.user_id, m.id FROM music m
+        SELECT m.album, m.artist, m.user_id, m.id, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m
         JOIN (SELECT id FROM music ORDER BY RANDOM() LIMIT 200) r ON m.id = r.id
         WHERE m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id) AND m.album != 'Unknown Album' AND m.album != '' AND m.album IS NOT NULL
       ");
@@ -3986,9 +4130,10 @@ if (isset($_GET['action'])) {
           if ($p !== '') {
             $key = strtolower($row['album'] . ':::' . $p);
             if (!isset($discovery_albums[$key])) {
-              $discovery_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+              $discovery_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1, 'total_plays' => $row['pc']];
             } else {
               $discovery_albums[$key]['song_count']++;
+              $discovery_albums[$key]['total_plays'] += $row['pc'];
             }
           }
         }
@@ -4068,21 +4213,27 @@ if (isset($_GET['action'])) {
         $img_id = $img_stmt->fetchColumn() ?: $song_ids[0];
         $public_id = bin2hex(random_bytes(8));
         $name = 'Mix - ' . $seed['seed_name'];
-        $db->prepare("INSERT INTO mixes (public_id, name, creator, image_id) VALUES (?, ?, ?, ?)")->execute([$public_id, $name, 'PHP-Music', $img_id]);
-        $mix_id = $db->lastInsertId();
-        $order = 0;
-        $insert_ms = $db->prepare("INSERT INTO mix_songs (mix_id, song_id, sort_order) VALUES (?, ?, ?)");
-        foreach ($song_ids as $sid) {
-          $insert_ms->execute([$mix_id, $sid, $order++]);
+          $db->prepare("INSERT INTO mixes (public_id, name, creator, image_id) VALUES (?, ?, ?, ?)")->execute([$public_id, $name, 'PHP-Music', $img_id]);
+          $mix_id = $db->lastInsertId();
+          $order = 0;
+          $insert_ms = $db->prepare("INSERT INTO mix_songs (mix_id, song_id, sort_order) VALUES (?, ?, ?)");
+          foreach ($song_ids as $sid) {
+            $insert_ms->execute([$mix_id, $sid, $order++]);
+          }
+          
+          $mix_pc_stmt = $db->prepare("SELECT SUM(play_count) FROM play_counts WHERE song_id IN (" . implode(',', $song_ids) . ")");
+          $mix_pc_stmt->execute();
+          $mix_play_count = $mix_pc_stmt->fetchColumn() ?: 0;
+          
+          $mixes[] = [
+            'public_id' => $public_id,
+            'name' => $name,
+            'creator' => 'PHP-Music',
+            'image_id' => $img_id,
+            'song_count' => count($song_ids),
+            'play_count' => $mix_play_count
+          ];
         }
-        $mixes[] = [
-          'public_id' => $public_id,
-          'name' => $name,
-          'creator' => 'PHP-Music',
-          'image_id' => $img_id,
-          'song_count' => count($song_ids)
-        ];
-      }
       if (!empty($mixes)) {
         $shelves[] = ['title' => 'Your Mixes', 'type' => 'mixes', 'items' => $mixes];
       }
@@ -4100,7 +4251,7 @@ if (isset($_GET['action'])) {
       }
 
       $latest_followed_albums_stmt = $db->prepare("
-        SELECT m.album, m.artist, m.user_id, m.id FROM music m
+        SELECT m.album, m.artist, m.user_id, m.id, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m
         WHERE m.user_id IN (SELECT following_id FROM follows WHERE follower_id = :user_id) AND m.album != 'Unknown Album' AND m.album != '' AND m.album IS NOT NULL
         ORDER BY id DESC LIMIT 200
       ");
@@ -4115,9 +4266,10 @@ if (isset($_GET['action'])) {
           if ($p !== '') {
             $key = strtolower($row['album'] . ':::' . $p);
             if (!isset($latest_followed_albums[$key])) {
-              $latest_followed_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1];
+              $latest_followed_albums[$key] = ['album' => $row['album'], 'artist' => $p, 'user_id' => $row['user_id'], 'id' => $row['id'], 'song_count' => 1, 'total_plays' => $row['pc']];
             } else {
               $latest_followed_albums[$key]['song_count']++;
+              $latest_followed_albums[$key]['total_plays'] += $row['pc'];
             }
           }
         }
@@ -4136,6 +4288,54 @@ if (isset($_GET['action'])) {
       header('Content-Type: application/json; charset=utf-8');
       echo $final_rec_json ?: '{"shelves":[]}';
       exit;
+
+    case 'export_notes':
+      if (!$user_id) { http_response_code(403); exit; }
+      $stmt = $db->prepare("SELECT title, content, created_at, updated_at FROM personal_notes WHERE user_id = ? ORDER BY created_at ASC");
+      $stmt->execute([$user_id]);
+      $rows = $stmt->fetchAll();
+      if (empty($rows)) { http_response_code(404); exit; }
+
+      $export_data = [
+        'name' => 'Personal Notes',
+        'notes' => $rows
+      ];
+      
+      header('Content-Type: application/json');
+      header('Content-Disposition: attachment; filename="personal_notes.json"');
+      echo json_encode($export_data, JSON_PRETTY_PRINT);
+      exit;
+
+    case 'import_notes':
+      if (!$user_id) { http_response_code(403); exit; }
+      $import_data = json_decode(file_get_contents('php://input'), true);
+      if (json_last_error() !== JSON_ERROR_NONE || !isset($import_data['notes']) || !is_array($import_data['notes'])) {
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or malformed JSON payload.']);
+      }
+
+      $db->beginTransaction();
+      try {
+        $stmt_insert = $db->prepare("INSERT INTO personal_notes (user_id, title, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
+        $count = 0;
+        foreach ($import_data['notes'] as $note) {
+          $title = isset($note['title']) ? htmlspecialchars($note['title']) : 'Imported Note';
+          // Raw content from export might already be formatted, but we run it through our standard text wrapper safely
+          $content = isset($note['content']) ? format_user_text($note['content']) : ''; 
+          $created_at = isset($note['created_at']) ? $note['created_at'] : date('Y-m-d H:i:s');
+          $updated_at = isset($note['updated_at']) ? $note['updated_at'] : date('Y-m-d H:i:s');
+          
+          if ($content !== '') {
+            $stmt_insert->execute([$user_id, $title, $content, $created_at, $updated_at]);
+            $count++;
+          }
+        }
+        $db->commit();
+        send_json(['status' => 'success', 'message' => "Successfully imported {$count} notes."]);
+      } catch (Exception $e) {
+        $db->rollBack();
+        http_response_code(500); send_json(['status' => 'error', 'message' => 'Database error during import.']);
+      }
+      break;
 
     case 'export_favorites':
       if (!$user_id) { http_response_code(403); exit; }
@@ -4709,6 +4909,61 @@ function perform_full_scan($db) {
     <meta name="theme-color" content="#0a0a0a"/>
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
+      // ANTI-INSPECT: Block Eruda/vConsole, with Super Admin Bypass
+      (function() {
+        const blockInspect = () => {
+          document.documentElement.innerHTML = '<div style="background-color:#030303; color:#ff0000; font-family:sans-serif; padding: 5rem 1rem; text-align:center; height:100vh; width:100vw; z-index:999999; position:fixed; top:0; left:0;"><h3>Security Violation</h3><p>Inspection tools are strictly forbidden on this application.</p></div>';
+          setTimeout(() => { window.location.replace('about:blank'); }, 500);
+        };
+
+        const checkBypass = () => {
+          if (localStorage.getItem('dev_mode_token') === 'admin') return true;
+          const pwd = prompt("Developer tools locked. Enter admin password:");
+          if (pwd === 'admin') {
+            localStorage.setItem('dev_mode_token', 'admin');
+            return true;
+          }
+          if (pwd !== null) {
+            alert("Password incorrect. You want to try exploit the site?");
+          }
+          return false;
+        };
+        
+        let _eruda, _vConsole;
+        try {
+          Object.defineProperty(window, 'eruda', { 
+            get: () => _eruda, 
+            set: (val) => { if (checkBypass()) _eruda = val; else blockInspect(); }, 
+            configurable: true 
+          });
+          Object.defineProperty(window, 'vConsole', { 
+            get: () => _vConsole, 
+            set: (val) => { if (checkBypass()) _vConsole = val; else blockInspect(); }, 
+            configurable: true 
+          });
+        } catch (e) {}
+        
+        const observer = new MutationObserver((mutations) => {
+          if (localStorage.getItem('dev_mode_token') === 'admin') return;
+          for (const mutation of mutations) {
+            for (const node of mutation.addedNodes) {
+              if (node.id === 'eruda' || node.id === '__vconsole' || 
+                 (node.className && typeof node.className === 'string' && (node.className.includes('__eruda') || node.className.includes('vc-switch')))) {
+                if (!checkBypass()) blockInspect();
+              }
+            }
+          }
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+
+        setInterval(() => {
+          if (localStorage.getItem('dev_mode_token') === 'admin') return;
+          if (document.getElementById('eruda') || document.querySelector('[class^="__eruda"]') || document.getElementById('__vconsole') || document.querySelector('.vc-switch')) {
+            if (!checkBypass()) blockInspect();
+          }
+        }, 500);
+      })();
+
       (async function() {
         const appVersion = '<?php echo APP_VERSION; ?>';
         try {
@@ -4854,7 +5109,9 @@ function perform_full_scan($db) {
         display: grid; grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px;
         align-items: center; gap: 1rem; padding: 0.5rem 1rem; font-size: 0.9rem; color: var(--ytm-secondary-text);
       }
-      .song-item.history-item { grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 80px 40px !important; }
+      @media (min-width: 768px) {
+        .song-item.history-item { grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 80px 40px !important; }
+      }
       .song-list-header { font-weight: 500; }
       .song-item .song-artist-mobile { display: none !important; }
       /* Clean, spacious layout for the constrained Desktop Player Modal queue */
@@ -5157,6 +5414,7 @@ function perform_full_scan($db) {
       .search-dropdown-title { font-size: 0.95rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; }
       .search-dropdown-subtitle { font-size: 0.8rem; color: var(--ytm-secondary-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .search-dropdown-header { padding: 0.25rem 1rem; font-size: 0.75rem; text-transform: uppercase; color: var(--ytm-secondary-text); font-weight: bold; margin-top: 0.5rem; margin-bottom: 0.25rem;}
+      .hover-white:hover { color: #ffffff !important; }
       
       #sleep-timer-bubble { position: fixed; top: 80px; right: 20px; background: rgba(30, 30, 30, 0.9); backdrop-filter: blur(10px); border: 1px solid var(--ytm-surface-2); border-radius: 50px; padding: 8px 16px; z-index: 1060; display: flex; align-items: center; gap: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); cursor: grab; user-select: none; touch-action: none; }
       #sleep-timer-bubble:active { cursor: grabbing; }
@@ -5164,7 +5422,15 @@ function perform_full_scan($db) {
       #sleep-timer-bubble .action-btn { background: none; border: none; padding: 0; font-size: 1.2rem; display: flex; align-items: center; transition: color 0.2s; }
       #sleep-timer-bubble .action-btn:hover { color: var(--ytm-primary-text) !important; }
       #sleep-timer-bubble #sleep-timer-cancel-btn:hover { color: var(--ytm-accent) !important; }
-      #sleep-timer-bubble #sleep-timer-wake-btn.active { color: var(--ytm-accent) !important; } }
+      #sleep-timer-bubble #sleep-timer-wake-btn.active { color: var(--ytm-accent) !important; }
+      
+      #artist-hover-tooltip {
+        position: absolute; z-index: 1080; background: var(--ytm-surface-2); border: 1px solid #404040;
+        border-radius: 12px; padding: 1rem; width: 320px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        display: none; opacity: 0; transition: opacity 0.2s ease-in-out; pointer-events: auto;
+      }
+      .tooltip-follow-btn { transition: background-color 0.2s, color 0.2s; }
+    }
     </style>
   </head>
   <body class="logged-out">
@@ -5227,7 +5493,7 @@ function perform_full_scan($db) {
             </a>
             <a href="#" class="nav-link" data-view="get_collab_playlists">
               <i class="bi bi-people-fill"></i>
-              <span>Shared with me</span>
+              <span>Shared With Me</span>
             </a>
             <a href="#" class="nav-link" data-view="get_offline_songs">
               <i class="bi bi-cloud-arrow-down-fill"></i>
@@ -5270,21 +5536,21 @@ function perform_full_scan($db) {
             <hr class="text-secondary">
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#how-to-use-modal">
               <i class="bi bi-question-circle-fill"></i>
-              <span>How to use</span>
+              <span>How To Use</span>
             </a>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#shortcuts-modal">
               <i class="bi bi-keyboard-fill"></i>
-              <span>Shortcuts</span>
+              <span>Keyboard Shortcuts</span>
             </a>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#playlist-downloader-modal">
               <i class="bi bi-cloud-arrow-down-fill"></i>
               <span>Downloader</span>
             </a>
-            <a href="#" class="nav-link logged-in-only verified-user-only" data-bs-toggle="modal" data-bs-target="#upload-modal">
+            <a href="#" class="nav-link logged-in-only" id="nav-upload-btn">
               <i class="bi bi-cloud-upload-fill"></i>
               <span>Upload Song</span>
             </a>
-            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#full-scan-modal">
+            <a href="#" class="nav-link logged-in-only" id="nav-scan-all" data-bs-toggle="modal" data-bs-target="#full-scan-modal" style="display: none !important;">
               <i class="bi bi-hdd-stack-fill"></i>
               <span>Scan All</span>
             </a>
@@ -5840,75 +6106,299 @@ function perform_full_scan($db) {
     </div>
 
     <div class="modal fade" id="shortcuts-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
-            <h5 class="modal-title text-white"><i class="bi bi-keyboard-fill text-info me-2"></i>Keyboard Shortcuts</h5>
+            <h5 class="modal-title text-white"><i class="bi bi-keyboard-fill text-info me-2"></i>Detailed Keyboard Shortcuts</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body text-light">
-            <p class="text-secondary mb-4 small">Control the music player instantly without using your mouse.</p>
+            <p class="text-secondary mb-4 small">Master the music player instantly with these advanced, hands-free keyboard commands.</p>
             
             <div class="d-flex flex-column gap-3">
-              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
-                <div class="d-flex align-items-center gap-2">
-                  <svg width="70" height="36" viewBox="0 0 70 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="70" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
-                    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SPACE</text>
-                  </svg>
+              
+              <h5 class="text-white mt-2 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Playback Controls</h5>
+              
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="70" height="36" viewBox="0 0 70 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="70" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SPACE</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Play / Pause</span>
                 </div>
-                <span class="fw-medium text-secondary">Play / Pause</span>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The Spacebar serves as the universal standard command for controlling media playback across nearly every modern software application and streaming platform. By pressing the Spacebar while a track is loaded into the PHP Music player, you can instantly toggle the current playback state between active playing and paused. This operates flawlessly regardless of which tab, menu, or view you are currently browsing, provided you are not actively typing inside a text input field, search bar, or comment box. Using this critical shortcut drastically reduces your reliance on moving the mouse to the bottom player bar, offering a seamless, hands-free listening experience. Whether you need to abruptly pause the audio to answer a sudden phone call, speak to someone in the room, or quickly resume the beat once you are ready, the Spacebar delivers instantaneous zero-latency response directly to the internal Web Audio API engine. It is arguably the most essential and frequently used keyboard command for managing your continuous stream of music.</p>
               </div>
 
-              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
-                <div class="d-flex align-items-center gap-2">
-                  <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
-                    <path d="M14 12L22 18L14 24V12Z" fill="#ffffff"/>
-                  </svg>
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><path d="M14 12L22 18L14 24V12Z" fill="#ffffff"/></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Next Track</span>
                 </div>
-                <span class="fw-medium text-secondary">Next Track (Right Arrow)</span>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the Right Arrow key triggers an immediate skip to the next track in your active playing queue. This powerful shortcut allows you to rapidly cycle through playlists, albums, or randomly shuffled recommendations without ever needing to physically click the 'Next' button on the user interface. It evaluates your current repeat and shuffle settings intelligently; if you have Repeat All enabled, it will seamlessly loop back to the beginning of the queue once it hits the end. By keeping your hands on the keyboard, you can effortlessly browse and curate your listening session, bypassing tracks that do not fit your current mood with a single keystroke. This functionality is heavily optimized for speed, instantly dumping the current audio buffer and requesting the subsequent stream from the server, ensuring minimal delay between track transitions. It is an indispensable tool for power users who want to aggressively filter through massive discovery mixes.</p>
               </div>
 
-              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
-                <div class="d-flex align-items-center gap-2">
-                  <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
-                    <path d="M22 12L14 18L22 24V12Z" fill="#ffffff"/>
-                  </svg>
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><path d="M22 12L14 18L22 24V12Z" fill="#ffffff"/></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Previous Track</span>
                 </div>
-                <span class="fw-medium text-secondary">Previous Track (Left Arrow)</span>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The Left Arrow key is your dedicated command for navigating backward through your listening session. Its behavior is contextually aware of the current playback position. If the currently playing track has progressed beyond the first three seconds, pressing this key will instantly rewind the audio back to the absolute beginning of the song, allowing you to restart your favorite verses effortlessly. However, if the track is still within its opening three seconds, pressing the Left Arrow key will physically pull the previous song from the queue history and begin playing it immediately. This dual-function logic mirrors industry-standard professional audio players, giving you precise chronological control over your playlists. It is exceptionally useful when you accidentally skip a song you wanted to hear, or when a track transitions and you realize you weren't finished vibing with the prior masterpiece. The transition occurs instantly via the background audio engine.</p>
               </div>
 
-              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
-                <div class="d-flex align-items-center gap-2">
-                  <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
-                    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">M</text>
-                  </svg>
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
+                    <span class="text-secondary fw-bold">+</span>
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><path d="M14 12L22 18L14 24V12Z" fill="#ffffff"/></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Seek Forward 10s</span>
                 </div>
-                <span class="fw-medium text-secondary">Mute / Unmute</span>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">By holding the Shift key and pressing the Right Arrow, you initiate a precise chronological seek forward within the currently playing audio track. Specifically, this combination jumps the playback head exactly ten seconds into the future. This is a highly technical tool designed for bypassing long, drawn-out instrumental intros, skipping over podcast-style dialogue segments in mixes, or fast-forwarding to your absolute favorite chorus or drop in a song. Because it interacts directly with the HTML5 Media Element API, the time-shift is executed with frame-perfect accuracy and zero graphical stuttering. You can rapidly tap this key combination multiple times in succession to jump 20, 30, or 40 seconds ahead in a matter of milliseconds. This shortcut completely removes the friction of attempting to click a tiny position on the visual progress bar, granting you authoritative control over the exact timestamp of your listening experience.</p>
               </div>
 
-              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
-                <div class="d-flex align-items-center gap-2">
-                  <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
-                    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">S</text>
-                  </svg>
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
+                    <span class="text-secondary fw-bold">+</span>
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><path d="M22 12L14 18L22 24V12Z" fill="#ffffff"/></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Seek Backward 10s</span>
                 </div>
-                <span class="fw-medium text-secondary">Toggle Shuffle</span>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Engaging the Shift key while pressing the Left Arrow instantly rewinds the active audio stream by exactly ten seconds. This is the ultimate tool for lyrical comprehension and musical appreciation. If an artist delivers a complex, rapid-fire rap verse, or if a guitarist executes a mesmerizing, lightning-fast solo that you couldn't quite process on the first listen, this shortcut allows you to instantly pull the track back to analyze it again. It provides a massive quality-of-life improvement over manually dragging the progress bar with your cursor, which is often inaccurate and frustrating. The internal engine dynamically recalculates the buffer position to ensure that the audio resumes smoothly without popping or artifacting. You can reliably spam this shortcut to scrub backwards through minutes of audio in seconds, giving you unparalleled precision to catch every single hidden detail, background vocal, or subtle instrumental layer buried in the mix.</p>
               </div>
 
-              <div class="d-flex align-items-center justify-content-between p-2 rounded" style="background: rgba(255,255,255,0.03);">
-                <div class="d-flex align-items-center gap-2">
-                  <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/>
-                    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">R</text>
-                  </svg>
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="50" height="36" viewBox="0 0 50 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="50" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="14" font-weight="bold">1-9</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Jump 10% - 90%</span>
                 </div>
-                <span class="fw-medium text-secondary">Toggle Repeat Mode</span>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The number keys across the top of your keyboard (1 through 9) act as absolute percentage markers for the currently playing track. Pressing '1' instantly teleports the playback head to the 10% mark of the song's total duration, '5' jumps exactly to the halfway point (50%), and '9' skips straight to the final 10% of the track. This feature is heavily inspired by professional video and audio editing timelines, providing a mathematically perfect way to scrub through a file. If you are listening to a massive, hour-long DJ mix or a lengthy ambient compilation, using these number keys allows you to slice through the file in massive chunks to find the exact transition or track you are looking for. It mathematically calculates the total duration metadata and applies the percentage instantly. This is a highly advanced navigation method that significantly elevates your ability to browse long-form audio without touching the mouse.</p>
               </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">0</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Restart Song</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the '0' key acts as a hard reset for the current audio stream. Regardless of whether you are two seconds into the track or three milliseconds away from the final fade-out, striking this key instantly snaps the playback head back to the 0:00 timestamp. This is incredibly satisfying when you want to experience the atmospheric build-up of a song's intro all over again, or if you were momentarily distracted and want to give the track the undivided attention it deserves from the very first beat. It completely bypasses the nuanced logic of the Left Arrow key, functioning purely as an absolute zeroing mechanism. The underlying Web Audio context handles the buffer reset cleanly, ensuring that any active equalizers, spatial audio filters, or volume normalizations remain perfectly intact while the song begins its playback cycle anew. It is the absolute fastest way to start your listening experience fresh.</p>
+              </div>
+
+              <!-- Audio & Modes -->
+              <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Audio & Modes</h5>
+              
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><path d="M18 12L12 18H24L18 12Z" fill="#ffffff"/></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Volume Up</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The Up Arrow key serves as your primary hardware interface for increasing the master audio output of the PHP Music platform. Every single press of this key digitally increments the internal volume multiplier by exactly five percent (0.05). This grants you granular, step-by-step control over your listening levels without needing to squint at the tiny volume slider in the bottom corner of the interface. If a specific track was mastered too quietly, you can rapidly tap the Up Arrow to compensate in real-time. Because the volume logic is routed through a specialized Gain Node within the Web Audio API context, the increase is applied smoothly, preventing harsh digital clipping or sudden audio spikes that could damage your hearing or speaker equipment. It synchronizes visually with the on-screen volume slider, ensuring that the graphical interface accurately reflects the physical adjustments you are making through your keyboard.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><path d="M18 24L12 18H24L18 24Z" fill="#ffffff"/></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Volume Down</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the Down Arrow key systematically decreases the application's master volume by five percent (0.05) per keystroke. This is an absolutely vital shortcut for instantly managing sudden, overwhelmingly loud audio mastering differences between tracks, especially when listening through sensitive studio headphones. Instead of frantically searching for your mouse to drag a slider, you can swiftly tap this key to bring the audio down to a comfortable, ambient background level. The underlying math ensures that the volume scales linearly down to absolute zero, and it perfectly updates the graphical UI slider in the player bar to reflect the new state. If you need to quickly lower the volume to hear a notification from another application, converse with a coworker, or just reduce ear fatigue during a long listening session, the Down Arrow provides an immediate, reliable, and ergonomically superior solution compared to manual cursor adjustments.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">M</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Mute / Unmute</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'M' key acts as a digital kill switch for the master audio output. Striking this key instantly mutes all sound emanating from the player without actually pausing the track's progression. Pressing it again will perfectly restore the volume to the exact level it was at before you muted it. This is a highly strategic shortcut for situations where you need absolute silence immediately—such as answering an unexpected phone call, joining a virtual meeting, or watching a video in another tab—but you don't necessarily want to interrupt the flow of a live, synchronized listening session or a live radio queue. The graphical user interface responds in real-time, changing the speaker icon in the bottom right corner to visually confirm the muted state. The memory retention system ensures that your carefully calibrated volume preferences are never lost when toggling this essential hardware shortcut.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">S</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Toggle Shuffle</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'S' key is a powerful algorithmic trigger that instantly toggles the randomized shuffle state of your active playing queue. When activated, the system takes your currently loaded playlist, album, or history view and applies a cryptographic Fisher-Yates shuffle algorithm to completely randomize the upcoming track order. This mathematically guarantees that every single song will be played exactly once before the queue repeats, completely eliminating the repetitive boredom of listening to a playlist in the exact same chronological order every day. Pressing the 'S' key again disables the algorithm, instantly snapping the remaining unplayed tracks back into their original, sequential database order. A visual highlight on the shuffle icon in the main player bar confirms your selection. This hands-free shortcut is the ultimate tool for injecting spontaneity and unpredictability into your daily listening habits without disrupting your workflow.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">R</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Toggle Repeat Mode</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the 'R' key allows you to cycle seamlessly through the three fundamental repeat modes of the audio engine: Repeat Off, Repeat All, and Repeat One. The first press locks the queue into a continuous loop, ensuring that once your playlist or album reaches the final track, it will instantly wrap around and start from the beginning without any dead silence. Pressing the key a second time activates the 'Repeat One' protocol, which traps the currently playing song in an infinite loop—perfect for when you become completely obsessed with a new track and need to hear it dozens of times in a row to dissect the lyrics and production. A third press disengages the system, allowing playback to stop naturally at the end of the queue. The visual icon dynamically updates to reflect your current mode, giving you total authoritative control over the continuous flow of your music.</p>
+              </div>
+
+              <!-- Interface & Actions -->
+              <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Interface & Actions</h5>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">F</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Toggle Fullscreen Player</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'F' key is your gateway to an incredibly immersive, distraction-free visual experience. Striking this key instantly sends a request to the browser's Fullscreen API, stripping away all browser tabs, URL bars, and operating system taskbars to dedicate your entire monitor exclusively to the PHP Music interface. This is specifically designed for users who want to leave the application running on a secondary monitor, a living room television, or a party display. When combined with the dynamic blurred background generation and the audio-reactive visualizer canvas, the fullscreen mode transforms your screen into a mesmerizing, professional-grade media centerpiece. Pressing the 'F' key a second time (or hitting the Escape key) gracefully collapses the view back into standard windowed mode. It completely redefines the aesthetic atmosphere of your listening environment with a single, effortless keystroke.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">P</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Picture-in-Picture (PiP)</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the 'P' key activates one of the most advanced technical features of the entire platform: the Document Picture-in-Picture (PiP) mode. This command detaches the core playback interface, including the high-resolution album art, synchronized lyrics, and media controls, into a compact, floating window that hovers persistently above all other applications on your computer. This means you can actively read along with the lyrics or skip tracks while browsing completely different websites, writing documents, or playing video games. The PiP window operates in its own isolated DOM context, maintaining a flawless, real-time connection to the main audio engine without consuming massive amounts of system memory. If your browser does not support Document PiP, the system intelligently falls back to standard Video PiP, rendering the album art and a dynamic audio visualizer onto a canvas element. It is the ultimate multitasking shortcut for power users.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">L</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Show Lyrics</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'L' key is a dedicated shortcut that instantly summons the synchronized lyrics modal over your current view. If the currently playing track contains deeply embedded LRC timestamp metadata, this interface will automatically display the lyrics scrolling in perfect, real-time synchronization with the artist's vocals. The active line will be beautifully highlighted and magnified, allowing you to easily read along or host impromptu karaoke sessions. Even if the track only contains standard, unsynchronized text lyrics, this shortcut provides immediate access to the full textual composition, completely bypassing the need to navigate through the context menu with your mouse. The modal heavily utilizes the dynamic blurred background system, creating a stunning visual contrast that makes the text highly readable. It is an essential tool for music enthusiasts who want to deeply understand the poetry and storytelling behind their favorite compositions at a moment's notice.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">C</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Open Comments</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">By pressing the 'C' key, you instantly open the dynamic community interaction modal for the currently playing track. This specialized shortcut bridges the gap between solitary listening and global social engagement. Inside the modal, you can read the thoughts, analyses, and reactions of other users across the server, reply directly to their insights, or drop your own hot take on the production quality of the song. You can also view the aggregate Like and Dislike statistics to gauge the track's popularity. By assigning this function to a single keystroke, the application encourages spontaneous community interaction; if a specific beat drop or lyrical punchline amazes you, you can hit 'C', type your reaction, and return to your work in a matter of seconds. It transforms the music player from a passive audio stream into an active, collaborative social experience.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">I</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">View Metadata (Info)</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'I' (Information) key is designed specifically for audiophiles, data hoarders, and library curators. Pressing this shortcut instantly generates a clean, readable overlay detailing the absolute core metadata of the currently playing track. You will be presented with the exact Title, Artist, Album, and Genre tags, alongside the release Year, the mathematically calculated Duration, and the precise Bitrate (e.g., 320 kbps) of the physical audio file. This is incredibly useful when you are listening to a massive, auto-generated discovery mix and suddenly encounter a track with pristine audio fidelity or an obscure genre classification that you want to investigate further. It completely removes the guesswork from understanding exactly what format and quality of audio your browser is currently decoding. For users who obsess over their library's organization and file integrity, this shortcut provides instant, transparent verification of the backend database.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">E</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Per-Song Audio Settings</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the 'E' key launches the advanced Per-Song Audio Settings panel, which is an absolute game-changer for users with highly diverse music libraries. If you encounter a track that was mastered in the 1980s and sounds incredibly quiet, or an underground rap song with overpowering, muddy bass frequencies, you can use this shortcut to fix it permanently. The interface allows you to define a specific volume multiplier and a custom 5-band Equalizer curve that applies exclusively to that exact song. The database permanently memorizes these adjustments, ensuring that every time this specific track plays in the future—whether in a playlist or on shuffle—the custom audio filters will automatically engage to correct the mastering flaws. It is an unparalleled quality-of-life feature that prevents you from constantly adjusting your master volume or global EQ when transitioning between drastically different eras and genres of music.</p>
+              </div>
+
+              <!-- Library Management -->
+              <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Library Management</h5>
+              
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">H</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Toggle Favorite (Heart)</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'H' (Heart) key is the fastest and most ergonomic way to curate your personal music library. Whenever a song resonates with you, simply strike the 'H' key to instantly pin it to your global Favorites collection. The system communicates directly with the SQLite database via an asynchronous background API request, permanently saving the association without interrupting the audio playback or forcing the page to reload. A visual toast notification will appear confirming the addition, and the heart icon on the interface will illuminate. If you press 'H' while listening to a song that is already in your Favorites, it will intelligently remove it from the list. This hands-free bookmarking system is essential for rapidly building an elite collection of top-tier tracks while passively listening to complex "For You" algorithmic recommendations or expansive radio mixes.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">O</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Make Offline / Re-cache</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the 'O' key triggers the platform's incredibly sophisticated Progressive Web App (PWA) caching engine. When activated, the browser forcefully downloads the physical MP3/FLAC audio stream, the high-resolution cover art, and the core JSON metadata of the currently playing track, securely encrypting and storing them directly into your device's internal hard drive via the Cache Storage API. Once cached, the song will play instantaneously, with zero buffering, even if you completely disconnect from the internet or board a flight. If the song is already cached but the file has become corrupted due to your operating system aggressively clearing space, pressing 'O' will force the engine to securely re-download and repair the cache chunk. This shortcut gives you absolute, authoritative control over your bandwidth consumption and guarantees that your most critical tracks are fundamentally immune to network outages or server downtime.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">B</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Toggle Listen Later (Bookmark)</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'B' (Bookmark) key is a highly strategic organizational tool designed for heavy music discoverers. When you are listening to a new album or a shared community playlist and you hear a track that sounds promising but you don't have the time to fully appreciate it right now, pressing 'B' instantly sends it to your "Listen Later" queue. This acts as a temporary holding zone—a purgatory for tracks that require a second, more focused listening session before you decide whether to permanently Favorite them or discard them. It prevents your primary Favorites list from becoming cluttered with songs you are unsure about. The background API handles the insertion seamlessly, allowing you to rapidly tag dozens of tracks during a fast-paced browsing session without breaking your focus or navigating away from your current view.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">D</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Download MP3 File</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">By pressing the 'D' key, you bypass the internal browser player and directly request the raw, physical audio file from the backend server. The system immediately initiates a forced file download, transferring the pristine MP3, FLAC, or M4A file straight into your operating system's native 'Downloads' folder. The backend dynamically intercepts the request and renames the file using the clean, properly formatted "Title - Artist" metadata, ensuring your local hard drive remains perfectly organized instead of being cluttered with random alphanumeric database hashes. This shortcut is heavily utilized by DJs, local hoarders, and users who want to transfer their music to legacy hardware devices like iPods or USB drives for car stereos. It is the ultimate bridge between the cloud-based streaming architecture and pure, localized file ownership.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">U</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Copy Share Link</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'U' key is a lightning-fast social utility that instantly generates a cryptographic URL hook for the currently playing track and copies it directly to your operating system's clipboard. This completely bypasses the need to open the share modal, click the copy button, and close the interface. As soon as you hit 'U', you can immediately paste the link into Discord, WhatsApp, Twitter, or an email to share the exact song with your friends. The link contains specialized routing parameters that will automatically boot up the PHP Music platform, query the database, and load the specific track on the recipient's screen. It is an incredibly efficient workflow optimization for users who heavily interact in communities, allowing you to instantly broadcast the music you are currently enjoying with absolute minimal physical effort.</p>
+              </div>
+
+              <!-- System Actions -->
+              <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">System Actions</h5>
+              
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
+                    <span class="text-secondary fw-bold">+</span>
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">S</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Focus Search Bar</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Engaging the Shift key and pressing 'S' immediately teleports your cursor directly into the master search bar, regardless of how far down the page you have scrolled or which menu you are currently viewing. It automatically summons your keyboard focus, meaning you can begin typing your search query the exact millisecond you execute the shortcut. This completely eliminates the tedious necessity of grabbing your mouse, scrolling all the way back to the top of the interface, and physically clicking inside the input box. Because the search engine features ultra-fast, live-updating dropdown results, this shortcut allows you to dynamically pivot from listening to a track to searching for a completely different artist or album in a matter of seconds. It is a fundamental navigation tool for power users with massive libraries.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
+                    <span class="text-secondary fw-bold">+</span>
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">C</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Clear Listening History</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Holding Shift and pressing 'C' serves as a rapid execution trigger for wiping your personalized listening history. If you are currently inside the dedicated "Playback History" tab, this shortcut instantly simulates a click on the "Clear History" button. You will be prompted with a secure confirmation dialog to ensure you don't accidentally execute the wipe. Once confirmed, the system communicates with the SQLite database to permanently incinerate your chronological playback logs and wipe your analytical play count arrays, effectively resetting your algorithmic recommendations back to zero. This is exceptionally useful if you accidentally left the player running overnight on a genre you dislike, or if you simply want to aggressively purge your profile statistics to rebuild your "For You" algorithms from scratch with entirely new musical tastes.</p>
+              </div>
+
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="14" font-weight="bold">ESC</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Close Modals / Context Menu</span>
+                </div>
+                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The Escape key serves as the ultimate, universal panic button and interface reset tool. Striking this key instantly obliterates any active overlay, context menu, modal window, or full-screen view currently obstructing the main application interface. Whether you are deeply buried inside the metadata editor, browsing the synchronized lyrics panel, reading community comments, managing a collaborative playlist, or trapped in the immersive Fullscreen visualizer, hitting Escape guarantees an immediate return to the core browsing experience. It forcefully unbinds focus states, hides translucent backdrops, and restores scrolling capabilities to the main document body. This hardware standard provides a psychological safety net, ensuring that you can rapidly back out of complex menus without needing to hunt down tiny, microscopic "X" buttons with your mouse cursor.</p>
+              </div>
+
             </div>
 
           </div>
@@ -6485,6 +6975,22 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+    <div class="modal fade" id="request-verification-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-patch-check-fill text-info me-2"></i>Account Verification</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-center p-4">
+            <i class="bi bi-cloud-upload text-secondary mb-3" style="font-size: 3rem; display: block;"></i>
+            <h5 class="text-white mb-3">Upload Permissions Required</h5>
+            <p class="text-secondary mb-4">Please notify the admin to verify your account so you can upload your own songs and share them with the community.</p>
+            <button class="btn btn-info w-100 fw-bold text-dark" id="send-verification-request-btn">Request Verification</button>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="modal fade" id="upload-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
@@ -6669,6 +7175,25 @@ function perform_full_scan($db) {
                 <input type="file" class="form-control" id="import-favorites-file" accept="application/json,.json" required>
               </div>
               <button type="submit" class="btn btn-danger w-100">Import</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal fade" id="import-notes-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface);">
+          <div class="modal-header border-0">
+            <h5 class="modal-title text-white">Import Notes</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="import-notes-form">
+              <div class="mb-3">
+                <label for="import-notes-file" class="form-label text-white">Select JSON file</label>
+                <input type="file" class="form-control bg-dark text-white border-secondary" id="import-notes-file" accept="application/json,.json" required>
+              </div>
+              <button type="submit" class="btn btn-danger w-100">Import Notes</button>
             </form>
           </div>
         </div>
@@ -8522,11 +9047,11 @@ SOFTWARE.</div>
           currentViewOwnerId = details ? details.user_id : null;
           let typeText = type.charAt(0).toUpperCase() + type.slice(1);
           let statsText = `${formatSongCount(details.song_count || 0)} songs &bull; ${formatTime(details.total_duration || 0)}`;
-          if (details.play_count !== undefined) {
-            statsText += ` &bull; ${details.play_count || 0} plays`;
+          if (details.play_count !== undefined && details.play_count !== null) {
+            statsText += ` &bull; ${formatSongCount(details.play_count)} plays`;
           }
-          if (details.followers_count !== undefined) {
-            statsText += ` &bull; ${details.followers_count || 0} followers`;
+          if (details.followers_count !== undefined && details.followers_count !== null) {
+            statsText += ` &bull; ${formatSongCount(details.followers_count)} followers`;
           }
           let shareButtonHTML = '', copyButtonHTML = '', downloadButtonHTML = '', downloadExportPlaylistZipButtonHTML = '';
           
@@ -8913,6 +9438,14 @@ SOFTWARE.</div>
                 if ((type === 'get_albums' || type === 'get_user_playlists' || type === 'get_collab_playlists') && item.song_count !== undefined) {
                   songCountBadge = `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(item.song_count)}</div>`;
                 }
+                
+                let viewCountHtml = '';
+                if (type === 'get_albums' && item.total_plays !== undefined) {
+                  viewCountHtml = `<div class="card-text small text-secondary text-truncate mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(item.total_plays)} views</div>`;
+                } else if ((type === 'get_user_playlists' || type === 'get_collab_playlists') && item.play_count !== undefined) {
+                  viewCountHtml = `<div class="card-text small text-secondary text-truncate mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(item.play_count)} views</div>`;
+                }
+
                 // Determine whether it needs circle or standard card rounded corners
                 let borderStyle = (imgClass === 'rounded-circle') ? 'border-radius: 50%;' : 'border-radius: 6px;';
                 return `<div class="col">
@@ -8926,7 +9459,8 @@ SOFTWARE.</div>
                       <h5 class="card-title fs-6 fw-normal text-truncate ${titleClass}">
                         ${type === 'get_user_playlists' && item.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1"></i>' : ''}${escapeHTML(name)}
                       </h5>
-                      ${subtext ? `<p class="card-text small text-secondary text-truncate ${subtextClass}">${escapeHTML(subtext)}</p>` : ''}
+                      ${subtext ? `<p class="card-text small text-secondary text-truncate mb-0 ${subtextClass}">${escapeHTML(subtext)}</p>` : ''}
+                      ${viewCountHtml}
                     </div>
                   </div>
                 </div>`;
@@ -8949,8 +9483,73 @@ SOFTWARE.</div>
         
         const renderRecommendations = (data) => {
           contentArea.innerHTML = '';
-          if (!data.shelves || data.shelves.length === 0) {
-            contentArea.innerHTML = `<div class="text-center p-5 text-secondary">No results found.</div>`;
+          
+          if (currentView.type === 'search') {
+            const fd = currentView.f_date || '';
+            const fdu = currentView.f_dur || '';
+            const fs = currentView.f_sort || 'relevance';
+
+            const filterHTML = `
+              <div class="search-filters-container w-100 mb-4 px-2 order-first" style="grid-column: 1 / -1;">
+                <button class="btn btn-outline-light rounded-pill" type="button" data-bs-toggle="collapse" data-bs-target="#searchFiltersCollapse">
+                  <i class="bi bi-sliders"></i> Filters
+                </button>
+                <div class="collapse mt-3" id="searchFiltersCollapse">
+                  <div class="card card-body bg-dark border-secondary text-white d-flex flex-row flex-wrap gap-5" style="border-radius: 12px;">
+                    <div class="d-flex flex-column gap-2">
+                      <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">UPLOAD DATE</h6>
+                      <a href="#" class="text-decoration-none ${fd === '' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="">Any time</a>
+                      <a href="#" class="text-decoration-none ${fd === 'today' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="today">Today</a>
+                      <a href="#" class="text-decoration-none ${fd === 'week' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="week">This week</a>
+                      <a href="#" class="text-decoration-none ${fd === 'month' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="month">This month</a>
+                      <a href="#" class="text-decoration-none ${fd === 'year' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="year">This year</a>
+                    </div>
+                    <div class="d-flex flex-column gap-2">
+                      <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">DURATION</h6>
+                      <a href="#" class="text-decoration-none ${fdu === '' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_dur" data-val="">Any</a>
+                      <a href="#" class="text-decoration-none ${fdu === 'short' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_dur" data-val="short">Under 4 minutes</a>
+                      <a href="#" class="text-decoration-none ${fdu === 'long' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_dur" data-val="long">Over 20 minutes</a>
+                    </div>
+                    <div class="d-flex flex-column gap-2">
+                      <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">SORT BY</h6>
+                      <a href="#" class="text-decoration-none ${fs === 'relevance' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_sort" data-val="relevance">Relevance</a>
+                      <a href="#" class="text-decoration-none ${fs === 'date' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_sort" data-val="date">Upload date</a>
+                      <a href="#" class="text-decoration-none ${fs === 'views' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_sort" data-val="views">View count</a>
+                      <a href="#" class="text-decoration-none ${fs === 'likes' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_sort" data-val="likes">Rating (Songs only)</a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            `;
+            // Insert filters at the very top of content area
+            contentArea.insertAdjacentHTML('afterbegin', filterHTML);
+            
+            document.querySelectorAll('.filter-opt').forEach(opt => {
+              opt.addEventListener('click', (e) => {
+                e.preventDefault();
+                const key = opt.dataset.filter;
+                const val = opt.dataset.val;
+                currentView[key] = val;
+                
+                // Track if the collapse is currently open
+                const collapseEl = document.getElementById('searchFiltersCollapse');
+                const isExpanded = collapseEl && collapseEl.classList.contains('show');
+                
+                loadView(currentView);
+                
+                // Re-open collapse slightly after render completes
+                if (isExpanded) {
+                  setTimeout(() => {
+                    const newCollapse = document.getElementById('searchFiltersCollapse');
+                    if (newCollapse) newCollapse.classList.add('show');
+                  }, 300);
+                }
+              });
+            });
+          }
+
+          if (!data || !data.shelves || data.shelves.length === 0) {
+            contentArea.insertAdjacentHTML('beforeend', `<div class="text-center p-5 text-secondary">No results found.</div>`);
             return;
           }
 
@@ -9053,10 +9652,11 @@ SOFTWARE.</div>
                 <div class="shelf-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
                   <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
                     <img src="?action=get_image&id=${album.id || 0}" alt="${escapeHTML(album.album)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
-                    ${album.song_count ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(album.song_count)}</div>` : ''}
+                    ${album.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(album.song_count)}</div>` : ''}
                   </div>
                   <div class="item-title">${escapeHTML(album.album)}</div>
                   <div class="item-subtitle">${escapeHTML(album.artist)}</div>
+                  ${album.total_plays !== undefined ? `<div class="item-subtitle mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(album.total_plays)} views</div>` : ''}
                 </div>
               `).join('');
             } else if (shelf.type === 'playlists' || shelf.type === 'mixes') {
@@ -9068,6 +9668,7 @@ SOFTWARE.</div>
                   </div>
                   <div class="item-title">${escapeHTML(playlist.name)}</div>
                   <div class="item-subtitle">by ${escapeHTML(playlist.creator)}</div>
+                  ${playlist.play_count !== undefined ? `<div class="item-subtitle mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(playlist.play_count)} views</div>` : ''}
                 </div>
               `).join('');
             } else if (shelf.type === 'artists') {
@@ -9094,7 +9695,7 @@ SOFTWARE.</div>
             contentArea.insertAdjacentHTML('beforeend', shelfHTML);
           });
         };
-        
+
         const renderUserStats = (data) => {
           contentArea.innerHTML = `
             <div class="user-stats-page">
@@ -9151,6 +9752,12 @@ SOFTWARE.</div>
               case 'playlist_songs':
                 options = { 
                   'manual_order': 'My Order', 'added_newest': 'Added Newest', 'added_oldest': 'Added Oldest',
+                  'artist_asc': 'Artist', 'title_asc': 'Title', 'album_asc': 'Album'
+                };
+                break;
+              case 'get_history':
+                options = { 
+                  'history_desc': 'Recently Played', 'history_asc': 'Oldest Played',
                   'artist_asc': 'Artist', 'title_asc': 'Title', 'album_asc': 'Album'
                 };
                 break;
@@ -9311,7 +9918,7 @@ SOFTWARE.</div>
                     <div class="card bg-transparent border-secondary text-white">
                       <div class="card-body">
                         <div class="d-flex justify-content-between align-items-start mb-3">
-                          <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="cursor: pointer;" title="View Profile">
+                          <div class="d-flex align-items-center gap-3 ${p.is_disabled ? '' : 'user-profile-link'}" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="${p.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${p.is_disabled ? '' : 'title="View Profile"'}>
                             <img src="?action=get_profile_picture&id=${p.user_id}" style="width:40px; height:40px; border-radius:50%; object-fit:cover;">
                             <div>
                               <div class="fw-bold hover-underline">${escapeHTML(p.artist)}</div>
@@ -9405,6 +10012,9 @@ SOFTWARE.</div>
           let pageParams = new URLSearchParams({ sort: currentView.sort, page: 1 });
           if (currentView.filter_user_id) pageParams.append('filter_user_id', currentView.filter_user_id);
           if (currentView.artist_name) pageParams.append('artist_name', currentView.artist_name);
+          if (currentView.f_date) pageParams.append('f_date', currentView.f_date);
+          if (currentView.f_dur) pageParams.append('f_dur', currentView.f_dur);
+          if (currentView.f_sort) pageParams.append('f_sort', currentView.f_sort);
           
           switch (currentView.type) {
             case 'get_songs':
@@ -9538,14 +10148,42 @@ SOFTWARE.</div>
               }
               break;
 
+            case 'get_history':
+              updateContentTitle('History', !!currentUser);
+              if (currentUser) {
+                contentArea.innerHTML = `
+                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-clock-history text-secondary me-3 fs-3"></i> Playback History</div>
+                  </div>`;
+                data = await fetchData(`?action=get_history&${pageParams.toString()}`);
+                renderSongs(data, true);
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your history.</div>`;
+              }
+              break;
+
+            case 'get_trending':
+              updateContentTitle('Top 100 Trending', true);
+              contentArea.innerHTML = `
+                <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                  <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-graph-up-arrow text-success me-3 fs-3"></i> Top 100 Trending</div>
+                </div>`;
+              data = await fetchData(`?action=get_trending&${pageParams.toString()}`);
+              renderSongs(data, true);
+              break;
+
             case 'get_notes':
               updateContentTitle('Personal Notes', !!currentUser);
               if (currentUser) {
                 contentArea.innerHTML = `
                   <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
-                    <div class="d-flex w-100 justify-content-between align-items-center mb-3">
+                    <div class="d-flex w-100 justify-content-between align-items-center flex-wrap gap-2 mb-3">
                       <div class="text-white fw-bold fs-5 d-flex align-items-center"><i class="bi bi-journal-text text-primary me-3 fs-3"></i> My Notes</div>
-                      <button class="btn btn-primary rounded-pill px-4 fw-medium shadow-sm new-note-btn"><i class="bi bi-plus-lg me-1"></i> New Note</button>
+                      <div class="d-flex gap-2 flex-wrap">
+                        <a href="?action=export_notes" class="btn btn-outline-light rounded-pill px-3 fw-medium shadow-sm" id="export-notes-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</a>
+                        <button class="btn btn-outline-light rounded-pill px-3 fw-medium shadow-sm" id="import-notes-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
+                        <button class="btn btn-primary rounded-pill px-3 fw-medium shadow-sm new-note-btn"><i class="bi bi-plus-lg me-1"></i> New</button>
+                      </div>
                     </div>
                     <div class="w-100 position-relative">
                       <input type="text" id="notes-search-input" class="form-control bg-dark text-white border-secondary" placeholder="Search notes..." value="${escapeHTML(currentView.searchQuery || '')}">
@@ -9658,7 +10296,7 @@ SOFTWARE.</div>
                         <div class="card bg-transparent border-secondary text-white mb-2">
                           <div class="card-body">
                             <div class="d-flex justify-content-between align-items-start mb-2">
-                              <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="cursor: pointer;" title="View Profile">
+                              <div class="d-flex align-items-center gap-3 ${p.is_disabled ? '' : 'user-profile-link'}" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="${p.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${p.is_disabled ? '' : 'title="View Profile"'}>
                                 <img src="?action=get_profile_picture&id=${p.user_id}" style="width:32px; height:32px; border-radius:50%; object-fit:cover;">
                                 <div>
                                   <div class="fw-bold fs-6 hover-underline">${p.artist}</div>
@@ -9689,7 +10327,7 @@ SOFTWARE.</div>
                         <div class="card bg-transparent border-secondary text-white mb-2 ms-4 border-start border-top-0 border-bottom-0 border-end-0 rounded-0">
                           <div class="card-body py-2">
                             <div class="d-flex justify-content-between align-items-start mb-2">
-                              <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="cursor: pointer;" title="View Profile">
+                              <div class="d-flex align-items-center gap-3 ${p.is_disabled ? '' : 'user-profile-link'}" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="${p.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${p.is_disabled ? '' : 'title="View Profile"'}>
                                 <img src="?action=get_profile_picture&id=${p.user_id}" style="width:32px; height:32px; border-radius:50%; object-fit:cover;">
                                 <div>
                                   <div class="fw-bold fs-6 hover-underline">${p.artist}</div>
@@ -9735,30 +10373,6 @@ SOFTWARE.</div>
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to view the community.</div>`;
               }
               break;
-            case 'get_history':
-              updateContentTitle('History', !!currentUser);
-              if (currentUser) {
-                data = await fetchData(`?action=get_history&${pageParams.toString()}`);
-                renderSongs(data, false);
-              } else {
-                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your history.</div>`;
-              }
-              break;
-            case 'get_trending':
-              updateContentTitle('Top 100 Trending');
-              data = await fetchData(`?action=get_trending&${pageParams.toString()}`);
-              renderSongs(data, false);
-              break;
-            case 'get_following':
-              updateContentTitle('Following', !!currentUser);
-              if (currentUser) {
-                pageParams.delete('page');
-                data = await fetchData(`?action=get_following&${pageParams.toString()}`);
-                renderGrid(data, 'get_following', false);
-              } else {
-                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see who you follow.</div>`;
-              }
-              break;
             case 'get_recommendations':
               updateContentTitle('For You', !!currentUser);
               if (currentUser) {
@@ -9800,7 +10414,7 @@ SOFTWARE.</div>
                 renderSongs(typeViewData.songs, false);
                 data = typeViewData.songs;
               } else {
-                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Error loading view.</div>`;
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">User not found or this user already deleted.</div>`;
               }
               break;
             case 'search':
@@ -9950,13 +10564,20 @@ SOFTWARE.</div>
           const desktopBg = document.getElementById('desktop-player-bg');
           if (mobileBg) mobileBg.style.backgroundImage = `url('${imageUrl}')`;
           if (desktopBg) desktopBg.style.backgroundImage = `url('${imageUrl}')`;
+          if (docPipWindow) {
+            const pipBg = docPipWindow.document.getElementById('pip-bg');
+            if (pipBg) pipBg.style.backgroundImage = `url('${imageUrl}')`;
+          }
 
           playerElements.art.forEach(el => el.src = imageUrl);
 
           // Clear previous theme instantly on track change to prevent getting stuck
           document.querySelectorAll('.player-modal-content').forEach(modal => {
-             modal.classList.remove('theme-light-bg');
+            modal.classList.remove('theme-light-bg');
           });
+          if (docPipWindow && docPipWindow.document.body) {
+            docPipWindow.document.body.classList.remove('theme-light-bg');
+          }
 
           // Dynamically adjust modal text theme based on cover brightness
           const themeImg = new Image();
@@ -9970,6 +10591,9 @@ SOFTWARE.</div>
               document.querySelectorAll('.player-modal-content').forEach(modal => {
                 modal.classList.add('theme-light-bg');
               });
+              if (docPipWindow && docPipWindow.document.body) {
+                 docPipWindow.document.body.classList.add('theme-light-bg');
+              }
             }
           };
           // Append timestamp to bypass stubborn browser caches that prevent onload triggering
@@ -10768,7 +11392,7 @@ SOFTWARE.</div>
         };
         
         allNavLinks.forEach(link => {
-          if (link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn'].includes(link.id)) return;
+          if (link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn'].includes(link.id)) return;
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
@@ -10794,7 +11418,7 @@ SOFTWARE.</div>
             document.getElementById('search-dropdown-mobile').classList.add('d-none');
             searchInputDesktop.value = query;
             searchInputMobile.value = query;
-            loadView({ type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '' });
+            loadView({ type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '', f_date: '', f_dur: '', f_sort: 'relevance' });
           }
         };
 
@@ -10880,7 +11504,7 @@ SOFTWARE.</div>
             
             renderSearchDropdown(targetDropdown, data);
             
-            currentView = { type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '', artist_name: '' };
+            currentView = { type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '', artist_name: '', f_date: '', f_dur: '', f_sort: 'relevance' };
             updateContentTitle(`Search: "${query.trim()}"`);
             renderRecommendations(data);
             allContentloaded = true;
@@ -11111,7 +11735,7 @@ SOFTWARE.</div>
               return children.map(c => `
                 <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: 0;">
                   <div class="d-flex align-items-center gap-2 mb-1">
-                    <div class="d-flex align-items-center gap-2 user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="cursor: pointer;" title="View Profile">
+                    <div class="d-flex align-items-center gap-2 ${c.is_disabled ? '' : 'user-profile-link'}" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="${c.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${c.is_disabled ? '' : 'title="View Profile"'}>
                       <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
                       <strong class="hover-underline">${c.artist}</strong>
                     </div>
@@ -11138,7 +11762,7 @@ SOFTWARE.</div>
               const repliesHtml = children.map(c => `
                 <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: 20px;">
                   <div class="d-flex align-items-center gap-2 mb-1">
-                    <div class="d-flex align-items-center gap-2 user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="cursor: pointer;" title="View Profile">
+                    <div class="d-flex align-items-center gap-2 ${c.is_disabled ? '' : 'user-profile-link'}" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="${c.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${c.is_disabled ? '' : 'title="View Profile"'}>
                       <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
                       <strong class="hover-underline">${c.artist}</strong>
                     </div>
@@ -11458,8 +12082,9 @@ SOFTWARE.</div>
             return;
           }
           const exportFavoritesBtn = target.closest('#export-favorites-btn');
-          if (exportFavoritesBtn) {
-            return;
+          const exportNotesBtn = target.closest('#export-notes-btn');
+          if (exportFavoritesBtn || exportNotesBtn) {
+            return; // Allow the <a> tags to download the JSON files natively
           }
           const recacheAllBtn = target.closest('#recache-all-offline-btn');
           if (recacheAllBtn) {
@@ -11489,6 +12114,12 @@ SOFTWARE.</div>
           const importFavoritesBtn = target.closest('#import-favorites-btn');
           if (importFavoritesBtn) {
             importFavoritesModal.show();
+            return;
+          }
+          const importNotesBtn = target.closest('#import-notes-btn');
+          if (importNotesBtn) {
+            const importNotesModalEl = document.getElementById('import-notes-modal');
+            if (importNotesModalEl) bootstrap.Modal.getOrCreateInstance(importNotesModalEl).show();
             return;
           }
           const createPlaylistBtn = target.closest('#create-new-playlist-btn');
@@ -12523,13 +13154,13 @@ SOFTWARE.</div>
               }
               try {
                 docPipWindow = await window.documentPictureInPicture.requestWindow({
-                  width: 365,
+                  width: 425,
                   height: 780
                 });
 
                 docPipWindow.addEventListener('resize', () => {
-                  if (docPipWindow.innerWidth !== 365 || docPipWindow.innerHeight !== 780) {
-                    docPipWindow.resizeTo(365, 780);
+                  if (docPipWindow.innerWidth !== 425 || docPipWindow.innerHeight !== 780) {
+                    docPipWindow.resizeTo(425, 780);
                   }
                 });
 
@@ -12556,7 +13187,7 @@ SOFTWARE.</div>
 
                 const extraStyle = document.createElement('style');
                 extraStyle.textContent = `
-                  body { margin: 0; font-family: 'Roboto', sans-serif; background: var(--ytm-bg); color: var(--ytm-primary-text); overflow: hidden; }
+                body { margin: 0; font-family: 'Roboto', sans-serif; background: var(--ytm-bg); color: var(--ytm-primary-text); overflow: hidden; }
                   .player-btn { transition: color 0.2s, transform 0.1s; display: flex; align-items: center; justify-content: center; cursor: pointer; }
                   .player-btn:hover { color: var(--ytm-primary-text) !important; }
                   .play-btn:hover { transform: scale(1.1); background-color: #383838 !important; }
@@ -12577,13 +13208,13 @@ SOFTWARE.</div>
                   .pip-lyric-line { font-size: 1.15rem; color: var(--ytm-secondary-text); margin-bottom: 0.75rem; transition: all 0.3s ease; cursor: pointer; min-height: 1.5rem; }
                   .pip-lyric-line:hover { color: #ffffff; }
                   .pip-lyric-line.active { color: var(--ytm-accent); transform: scale(1.1); font-weight: 700; }
-                  
+                
                   .slide-range { -webkit-appearance: none; appearance: none; width: 100%; background: transparent; height: 14px; position: absolute; top: 0; left: 0; z-index: 10; margin: 0; cursor: pointer; outline: none; }
                   .slide-range::-webkit-slider-runnable-track { -webkit-appearance: none; background: transparent; border: none; height: 14px; }
                   .slide-range::-moz-range-track { background: transparent; border: none; height: 14px; }
                   .slide-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; margin-top: 1px; opacity: 0; transition: opacity 0.2s; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
                   .slide-range::-moz-range-thumb { appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; opacity: 0; transition: opacity 0.2s; border: none; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
-                  
+                
                   @keyframes spinner-border {
                     to { transform: rotate(360deg); }
                   }
@@ -12600,17 +13231,39 @@ SOFTWARE.</div>
                     animation: 0.75s linear infinite spinner-border;
                   }
                   .text-secondary { color: var(--ytm-secondary-text) !important; }
+                
+                  body.theme-light-bg { background-color: #ffffff !important; color: #000000 !important; }
+                  body.theme-light-bg .text-secondary { color: rgba(0,0,0,0.6) !important; font-weight: 500; }
+                  body.theme-light-bg .pip-tab-btn { color: rgba(0,0,0,0.6) !important; }
+                  body.theme-light-bg .pip-tab-btn:hover { color: #000000 !important; }
+                  body.theme-light-bg .pip-tab-btn.active { color: #000000 !important; border-bottom-color: #000000 !important; font-weight: 800; text-shadow: none; }
+                  body.theme-light-bg .pip-lyric-line { color: rgba(0,0,0,0.6) !important; }
+                  body.theme-light-bg .pip-lyric-line:hover { color: #000000 !important; }
+                  body.theme-light-bg .pip-lyric-line.active { color: var(--ytm-accent) !important; font-weight: 800; text-shadow: none; }
+                  body.theme-light-bg .title, body.theme-light-bg .artist { color: #000000 !important; }
+                  body.theme-light-bg .time-stamps span { color: rgba(0,0,0,0.6) !important; }
+                  body.theme-light-bg .player-btn { color: #333333 !important; }
+                  body.theme-light-bg .player-btn:hover, body.theme-light-bg .player-btn.active { color: #000000 !important; }
+                  body.theme-light-bg .play-btn { background-color: #000000 !important; color: #ffffff !important; }
+                  body.theme-light-bg .progress-bar-bg { background-color: rgba(0, 0, 0, 0.2) !important; }
+                  body.theme-light-bg .progress-bar-fg { background-color: #000000 !important; }
+            
+                  /* Force bootstrap icon tags inside control buttons to inherit their parent's inline font-sizes */
+                  .player-modal-controls .player-btn .bi { font-size: inherit !important; }
+                  .player-modal-controls .play-btn .bi { font-size: inherit !important; }
                 `;
                 docPipWindow.document.head.appendChild(extraStyle);
-
+            
+                docPipWindow.document.body.className = 'player-modal-content';
                 docPipWindow.document.body.innerHTML = `
-                  <div style="display: flex; flex-direction: column; background: var(--ytm-bg); height: 100vh;">
+                  <div class="dynamic-blur-bg" id="pip-bg" style="position: absolute; z-index: -1;"></div>
+                  <div style="display: flex; flex-direction: column; background: transparent; height: 100vh; position: relative; z-index: 1;">
                     <div class="pip-tabs">
                       <button class="pip-tab-btn active" id="pip-tab-player">Player</button>
                       <button class="pip-tab-btn" id="pip-tab-lyrics">Lyrics</button>
                     </div>
                     
-                    <div class="pip-pane active mt-5" id="pip-pane-player" style="padding: 1rem 1.5rem 1.5rem 1.5rem; justify-content: space-evenly;">
+                    <div class="pip-pane active mt-4" id="pip-pane-player" style="padding: 1rem 1.5rem 1.5rem 1.5rem; justify-content: space-evenly;">
                       <div style="width: 100%; max-width: min(440px, 48vh); margin: 0 auto; display: flex; flex-direction: column; height: 100%; justify-content: space-evenly;">
                         <div class="player-modal-art-wrapper" style="flex-grow: 1; display: flex; align-items: center; justify-content: center; margin-bottom: 1.5rem; min-height: 0;">
                           <div class="position-relative shadow-lg" style="width: 100%; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden;">
@@ -12618,11 +13271,11 @@ SOFTWARE.</div>
                             <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
                           </div>
                         </div>
-                        <div class="player-modal-track-info mt-5" style="text-align: left; margin-bottom: 1rem;">
+                        <div class="player-modal-track-info mt-2" style="text-align: left; margin-bottom: 1rem;">
                           <h3 id="pip-title" class="title text-truncate" style="font-weight: 700; font-size: 1.5rem; margin-bottom: 0;">Song Title</h3>
                           <p id="pip-artist" class="artist text-truncate" style="color: var(--ytm-secondary-text); font-size: 1rem; margin-bottom: 0;">Artist Name</p>
                         </div>
-                        <div class="player-modal-progress" style="width: 100%; margin-bottom: 1rem;">
+                        <div class="player-modal-progress" style="width: 100%;">
                           <div class="progress-bar-container" id="pip-progress-container" style="height: 14px; border-radius: 2px; position: relative; margin-bottom: 0.2em;">
                             <div class="progress-bar-bg" style="height: 4px; background-color: #404040; border-radius: 2px; position: absolute; top: 5px; left: 0; right: 0; pointer-events: none;"></div>
                             <div class="progress-bar-fg" id="pip-progress-bar" style="height: 4px; background-color: var(--ytm-primary-text); border-radius: 2px; width: 0%; position: absolute; top: 5px; left: 0; pointer-events: none;"></div>
@@ -12634,11 +13287,11 @@ SOFTWARE.</div>
                           </div>
                         </div>
                         <div class="player-modal-controls" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                          <button class="player-btn" id="pip-shuffle-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
-                          <button class="player-btn" id="pip-prev-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
-                          <button class="player-btn play-btn" id="pip-play-pause-btn" style="background: var(--ytm-surface); border: none; color: var(--ytm-primary-text); font-size: 3.5rem; width: 70px; height: 70px; border-radius: 50%;"></button>
-                          <button class="player-btn" id="pip-next-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 2.5rem;"></button>
-                          <button class="player-btn" id="pip-repeat-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.5rem;"></button>
+                          <button class="player-btn" id="pip-shuffle-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.25rem; padding: 10px;"></button>
+                          <button class="player-btn" id="pip-prev-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 1.25rem; padding: 10px;"></button>
+                          <button class="player-btn play-btn" id="pip-play-pause-btn" style="background: var(--ytm-surface); border: none; color: var(--ytm-primary-text); font-size: 2rem; width: 70px; height: 70px; border-radius: 50%;"></button>
+                          <button class="player-btn" id="pip-next-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 1.25rem;"></button>
+                          <button class="player-btn" id="pip-repeat-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.25rem; padding: 10px;"></button>
                         </div>
                       </div>
                     </div>
@@ -12687,10 +13340,10 @@ SOFTWARE.</div>
                         });
                       });
                     } else {
-                      container.innerHTML = `<pre style="white-space: pre-wrap; font-family: 'Roboto', sans-serif; font-size: 1rem; color: var(--ytm-secondary-text); padding: 1rem;">${escapeHTML(currentSong.lyrics)}</pre>`;
+                      container.innerHTML = `<pre style="white-space: pre-wrap; font-family: 'Roboto', sans-serif; font-size: 1rem; padding: 1rem;" class="text-secondary">${escapeHTML(currentSong.lyrics)}</pre>`;
                     }
                   } else {
-                    container.innerHTML = '<p style="color: var(--ytm-secondary-text); margin-top: 2rem;">No lyrics available.</p>';
+                    container.innerHTML = '<p class="text-secondary" style="margin-top: 2rem;">No lyrics available.</p>';
                   }
                 };
 
@@ -12874,6 +13527,62 @@ SOFTWARE.</div>
           }
         });
         
+        const navUploadBtn = document.getElementById('nav-upload-btn');
+        if (navUploadBtn) {
+          navUploadBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            hideMobileSidebar();
+            if (currentUser && currentUser.verified === 'yes') {
+              bootstrap.Modal.getOrCreateInstance(document.getElementById('upload-modal')).show();
+            } else {
+              const reqModalEl = document.getElementById('request-verification-modal');
+              const reqModalBody = reqModalEl.querySelector('.modal-body');
+              
+              if (currentUser && currentUser.verified === 'pending') {
+                reqModalBody.innerHTML = `
+                  <i class="bi bi-hourglass-split text-info" style="font-size: 3.5rem; display: block; margin-bottom: 1rem;"></i>
+                  <h5 class="text-white mb-3">Verification Pending</h5>
+                  <p class="text-secondary mb-0">Your request is currently being reviewed by an administrator. Please check back later.</p>
+                `;
+              } else {
+                reqModalBody.innerHTML = `
+                  <i class="bi bi-cloud-upload text-secondary mb-3" style="font-size: 3rem; display: block;"></i>
+                  <h5 class="text-white mb-3">Upload Permissions Required</h5>
+                  <p class="text-secondary mb-4">Please notify the admin to verify your account so you can upload your own songs and share them with the community.</p>
+                  <button class="btn btn-info w-100 fw-bold text-dark" id="send-verification-request-btn">Request Verification</button>
+                `;
+                
+                const newBtn = document.getElementById('send-verification-request-btn');
+                if (newBtn) {
+                  newBtn.addEventListener('click', async () => {
+                    newBtn.disabled = true;
+                    newBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Sending...';
+                    const res = await fetchData('?action=request_verification', { method: 'POST' });
+                    if (res) {
+                      if (res.status === 'success') {
+                        reqModalBody.innerHTML = `
+                          <i class="bi bi-check-circle-fill text-success" style="font-size: 3.5rem; display: block; margin-bottom: 1rem;"></i>
+                          <h5 class="text-white mb-3">Request Sent!</h5>
+                          <p class="text-secondary mb-0">Your request has been forwarded to the administrators. Please wait for approval.</p>
+                        `;
+                        await checkSession();
+                      } else {
+                        showToast(res.message, 'error');
+                        newBtn.disabled = false;
+                        newBtn.innerHTML = 'Request Verification';
+                      }
+                    } else {
+                      newBtn.disabled = false;
+                      newBtn.innerHTML = 'Request Verification';
+                    }
+                  });
+                }
+              }
+              bootstrap.Modal.getOrCreateInstance(reqModalEl).show();
+            }
+          });
+        }
+        
         const loginForm = document.getElementById('login-form');
         const registerForm = document.getElementById('register-form');
         const restoreForm = document.getElementById('restore-form');
@@ -12883,6 +13592,56 @@ SOFTWARE.</div>
         const createPlaylistForm = document.getElementById('create-playlist-form');
         const editPlaylistForm = document.getElementById('edit-playlist-form');
         const importPlaylistForm = document.getElementById('import-playlist-form');
+        const importNotesForm = document.getElementById('import-notes-form');
+        if (importNotesForm) {
+          importNotesForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const fileInput = document.getElementById('import-notes-file');
+            if (fileInput.files.length === 0) return;
+            
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+            
+            reader.onload = async (event) => {
+              try {
+                const importData = JSON.parse(event.target.result);
+                if (!importData.notes || !Array.isArray(importData.notes)) {
+                  showToast('Invalid JSON format. Missing notes array.', 'error');
+                  return;
+                }
+                
+                const btn = importNotesForm.querySelector('button[type="submit"]');
+                const originalText = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Importing...';
+                
+                const response = await fetch('?action=import_notes', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(importData)
+                });
+                
+                const result = await response.json();
+                if (result) {
+                  showToast(result.message, result.status);
+                  if (result.status === 'success') {
+                    bootstrap.Modal.getOrCreateInstance(document.getElementById('import-notes-modal')).hide();
+                    importNotesForm.reset();
+                    loadView(currentView); // Refresh the Notes view
+                  }
+                }
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+              } catch (err) {
+                showToast('Failed to parse JSON or import.', 'error');
+                const btn = importNotesForm.querySelector('button[type="submit"]');
+                btn.disabled = false;
+                btn.textContent = 'Import Notes';
+              }
+            };
+            reader.readAsText(file);
+          });
+        }
         const importFavoritesForm = document.getElementById('import-favorites-form');
         const editMetadataForm = document.getElementById('edit-metadata-form');
         const btnDeleteKeep = document.getElementById('btn-delete-keep');
@@ -14115,6 +14874,14 @@ SOFTWARE.</div>
             profilePictureHeaderDesktop.src = picUrl;
             profilePictureHeaderMobile.src = picUrl;
             profilePicturePreview.src = picUrl;
+            const scanAllBtn = document.getElementById('nav-scan-all');
+            if (scanAllBtn) {
+              if (currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com') {
+                scanAllBtn.style.setProperty('display', 'flex', 'important');
+              } else {
+                scanAllBtn.style.setProperty('display', 'none', 'important');
+              }
+            }
           } else {
             document.body.classList.remove('user-verified');
           }
@@ -14335,48 +15102,117 @@ SOFTWARE.</div>
           }
         });
 
-        // Forbid inspecting the page
+        // Forbid inspecting the page, bypassable by super admin
         document.addEventListener('contextmenu', e => {
+          if (localStorage.getItem('dev_mode_token') === 'admin') return;
           if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
             e.preventDefault();
           }
         });
 
-        document.addEventListener('keydown', e => {
+        document.addEventListener('keydown', async e => {
           // Anti-inspect
           if (e.key === 'F12' || 
-             (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'C' || e.key === 'J')) || 
-             (e.ctrlKey && e.key === 'U')) {
-              e.preventDefault();
+          (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'C' || e.key === 'J')) || 
+          (e.ctrlKey && e.key === 'U')) {
+            if (localStorage.getItem('dev_mode_token') !== 'admin') {
+              e.preventDefault(); // Block the browser's default inspect window opening
+              const pwd = prompt("Developer tools locked. Enter admin password:");
+              if (pwd === 'admin') {
+                localStorage.setItem('dev_mode_token', 'admin');
+                alert("Access granted. You can now press the shortcut again to open DevTools.");
+              } else if (pwd !== null) {
+                alert("Password incorrect. You want to try exploit the site?");
+              }
               return false;
+            }
+          }
+          // Stop if user is typing in an input field
+          if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+            if (e.code === 'Escape') {
+              e.target.blur();
+            }
+            return;
           }
 
-          // Stop if user is typing in an input field
-          if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+          // Global non-song shortcuts
+          if (e.code === 'Escape') {
+            e.preventDefault();
+            const modals = document.querySelectorAll('.modal.show');
+            modals.forEach(m => {
+              const instance = bootstrap.Modal.getInstance(m);
+              if (instance) instance.hide();
+            });
+            const ctxMenu = document.getElementById('context-menu');
+            if (ctxMenu) ctxMenu.style.display = 'none';
+            return;
+          }
+
+          if (e.shiftKey && e.code === 'KeyS') {
+            e.preventDefault();
+            const searchInput = window.innerWidth >= 768 ? document.getElementById('search-input-desktop') : document.getElementById('search-input-mobile');
+            if (searchInput) searchInput.focus();
+            return;
+          }
+
+          if (e.shiftKey && e.code === 'KeyC') {
+            e.preventDefault();
+            const clearBtn = document.getElementById('clear-history-btn');
+            if (clearBtn && !clearBtn.closest('#history-controls').classList.contains('d-none')) {
+              clearBtn.click();
+            }
+            return;
+          }
 
           // Global Player Shortcuts (Only if a song is loaded)
           if (!currentSong) return;
 
           switch (e.code) {
             case 'Space':
-              e.preventDefault(); // Prevents the page from scrolling down
+              e.preventDefault(); 
               togglePlayPause();
               break;
             case 'ArrowRight':
               e.preventDefault();
-              playNext();
+              if (e.shiftKey) {
+                if (isFinite(audio.duration)) audio.currentTime = Math.min(audio.duration, audio.currentTime + 10);
+              } else {
+                playNext();
+              }
               break;
             case 'ArrowLeft':
               e.preventDefault();
-              playPrev();
+              if (e.shiftKey) {
+                if (isFinite(audio.duration)) audio.currentTime = Math.max(0, audio.currentTime - 10);
+              } else {
+                playPrev();
+              }
+              break;
+            case 'ArrowUp':
+              e.preventDefault();
+              audio.volume = Math.min(1, audio.volume + 0.05);
+              if(playerElements.volumeSlider) {
+                playerElements.volumeSlider.value = audio.volume;
+                playerElements.volumeSlider.dispatchEvent(new Event('input'));
+              }
+              break;
+            case 'ArrowDown':
+              e.preventDefault();
+              audio.volume = Math.max(0, audio.volume - 0.05);
+              if(playerElements.volumeSlider) {
+                playerElements.volumeSlider.value = audio.volume;
+                playerElements.volumeSlider.dispatchEvent(new Event('input'));
+              }
               break;
             case 'KeyM':
               e.preventDefault();
               if (playerElements.volumeBtn) playerElements.volumeBtn.click();
               break;
             case 'KeyS':
-              e.preventDefault();
-              toggleShuffle();
+              if (!e.shiftKey) {
+                e.preventDefault();
+                toggleShuffle();
+              }
               break;
             case 'KeyR':
               e.preventDefault();
@@ -14384,6 +15220,294 @@ SOFTWARE.</div>
               localStorage.setItem('repeatMode', repeatMode);
               updateRepeatIcons();
               break;
+            case 'KeyF':
+              e.preventDefault();
+              const fsBtn = document.getElementById('fullscreen-btn');
+              if (fsBtn) fsBtn.click();
+              break;
+            case 'KeyP':
+              e.preventDefault();
+              const pipBtn = document.getElementById('pip-btn-desktop');
+              if (pipBtn) pipBtn.click();
+              break;
+            case 'KeyL':
+              e.preventDefault();
+              const lyricsSongData = await fetchData('?action=get_song_data&id=' + currentSong.id);
+              if (lyricsSongData) {
+                const lyricsTitleEl = document.getElementById('lyrics-modal-title');
+                const lyricsBodyEl = document.getElementById('lyrics-modal-body');
+                if (lyricsTitleEl) lyricsTitleEl.textContent = lyricsSongData.title;
+                if (lyricsBodyEl) {
+                  const lrcData = parseLRC(lyricsSongData.lyrics);
+                  if (lrcData.length > 0) {
+                    currentLrcData = lrcData;
+                    currentLrcSongId = parseInt(currentSong.id);
+                    currentLyricIndex = -1;
+                    lyricsBodyEl.innerHTML = `<div id="synced-lyrics-container">` + 
+                      lrcData.map((line, idx) => `<div class="lyric-line" data-index="${idx}" data-time="${line.time}">${escapeHTML(line.text)}</div>`).join('') +
+                      `</div>`;
+                  } else {
+                    currentLrcData = null;
+                    currentLrcSongId = null;
+                    lyricsBodyEl.innerHTML = lyricsSongData.lyrics ? `<pre style="white-space: pre-wrap; font-family: 'Roboto', sans-serif;">${escapeHTML(lyricsSongData.lyrics)}</pre>` : '<p class="text-center text-secondary">No lyrics available.</p>';
+                  }
+                }
+                const lyricsModalEl = document.getElementById('lyrics-modal');
+                if (lyricsModalEl) {
+                  bootstrap.Modal.getOrCreateInstance(lyricsModalEl).show();
+                }
+              }
+              break;
+            case 'KeyC':
+              if (!e.shiftKey) {
+                e.preventDefault();
+                if (currentUser) {
+                  window.openCommentsModal(currentSong.id);
+                } else {
+                  showToast('Please login to view comments', 'error');
+                }
+              }
+              break;
+            case 'KeyH':
+              e.preventDefault();
+              if (currentUser) toggleFavorite(currentSong.id);
+              break;
+            case 'KeyB':
+              e.preventDefault();
+              if (currentUser) {
+                const res = await fetchData('?action=toggle_listen_later', { method: 'POST', body: JSON.stringify({id: parseInt(currentSong.id)}) });
+                if(res) {
+                  if(res.status === 'added') listenLaterSet.add(parseInt(currentSong.id));
+                  else listenLaterSet.delete(parseInt(currentSong.id));
+                  showToast(res.status === 'added' ? 'Added to Listen Later' : 'Removed from Listen Later', 'success'); 
+                }
+              }
+              break;
+            case 'KeyO':
+              e.preventDefault();
+              if (currentUser) {
+                 const offRes = await fetchData('?action=toggle_offline', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ id: parseInt(currentSong.id) })
+                });
+                if (offRes) {
+                  if (offRes.status === 'added') {
+                    showToast('Caching offline (check menu for progress)...', 'info');
+                    offlineSongsSet.add(parseInt(currentSong.id));
+                  } else {
+                    showToast('Removed from offline list.', 'success');
+                    offlineSongsSet.delete(parseInt(currentSong.id));
+                  }
+                }
+              }
+              break;
+            case 'KeyD':
+              e.preventDefault();
+              window.location.href = '?action=download_song&id=' + currentSong.id;
+              break;
+            case 'KeyI':
+              e.preventDefault();
+              const metaSongData = await fetchData('?action=get_song_data&id=' + parseInt(currentSong.id));
+              if (metaSongData) {
+                const metaBody = document.getElementById('metadata-modal-body');
+                if (metaBody) {
+                  metaBody.innerHTML = `
+                    <ul class="list-group list-group-flush">
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Title:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.title || 'N/A'}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Artist:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.artist || 'N/A'}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Album:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.album || 'N/A'}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Genre:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.genre || 'N/A'}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Year:</strong> <span>${metaSongData.year || 'N/A'}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Duration:</strong> <span>${formatTime(metaSongData.duration)}</span></li>
+                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Bitrate:</strong> <span>${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + ' kbps' : 'N/A'}</span></li>
+                    </ul>`;
+                  bootstrap.Modal.getOrCreateInstance(document.getElementById('metadata-modal')).show();
+                }
+              }
+              break;
+            case 'KeyE':
+              e.preventDefault();
+              if (currentUser) {
+                const sasModalEl = document.getElementById('song-audio-settings-modal');
+                if (sasModalEl) {
+                  document.getElementById('sas-song-id').value = currentSong.id;
+                  document.getElementById('sas-song-title').textContent = currentSong.title;
+                  const targetVol = currentSong.volume_multiplier !== null ? parseFloat(currentSong.volume_multiplier) : globalVolumeMultiplier;
+                  const targetEQ = currentSong.eq_bands || [0,0,0,0,0];
+                  document.getElementById('sas-vol-slider').value = targetVol;
+                  document.getElementById('sas-vol-val').textContent = targetVol + 'x';
+                  const sasEqBands = document.querySelectorAll('.sas-eq-band');
+                  sasEqBands.forEach((band, i) => band.value = targetEQ[i] !== undefined ? targetEQ[i] : 0);
+                  document.getElementById('sas-eq-preset-select').value = 'Custom';
+                  bootstrap.Modal.getOrCreateInstance(sasModalEl).show();
+                }
+              }
+              break;
+            case 'KeyU':
+              e.preventDefault();
+              showShareModal('song', currentSong.id, currentSong.title);
+              break;
+            case 'Digit0':
+            case 'Numpad0':
+              e.preventDefault();
+              audio.currentTime = 0;
+              break;
+            case 'Digit1':
+            case 'Numpad1':
+            case 'Digit2':
+            case 'Numpad2':
+            case 'Digit3':
+            case 'Numpad3':
+            case 'Digit4':
+            case 'Numpad4':
+            case 'Digit5':
+            case 'Numpad5':
+            case 'Digit6':
+            case 'Numpad6':
+            case 'Digit7':
+            case 'Numpad7':
+            case 'Digit8':
+            case 'Numpad8':
+            case 'Digit9':
+            case 'Numpad9':
+              e.preventDefault();
+              const num = parseInt(e.key);
+              if (isFinite(audio.duration)) {
+                audio.currentTime = audio.duration * (num / 10);
+              }
+              break;
+          }
+        });
+
+        // --- ARTIST HOVER TOOLTIP LOGIC ---
+        const artistTooltip = document.createElement('div');
+        artistTooltip.id = 'artist-hover-tooltip';
+        document.body.appendChild(artistTooltip);
+
+        let artistHoverTimeout;
+        let artistHideTimeout;
+        const artistHoverCache = {};
+
+        const showArtistTooltip = async (target, artistRaw, userId) => {
+          if (window.innerWidth < 992) return;
+          
+          const artistName = decodeURIComponent(artistRaw).split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i)[0].trim();
+          const cacheKey = (userId ? userId + '_' : '') + artistName.toLowerCase();
+          
+          const rect = target.getBoundingClientRect();
+          artistTooltip.style.display = 'block';
+          
+          let top = rect.bottom + window.scrollY + 10;
+          let left = rect.left + window.scrollX;
+          
+          if (left + 320 > window.innerWidth) left = window.innerWidth - 340;
+          if (top + 200 > window.scrollY + window.innerHeight) top = rect.top + window.scrollY - 210;
+          
+          artistTooltip.style.top = top + 'px';
+          artistTooltip.style.left = left + 'px';
+
+          let data = artistHoverCache[cacheKey];
+
+          if (!data) {
+             artistTooltip.innerHTML = '<div class="text-center p-3"><div class="spinner-border spinner-border-sm text-secondary"></div></div>';
+             artistTooltip.style.opacity = '1';
+             const res = await fetchData(`?action=get_view_data&type=artist&name=${encodeURIComponent(artistName)}&filter_user_id=${userId || ''}`);
+             if (res && res.details) {
+                data = res.details;
+                artistHoverCache[cacheKey] = data;
+             } else {
+                artistTooltip.innerHTML = '<div class="text-secondary small text-center p-3">Artist details not found</div>';
+                return;
+             }
+          }
+
+          let followBtn = '';
+          if (data.is_user && currentUser && currentUser.id != data.user_id) {
+             const btnClass = data.is_following ? 'btn-outline-light' : 'btn-danger';
+             const btnText = data.is_following ? 'Unfollow' : 'Follow';
+             followBtn = `<button class="btn btn-sm ${btnClass} w-100 mt-3 tooltip-follow-btn fw-bold" data-user-id="${data.user_id}">${btnText}</button>`;
+          }
+
+          artistTooltip.innerHTML = `
+            <div class="d-flex align-items-center gap-3" style="cursor: pointer;">
+              <img src="${data.image_url}" style="width: 70px; height: 70px; object-fit: cover; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+              <div style="min-width: 0;">
+                 <h6 class="text-white text-truncate mb-1 fw-bold artist-tt-name" style="font-size: 1.1rem;">${escapeHTML(data.name)}</h6>
+                 <div class="text-secondary" style="font-size: 0.85rem;">${formatSongCount(data.song_count || 0)} tracks • ${formatTime(data.total_duration || 0)}</div>
+                 ${data.followers_count !== undefined ? `<div class="text-info mt-1" style="font-size: 0.8rem;"><i class="bi bi-people-fill"></i> ${formatSongCount(data.followers_count)} followers</div>` : `<div class="text-secondary mt-1" style="font-size: 0.8rem;"><i class="bi bi-eye"></i> ${formatSongCount(data.play_count || 0)} plays</div>`}
+              </div>
+            </div>
+            ${followBtn}
+          `;
+          artistTooltip.style.opacity = '1';
+        };
+
+        document.addEventListener('mouseover', e => {
+          const artistEl = e.target.closest('.song-artist, .song-artist-name, .item-subtitle[data-artist], .mention-link, .user-profile-link');
+          if (artistEl) {
+            clearTimeout(artistHideTimeout);
+            if (artistTooltip.contains(e.relatedTarget)) return; 
+            
+            let artistRaw = artistEl.dataset.artist;
+            let userId = artistEl.dataset.userid || '';
+            if (!artistRaw && artistEl.classList.contains('song-artist-name')) artistRaw = artistEl.textContent.trim();
+            
+            if (artistRaw && window.innerWidth >= 992) {
+               artistHoverTimeout = setTimeout(() => {
+                  showArtistTooltip(artistEl, artistRaw, userId);
+               }, 500);
+            }
+          } else if (e.target.closest('#artist-hover-tooltip')) {
+            clearTimeout(artistHideTimeout);
+          }
+        });
+
+        document.addEventListener('mouseout', e => {
+          const artistEl = e.target.closest('.song-artist, .song-artist-name, .item-subtitle[data-artist], .mention-link, .user-profile-link');
+          if (artistEl || e.target.closest('#artist-hover-tooltip')) {
+            clearTimeout(artistHoverTimeout);
+            artistHideTimeout = setTimeout(() => {
+              artistTooltip.style.opacity = '0';
+              setTimeout(() => { if(artistTooltip.style.opacity === '0') artistTooltip.style.display = 'none'; }, 200);
+            }, 300);
+          }
+        });
+
+        artistTooltip.addEventListener('click', async e => {
+          const followBtn = e.target.closest('.tooltip-follow-btn');
+          if (followBtn) {
+             if (!currentUser) return showToast('Please log in', 'error');
+             const userId = followBtn.dataset.userId;
+             const res = await fetchData('?action=toggle_follow', {
+                method: 'POST', body: JSON.stringify({ following_id: userId })
+             });
+             if (res && (res.status === 'followed' || res.status === 'unfollowed')) {
+                const isFollowing = res.status === 'followed';
+                followBtn.textContent = isFollowing ? 'Unfollow' : 'Follow';
+                followBtn.className = `btn btn-sm w-100 mt-3 tooltip-follow-btn fw-bold ${isFollowing ? 'btn-outline-light' : 'btn-danger'}`;
+                
+                for (let key in artistHoverCache) {
+                   if (artistHoverCache[key].user_id == userId) {
+                      artistHoverCache[key].is_following = isFollowing;
+                      artistHoverCache[key].followers_count += isFollowing ? 1 : -1;
+                      const followersText = artistTooltip.querySelector('.text-info');
+                      if (followersText) {
+                         followersText.innerHTML = `<i class="bi bi-people-fill"></i> ${formatSongCount(artistHoverCache[key].followers_count)} followers`;
+                      }
+                   }
+                }
+                if (currentView.type === 'artist_songs' || currentView.type === 'get_following' || currentView.type === 'get_recommendations') {
+                   loadView(currentView);
+                }
+             }
+          } else {
+             const nameEl = artistTooltip.querySelector('.artist-tt-name');
+             if (nameEl) {
+                artistTooltip.style.opacity = '0';
+                artistTooltip.style.display = 'none';
+                loadView({ type: 'artist_songs', param: nameEl.textContent, sort: 'album_asc', filter_user_id: '', artist_name: '' });
+             }
           }
         });
 
