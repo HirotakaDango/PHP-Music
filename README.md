@@ -41,7 +41,8 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 | **Listen Later (Bookmark)** | Queue up tracks you intend to play at a later date. | Tracks bookmarks using the `listen_later` table. Displays an intuitive bookmark outline/fill toggle and supports manual drag-and-drop sorting via SortableJS. |
 | **Curation Mixes ("For You")** | Generates personalized mixes, discover shelves, and artist auto-mixes. | Compiles metrics using history and play counts logged after 30 seconds of playback. |
 | **Collaborative Playlists** | Invite users by username/email to co-edit. | Tracks contributions with an `added_by` column on the `playlist_songs` table and validates using a `playlist_collaborators` lookup. |
-| **Social Following** | Build a personal network of followed users. | Tracks relationships using a `follows` table; displays followed accounts in a dedicated "Following" tab. |
+| **Social Following & Blocking** | Build your network and curate interactions. | Tracks relationships using `follows` and `blocks` tables. Blocking a user automatically severs follows and prevents messaging. |
+| **Direct Messaging (Inbox)** | Real-time peer-to-peer chat system. | Operates on the `messages` table. Includes inbox user searching, image attachments, edit/delete controls, active status, and read/unread indicators. |
 | **Direct Deep-Linking** | Share exact deep-links to tracks, playlists, artists, and albums. | Emits direct sharing hooks to social platforms (Facebook, X, WhatsApp, Telegram) with direct query parameters. |
 | **Playlists Portability** | Create, manage, import, export, and clone playlists. | Supports copying public playlists directly from other users, alongside JSON import/export handlers. |
 | **Community Social Feed** | Micro-blogging space for sharing status updates, announcements, or thoughts. | Operates on the `community_posts` and `community_reactions` tables. Allows full CRUD capabilities for post owners, with likes/dislikes and multi-sorting (Newest, Most Liked, Following Users). |
@@ -70,6 +71,7 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 | Feature | Description | Technical Implementation |
 | :--- | :--- | :--- |
 | **Personal Notes notebook** | Keep private logs, song ideas, lyrics, or personal to-do lists within the app. | Stores note data inside a dedicated `personal_notes` table sandboxed to individual accounts. Allows note creation, edits, deletions, and sorting filters (Newest, Oldest, Recently Modified). |
+| **Interactive Calendar** | Built-in date planner and time referencing tool. | Accessible via the sidebar. Features a live clock, dynamic month/year navigation, and a quick date-picker input. |
 | **1:1 Image Cropper** | Crop profile pictures and song covers. | Integrated 1:1 aspect-ratio cropping canvas with panning/zoom to fill gaps, resizing and converting uploads to WebP/JPEG format. |
 | **Upload Progress Percentage** | Displays visual upload progress. | Tracks real-time upload progress using `XMLHttpRequest` upload listeners, mapping output percentages to a loading spinner. |
 | **Account Soft-Delete** | Soft-deletes user credentials while keeping upload logs. | Wipes personal emails and passwords and generates a physical backup key for secure restoration later. |
@@ -175,6 +177,8 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite, follow
 * **Song Community & Inline CRUD**: From a song's context menu, select `View Comments & Likes` to access the discussions. You can like or dislike the track, start threaded conversations, reply directly to previous responses, or update/delete your own submissions. Adding `@username` to comments automatically formats and highlights the handle for visibility.
 * **Community Social Feed**: Use the *Community* feed to post general updates. Posts support reactions (likes and dislikes) and full edit/deletion controls. Filters allow you to sort posts by *Newest*, *Most Liked*, or exclusively from *Following Users*.
 * **Personal Notes Notebook**: Organize draft lyrics, artist logs, or notes in the *Personal Notes* tab. Notes are sandboxed privately to your account and can be sorted by *Newest*, *Oldest*, or *Recently Modified*.
+* **Direct Messaging & Blocking**: Click the Message button on a user's profile to open a chat, or use the Inbox search to find users. You can send images, edit/delete messages, and view read receipts/active status. Use the Block button to prevent unwanted interactions.
+* **Calendar & Clock**: Open the Calendar from the sidebar to check the current time, jump to specific dates via the date-picker, and reference days seamlessly while managing your music metadata.
 * **Synchronized LRC Lyrics**: Right-click (or tap "..." on mobile) a song and choose "Edit Info" to modify tags and paste synchronized `.lrc` text. Ensure that each timestamp is followed by a space so the parser reads it correctly:
     * ✅ **Correct:** `[00:15.30] Never gonna give you up`
     - ❌ **Incorrect:** `[00:15.30]Never gonna give you up`
@@ -213,8 +217,8 @@ Access the administrative dashboard by appending `?access=admin` to your URL. Lo
 * Playlists, offline lists, and favorites support fluid drag-and-drop ordering powered by SortableJS, pushing positional arrays back to the server.
 * Collaborative playlists track individual song contributions via an `added_by` column on the `playlist_songs` table, and authenticate editor permissions securely using a `playlist_collaborators` lookup.
 * Play histories and view counts are continuously logged locally (after 30 seconds of playback) to generate personalized "For You" shelves and track statistics.
-* Secure transactional storage models like `personal_notes`, `song_comments`, `community_posts`, and `listen_later` are safely indexed with Foreign Key constraints referencing the user session state.
-* A `follows` table tracks user-to-artist and user-to-user relationships.
+* Secure transactional storage models like `personal_notes`, `song_comments`, `community_posts`, `listen_later`, and `messages` are safely indexed with Foreign Key constraints referencing the user session state.
+* The `follows` and `blocks` tables tightly control user-to-user social networking and privacy boundaries.
 
 ---
 

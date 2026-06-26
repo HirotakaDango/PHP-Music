@@ -4,56 +4,168 @@ if (isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEP
 }
 error_reporting(E_ALL & ~E_DEPRECATED);
 
-// ANTI-SCRAPING FIREWALL: Aggressively block bots, scrapers, headless browsers, and API tools
-$user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
-$bot_patterns = '/(python|curl|wget|bot|spider|crawl|scraper|scrapy|phantom|headless|selenium|puppet|puppeteer|java|libwww|httpclient|postman|insomnia|slurp|facebookexternalhit)/i';
-if (empty($user_agent) || preg_match($bot_patterns, $user_agent)) {
-  http_response_code(403);
-  die("Access Denied: Automated scraping and bot activity are strictly prohibited.");
+// AUTOMATIC SECURITY FIREWALL: Generate strict .htaccess to block direct file and DB access
+$htaccess_path = __DIR__ . '/.htaccess';
+$needs_htaccess_update = false;
+
+if (file_exists($htaccess_path)) {
+  // If the old overly-strict FilesMatch is present, force an update to fix X-Sendfile audio playback
+  if (strpos(file_get_contents($htaccess_path), 'mp3|m4a') !== false) {
+    $needs_htaccess_update = true;
+  }
+} else {
+  $needs_htaccess_update = true;
 }
 
-// GLOBAL CORS ENABLER: Bulletproof cross-origin API access and preflight requests
-$http_origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_X_ORIGIN'] ?? '';
+if ($needs_htaccess_update) {
+  $htaccess_content = <<<HTACCESS
+# ==========================================
+# PHP MUSIC - STRICT SECURITY FIREWALL
+# ==========================================
 
-// Fallback to Referer if Origin is missing (common in FastCGI/Nginx proxy setups)
-if (!$http_origin && isset($_SERVER['HTTP_REFERER'])) {
-  $parsed_url = parse_url($_SERVER['HTTP_REFERER']);
-  if (isset($parsed_url['host'])) {
-    $http_origin = ($parsed_url['scheme'] ?? 'https') . '://' . $parsed_url['host'];
-    if (isset($parsed_url['port'])) {
-      $http_origin .= ':' . $parsed_url['port'];
+# 1. Disable directory listing globally
+Options -Indexes
+
+# 2. Block direct web access to database and config files unconditionally
+<FilesMatch "\.(db|sqlite|sqlite3|bak|log|ini|sh)$">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order Allow,Deny
+    Deny from all
+  </IfModule>
+</FilesMatch>
+
+# 3. Block direct web access to media files, but ALLOW internal serving (Fixes X-Sendfile Playback)
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  
+  # If the request is a direct HTTP request from the outside (not an internal redirect)
+  RewriteCond %{ENV:REDIRECT_STATUS} ^$
+  RewriteRule \.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif)$ - [F,L]
+
+  # Block folder browsing explicitly
+  RewriteCond %{ENV:REDIRECT_STATUS} ^$
+  RewriteRule ^uploads/.*$ - [F,L]
+  
+  RewriteCond %{ENV:REDIRECT_STATUS} ^$
+  RewriteRule ^getid3/.*$ - [F,L]
+</IfModule>
+HTACCESS;
+  @file_put_contents($htaccess_path, $htaccess_content);
+}
+
+// AUTOMATIC ROBOTS.TXT: Prevent search engines and legitimate crawlers from indexing media and APIs
+$robots_path = __DIR__ . '/robots.txt';
+if (!file_exists($robots_path)) {
+  $robots_content = <<<ROBOTS
+User-agent: *
+Disallow: /uploads/
+Disallow: /getid3/
+Disallow: /*?action=
+Disallow: /*?share_type=
+Disallow: /*?pwa=
+Disallow: /*.db$
+Disallow: /*.sqlite$
+
+# Block AI Scrapers specifically
+User-agent: GPTBot
+Disallow: /
+User-agent: ChatGPT-User
+Disallow: /
+User-agent: CCBot
+Disallow: /
+User-agent: anthropic-ai
+Disallow: /
+User-agent: Claude-Web
+Disallow: /
+ROBOTS;
+  @file_put_contents($robots_path, $robots_content);
+}
+
+// GLOBAL CORS ENABLER: Execute BEFORE Firewall to allow Preflight OPTIONS to pass cross-origin!
+$http_origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_X_ORIGIN'] ?? '';
+$raw_uri_cors = $_SERVER['REQUEST_URI'] ?? '';
+$is_api_cors = strpos($raw_uri_cors, 'access=api') !== false || (isset($_GET['access']) && $_GET['access'] === 'api');
+
+if ($is_api_cors) {
+  // 1. Pure Public CORS for External API Player (No credentials needed)
+  header("Access-Control-Allow-Origin: *");
+} else {
+  // 2. Standard CORS for Internal Web App (Requires credentials for sessions)
+  if ($http_origin === 'null') {
+    $http_origin = '*'; // Force wildcard for local testing
+  } elseif (!$http_origin && isset($_SERVER['HTTP_REFERER'])) {
+    $parsed_url = parse_url($_SERVER['HTTP_REFERER']);
+    if (isset($parsed_url['host'])) {
+      $http_origin = ($parsed_url['scheme'] ?? 'https') . '://' . $parsed_url['host'];
+      if (isset($parsed_url['port'])) $http_origin .= ':' . $parsed_url['port'];
     }
+  }
+
+  if ($http_origin) {
+    header("Access-Control-Allow-Origin: $http_origin");
+    if ($http_origin !== '*') {
+      header("Access-Control-Allow-Credentials: true");
+    }
+  } else {
+    header("Access-Control-Allow-Origin: *");
   }
 }
 
-if ($http_origin) {
-  // If a specific origin is detected, securely reflect it back to permit cookies/sessions
-  header("Access-Control-Allow-Origin: $http_origin");
-  header("Access-Control-Allow-Credentials: true");
-} else {
-  // Wildcard fallback if absolutely no origin can be determined
-  header("Access-Control-Allow-Origin: *");
-}
-
-// Expose headers so external JS clients can read streams and downloads properly
 header("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, Content-Type, Content-Disposition");
-
-// Force Allowed Methods and Headers on ALL responses (not just OPTIONS) 
-// This fixes strict browser enforcement on standard GET/POST requests.
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
 
-// Reflect requested headers or provide a robust default
 if (isset($_SERVER['HTTP_ACCESS_CONTROL_REQUEST_HEADERS'])) {
   header("Access-Control-Allow-Headers: {$_SERVER['HTTP_ACCESS_CONTROL_REQUEST_HEADERS']}");
 } else {
   header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Range, Accept-Ranges, Cache-Control");
 }
 
+// INTERCEPT PREFLIGHT: Exit 200 OK immediately so browsers validate CORS securely
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-  header("Access-Control-Max-Age: 86400"); // Cache preflight for 24 hours
-  header("Content-Length: 0");             // Prevent Safari from hanging
-  header("Content-Type: text/plain");      // Define response format
+  header("Access-Control-Max-Age: 86400"); 
+  header("Content-Length: 0");             
+  header("Content-Type: text/plain");      
   exit(0);
+}
+
+// ANTI-SCRAPING FIREWALL: Now runs safely AFTER CORS validation
+$raw_uri = $_SERVER['REQUEST_URI'] ?? '';
+$temp_action = $_GET['action'] ?? '';
+
+// ANTI-SCRAPING FIREWALL: Now runs safely AFTER CORS validation
+$raw_uri = $_SERVER['REQUEST_URI'] ?? '';
+$temp_action = $_GET['action'] ?? '';
+
+// Support JSON bodies sent by cross-origin fetch requests
+$json_body = json_decode(file_get_contents('php://input'), true);
+if (is_array($json_body)) {
+  if (empty($temp_action) && isset($json_body['action'])) {
+    $_GET['action'] = $json_body['action'];
+    $temp_action = $_GET['action'];
+  }
+  if (isset($json_body['access'])) {
+    $_GET['access'] = $json_body['access'];
+  }
+}
+
+// Pre-extract action if the URL is mangled by play.html
+if (empty($temp_action) && preg_match('/action=([a-zA-Z0-9_]+)/', $raw_uri, $act_match)) {
+  $temp_action = $act_match[1];
+}
+
+$is_media_request = in_array($temp_action, ['get_stream', 'get_image', 'download_song', 'download_cover']);
+$is_explicit_api = strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && $_GET['access'] === 'api');
+
+$user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+$bot_patterns = '/(python|curl|wget|bot|spider|crawl|scraper|scrapy|phantom|headless|selenium|puppet|puppeteer|httpclient|postman|insomnia|slurp|facebookexternalhit)/i';
+
+// Exempt access=api calls from the strict bot User-Agent check
+if (!$is_media_request && !$is_explicit_api && (empty($user_agent) || preg_match($bot_patterns, $user_agent))) {
+  http_response_code(403);
+  die("Access Denied: Automated scraping and bot activity are strictly prohibited.");
 }
 
 // MASS USE OPTIMIZATION: Force script into OPcache memory for max execution speed
@@ -219,7 +331,8 @@ session_start([
   'cookie_lifetime' => 31536000,
   'gc_maxlifetime' => 31536000,
   'cookie_httponly' => true,
-  'cookie_samesite' => 'Lax'
+  'cookie_samesite' => 'None',
+  'cookie_secure' => true
 ]);
 set_time_limit(0);
 
@@ -236,7 +349,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '4.0');
+define('APP_VERSION', '4.1');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -333,9 +446,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $db->prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?")->execute([$del_uid, $del_uid]);
       $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?")->execute([$del_uid, $del_uid]);
 
       $new_email = 'deleted_' . $del_uid . '_' . time() . '@mail.com';
-      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', password_hash = NULL, backup_key = NULL, profile_picture = NULL WHERE id = ?")->execute([$new_email, $del_uid]);
+      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL WHERE id = ?")->execute([$new_email, $del_uid]);
 
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
@@ -652,6 +769,10 @@ function send_json($data) {
 }
 
 $initialViewJS = '';
+$og_title = "PHP Music";
+$og_desc = "A simple, fast music player with user accounts and uploads.";
+$og_image = "?action=get_app_icon&size=512";
+
 if (isset($_GET['share_type'])) {
   $db_for_share = get_db();
   $share_type = $_GET['share_type'];
@@ -664,6 +785,9 @@ if (isset($_GET['share_type'])) {
       $stmt->execute([$share_id]);
       $song_info = $stmt->fetch();
       if ($song_info) {
+        $og_title = htmlspecialchars($song_info['album']) . " (Song)";
+        $og_desc = "Listen to this track on PHP Music.";
+        $og_image = "?action=get_image&id=" . $share_id;
         $view_config = [
           'type' => 'album_songs',
           'param' => rawurlencode($song_info['album']),
@@ -679,6 +803,8 @@ if (isset($_GET['share_type'])) {
       $artist_id = $_GET['artist_id'] ?? null;
       $artist_name = $_GET['artist_name'] ?? null;
       if ($album_name) {
+        $og_title = htmlspecialchars($album_name) . " - Album";
+        $og_desc = "Listen to this album on PHP Music.";
         $view_config = ['type' => 'album_songs', 'param' => $album_name, 'sort' => 'title_asc'];
         if ($artist_id) {
           $view_config['filter_user_id'] = (int)$artist_id;
@@ -696,18 +822,26 @@ if (isset($_GET['share_type'])) {
         $stmt->execute([(int)$share_id]);
         $artist_name = $stmt->fetchColumn();
         if ($artist_name) {
+          $og_title = htmlspecialchars($artist_name) . " - Artist";
+          $og_desc = "Listen to " . htmlspecialchars($artist_name) . " on PHP Music.";
+          $og_image = "?action=get_profile_picture&id=" . (int)$share_id;
           $view_config = ['type' => 'artist_songs', 'param' => $artist_name, 'sort' => 'album_asc', 'filter_user_id' => (int)$share_id];
         }
       } else if ($share_id) {
+        $og_title = htmlspecialchars($share_id) . " - Artist";
+        $og_desc = "Listen to " . htmlspecialchars($share_id) . " on PHP Music.";
         $view_config = ['type' => 'artist_songs', 'param' => $share_id, 'sort' => 'album_asc'];
       }
       break;
 
     case 'playlist':
       $share_id = $_GET['id'] ?? null;
-      $stmt = $db_for_share->prepare("SELECT id FROM playlists WHERE public_id = ?");
+      $stmt = $db_for_share->prepare("SELECT id, name FROM playlists WHERE public_id = ?");
       $stmt->execute([$share_id]);
-      if ($stmt->fetch()) {
+      $pl = $stmt->fetch();
+      if ($pl) {
+        $og_title = htmlspecialchars($pl['name']) . " - Playlist";
+        $og_desc = "Listen to this playlist on PHP Music.";
         $view_config = ['type' => 'playlist_songs', 'param' => $share_id, 'sort' => 'manual_order'];
       }
       break;
@@ -759,6 +893,9 @@ function init_db($db) {
     if (!in_array('backup_key', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN backup_key TEXT;");
     if (!in_array('banned', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0;");
     if (!in_array('settings', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN settings TEXT;");
+    if (!in_array('bio', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN bio TEXT;");
+    if (!in_array('profile_background', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background BLOB;");
+    if (!in_array('profile_background_type', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background_type TEXT;");
   }
 
   $db->exec("
@@ -847,6 +984,15 @@ function init_db($db) {
   if ($music_table_exists && !in_array('is_private', $music_columns)) {
     $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;");
   }
+
+  $db->exec("
+    CREATE TABLE IF NOT EXISTS playlist_invites (
+      token TEXT PRIMARY KEY,
+      playlist_id INTEGER NOT NULL,
+      expires_at DATETIME,
+      FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+    );
+  ");
 
   $db->exec("
     CREATE TABLE IF NOT EXISTS playlist_collaborators (
@@ -972,6 +1118,14 @@ function init_db($db) {
       user_id INTEGER NOT NULL, comment_id INTEGER NOT NULL, reaction TEXT,
       PRIMARY KEY (user_id, comment_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (comment_id) REFERENCES song_comments(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS blocks (
+      blocker_id INTEGER NOT NULL, blocked_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (blocker_id, blocked_id), FOREIGN KEY (blocker_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (blocked_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY, sender_id INTEGER NOT NULL, receiver_id INTEGER NOT NULL, content TEXT, image BLOB, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, is_read INTEGER DEFAULT 0,
+      FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
+    );
   ");
 
   $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
@@ -1073,9 +1227,82 @@ function process_image_to_jpeg($imageData, $target_width = 640, $quality = 82) {
   return $jpegData;
 }
 
+// =========================================================================================
+// EXTERNAL API ROUTER & URL UNTANGLER
+// =========================================================================================
+
+$raw_uri = $_SERVER['REQUEST_URI'] ?? '';
+$is_public_api = false;
+
+// 1. Aggressive URL matching to detect the exact "access=api" flag regardless of slash mangling
+if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpos($_GET['access'], 'api') !== false)) {
+  $is_public_api = true;
+
+  // 2. URL Untangler: Extract parameters hidden behind bad slashes (e.g., access=api/?action=...)
+  preg_match_all('/(?:[?&]|\/\?)([a-zA-Z0-9_]+)=([^&]+)/', $raw_uri, $matches);
+    
+  if (!empty($matches[1]) && !empty($matches[2])) {
+    foreach ($matches[1] as $index => $key) {
+      if (!isset($_GET[$key])) {
+        $_GET[$key] = urldecode($matches[2][$index]);
+      }
+    }
+  }
+
+  // Ultimate fallback if "action" is still missing from the URI array
+  if (empty($_GET['action'])) {
+    if (preg_match('/action=([a-zA-Z0-9_]+)/', $raw_uri, $act_match)) {
+      $_GET['action'] = $act_match[1];
+    } else {
+      $_GET['action'] = 'get_songs';
+    }
+  }
+
+  // 3. Global API Firewall: Require Admin Password (api_key) for ALL external requests
+  $api_extracted_action = $_GET['action'] ?? '';
+  
+  if (($_GET['api_key'] ?? '') !== ADMIN_PASSWORD) {
+    http_response_code(401);
+    header('Content-Type: application/json');
+    echo '{"status":"error", "message":"API access denied. Valid api_key (Admin Password) required."}';
+    exit;
+  }
+}
+
 if (isset($_GET['action'])) {
   $action = $_GET['action'];
   $db = get_db();
+  
+  // 4. STRICT INTERNAL API FIREWALL: Absolute Lockdown
+  // If the request does NOT have ?access=api, we enforce strict origin checks.
+  if (!$is_public_api) {
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    if (strpos($host, ':') !== false) {
+      $host = explode(':', $host)[0];
+    }
+    
+    $referer = $_SERVER['HTTP_REFERER'] ?? '';
+    $origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_X_ORIGIN'] ?? '';
+    if ($origin === 'null') $origin = ''; // Explicitly deny local file:/// origin bypasses
+    
+    $is_valid_internal = false;
+    if ($origin && parse_url($origin, PHP_URL_HOST) === $host) {
+      $is_valid_internal = true;
+    } elseif ($referer && parse_url($referer, PHP_URL_HOST) === $host) {
+      $is_valid_internal = true;
+    } elseif (in_array($action, ['get_stream', 'get_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes'])) {
+      // Media routes are allowed internally without headers, but data JSON routes are strictly blocked!
+      $is_valid_internal = true;
+    }
+    
+    if (!$is_valid_internal) {
+      http_response_code(403);
+      send_json([
+        'status' => 'error', 
+        'message' => 'Access Denied: You must append ?access=api to your URL to fetch data externally.'
+      ]);
+    }
+  }
   
   // Rate Limiting API - ONLY trigger write locks on POST requests or heavy actions to prevent locking concurrent reads on page load
   if ($_SERVER['REQUEST_METHOD'] === 'POST' || in_array($action, ['search', 'full_scan'])) {
@@ -1116,12 +1343,22 @@ if (isset($_GET['action'])) {
     } catch(Exception $e) {}
 
     try { $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE messages ADD COLUMN is_edited INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE community_posts ADD COLUMN parent_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE playlists ADD COLUMN play_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     
-    init_db($db); 
+    try {
+      $db->exec("CREATE TABLE IF NOT EXISTS playlist_invites (
+        token TEXT PRIMARY KEY,
+        playlist_id INTEGER NOT NULL,
+        expires_at DATETIME,
+        FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+      );");
+    } catch(Exception $e) {}
+    
+    init_db($db);
     $_SESSION['db_initialized'] = APP_VERSION;
   }
 
@@ -1272,7 +1509,10 @@ if (isset($_GET['action'])) {
 
     case 'get_session':
       if ($user_id) {
-        $stmt = $db->prepare("SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned, settings FROM users WHERE id = ?");
+        try { $db->exec("ALTER TABLE users ADD COLUMN last_active DATETIME;"); } catch(Exception $e) {}
+        $db->prepare("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE id = ?")->execute([$user_id]);
+
+        $stmt = $db->prepare("SELECT id, email, artist, bio, verified, last_upload_date, daily_upload_count, banned, settings FROM users WHERE id = ?");
         $stmt->execute([$user_id]);
         $user = $stmt->fetch();
         if ($user && empty($user['banned'])) {
@@ -1400,6 +1640,93 @@ if (isset($_GET['action'])) {
       send_json(['status' => 'success', 'message' => 'Name changed successfully.']);
       break;
 
+    case 'save_bio':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $bio = trim(htmlspecialchars($data['bio'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $db->prepare("UPDATE users SET bio = ? WHERE id = ?")->execute([$bio, $user_id]);
+      send_json(['status' => 'success', 'message' => 'Bio updated.']);
+      break;
+
+    case 'get_connections':
+      $target_user_id = (int)($_GET['id'] ?? 0);
+      $conn_type = $_GET['conn_type'] ?? 'followers';
+      if ($conn_type === 'following') {
+        $stmt = $db->prepare("SELECT u.id, u.artist FROM follows f JOIN users u ON f.following_id = u.id WHERE f.follower_id = ? AND u.banned = 0");
+      } else {
+        $stmt = $db->prepare("SELECT u.id, u.artist FROM follows f JOIN users u ON f.follower_id = u.id WHERE f.following_id = ? AND u.banned = 0");
+      }
+      $stmt->execute([$target_user_id]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'get_recommended_artists':
+      $target_user_id = (int)($_GET['target_id'] ?? 0);
+      $stmt = $db->prepare("SELECT id, artist FROM users WHERE id != ? AND id != ? AND banned = 0 AND email NOT LIKE 'deleted_%' ORDER BY RANDOM() LIMIT 8");
+      $stmt->execute([$user_id ?? 0, $target_user_id]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'upload_profile_background':
+      if (!$user_id) { http_response_code(403); send_json(['status' => 'error', 'message' => 'Not logged in.']); }
+      if (isset($_FILES['profile_background'])) {
+        $file = $_FILES['profile_background'];
+        if ($file['error'] !== UPLOAD_ERR_OK) { http_response_code(400); send_json(['status' => 'error', 'message' => 'Upload error: ' . $file['error']]); }
+        $allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        if (!in_array($file['type'], $allowed_types)) { http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid file type.']); }
+        $imageData = file_get_contents($file['tmp_name']);
+        
+        // Resize horizontally for backgrounds
+        $sourceImage = @imagecreatefromstring($imageData);
+        if ($sourceImage) {
+          $final_width = 1200;
+          $final_height = 400;
+          $resizedImage = imagecreatetruecolor($final_width, $final_height);
+          imagecopyresampled($resizedImage, $sourceImage, 0, 0, 0, 0, $final_width, $final_height, imagesx($sourceImage), imagesy($sourceImage));
+          ob_start();
+          imagewebp($resizedImage, null, 80);
+          $webpData = ob_get_clean();
+          imagedestroy($sourceImage); imagedestroy($resizedImage);
+          
+          $db->prepare("UPDATE users SET profile_background = ?, profile_background_type = 'image/webp' WHERE id = ?")->execute([$webpData, $user_id]);
+          send_json(['status' => 'success', 'message' => 'Background updated.']);
+        } else {
+          http_response_code(500); send_json(['status' => 'error', 'message' => 'Failed to process image.']);
+        }
+      } else {
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'No file uploaded.']);
+      }
+      break;
+
+    case 'get_profile_background':
+      header('Cache-Control: public, max-age=31536000, immutable');
+      $pic_user_id = (int)($_GET['id'] ?? 0);
+      $stmt = $db->prepare("SELECT profile_background, profile_background_type, artist FROM users WHERE id = ?");
+      $stmt->execute([$pic_user_id]);
+      $pic_data = $stmt->fetch();
+      
+      if ($pic_data && $pic_data['profile_background']) {
+        header('Content-Type: ' . $pic_data['profile_background_type']);
+        echo $pic_data['profile_background'];
+        exit;
+      }
+      
+      $artist_name = $pic_data['artist'] ?? 'Unknown';
+      $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
+      
+      // Generate 3 deterministic colors based on the artist name
+      $color_index1 = hexdec(substr(md5($artist_name . 'bg1'), 0, 6)) % count($colors);
+      $color_index2 = hexdec(substr(md5($artist_name . 'bg2'), 0, 6)) % count($colors);
+      $color_index3 = hexdec(substr(md5($artist_name . 'bg3'), 0, 6)) % count($colors);
+      
+      $c1 = $colors[$color_index1];
+      $c2 = $colors[$color_index2];
+      $c3 = $colors[$color_index3];
+      
+      header('Content-Type: image/svg+xml');
+      echo '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400"><defs><linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="' . $c1 . '" /><stop offset="50%" stop-color="' . $c2 . '" /><stop offset="100%" stop-color="' . $c3 . '" /></linearGradient></defs><rect width="1200" height="400" fill="url(#grad)"/></svg>';
+      exit;
+
     case 'upload_profile_picture':
       if (!$user_id) { http_response_code(403); send_json(['status' => 'error', 'message' => 'Not logged in.']); }
       if (isset($_FILES['profile_picture'])) {
@@ -1489,9 +1816,13 @@ if (isset($_GET['action'])) {
       $db->prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?")->execute([$user_id, $user_id]);
       $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?")->execute([$user_id, $user_id]);
 
       $new_email = 'deleted_' . $user_id . '_' . time() . '@mail.com';
-      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', password_hash = NULL, backup_key = NULL, profile_picture = NULL WHERE id = ?")->execute([$new_email, $user_id]);
+      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL WHERE id = ?")->execute([$new_email, $user_id]);
       
       session_destroy();
       send_json(['status' => 'success']);
@@ -1504,7 +1835,7 @@ if (isset($_GET['action'])) {
       $final_key = $user_id . '-' . $raw_str;
       $new_email = 'deleted_' . $user_id . '_' . time() . '@mail.com';
       $new_artist = 'Deleted User';
-      $db->prepare("UPDATE users SET email = ?, artist = ?, password_hash = NULL, backup_key = ?, profile_picture = NULL WHERE id = ?")
+      $db->prepare("UPDATE users SET email = ?, artist = ?, bio = NULL, password_hash = NULL, backup_key = ?, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL WHERE id = ?")
          ->execute([$new_email, $new_artist, $hash, $user_id]);
       session_destroy();
       send_json(['status' => 'success', 'backup_key' => $final_key]);
@@ -1694,8 +2025,13 @@ if (isset($_GET['action'])) {
       
       if ($song && ($song['user_id'] == $user_id || $is_super_admin)) {
         $db->prepare("DELETE FROM music WHERE id = ?")->execute([$song_id]);
-        if ($song['file'] && file_exists($song['file'])) {
-          @unlink($song['file']);
+        $file_path = $song['file'];
+        if (!file_exists($file_path)) {
+          $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
+          if (file_exists($dynamic_path)) $file_path = $dynamic_path;
+        }
+        if ($file_path && file_exists($file_path)) {
+          @unlink($file_path);
         }
         send_json(['status' => 'success', 'message' => 'Song deleted.']);
       } else {
@@ -1710,89 +2046,32 @@ if (isset($_GET['action'])) {
       $stmt->execute([$song_id]);
       $song = $stmt->fetch();
 
-      if ($song && file_exists($song['file'])) {
-        while (ob_get_level() > 0) { @ob_end_clean(); }
-        $ext = pathinfo($song['file'], PATHINFO_EXTENSION);
-        $dl_name = trim(($song['title'] ?? '') . (($song['artist'] && $song['title']) ? ' - ' : '') . ($song['artist'] ?? ''));
-        $dl_name = $dl_name ? $dl_name . '.' . $ext : basename($song['file']);
-        $encoded = rawurlencode($dl_name);
-        $finfo = finfo_open(FILEINFO_MIME_TYPE);
-        header('Content-Type: ' . finfo_file($finfo, $song['file']));
-        finfo_close($finfo);
-        header('Content-Length: ' . filesize($song['file']));
-        header("Content-Disposition: attachment; filename=\"song." . $ext . "\"; filename*=UTF-8''" . $encoded);
-        @flush();
-        readfile($song['file']);
-        exit;
-      } else {
-        http_response_code(404);
-        send_json(['status' => 'error', 'message' => 'File not found.']);
-      }
-      break;
+      if ($song) {
+        $file_path = $song['file'];
+        if (!file_exists($file_path)) {
+          $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
+          if (file_exists($dynamic_path)) $file_path = $dynamic_path;
+        }
 
-    case 'download_cover':
-      $song_id = intval($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT file, title, artist, album FROM music WHERE id = ?");
-      $stmt->execute([$song_id]);
-      $song = $stmt->fetch();
-
-      if ($song && file_exists($song['file'])) {
-        $getID3 = new getID3;
-        $info = $getID3->analyze($song['file']);
-        getid3_lib::CopyTagsToComments($info);
-
-        if (!empty($info['comments']['picture'][0]['data'])) {
-          $raw_img = $info['comments']['picture'][0]['data'];
-          $mime = $info['comments']['picture'][0]['image_mime'] ?? 'image/jpeg';
-          
-          $src_img = @imagecreatefromstring($raw_img);
-          if ($src_img) {
-            while (ob_get_level() > 0) { @ob_end_clean(); }
-
-            $width = imagesx($src_img);
-            $height = imagesy($src_img);
-            $min_dim = min($width, $height);
-            $src_x = (int)(($width - $min_dim) / 2);
-            $src_y = (int)(($height - $min_dim) / 2);
-            
-            $cropped_img = imagecreatetruecolor($min_dim, $min_dim);
-            
-            if ($mime === 'image/png') {
-              imagealphablending($cropped_img, false);
-              imagesavealpha($cropped_img, true);
-            }
-            
-            // Copy without resizing to retain 100% original resolution
-            imagecopy($cropped_img, $src_img, 0, 0, $src_x, $src_y, $min_dim, $min_dim);
-            
-            $album_name = trim($song['album'] ?? '');
-            if (empty($album_name) || $album_name === 'Unknown Album') {
-              $dl_name = trim(($song['title'] ?? '') . (($song['artist'] && $song['title']) ? ' - ' : '') . ($song['artist'] ?? ''));
-            } else {
-              $dl_name = $album_name;
-            }
-            $dl_name = $dl_name ? preg_replace('/[^\p{L}\p{N}\s\.\-\(\)]/u', '_', $dl_name) . '_Cover' : 'cover';
-            $ext = ($mime === 'image/png') ? 'png' : 'jpg';
-            $encoded = rawurlencode($dl_name . '.' . $ext);
-            
-            header('Content-Type: ' . $mime);
-            header("Content-Disposition: attachment; filename=\"cover." . $ext . "\"; filename*=UTF-8''" . $encoded);
-            
-            if ($mime === 'image/png') {
-              imagepng($cropped_img);
-            } else {
-              imagejpeg($cropped_img, null, 100); // 100 quality for original fidelity
-            }
-            
-            imagedestroy($src_img);
-            imagedestroy($cropped_img);
-            exit;
-          }
+        if (file_exists($file_path)) {
+          while (ob_get_level() > 0) { @ob_end_clean(); }
+          $ext = pathinfo($file_path, PATHINFO_EXTENSION);
+          $dl_name = trim(($song['title'] ?? '') . (($song['artist'] && $song['title']) ? ' - ' : '') . ($song['artist'] ?? ''));
+          $dl_name = $dl_name ? $dl_name . '.' . $ext : basename($file_path);
+          $encoded = rawurlencode($dl_name);
+          $finfo = finfo_open(FILEINFO_MIME_TYPE);
+          header('Content-Type: ' . finfo_file($finfo, $file_path));
+          finfo_close($finfo);
+          header('Content-Length: ' . filesize($file_path));
+          header("Content-Disposition: attachment; filename=\"song." . $ext . "\"; filename*=UTF-8''" . $encoded);
+          @flush();
+          readfile($file_path);
+          exit;
         }
       }
       http_response_code(404);
-      echo "Cover image not found in the original file.";
-      exit;
+      send_json(['status' => 'error', 'message' => 'File not found.']);
+      break;
 
     case 'edit_metadata':
       if (!$user_id) { http_response_code(403); exit; }
@@ -1808,6 +2087,13 @@ if (isset($_GET['action'])) {
       $song = $stmt->fetch();
 
       if ($song && ($song['user_id'] == $user_id || $is_super_admin)) {
+        $file_path = $song['file'];
+        if (!file_exists($file_path)) {
+          $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
+          if (file_exists($dynamic_path)) $file_path = $dynamic_path;
+        }
+        $song['file'] = $file_path; // Override with resolved path
+
         $is_private = intval($_POST['is_private'] ?? 0);
         $update_fields = ["title = ?", "artist = ?", "album = ?", "genre = ?", "lyrics = ?", "is_private = ?"];
         $update_params = [$new_title, $new_artist, $new_album, $new_genre, $new_lyrics, $is_private];
@@ -1843,7 +2129,7 @@ if (isset($_GET['action'])) {
           if ($ext === 'mp3') {
             $tagwriter->tagformats = ['id3v1', 'id3v2.3'];
           } elseif ($ext === 'flac') {
-            $tagwriter->tagformats = ['metaflac'];
+            $tagformats = ['metaflac'];
           } elseif ($ext === 'ogg') {
             $tagwriter->tagformats = ['vorbiscomment'];
           } else {
@@ -1857,7 +2143,7 @@ if (isset($_GET['action'])) {
             'artist' => [htmlspecialchars_decode($new_artist, ENT_QUOTES)],
             'album' => [htmlspecialchars_decode($new_album, ENT_QUOTES)],
             'genre' => [htmlspecialchars_decode($new_genre, ENT_QUOTES)],
-            'unsynchronised_lyric' => [htmlspecialchars_decode($new_lyrics, ENT_QUOTES)] // <-- ADD LYRICS
+            'unsynchronised_lyric' => [htmlspecialchars_decode($new_lyrics, ENT_QUOTES)]
           ];
 
           if ($jpeg_data) {
@@ -2607,6 +2893,109 @@ if (isset($_GET['action'])) {
       send_json(['status' => 'success']);
       break;
 
+    case 'toggle_block':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $blocked_id = intval($data['blocked_id']);
+      if ($blocked_id === $user_id) { send_json(['status' => 'error', 'message' => 'Cannot block yourself.']); }
+      
+      $stmt = $db->prepare("SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?");
+      $stmt->execute([$user_id, $blocked_id]);
+      if ($stmt->fetch()) {
+        $db->prepare("DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?")->execute([$user_id, $blocked_id]);
+        send_json(['status' => 'unblocked']);
+      } else {
+        $db->prepare("INSERT INTO blocks (blocker_id, blocked_id) VALUES (?, ?)")->execute([$user_id, $blocked_id]);
+        // Remove mutual follows
+        $db->prepare("DELETE FROM follows WHERE (follower_id = ? AND following_id = ?) OR (follower_id = ? AND following_id = ?)")->execute([$user_id, $blocked_id, $blocked_id, $user_id]);
+        send_json(['status' => 'blocked']);
+      }
+      break;
+
+    case 'get_inbox':
+      if (!$user_id) { send_json([]); }
+      $stmt = $db->prepare("
+        SELECT m.id, m.content, CASE WHEN m.image IS NOT NULL THEN 1 ELSE 0 END as has_image, m.created_at, m.is_read, m.sender_id, m.receiver_id, u.artist as other_name, u.id as other_id, u.last_active
+        FROM messages m JOIN users u ON u.id = CASE WHEN m.sender_id = ? THEN m.receiver_id ELSE m.sender_id END
+        WHERE m.id IN (
+          SELECT MAX(id) FROM messages WHERE sender_id = ? OR receiver_id = ? GROUP BY CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END
+        )
+        ORDER BY m.created_at DESC
+      ");
+      $stmt->execute([$user_id, $user_id, $user_id, $user_id]);
+      $inbox = $stmt->fetchAll();
+      // Add unread count
+      foreach($inbox as &$msg) {
+        $ur_stmt = $db->prepare("SELECT COUNT(*) FROM messages WHERE sender_id = ? AND receiver_id = ? AND is_read = 0");
+        $ur_stmt->execute([$msg['other_id'], $user_id]);
+        $msg['unread_count'] = $ur_stmt->fetchColumn();
+      }
+      send_json($inbox);
+      break;
+
+    case 'get_chat':
+      if (!$user_id) { send_json([]); }
+      $target_id = intval($_GET['target_id'] ?? 0);
+      $db->prepare("UPDATE messages SET is_read = 1 WHERE sender_id = ? AND receiver_id = ?")->execute([$target_id, $user_id]);
+      $stmt = $db->prepare("SELECT id, sender_id, content, CASE WHEN image IS NOT NULL THEN 1 ELSE 0 END as has_image, created_at, is_edited FROM messages WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?) ORDER BY created_at ASC");
+      $stmt->execute([$user_id, $target_id, $target_id, $user_id]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'edit_message':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("UPDATE messages SET content = ?, is_edited = 1 WHERE id = ? AND sender_id = ?")->execute([format_user_text($data['content']), intval($data['id']), $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'delete_message':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("DELETE FROM messages WHERE id = ? AND sender_id = ?")->execute([intval($data['id']), $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'send_message':
+      if (!$user_id) { http_response_code(403); exit; }
+      $target_id = intval($_POST['target_id'] ?? 0);
+      $content = trim(htmlspecialchars($_POST['content'] ?? '', ENT_QUOTES, 'UTF-8'));
+      
+      $stmt_block = $db->prepare("SELECT 1 FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)");
+      $stmt_block->execute([$user_id, $target_id, $target_id, $user_id]);
+      if ($stmt_block->fetch()) {
+         send_json(['status' => 'error', 'message' => 'Cannot send message. A block is active.']);
+      }
+      
+      $webpData = null;
+      if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
+        $allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        if (in_array($_FILES['image']['type'], $allowed_types)) {
+          $webpData = process_image_to_webp(file_get_contents($_FILES['image']['tmp_name']), 800, 80);
+        }
+      }
+      
+      if ($content !== '' || $webpData !== null) {
+        $db->prepare("INSERT INTO messages (sender_id, receiver_id, content, image) VALUES (?, ?, ?, ?)")->execute([$user_id, $target_id, format_user_text($content), $webpData]);
+        send_json(['status' => 'success']);
+      } else {
+        send_json(['status' => 'error', 'message' => 'Empty message.']);
+      }
+      break;
+
+    case 'get_message_image':
+      header('Cache-Control: public, max-age=31536000, immutable');
+      $msg_id = intval($_GET['id'] ?? 0);
+      $stmt = $db->prepare("SELECT image, sender_id, receiver_id FROM messages WHERE id = ?");
+      $stmt->execute([$msg_id]);
+      $msg = $stmt->fetch();
+      if ($msg && $msg['image'] && ($msg['sender_id'] == $user_id || $msg['receiver_id'] == $user_id || $is_super_admin)) {
+        header('Content-Type: image/webp');
+        echo $msg['image'];
+        exit;
+      }
+      http_response_code(404); exit;
+
     case 'toggle_follow':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
@@ -2944,7 +3333,7 @@ if (isset($_GET['action'])) {
       if ($type === 'profile') {
         if (!$user_id) { http_response_code(403); exit; }
         
-        $stmt_user = $db->prepare("SELECT artist FROM users WHERE id = ?");
+        $stmt_user = $db->prepare("SELECT artist, bio FROM users WHERE id = ?");
         $stmt_user->execute([$user_id]);
         $user_details = $stmt_user->fetch();
 
@@ -2959,6 +3348,17 @@ if (isset($_GET['action'])) {
         $stmt_followers->execute([$user_id]);
         $details['followers_count'] = $stmt_followers->fetchColumn();
         $details['image_url'] = '?action=get_profile_picture&id=' . $user_id;
+        $details['background_url'] = '?action=get_profile_background&id=' . $user_id;
+        $details['bio'] = $user_details['bio'] ?? '';
+        
+        $stmt_following = $db->prepare("SELECT COUNT(*) FROM follows WHERE follower_id = ?");
+        $stmt_following->execute([$user_id]);
+        $details['following_count'] = $stmt_following->fetchColumn();
+
+        $stmt_rec_art = $db->prepare("SELECT id, artist FROM users WHERE id != ? AND banned = 0 AND email NOT LIKE 'deleted_%' ORDER BY RANDOM() LIMIT 5");
+        $stmt_rec_art->execute([$user_id]);
+        $details['recommended_artists'] = $stmt_rec_art->fetchAll();
+
         $details['public_id'] = null;
         $details['user_id'] = $user_id;
 
@@ -3091,7 +3491,7 @@ if (isset($_GET['action'])) {
         $details['public_id'] = null;
 
         if ($type === 'artist') {
-          $stmt_user = $db->prepare("SELECT id, banned, email FROM users WHERE artist = ? COLLATE NOCASE");
+          $stmt_user = $db->prepare("SELECT id, banned, email, bio FROM users WHERE artist = ? COLLATE NOCASE");
           $stmt_user->execute([$name]);
           $artist_user = $stmt_user->fetch();
 
@@ -3106,11 +3506,31 @@ if (isset($_GET['action'])) {
             $stmt_followers = $db->prepare("SELECT COUNT(*) FROM follows WHERE following_id = ?");
             $stmt_followers->execute([$artist_user_id]);
             $details['followers_count'] = $stmt_followers->fetchColumn();
+            
+            $stmt_following = $db->prepare("SELECT COUNT(*) FROM follows WHERE follower_id = ?");
+            $stmt_following->execute([$artist_user_id]);
+            $details['following_count'] = $stmt_following->fetchColumn();
+            
             $details['image_url'] = '?action=get_profile_picture&id=' . $artist_user_id;
+            $details['background_url'] = '?action=get_profile_background&id=' . $artist_user_id;
+            $details['bio'] = $artist_user['bio'] ?? '';
+            
+            $stmt_rec_art = $db->prepare("SELECT id, artist FROM users WHERE id != ? AND banned = 0 AND email NOT LIKE 'deleted_%' ORDER BY RANDOM() LIMIT 5");
+            $stmt_rec_art->execute([$artist_user_id]);
+            $details['recommended_artists'] = $stmt_rec_art->fetchAll();
+
+            $stmt_rec_songs = $db->prepare("SELECT id, title, artist, last_modified FROM music WHERE user_id = ? AND is_private = 0 ORDER BY (SELECT SUM(play_count) FROM play_counts WHERE song_id = music.id) DESC LIMIT 5");
+            $stmt_rec_songs->execute([$artist_user_id]);
+            $details['recommended_songs'] = $stmt_rec_songs->fetchAll();
+
             if ($user_id) {
               $stmt_follow = $db->prepare("SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?");
               $stmt_follow->execute([$user_id, $artist_user_id]);
               $details['is_following'] = (bool)$stmt_follow->fetchColumn();
+
+              $stmt_block = $db->prepare("SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?");
+              $stmt_block->execute([$user_id, $artist_user_id]);
+              $details['is_blocked'] = (bool)$stmt_block->fetchColumn();
             } else {
               $details['is_following'] = false;
             }
@@ -3371,77 +3791,81 @@ if (isset($_GET['action'])) {
       $stmt = $db->prepare("SELECT file, user_id, is_private FROM music WHERE id = ?");
       $stmt->execute([$id]);
       $song_stream = $stmt->fetch();
-      if ($song_stream && file_exists($song_stream['file'])) {
-        if ($song_stream['is_private'] == 1 && $song_stream['user_id'] != $user_id && $is_super_admin == 0) {
-           http_response_code(403); exit;
-        }
+      
+      if ($song_stream) {
         $file_path = $song_stream['file'];
-        session_write_close();
-        while (ob_get_level() > 0) { @ob_end_clean(); }
-        $filesize = filesize($file_path);
-        
-        $mime_type = 'audio/mpeg';
-        $ext = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
-        switch ($ext) {
-          case 'flac': $mime_type = 'audio/flac'; break;
-          case 'ogg': $mime_type = 'audio/ogg'; break;
-          case 'wav': $mime_type = 'audio/wav'; break;
-          case 'm4a': $mime_type = 'audio/mp4'; break;
+        // Dynamic path resolution to prevent breaking if server/folder changes
+        if (!file_exists($file_path)) {
+          $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
+          if (file_exists($dynamic_path)) $file_path = $dynamic_path;
         }
 
-        header('Content-Type: ' . $mime_type);
-        header('Accept-Ranges: bytes');
-        
-        $start = 0;
-        $end = $filesize - 1;
-        $length = $filesize;
-
-        // ULTRA-SCALE OFF-LOADING: Let Apache/Nginx handle the stream instead of PHP!
-        header('X-Sendfile: ' . realpath($file_path));
-        header('X-Accel-Redirect: /' . str_replace($_SERVER['DOCUMENT_ROOT'], '', realpath($file_path)));
-        
-        if (isset($_SERVER['HTTP_RANGE'])) {
-          $range = str_replace('bytes=', '', $_SERVER['HTTP_RANGE']);
-          $parts = explode('-', $range, 2);
-          $start = intval($parts[0]);
-          if (isset($parts[1]) && $parts[1] !== '') {
-            $end = intval($parts[1]);
+        if (file_exists($file_path)) {
+          if ($song_stream['is_private'] == 1 && $song_stream['user_id'] != $user_id && $is_super_admin == 0) {
+            http_response_code(403); exit;
           }
-          if ($start > $end || $start >= $filesize) {
-            header('HTTP/1.1 416 Range Not Satisfiable');
-            header("Content-Range: bytes */$filesize");
-            exit;
+          session_write_close();
+          while (ob_get_level() > 0) { @ob_end_clean(); }
+          $filesize = filesize($file_path);
+          
+          $mime_type = 'audio/mpeg';
+          $ext = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
+          switch ($ext) {
+            case 'flac': $mime_type = 'audio/flac'; break;
+            case 'ogg': $mime_type = 'audio/ogg'; break;
+            case 'wav': $mime_type = 'audio/wav'; break;
+            case 'm4a': $mime_type = 'audio/mp4'; break;
           }
-          $length = $end - $start + 1;
-          header('HTTP/1.1 206 Partial Content');
-          header("Content-Range: bytes $start-$end/$filesize");
-        } else {
-          header('HTTP/1.1 200 OK');
-        }
 
-        header('Content-Length: ' . $length);
+          header('Content-Type: ' . $mime_type);
+          header('Accept-Ranges: bytes');
+          
+          $start = 0;
+          $end = $filesize - 1;
+          $length = $filesize;
 
-        // Fallback for servers without X-Sendfile/X-Accel-Redirect enabled
-        $f = @fopen($file_path, 'rb');
-        if ($f) {
-          fseek($f, $start);
-          $chunk_size = 1024 * 8;
-          $bytes_left = $length;
-          @flush();
-          while ($bytes_left > 0 && !feof($f)) {
-            if (connection_aborted()) break;
-            $read_size = min($chunk_size, $bytes_left);
-            $data = fread($f, $read_size);
-            if ($data === false) break;
-            echo $data;
+          if (isset($_SERVER['HTTP_RANGE'])) {
+            $range = str_replace('bytes=', '', $_SERVER['HTTP_RANGE']);
+            $parts = explode('-', $range, 2);
+            $start = intval($parts[0]);
+            if (isset($parts[1]) && $parts[1] !== '') {
+              $end = intval($parts[1]);
+            }
+            if ($start > $end || $start >= $filesize) {
+              header('HTTP/1.1 416 Range Not Satisfiable');
+              header("Content-Range: bytes */$filesize");
+              exit;
+            }
+            $length = $end - $start + 1;
+            header('HTTP/1.1 206 Partial Content');
+            header("Content-Range: bytes $start-$end/$filesize");
+          } else {
+            header('HTTP/1.1 200 OK');
+          }
+
+          header('Content-Length: ' . $length);
+
+          $f = @fopen($file_path, 'rb');
+          if ($f) {
+            fseek($f, $start);
+            $chunk_size = 1024 * 8;
+            $bytes_left = $length;
             @flush();
-            $bytes_left -= strlen($data);
+            while ($bytes_left > 0 && !feof($f)) {
+              if (connection_aborted()) break;
+              $read_size = min($chunk_size, $bytes_left);
+              $data = fread($f, $read_size);
+              if ($data === false) break;
+              echo $data;
+              @flush();
+              $bytes_left -= strlen($data);
+            }
+            fclose($f);
           }
-          fclose($f);
+          exit;
         }
-      } else {
-        http_response_code(404);
       }
+      http_response_code(404);
       exit;
 
     case 'get_image':
@@ -3449,15 +3873,20 @@ if (isset($_GET['action'])) {
       header('Pragma: cache');
       header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
       $id = intval($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT image FROM music WHERE id = ?");
+      $stmt = $db->prepare("SELECT image, title, artist FROM music WHERE id = ?");
       $stmt->execute([$id]);
-      $image_data = $stmt->fetchColumn();
-      if ($image_data) {
+      $row = $stmt->fetch();
+      
+      if ($row && $row['image']) {
         header('Content-Type: image/webp');
-        echo $image_data;
+        echo $row['image'];
       } else {
         header('Content-Type: image/svg+xml');
-        echo '<svg xmlns="http://www.w3.org/2000/svg" fill="#404040" class="bi bi-music-note" viewBox="-4 -4 24 24"><path d="M9 13c0 1.105-1.12 2-2.5 2S4 14.105 4 13s1.12-2 2.5-2 2.5.895 2.5 2"/><path fill-rule="evenodd" d="M9 3v10H8V3h1z"/><path d="M8 2.82a1 1 0 0 1 .804-.98l3-.6A1 1 0 0 1 13 2.22V4L8 5V2.82z"/></svg>';
+        $seed = ($row['title'] ?? 'Unknown') . ($row['artist'] ?? 'Unknown');
+        $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
+        $c1 = $colors[hexdec(substr(md5($seed . 'cov1'), 0, 6)) % count($colors)];
+        $c2 = $colors[hexdec(substr(md5($seed . 'cov2'), 0, 6)) % count($colors)];
+        echo '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="'.$c1.'"/><stop offset="100%" stop-color="'.$c2.'"/></linearGradient></defs><rect width="16" height="16" fill="url(#g)"/><path d="M9 13c0 1.105-1.12 2-2.5 2S4 14.105 4 13s1.12-2 2.5-2 2.5.895 2.5 2" fill="#ffffff" opacity="0.6"/><path fill-rule="evenodd" d="M9 3v10H8V3h1z" fill="#ffffff" opacity="0.6"/><path d="M8 2.82a1 1 0 0 1 .804-.98l3-.6A1 1 0 0 1 13 2.22V4L8 5V2.82z" fill="#ffffff" opacity="0.6"/></svg>';
       }
       exit;
 
@@ -3548,7 +3977,32 @@ if (isset($_GET['action'])) {
         http_response_code(404); send_json(['status' => 'error', 'message' => 'Playlist not found.']);
       }
       
+      if ($action_type === 'generate_link') {
+        if ($pl['user_id'] != $user_id && $is_super_admin == 0) {
+          http_response_code(403); send_json(['status' => 'error', 'message' => 'Only the owner can generate links.']);
+        }
+        // Cleanup expired tokens dynamically to save space
+        $db->exec("DELETE FROM playlist_invites WHERE expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP");
+        
+        $expire_val = $data['expire'] ?? null;
+        $expires_at = null;
+        if ($expire_val && is_numeric($expire_val)) {
+          $expires_at = date('Y-m-d H:i:s', time() + ((int)$expire_val * 60));
+        }
+        $token = bin2hex(random_bytes(16));
+        $db->prepare("INSERT INTO playlist_invites (token, playlist_id, expires_at) VALUES (?, ?, ?)")->execute([$token, $pl['id'], $expires_at]);
+        send_json(['status' => 'success', 'token' => $token]);
+      }
+
       if ($action_type === 'join') {
+        $token = $data['token'] ?? '';
+        $stmt_inv = $db->prepare("SELECT playlist_id FROM playlist_invites WHERE token = ? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)");
+        $stmt_inv->execute([$token]);
+        $inv_pl_id = $stmt_inv->fetchColumn();
+        
+        if (!$inv_pl_id || $inv_pl_id != $pl['id']) {
+          send_json(['status' => 'error', 'message' => 'Invalid or expired invite link.']);
+        }
         if (!$pl['is_collaborative']) {
           send_json(['status' => 'error', 'message' => 'This playlist is not open for collaboration.']);
         }
@@ -3586,6 +4040,24 @@ if (isset($_GET['action'])) {
         $remove_id = $data['collab_user_id'];
         $db->prepare("DELETE FROM playlist_collaborators WHERE playlist_id = ? AND user_id = ?")->execute([$pl['id'], $remove_id]);
         send_json(['status' => 'success', 'message' => 'Collaborator removed.']);
+      }
+      break;
+
+    case 'get_invite_info':
+      $token = $_GET['token'] ?? '';
+      $stmt = $db->prepare("
+        SELECT p.public_id, p.name, u.artist as creator, p.is_private, p.user_id 
+        FROM playlist_invites pi 
+        JOIN playlists p ON pi.playlist_id = p.id 
+        JOIN users u ON p.user_id = u.id 
+        WHERE pi.token = ? AND (pi.expires_at IS NULL OR pi.expires_at > CURRENT_TIMESTAMP)
+      ");
+      $stmt->execute([$token]);
+      $info = $stmt->fetch();
+      if ($info) {
+        send_json(['status' => 'success', 'details' => $info]);
+      } else {
+        http_response_code(404); send_json(['status' => 'error', 'message' => 'Invalid or expired invite link.']);
       }
       break;
 
@@ -3670,6 +4142,24 @@ if (isset($_GET['action'])) {
       $stmt3->execute([$user_id, $user_id, $last_clear]);
       $feed = array_merge($feed, $stmt3->fetchAll());
       
+      // 4. Incoming Messages
+      $stmt4 = $db->prepare("
+        SELECT 
+          'message_notif' as type,
+          m.id as message_id,
+          m.content,
+          m.created_at,
+          CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as commenter_name,
+          u.id as sender_id,
+          'message' as notif_type
+        FROM messages m
+        JOIN users u ON m.sender_id = u.id
+        WHERE m.receiver_id = ? AND m.created_at > ?
+        ORDER BY m.created_at DESC LIMIT 50
+      ");
+      $stmt4->execute([$user_id, $last_clear]);
+      $feed = array_merge($feed, $stmt4->fetchAll());
+
       // Sort all notifications by date
       usort($feed, function($a, $b) {
         return strtotime($b['created_at']) - strtotime($a['created_at']);
@@ -3717,7 +4207,11 @@ if (isset($_GET['action'])) {
       $stmt2->execute([$user_id, $user_id, $user_id, $user_id, $threshold]);
       $count = $stmt2->fetchColumn();
       
-      send_json(['count' => (int)$count]);
+      $stmt3 = $db->prepare("SELECT COUNT(*) FROM messages WHERE receiver_id = ? AND created_at > ?");
+      $stmt3->execute([$user_id, $threshold]);
+      $msg_count = $stmt3->fetchColumn();
+      
+      send_json(['count' => (int)$count + (int)$msg_count]);
       break;
 
     case 'mark_notifs_read':
@@ -4895,15 +5389,14 @@ function perform_full_scan($db) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="A simple, fast music player with user accounts and uploads.">
-    <meta property="og:title" content="PHP Music">
-    <meta property="og:description" content="A simple, fast music player with user accounts and uploads.">
+    <meta property="og:title" content="<?php echo $og_title; ?>">
+    <meta property="og:description" content="<?php echo $og_desc; ?>">
     <meta property="og:type" content="website">
-    <meta property="og:image" content="?action=get_app_icon&size=512">
+    <meta property="og:image" content="<?php echo $og_image; ?>">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="PHP Music">
     <meta name="application-name" content="PHP Music">
-    <link rel="apple-touch-startup-image" href="?action=get_pwa_splash">
     <title>PHP Music</title>
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
     <meta name="theme-color" content="#0a0a0a"/>
@@ -5511,9 +6004,18 @@ function perform_full_scan($db) {
               <i class="bi bi-people"></i>
               <span>Community</span>
             </a>
+            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#inbox-modal">
+              <i class="bi bi-chat-dots-fill"></i>
+              <span>Messages</span>
+              <span class="badge bg-danger rounded-pill d-none ms-auto inbox-badge">0</span>
+            </a>
             <a href="#" class="nav-link" data-view="get_notes">
               <i class="bi bi-journal-text"></i>
               <span>Personal Notes</span>
+            </a>
+            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#calendar-modal">
+              <i class="bi bi-calendar3"></i>
+              <span>Calendar</span>
             </a>
           </div>
           
@@ -5558,7 +6060,7 @@ function perform_full_scan($db) {
               <i class="bi bi-cloud-arrow-down-fill"></i>
               <span>Install App</span>
             </a>
-            <a href="#" class="nav-link" id="get-api-btn" data-bs-toggle="modal" data-bs-target="#api-modal">
+            <a href="#" class="nav-link" id="get-api-btn">
               <i class="bi bi-code-slash"></i>
               <span>Get API</span>
             </a>
@@ -5605,6 +6107,10 @@ function perform_full_scan($db) {
                 <span><i class="bi bi-bell-fill me-2"></i>My Activity</span>
                 <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
               </a></li>
+              <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#inbox-modal">
+                <span><i class="bi bi-chat-dots-fill me-2"></i>Direct Messages</span>
+                <span class="badge bg-danger rounded-pill d-none inbox-badge">0</span>
+              </a></li>
               <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-mobile"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
               <li><a class="dropdown-item" href="#" id="sleep-timer-btn-mobile"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
               <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill me-2"></i>Settings</a></li>
@@ -5634,9 +6140,14 @@ function perform_full_scan($db) {
               <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-desktop" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
               <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
                 <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#activity-modal">
-                <span><i class="bi bi-bell-fill me-2"></i>My Activity</span>
-                <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
-              </a></li>
+                  <span><i class="bi bi-bell-fill me-2"></i>My Activity</span>
+                  <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
+                </a></li>
+                <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#inbox-modal">
+                  <span><i class="bi bi-chat-dots-fill me-2"></i>Direct Messages</span>
+                  <span class="badge bg-danger rounded-pill d-none inbox-badge">0</span>
+                </a></li>
+                <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
                 <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
                 <li><a class="dropdown-item" href="#" id="sleep-timer-btn-desktop"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
                 <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill me-2"></i>Settings</a></li>
@@ -6622,6 +7133,20 @@ function perform_full_scan($db) {
       </div>
     </div>
 
+    <div class="modal fade" id="connections-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background-color: var(--ytm-surface);">
+          <div class="modal-header border-secondary">
+            <h5 class="modal-title text-white" id="connections-modal-title">Connections</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-0">
+            <div class="list-group list-group-flush bg-transparent" id="connections-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="comments-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
@@ -6662,27 +7187,20 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
-    
-    <div class="modal fade" id="view-note-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
-        <div class="modal-content" style="background-color: var(--ytm-surface);">
-          <div class="modal-header border-secondary">
-            <h5 class="modal-title text-white fw-bold" id="view-note-title"></h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body text-white" style="white-space: pre-wrap; font-size: 1.05rem; line-height: 1.6;" id="view-note-content"></div>
-        </div>
-      </div>
-    </div>
 
     <div class="modal fade" id="view-note-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
-        <div class="modal-content" style="background-color: var(--ytm-surface);">
-          <div class="modal-header border-secondary">
-            <h5 class="modal-title text-white fw-bold" id="view-note-title"></h5>
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-secondary pb-3">
+            <h5 class="modal-title text-white fw-bold fs-4" id="view-note-title"></h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body text-white" style="white-space: pre-wrap; font-size: 1.05rem; line-height: 1.6;" id="view-note-content"></div>
+          <div class="modal-body text-white p-4 d-flex flex-column">
+            <div style="white-space: pre-wrap; font-size: 1.1rem; line-height: 1.7; flex-grow: 1;" id="view-note-content"></div>
+            <div class="mt-4 pt-3 border-top border-secondary text-secondary small d-flex align-items-center gap-2" id="view-note-date">
+              <!-- Date injected here -->
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -6710,6 +7228,43 @@ function perform_full_scan($db) {
                 <span class="text-secondary small">Use <code>@Username</code> (without spaces) to link directly to a user's profile.</span>
               </li>
             </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="calendar-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-secondary pb-2">
+            <h5 class="modal-title text-white"><i class="bi bi-calendar3 text-info me-2"></i>Calendar & Time</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-center p-4">
+            <h2 id="calendar-time-display" class="fw-bold text-white mb-1" style="font-size: clamp(2rem, 8vw, 3.5rem); font-family: monospace; letter-spacing: 2px;">00:00:00</h2>
+            <p id="calendar-date-display" class="text-secondary fs-5 mb-4"></p>
+            <div id="calendar-grid" class="bg-dark rounded p-3 border border-secondary shadow-sm">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <button class="btn btn-sm btn-outline-light" id="cal-prev-month"><i class="bi bi-chevron-left"></i></button>
+                <h5 id="cal-month-year" class="mb-0 text-white fw-bold"></h5>
+                <button class="btn btn-sm btn-outline-light" id="cal-next-month"><i class="bi bi-chevron-right"></i></button>
+              </div>
+              <div class="d-grid" style="grid-template-columns: repeat(7, 1fr); gap: 5px; text-align: center;">
+                <div class="text-danger small fw-bold">Su</div>
+                <div class="text-secondary small fw-bold">Mo</div>
+                <div class="text-secondary small fw-bold">Tu</div>
+                <div class="text-secondary small fw-bold">We</div>
+                <div class="text-secondary small fw-bold">Th</div>
+                <div class="text-secondary small fw-bold">Fr</div>
+                <div class="text-primary small fw-bold">Sa</div>
+              </div>
+              <div id="cal-days-grid" class="d-grid mt-2" style="grid-template-columns: repeat(7, 1fr); gap: 5px; text-align: center; min-height: 200px; align-items: start;">
+              </div>
+            </div>
+            <div class="d-flex gap-2 mt-3">
+              <input type="date" id="cal-jump-date" class="form-control form-control-sm bg-dark text-white border-secondary" title="Jump to Date">
+              <button class="btn btn-sm btn-outline-info fw-bold w-100" id="cal-today-btn">Jump to Today</button>
+            </div>
           </div>
         </div>
       </div>
@@ -6872,17 +7427,37 @@ function perform_full_scan($db) {
           <div class="modal-body">
             <h6>Profile Picture</h6>
             <form id="profile-picture-form" class="mb-4 text-center">
-                <div style="max-width: 300px; margin: 0 auto;" class="mb-3">
-                    <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="profile-picture-preview" class="profile-picture-lg" style="width: 100%; display: block; max-width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;" alt="Profile Picture Preview">
+              <div style="max-width: 300px; margin: 0 auto;" class="mb-3">
+                <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="profile-picture-preview" class="profile-picture-lg" style="width: 100%; display: block; max-width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;" alt="Profile Picture Preview">
+              </div>
+              <div class="mb-3">
+                <label for="profile-picture-input" class="form-label">Upload new picture</label>
+                <input class="form-control" type="file" id="profile-picture-input" accept="image/png, image/jpeg, image/gif">
+              </div>
+              <button type="submit" class="btn btn-danger w-100" id="profile-picture-submit-btn">Save Picture</button>
+              <div class="progress mt-3 d-none" id="profile-pic-progress-container" style="height: 15px;">
+                <div id="profile-pic-progress" class="progress-bar progress-bar-striped progress-bar-animated bg-danger" role="progressbar" style="width: 0%;">0%</div>
+              </div>
+            </form>
+            <hr class="text-secondary">
+            <h6>Profile Background Picture</h6>
+            <form id="profile-bg-form" class="mb-4">
+              <div class="mb-3">
+                <input class="form-control" type="file" id="profile-bg-input" accept="image/png, image/jpeg, image/gif, image/webp">
+              </div>
+              <button type="submit" class="btn btn-danger w-100" id="profile-bg-submit-btn">Save Background</button>
+            </form>
+            <hr class="text-secondary">
+            <h6 class="mt-4">Profile Info</h6>
+            <form id="bio-form" class="mb-4">
+              <div class="mb-3">
+                <label for="settings-bio" class="form-label">Bio</label>
+                <textarea class="form-control" id="settings-bio" rows="3" placeholder="Tell us about yourself..."></textarea>
+                <div class="d-flex justify-content-end mt-1">
+                  <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
                 </div>
-                <div class="mb-3">
-                    <label for="profile-picture-input" class="form-label">Upload new picture</label>
-                    <input class="form-control" type="file" id="profile-picture-input" accept="image/png, image/jpeg, image/gif">
-                </div>
-                <button type="submit" class="btn btn-danger w-100" id="profile-picture-submit-btn">Save Picture</button>
-                <div class="progress mt-3 d-none" id="profile-pic-progress-container" style="height: 15px;">
-                  <div id="profile-pic-progress" class="progress-bar progress-bar-striped progress-bar-animated bg-danger" role="progressbar" style="width: 0%;">0%</div>
-                </div>
+              </div>
+              <button type="submit" class="btn btn-danger w-100">Save Bio</button>
             </form>
             <hr class="text-secondary">
             <h6 class="mt-4">Change Display Name</h6>
@@ -6961,6 +7536,66 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+    <div class="modal fade" id="inbox-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; height: 85vh;">
+          <div class="modal-header border-secondary pb-2">
+            <h5 class="modal-title text-white"><i class="bi bi-envelope-paper-heart-fill text-danger me-2"></i>Direct Messages</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-0 position-relative">
+            <div class="p-3 border-bottom border-secondary position-relative">
+              <input type="text" id="inbox-search-input" class="form-control bg-dark text-white border-secondary" placeholder="Search Artist Name...">
+              <div id="inbox-search-dropdown" class="search-dropdown d-none w-100" style="top: 100%; position: absolute; z-index: 2000; background-color: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 0 0 8px 8px; max-height: 250px; overflow-y: auto; left: 0; width: calc(100% - 2rem) !important; margin: 0 1rem; box-shadow: 0 8px 24px rgba(0,0,0,0.8);"></div>
+            </div>
+            <div class="list-group list-group-flush bg-transparent" id="inbox-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="chat-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; height: 80vh;">
+          <div class="modal-header border-secondary pb-2">
+            <h5 class="modal-title text-white fw-bold d-flex align-items-center gap-2" id="chat-modal-title"></h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body d-flex flex-column gap-3 p-3 overflow-auto" id="chat-messages-list" style="background-color: #000;">
+          </div>
+          <div class="modal-footer border-secondary p-2">
+            <form id="chat-form" class="w-100 d-flex gap-2">
+              <input type="hidden" id="chat-target-id">
+              <label class="btn btn-outline-secondary mb-0 d-flex align-items-center justify-content-center" style="cursor: pointer;">
+                 <i class="bi bi-image"></i>
+                 <input type="file" id="chat-image-input" accept="image/*" class="d-none">
+              </label>
+              <input type="text" id="chat-input" class="form-control bg-dark text-white border-secondary" placeholder="Type a message..." autocomplete="off">
+              <button type="submit" class="btn btn-danger"><i class="bi bi-send"></i></button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="edit-message-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface);">
+          <div class="modal-header border-0">
+            <h5 class="modal-title text-white">Edit Message</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="edit-message-form">
+              <input type="hidden" id="edit-message-id">
+              <input type="text" id="edit-message-input" class="form-control bg-dark text-white border-secondary mb-3" maxlength="2000" required>
+              <button type="submit" class="btn btn-danger w-100">Save Changes</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="activity-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
@@ -7049,7 +7684,18 @@ function perform_full_scan($db) {
               </div>
               <div id="collab-search-dropdown" class="search-dropdown d-none w-100" style="top: 100%; position: absolute; z-index: 2000; background-color: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 0 0 8px 8px; max-height: 250px; overflow-y: auto;"></div>
             </div>
-            <button class="btn btn-outline-light w-100 mb-3" id="collab-copy-link-btn"><i class="bi bi-link-45deg"></i> Copy Invite Link</button>
+            <div class="mb-3 p-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid #404040;">
+              <label for="collab-expire-select" class="form-label text-white small mb-1">Invite Link Expiration</label>
+              <select id="collab-expire-select" class="form-select form-select-sm bg-dark text-white border-secondary mb-2">
+                <option value="1440">1 Day</option>
+                <option value="10080">1 Week</option>
+                <option value="43200">1 Month</option>
+                <option value="forever">Forever</option>
+                <option value="custom">Custom (Minutes)</option>
+              </select>
+              <input type="number" id="collab-custom-expire" class="form-control form-control-sm bg-dark text-white border-secondary d-none mb-2" placeholder="Enter minutes (e.g. 60)">
+              <button class="btn btn-outline-light w-100" id="collab-copy-link-btn"><i class="bi bi-link-45deg"></i> Generate & Copy Link</button>
+            </div>
             <h6 class="text-secondary mt-2">Current Collaborators</h6>
             <div id="collab-list" class="list-group list-group-flush bg-transparent"></div>
           </div>
@@ -7411,7 +8057,7 @@ function perform_full_scan($db) {
             <!-- NEW IFRAME SECTION FOR RANDOM EXAMPLE DATA -->
             <div class="mt-4">
               <h6 class="text-white mb-2" style="font-size: 0.85rem;">Example Output (Random Data)</h6>
-              <iframe id="api-example-iframe" class="w-100 rounded border border-secondary" style="height: 180px; background-color: #000000; overflow: auto;"></iframe>
+              <iframe id="api-example-iframe" class="w-100 rounded border border-secondary" style="height: 180px; background-color: #000000; overflow: auto;" src="about:blank"></iframe>
             </div>
 
           </div>
@@ -7617,13 +8263,18 @@ SOFTWARE.</div>
         const pipVideo = document.createElement('video');
         pipVideo.muted = true;
         pipVideo.playsInline = true;
-        try {
-          if (pipCanvas.captureStream) {
-            pipVideo.srcObject = pipCanvas.captureStream(1);
-          } else if (pipBtnDesktop) {
-            pipBtnDesktop.style.display = 'none';
-          }
-        } catch(e) {}
+        
+        // FIX INFINITE SPINNER: Do not assign endless MediaStreams to video elements before the window finishes loading!
+        // Chromium treats captureStream() as a pending network resource if attached too early.
+        window.addEventListener('load', () => {
+          try {
+            if (pipCanvas.captureStream) {
+              pipVideo.srcObject = pipCanvas.captureStream(1);
+            } else if (pipBtnDesktop) {
+              pipBtnDesktop.style.display = 'none';
+            }
+          } catch(e) {}
+        });
         
         const clearCacheBtn = document.getElementById('clear-cache-btn');
         const fullscreenBtn = document.getElementById('fullscreen-btn');
@@ -7668,7 +8319,27 @@ SOFTWARE.</div>
             const feed = await fetchData('?action=get_activity_feed');
             if (feed && feed.length > 0) {
               body.innerHTML = '<ul class="list-group list-group-flush">' + feed.map(item => {
-                if (item.type === 'comment_notif' || item.type === 'community_notif') {
+                if (item.type === 'message_notif') {
+                  const unreadBadge = item.is_unread ? '<span class="badge bg-danger ms-2" style="font-size: 0.65rem;">New</span>' : '';
+                  const bgClass = item.is_unread ? 'bg-dark' : 'bg-transparent';
+                  const cleanContent = item.content ? parseUserText(item.content).replace(/<[^>]*>?/gm, '') : 'Sent an image';
+
+                  return `
+                    <li class="list-group-item ${bgClass} text-white border-secondary py-3 open-chat-btn" data-userid="${item.sender_id}" data-artist="${escapeHTML(item.commenter_name)}" style="cursor: pointer;">
+                      <div class="d-flex align-items-start gap-3">
+                        <div class="mt-1"><i class="bi bi-chat-dots-fill text-info fs-5"></i></div>
+                        <div class="flex-grow-1" style="min-width: 0;">
+                          <div style="font-size: 0.95rem;"><span class="fw-bold">${escapeHTML(item.commenter_name)}</span> sent you a message${unreadBadge}</div>
+                          <div class="text-secondary fst-italic my-1 text-truncate" style="font-size: 0.9rem; border-left: 2px solid #555; padding-left: 8px;">"${cleanContent}"</div>
+                          <div class="d-flex justify-content-between align-items-center mt-2">
+                            <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(item.created_at)}</small>
+                            <button class="btn btn-sm btn-outline-light"><i class="bi bi-reply-fill"></i> Reply</button>
+                          </div>
+                        </div>
+                      </div>
+                    </li>
+                  `;
+                } else if (item.type === 'comment_notif' || item.type === 'community_notif') {
                   const isCommunity = item.type === 'community_notif';
                   const isReply = item.notif_type === 'reply' || item.notif_type === 'community_reply';
                   const unreadBadge = item.is_unread ? '<span class="badge bg-danger ms-2" style="font-size: 0.65rem;">New</span>' : '';
@@ -7737,6 +8408,276 @@ SOFTWARE.</div>
           };
 
           activityModalEl.addEventListener('show.bs.modal', loadActivityFeed);
+
+          const inboxModalEl = document.getElementById('inbox-modal');
+          const chatModalEl = document.getElementById('chat-modal');
+          const chatForm = document.getElementById('chat-form');
+          
+          let chatPollingInterval = null;
+
+          const getPreviewText = (htmlStr) => {
+            if (!htmlStr) return '';
+            const tmp = document.createElement('div');
+            tmp.innerHTML = htmlStr;
+            return tmp.textContent || tmp.innerText || '';
+          };
+
+          const loadInbox = async () => {
+            const listEl = document.getElementById('inbox-list');
+            listEl.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>';
+            const inbox = await fetchData('?action=get_inbox');
+            if (inbox && inbox.length > 0) {
+              listEl.innerHTML = inbox.map(m => {
+                const previewText = m.has_image ? 'Photo' : getPreviewText(m.content);
+                const isMe = m.sender_id == currentUser.id;
+                
+                let readStatusHtml = '';
+                if (isMe) {
+                  readStatusHtml = `<i class="bi bi-check2-all ms-1 ${m.is_read ? 'text-info' : 'text-secondary'}" title="${m.is_read ? 'Read' : 'Delivered'}"></i>`;
+                }
+
+                let activeStatusHtml = '';
+                if (m.last_active) {
+                  let isoTime = m.last_active;
+                  if (!isoTime.endsWith('Z')) isoTime += 'Z'; 
+                  const lastActiveDate = new Date(isoTime);
+                  const minsDiff = Math.floor((new Date() - lastActiveDate) / 60000);
+                  if (minsDiff < 5) {
+                    activeStatusHtml = `<span class="position-absolute bottom-0 end-0 p-1 bg-success border border-dark rounded-circle" title="Active now"></span>`;
+                  } else {
+                    activeStatusHtml = `<span class="position-absolute bottom-0 end-0 p-1 bg-secondary border border-dark rounded-circle" title="Active ${timeAgo(m.last_active)}"></span>`;
+                  }
+                }
+
+                return `
+                <div class="list-group-item bg-transparent text-white border-secondary px-3 py-3 d-flex align-items-center gap-3 hover-bg-dark open-chat-btn" data-userid="${m.other_id}" data-artist="${encodeURIComponent(m.other_name)}" style="cursor: pointer;" title="Preview: ${escapeHTML(previewText)}">
+                  <div class="position-relative user-profile-link" data-userid="${m.other_id}" data-artist="${encodeURIComponent(m.other_name)}">
+                    <img src="?action=get_profile_picture&id=${m.other_id}" class="rounded-circle" style="width: 48px; height: 48px; object-fit: cover;">
+                    ${activeStatusHtml}
+                  </div>
+                  <div class="flex-grow-1 overflow-hidden">
+                    <div class="d-flex justify-content-between align-items-center">
+                      <span class="fw-bold text-truncate user-profile-link hover-underline" data-userid="${m.other_id}" data-artist="${encodeURIComponent(m.other_name)}">${escapeHTML(m.other_name)}</span>
+                      <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(m.created_at)}</small>
+                    </div>
+                    <div class="text-secondary small text-truncate ${m.unread_count > 0 ? 'text-white fw-bold' : ''}">
+                       ${isMe ? 'You: ' : ''}${m.has_image ? '<i class="bi bi-image"></i> ' : ''}${escapeHTML(previewText)}${readStatusHtml}
+                    </div>
+                  </div>
+                  ${m.unread_count > 0 ? `<span class="badge bg-danger rounded-pill">${m.unread_count}</span>` : ''}
+                </div>
+              `}).join('');
+            } else {
+              listEl.innerHTML = '<div class="p-4 text-center text-secondary">No conversations yet. Go to a profile to send a message!</div>';
+            }
+          };
+
+          if (inboxModalEl) {
+            inboxModalEl.addEventListener('show.bs.modal', loadInbox);
+            inboxModalEl.addEventListener('click', (e) => {
+              const userLink = e.target.closest('.user-profile-link');
+              if (userLink) {
+                e.stopPropagation();
+                bootstrap.Modal.getInstance(inboxModalEl).hide();
+                loadView({ type: 'artist_songs', param: decodeURIComponent(userLink.dataset.artist), sort: 'album_asc', filter_user_id: userLink.dataset.userid, artist_name: '' });
+                return;
+              }
+              const chatBtn = e.target.closest('.open-chat-btn');
+              if (chatBtn) {
+                bootstrap.Modal.getInstance(inboxModalEl).hide();
+                window.openChat(chatBtn.dataset.userid, decodeURIComponent(chatBtn.dataset.artist));
+              }
+            });
+            
+            const inboxSearchInput = document.getElementById('inbox-search-input');
+            const inboxSearchDropdown = document.getElementById('inbox-search-dropdown');
+            let inboxSearchTimeout;
+
+            if (inboxSearchInput) {
+              inboxSearchInput.addEventListener('input', (e) => {
+                clearTimeout(inboxSearchTimeout);
+                const q = e.target.value.trim();
+                if (q === '') {
+                  inboxSearchDropdown.classList.add('d-none');
+                  return;
+                }
+                inboxSearchTimeout = setTimeout(async () => {
+                  const res = await fetchData(`?action=search&q=${encodeURIComponent(q)}`);
+                  inboxSearchDropdown.innerHTML = '';
+                  let usersFound = false;
+                  if (res && res.shelves) {
+                    const artistShelf = res.shelves.find(s => s.type === 'artists');
+                    if (artistShelf && artistShelf.items.length > 0) {
+                      const users = artistShelf.items.filter(u => u.is_user);
+                      if (users.length > 0) {
+                        usersFound = true;
+                        inboxSearchDropdown.innerHTML = users.map(u => `
+                          <div class="search-dropdown-item d-flex justify-content-between align-items-center w-100 px-3 py-2">
+                            <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${u.id}" data-artist="${encodeURIComponent(u.name)}">
+                              <img src="?action=get_profile_picture&id=${u.id}" class="search-dropdown-img rounded-circle" style="width: 32px; height: 32px;">
+                              <div class="search-dropdown-text">
+                                <div class="search-dropdown-title text-white fw-bold hover-underline">${escapeHTML(u.name)}</div>
+                                <div class="search-dropdown-subtitle text-secondary">ID: ${u.id}</div>
+                              </div>
+                            </div>
+                            <button class="btn btn-sm btn-outline-info rounded-pill ms-2 start-chat-btn" data-userid="${u.id}" data-artist="${escapeHTML(u.name)}">
+                              <i class="bi bi-chat-dots-fill"></i> Message
+                            </button>
+                          </div>
+                        `).join('');
+                      }
+                    }
+                  }
+                  if (!usersFound) {
+                    inboxSearchDropdown.innerHTML = '<div class="p-3 text-secondary text-center small">No users found</div>';
+                  }
+                  inboxSearchDropdown.classList.remove('d-none');
+                }, 300);
+              });
+
+              inboxSearchDropdown.addEventListener('click', (e) => {
+                const startChatBtn = e.target.closest('.start-chat-btn');
+                if (startChatBtn) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const userId = startChatBtn.dataset.userid;
+                  const artistName = startChatBtn.dataset.artist;
+                  
+                  inboxSearchDropdown.classList.add('d-none');
+                  inboxSearchInput.value = '';
+                  bootstrap.Modal.getInstance(inboxModalEl).hide();
+                  
+                  window.openChat(userId, artistName);
+                }
+              });
+
+              document.addEventListener('click', (e) => {
+                if (inboxSearchDropdown && !inboxSearchDropdown.contains(e.target) && e.target !== inboxSearchInput) {
+                  inboxSearchDropdown.classList.add('d-none');
+                }
+              });
+            }
+          }
+
+          window.openChat = async (targetId, artistName) => {
+            document.getElementById('chat-target-id').value = targetId;
+            document.getElementById('chat-modal-title').innerHTML = `<img src="?action=get_profile_picture&id=${targetId}" class="rounded-circle" style="width: 32px; height: 32px;"> ${escapeHTML(artistName)}`;
+            bootstrap.Modal.getOrCreateInstance(chatModalEl).show();
+            await refreshChat();
+            if (chatPollingInterval) clearInterval(chatPollingInterval);
+            chatPollingInterval = setInterval(refreshChat, 5000);
+          };
+
+          const refreshChat = async () => {
+            const targetId = document.getElementById('chat-target-id').value;
+            if (!targetId) return;
+            const messages = await fetchData(`?action=get_chat&target_id=${targetId}`);
+            const listEl = document.getElementById('chat-messages-list');
+             
+            if (messages && messages.length > 0) {
+              listEl.innerHTML = messages.map(m => {
+                const isMe = m.sender_id == currentUser.id;
+                const align = isMe ? 'align-self-end' : 'align-self-start';
+                const bg = isMe ? 'bg-danger text-white' : 'bg-dark border border-secondary text-white';
+                const imgHtml = m.has_image ? `<img src="?action=get_message_image&id=${m.id}" class="img-fluid rounded-3 mb-2" style="max-height: 200px;">` : '';
+                const editedHtml = m.is_edited ? '<small class="text-white-50 ms-2" style="font-size: 0.65rem;">(Edited)</small>' : '';
+                 
+                let actionHtml = '';
+                if (isMe) {
+                  actionHtml = `
+                    <div class="d-flex justify-content-end gap-2 mt-1">
+                      <button class="btn btn-link btn-sm text-white-50 p-0 edit-msg-btn" data-id="${m.id}" data-content="${escapeHTML(m.content)}"><i class="bi bi-pencil"></i></button>
+                      <button class="btn btn-link btn-sm text-white-50 p-0 del-msg-btn" data-id="${m.id}"><i class="bi bi-trash"></i></button>
+                    </div>
+                  `;
+                }
+
+                return `
+                  <div class="${align} ${bg} p-2 rounded-4 shadow-sm" style="max-width: 80%; min-width: 100px;">
+                    ${imgHtml}
+                    ${m.content ? `<div style="font-size: 0.95rem; white-space: pre-wrap;">${parseUserText(m.content)}</div>` : ''}
+                    <div class="d-flex justify-content-between align-items-center mt-1">
+                      <div style="font-size: 0.65rem; opacity: 0.7;">${timeAgo(m.created_at)}${editedHtml}</div>
+                      ${actionHtml}
+                    </div>
+                  </div>
+                `;
+              }).join('');
+              listEl.scrollTop = listEl.scrollHeight;
+            } else {
+              listEl.innerHTML = '<div class="text-center text-secondary p-4 mt-auto mb-auto">Start the conversation!</div>';
+            }
+            updateNotifBadge();
+          };
+
+          if (chatModalEl) {
+             chatModalEl.addEventListener('click', async (e) => {
+               const editBtn = e.target.closest('.edit-msg-btn');
+               if (editBtn) {
+                 document.getElementById('edit-message-id').value = editBtn.dataset.id;
+                 document.getElementById('edit-message-input').value = decodeHTML(editBtn.dataset.content);
+                 bootstrap.Modal.getOrCreateInstance(document.getElementById('edit-message-modal')).show();
+               }
+               const delBtn = e.target.closest('.del-msg-btn');
+               if (delBtn) {
+                 if (confirm('Delete this message?')) {
+                   await fetchData('?action=delete_message', { method: 'POST', body: JSON.stringify({ id: delBtn.dataset.id }) });
+                   refreshChat();
+                 }
+               }
+             });
+
+             chatModalEl.addEventListener('hidden.bs.modal', () => {
+               if (chatPollingInterval) clearInterval(chatPollingInterval);
+               document.getElementById('chat-target-id').value = '';
+             });
+          }
+
+          const editMsgForm = document.getElementById('edit-message-form');
+          if (editMsgForm) {
+            editMsgForm.addEventListener('submit', async e => {
+              e.preventDefault();
+              const id = document.getElementById('edit-message-id').value;
+              const content = document.getElementById('edit-message-input').value;
+              await fetchData('?action=edit_message', { method: 'POST', body: JSON.stringify({ id, content }) });
+              bootstrap.Modal.getInstance(document.getElementById('edit-message-modal')).hide();
+              refreshChat();
+            });
+          }
+
+          if (chatForm) {
+             chatForm.addEventListener('submit', async e => {
+               e.preventDefault();
+               const targetId = document.getElementById('chat-target-id').value;
+               const input = document.getElementById('chat-input');
+               const imgInput = document.getElementById('chat-image-input');
+               
+               if (!input.value.trim() && imgInput.files.length === 0) return;
+               
+               const formData = new FormData();
+               formData.append('target_id', targetId);
+               formData.append('content', input.value);
+               if (imgInput.files.length > 0) {
+                 formData.append('image', imgInput.files[0]);
+               }
+
+               const submitBtn = chatForm.querySelector('button[type="submit"]');
+               submitBtn.disabled = true;
+
+               const res = await fetch('?action=send_message', { method: 'POST', body: formData });
+               const result = await res.json();
+               
+               submitBtn.disabled = false;
+               
+               if (result && result.status === 'success') {
+                 input.value = '';
+                 imgInput.value = '';
+                 await refreshChat();
+               } else {
+                 showToast(result.message || 'Failed to send', 'error');
+               }
+             });
+          }
           
           const clearBtn = document.getElementById('clear-activity-btn');
           if (clearBtn) {
@@ -7797,8 +8738,9 @@ SOFTWARE.</div>
           const selectedOption = apiActionSelect.options[apiActionSelect.selectedIndex];
           const actionVal = selectedOption.value;
           
-          // Generate the full URL
-          apiUrlInput.value = window.location.origin + window.location.pathname + '?action=' + actionVal;
+          // Generate the full URL for the Dedicated Public API
+          let url = window.location.origin + window.location.pathname + '?access=api&action=' + actionVal;
+          apiUrlInput.value = url;
           
           // Update the GET/POST badge
           const method = selectedOption.getAttribute('data-method') || 'GET';
@@ -7846,6 +8788,9 @@ SOFTWARE.</div>
             if (method === 'GET') {
               // Replace UI placeholders with generic '1' or 'a' so the database actually returns valid matches
               let testUrl = apiUrlInput.value.replace('SONG_ID', '1').replace('USER_ID', '1').replace('PLAYLIST_ID', '1').replace('YOUR_QUERY', 'a');
+              if (window.adminApiKey) {
+                testUrl += '&api_key=' + encodeURIComponent(window.adminApiKey);
+              }
               
               fetch(testUrl)
                 .then(res => res.json())
@@ -9108,67 +10053,156 @@ SOFTWARE.</div>
           }
 
           let followButtonHTML = '';
+          let messageButtonHTML = '';
+          let blockButtonHTML = '';
+
           if (type === 'artist' && details.is_user && currentUser && currentUser.id !== details.user_id) {
-             const followText = details.is_following ? 'Unfollow' : 'Follow';
-             const followClass = details.is_following ? 'btn-outline-light' : 'btn-danger';
-             followButtonHTML = `<button class="btn ${followClass} border-0 follow-btn" data-user-id="${details.user_id}">${followText}</button>`;
+            const followText = details.is_following ? 'Unfollow' : 'Follow';
+            const followClass = details.is_following ? 'btn-outline-light' : 'btn-danger';
+            followButtonHTML = `<button class="btn ${followClass} border-0 follow-btn" data-user-id="${details.user_id}">${followText}</button>`;
+             
+            messageButtonHTML = `<button class="btn btn-outline-light border-0 message-btn" data-user-id="${details.user_id}" data-artist="${encodeURIComponent(details.name)}" title="Message User"><i class="bi bi-chat-dots-fill"></i> <span class="d-none d-md-inline">Message</span></button>`;
+             
+            const blockText = details.is_blocked ? 'Unblock' : 'Block';
+            const blockClass = details.is_blocked ? 'text-danger' : 'text-secondary';
+            blockButtonHTML = `<button class="btn btn-outline-light border-0 block-btn" data-user-id="${details.user_id}" title="${blockText} User"><i class="bi bi-slash-circle-fill ${blockClass}"></i> <span class="d-none d-md-inline">${blockText}</span></button>`;
           }
 
+          // Make Connections Clickable if it's an artist/profile
+          let finalStatsText = statsText;
+          if (type === 'artist' || type === 'profile') {
+            finalStatsText = `${formatSongCount(details.song_count || 0)} songs &bull; ${formatTime(details.total_duration || 0)}
+              &bull; <a href="#" class="text-info text-decoration-none connection-trigger" data-id="${details.user_id}" data-type="followers">${formatSongCount(details.followers_count || 0)} followers</a>
+              &bull; <a href="#" class="text-info text-decoration-none connection-trigger" data-id="${details.user_id}" data-type="following">${formatSongCount(details.following_count || 0)} following</a>`;
+          }
+
+          const bioHTML = (details.bio && (type === 'artist' || type === 'profile')) ? 
+            `<div class="mt-2 text-white" style="font-size: 0.95rem; white-space: pre-wrap; max-width: 800px;">${parseUserText(details.bio)}</div>` : '';
+
           const headerHTML = `
-            <div class="view-details-header">
-              <img src="${details.image_url}" alt="${escapeHTML(details.name)}" class="${(type === 'profile' || type === 'artist') ? 'profile-picture-lg' : ''}">
-              <div class="view-details-header-info">
-                <div class="type">${typeText}</div>
-                <h2 class="name text-truncate text-truncate-width">${escapeHTML(details.name)}</h2>
-                <div class="stats">${statsText}</div>
+            <div class="view-details-header position-relative overflow-hidden" style="min-height: 250px; background-color: var(--ytm-surface);">
+              ${(type === 'profile' || type === 'artist') && details.background_url ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.background_url}'); background-size: cover; background-position: center; filter: brightness(0.4) blur(2px); z-index: 0;"></div>` : ''}
+              <div class="d-flex flex-column flex-md-row align-items-center align-items-md-end gap-4 position-relative w-100" style="z-index: 1;">
+                <img src="${details.image_url}" alt="${escapeHTML(details.name)}" class="${(type === 'profile' || type === 'artist') ? 'profile-picture-lg' : 'rounded'}" style="width: 220px; height: 220px; box-shadow: 0 8px 30px rgba(0,0,0,0.7);">
+                <div class="view-details-header-info text-center text-md-start">
+                  <div class="type text-uppercase fw-bold mb-2" style="letter-spacing: 2px; color: rgba(255,255,255,0.8); text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${typeText}</div>
+                  <h2 class="name text-white fw-bold mb-3" style="font-size: clamp(2rem, 6vw, 4.5rem); line-height: 1.1; white-space: normal !important; word-break: break-word; text-shadow: 0 4px 12px rgba(0,0,0,0.6);">${escapeHTML(details.name)}</h2>
+                  <div class="stats mb-2" style="color: rgba(255,255,255,0.9); font-size: 1rem; text-shadow: 0 1px 3px rgba(0,0,0,0.5);">${finalStatsText}</div>
+                  ${bioHTML}
+                </div>
+                <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-md-start gap-2 mt-4 mt-md-0 ms-md-auto align-self-md-end">
+                  ${followButtonHTML}
+                  ${messageButtonHTML}
+                  ${blockButtonHTML}
+                  ${copyButtonHTML}
+                  ${shareButtonHTML}
+                  ${downloadButtonHTML}
+                  ${downloadExportPlaylistZipButtonHTML}
+                </div>
               </div>
-              <div class="d-flex align-items-center gap-2">
-                ${followButtonHTML}
-                ${copyButtonHTML}
-                ${shareButtonHTML}
-                ${downloadButtonHTML}
-                ${downloadExportPlaylistZipButtonHTML}
-              </div>
-            </div>`;
+              <div style="position: absolute; bottom: 0; left: 0; right: 0; height: 100px; background: linear-gradient(to top, var(--ytm-bg), transparent); z-index: 0;"></div>
+            </div>
+            <div id="recommendation-alert-container"></div>
+          `;
           contentArea.insertAdjacentHTML('afterbegin', headerHTML);
 
-          if (type === 'artist') {
-            const isUser = details.is_user;
+          // Extract color and apply beautiful gradient background
+          const headerImg = new Image();
+          headerImg.crossOrigin = 'anonymous';
+          headerImg.onload = () => {
+             const rgb = getAverageColor(headerImg);
+             const headerBg = document.getElementById('dynamic-view-header');
+             if (headerBg && !details.background_url) { // Prioritize user bg image if it exists
+               headerBg.style.background = `linear-gradient(135deg, rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.7) 0%, rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.2) 50%, var(--ytm-bg) 100%)`;
+             } else if (headerBg && details.background_url) {
+               // If bg exists, just tint it slightly to match the theme
+               headerBg.style.boxShadow = `inset 0 0 150px rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.3)`;
+             }
+          };
+          headerImg.src = details.image_url + (details.image_url.includes('?') ? '&' : '?') + 't=' + new Date().getTime();
+
+          if (type === 'artist' || type === 'profile') {
+            const isUser = details.is_user || type === 'profile';
             const hasPlaylists = details.playlists && details.playlists.length > 0;
             
-            let tabsHTML = `
-              <ul class="nav nav-tabs mt-4 mb-3" id="artistTabs" role="tablist">
-                <li class="nav-item" role="presentation">
-                  <button class="nav-link active" id="songs-tab" data-bs-toggle="tab" data-bs-target="#songs-pane" type="button" role="tab">All Songs</button>
-                </li>
-                ${isUser ? `
-                <li class="nav-item" role="presentation">
-                  <button class="nav-link" id="playlists-tab" data-bs-toggle="tab" data-bs-target="#playlists-pane" type="button" role="tab">Playlists</button>
-                </li>` : ''}
-              </ul>
-              <div class="tab-content" id="artistTabsContent">
-                <div class="tab-pane fade show active" id="songs-pane" role="tabpanel"></div>
-                                ${isUser ? `
-                <div class="tab-pane fade" id="playlists-pane" role="tabpanel">
-                  ${hasPlaylists ? `
-                  <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 row-cols-lg-5 row-cols-xl-6 g-4">
-                    ${details.playlists.map(p => `
-                      <div class="col">
-                        <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
-                          ${(currentUser && (currentUser.id == details.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${details.user_id}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
-                          <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
-                            <img src="?action=get_image&id=${p.image_id || 0}" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
-                            ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ''}
-                          </div>
-                          <div class="card-body px-0 py-2">
-                            <h5 class="card-title fs-6 fw-normal text-truncate">${escapeHTML(p.name)}</h5>
-                          </div>
+            // Build the Desktop Sidebar for Recommended content
+            let recommendedSidebarHTML = ``;
+            if (details.recommended_artists && details.recommended_artists.length > 0) {
+              recommendedSidebarHTML += `
+                <div class="d-flex flex-column" style="min-height: 0; flex: 1 1 40%;">
+                  <h6 class="text-white fw-bold border-bottom border-secondary pb-2 mb-2 text-uppercase d-flex align-items-center gap-2" style="letter-spacing: 1px; font-size: 0.85rem;"><i class="bi bi-stars text-warning fs-5"></i> Similar Artists</h6>
+                  <div class="list-group list-group-flush bg-transparent overflow-auto" style="scrollbar-width: thin; padding-right: 4px; flex-grow: 1;">
+                    ${details.recommended_artists.map(a => `
+                      <div class="list-group-item list-group-item-action bg-transparent text-white border-0 rounded px-2 py-2 mb-1 d-flex align-items-center gap-3 user-profile-link" data-userid="${a.id}" data-artist="${encodeURIComponent(a.artist)}" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.08)'" onmouseout="this.style.backgroundColor='transparent'">
+                        <img src="?action=get_profile_picture&id=${a.id}" class="rounded-circle shadow-sm" style="width: 48px; height: 48px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
+                        <div class="fw-bold text-truncate" style="font-size: 0.95rem;">${escapeHTML(a.artist)}</div>
+                      </div>
+                    `).join('')}
+                  </div>
+                </div>
+              `;
+            }
+            if (details.recommended_songs && details.recommended_songs.length > 0) {
+              recommendedSidebarHTML += `
+                <div class="d-flex flex-column" style="min-height: 0; flex: 1 1 60%;">
+                  <h6 class="text-white fw-bold border-bottom border-secondary pb-2 mb-2 text-uppercase d-flex align-items-center gap-2" style="letter-spacing: 1px; font-size: 0.85rem;"><i class="bi bi-fire text-danger fs-5"></i> Popular Tracks</h6>
+                  <div class="list-group list-group-flush bg-transparent overflow-auto" style="scrollbar-width: thin; padding-right: 4px; flex-grow: 1;">
+                    ${details.recommended_songs.map(s => `
+                      <div class="list-group-item list-group-item-action bg-transparent text-white border-0 rounded px-2 py-2 mb-1 d-flex align-items-center gap-3 top-result-card" data-song-id="${s.id}" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.08)'" onmouseout="this.style.backgroundColor='transparent'">
+                        <img src="?action=get_image&id=${s.id}&v=${s.last_modified || 0}" class="rounded shadow-sm" style="width: 48px; height: 48px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
+                        <div class="d-flex flex-column text-truncate justify-content-center">
+                          <div class="fw-bold text-truncate" style="font-size: 0.95rem;">${escapeHTML(s.title)}</div>
+                          <div class="text-secondary text-truncate" style="font-size: 0.8rem;">${escapeHTML(s.artist)}</div>
                         </div>
                       </div>
                     `).join('')}
                   </div>
-                  ` : `<div class="text-center p-5 text-secondary">No playlists found.</div>`}
-                </div>` : ''}
+                </div>
+              `;
+            }
+            
+            let tabsHTML = `
+              <div class="row mt-4">
+                <div class="col-12 col-lg-8">
+                  <ul class="nav nav-tabs mb-3" id="artistTabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                      <button class="nav-link active" id="songs-tab" data-bs-toggle="tab" data-bs-target="#songs-pane" type="button" role="tab">All Songs</button>
+                    </li>
+                    ${isUser ? `
+                    <li class="nav-item" role="presentation">
+                      <button class="nav-link" id="playlists-tab" data-bs-toggle="tab" data-bs-target="#playlists-pane" type="button" role="tab">Playlists</button>
+                    </li>` : ''}
+                  </ul>
+                  <div class="tab-content" id="artistTabsContent">
+                    <div class="tab-pane fade show active" id="songs-pane" role="tabpanel"></div>
+                    ${isUser ? `
+                    <div class="tab-pane fade" id="playlists-pane" role="tabpanel">
+                      ${hasPlaylists ? `
+                      <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 g-4">
+                        ${details.playlists.map(p => `
+                          <div class="col">
+                            <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
+                              ${(currentUser && (currentUser.id == details.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${details.user_id}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
+                              <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
+                                <img src="?action=get_image&id=${p.image_id || 0}" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
+                                ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ''}
+                              </div>
+                              <div class="card-body px-0 py-2">
+                                <h5 class="card-title fs-6 fw-normal text-truncate">${escapeHTML(p.name)}</h5>
+                              </div>
+                            </div>
+                          </div>
+                        `).join('')}
+                      </div>
+                      ` : `<div class="text-center p-5 text-secondary">No playlists found.</div>`}
+                    </div>` : ''}
+                  </div>
+                </div>
+                <div class="col-12 col-lg-4 d-none d-lg-block">
+                  <div class="p-3 rounded shadow-sm sticky-top d-flex flex-column gap-3" style="top: 100px; height: calc(100vh - 210px); background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
+                    ${recommendedSidebarHTML || '<div class="text-center text-secondary small m-auto">No recommendations yet.</div>'}
+                  </div>
+                </div>
               </div>
             `;
             contentArea.insertAdjacentHTML('beforeend', tabsHTML);
@@ -9977,7 +11011,22 @@ SOFTWARE.</div>
           }
         };
 
+        let viewDebounceTimer = null;
+        let viewLoadCounter = 0;
         const loadView = async (viewConfig, pushHistory = true) => {
+          viewLoadCounter++;
+          const currentLoadId = viewLoadCounter;
+
+          // DEBOUNCE: Prevent rapid firing of database queries on fast clicks
+          if (viewDebounceTimer) clearTimeout(viewDebounceTimer);
+          showLoader(true);
+          
+          await new Promise(resolve => {
+            viewDebounceTimer = setTimeout(resolve, 200);
+          });
+          
+          if (currentLoadId !== viewLoadCounter) return;
+
           if (pushHistory) {
             const isSameView = currentView.type === viewConfig.type &&
                                currentView.param === viewConfig.param &&
@@ -10208,12 +11257,12 @@ SOFTWARE.</div>
                     return `
                     <div class="col">
                       <div class="card h-100 bg-dark text-white border-secondary">
-                        <div class="card-body view-note-trigger" data-title="${escapeHTML(n.title)}" data-content="${escapeHTML(n.content)}" style="cursor: pointer;">
+                        <div class="card-body view-note-trigger" data-title="${escapeHTML(n.title)}" data-content="${escapeHTML(n.content)}" data-date="${n.updated_at}" style="cursor: pointer;">
                           <h5 class="card-title fw-bold text-truncate">${escapeHTML(n.title)}</h5>
                           <p class="card-text text-secondary small" style="white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">${parseUserText(truncContent)}</p>
                         </div>
                         <div class="card-footer border-secondary d-flex justify-content-between align-items-center">
-                          <small class="text-secondary">${timeAgo(n.updated_at)}</small>
+                          <small class="text-secondary"><i class="bi bi-clock"></i> ${timeAgo(n.updated_at)}</small>
                           <div>
                             <button class="btn btn-sm btn-outline-light me-1 edit-note-btn" data-id="${n.id}" data-title="${escapeHTML(n.title)}" data-content="${escapeHTML(n.content)}"><i class="bi bi-pencil"></i></button>
                             <button class="btn btn-sm btn-outline-danger delete-note-btn" data-id="${n.id}"><i class="bi bi-trash"></i></button>
@@ -10477,7 +11526,22 @@ SOFTWARE.</div>
           }
         };
 
+        let playDebounceTimer = null;
+        let playRequestCounter = 0;
         const playSongById = async (songId) => {
+          playRequestCounter++;
+          const currentPlayId = playRequestCounter;
+          
+          // DEBOUNCE: Protect rapid track skipping to prevent DB and audio buffer locks
+          if (playDebounceTimer) clearTimeout(playDebounceTimer);
+          updatePlayPauseIcons(true); // Show buffering spinner immediately
+          
+          await new Promise(resolve => {
+            playDebounceTimer = setTimeout(resolve, 250);
+          });
+          
+          if (currentPlayId !== playRequestCounter) return;
+
           // AUTOMATIC OFFLINE SKIP: If offline, ensure song is cached first
           if (!navigator.onLine) {
             const cache = await caches.open('php-music-offline');
@@ -10701,11 +11765,18 @@ SOFTWARE.</div>
           }
         };
 
+        let isTogglingFavorite = false;
         const toggleFavorite = async (songId) => {
           if (!currentUser) {
             showToast('Please log in to add favorites.', 'error');
             return;
           }
+          
+          // DEBOUNCE: Protect SQLite from write-locks if user spams the heart button
+          if (isTogglingFavorite) return;
+          isTogglingFavorite = true;
+          setTimeout(() => { isTogglingFavorite = false; }, 500); 
+          
           const result = await fetchData('?action=toggle_favorite', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -11217,16 +12288,21 @@ SOFTWARE.</div>
           if (!visAnimId) drawVisualizer();
         };
 
+        let isRadioLoading = false;
         const playNext = async () => {
           if (queue.length === 0) return;
+          if (isRadioLoading) return;
+          
           queueIndex++;
           if (queueIndex >= queue.length) {
             if (repeatMode === 'all') {
               queueIndex = 0;
             } else {
+              isRadioLoading = true;
               const lastSongId = queue[queue.length - 1];
               showToast('Starting Autoplay Station...', 'info');
               const newTracks = await fetchData(`?action=get_radio_tracks&seed_id=${lastSongId}`);
+              isRadioLoading = false;
               
               if (newTracks && newTracks.length > 0) {
                 newTracks.forEach(song => {
@@ -11290,7 +12366,19 @@ SOFTWARE.</div>
           showToast(isShuffle ? 'Shuffle enabled' : 'Shuffle disabled', 'info');
         };
 
+        let queueDebounceTimer = null;
+        let queueRequestCounter = 0;
         const setQueueAndPlay = async (startId, view) => {
+          queueRequestCounter++;
+          const currentQueueId = queueRequestCounter;
+          
+          // DEBOUNCE: Prevent massive array generation and queue fetches from rapid clicks
+          if (queueDebounceTimer) clearTimeout(queueDebounceTimer);
+          await new Promise(resolve => {
+            queueDebounceTimer = setTimeout(resolve, 200);
+          });
+          if (currentQueueId !== queueRequestCounter) return;
+
           const contextView = view || currentView;
           let fetchedQueue = [];
           
@@ -11396,10 +12484,10 @@ SOFTWARE.</div>
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
-            
+        
             const viewType = navLink.dataset.view;
             let sort = 'artist_asc';
-            if (['get_favorites', 'playlist_songs', 'get_offline_songs'].includes(viewType)) sort = 'manual_order';
+            if (['get_favorites', 'playlist_songs', 'get_offline_songs', 'get_listen_later'].includes(viewType)) sort = 'manual_order';
             if (viewType === 'get_user_playlists') sort = 'modified_desc';
             if (viewType === 'get_albums') sort = 'album_asc';
             if (viewType === 'get_artists') sort = 'name_asc';
@@ -11996,6 +13084,32 @@ SOFTWARE.</div>
             }
           }
           
+          const messageBtn = target.closest('.message-btn');
+          if (messageBtn) {
+            e.stopPropagation();
+            window.openChat(messageBtn.dataset.userId, decodeURIComponent(messageBtn.dataset.artist));
+            return;
+          }
+
+          const blockBtn = target.closest('.block-btn');
+          if (blockBtn) {
+             e.stopPropagation();
+             const userId = blockBtn.dataset.userId;
+             if (!confirm('Are you sure you want to block/unblock this user? Blocking prevents them from messaging or following you.')) return;
+             fetchData('?action=toggle_block', {
+               method: 'POST', headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({ blocked_id: userId })
+             }).then(res => {
+               if (res && (res.status === 'blocked' || res.status === 'unblocked')) {
+                 showToast(`User ${res.status}.`, 'success');
+                 loadView(currentView); // Refresh profile header to reflect changes
+               } else {
+                 showToast(res?.message || 'Error toggling block', 'error');
+               }
+             });
+             return;
+          }
+
           const followBtn = target.closest('.follow-btn');
           if (followBtn) {
             e.stopPropagation();
@@ -12004,11 +13118,34 @@ SOFTWARE.</div>
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({ following_id: userId })
-            }).then(res => {
+            }).then(async res => {
               if (res && res.status === 'followed') {
                 followBtn.textContent = 'Unfollow';
                 followBtn.classList.remove('btn-danger');
                 followBtn.classList.add('btn-outline-light');
+                
+                // Fetch Recommended Artists and show the dismissible container
+                const recs = await fetchData(`?action=get_recommended_artists&target_id=${userId}`);
+                if (recs && recs.length > 0) {
+                  const alertContainer = document.getElementById('recommendation-alert-container');
+                  if (alertContainer) {
+                    alertContainer.innerHTML = `
+                      <div class="alert bg-dark border-secondary text-white alert-dismissible fade show mt-3 position-relative shadow-lg" role="alert" style="border-radius: 12px;">
+                        <h6 class="alert-heading text-info fw-bold mb-3"><i class="bi bi-stars"></i> Because you followed this artist...</h6>
+                        <div class="d-flex gap-3 overflow-auto pb-2" style="scrollbar-width: thin;">
+                          ${recs.map(a => `
+                            <div class="text-center user-profile-link" data-userid="${a.id}" data-artist="${encodeURIComponent(a.artist)}" style="width: 80px; flex-shrink: 0; cursor: pointer;">
+                              <img src="?action=get_profile_picture&id=${a.id}" class="rounded-circle mb-2" style="width: 60px; height: 60px; object-fit: cover;">
+                              <div class="small text-truncate w-100 hover-underline">${escapeHTML(a.artist)}</div>
+                            </div>
+                          `).join('')}
+                        </div>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="alert"></button>
+                      </div>
+                    `;
+                  }
+                }
+
               } else if (res && res.status === 'unfollowed') {
                 followBtn.textContent = 'Follow';
                 followBtn.classList.remove('btn-outline-light');
@@ -12017,6 +13154,36 @@ SOFTWARE.</div>
                 showToast(res.message || 'Error toggling follow', 'error');
               }
             });
+            return;
+          }
+
+          const connTrigger = target.closest('.connection-trigger');
+          if (connTrigger) {
+            e.preventDefault();
+            e.stopPropagation();
+            const connType = connTrigger.dataset.type;
+            const uId = connTrigger.dataset.id;
+            const modalEl = document.getElementById('connections-modal');
+            if (modalEl) {
+              document.getElementById('connections-modal-title').textContent = connType.charAt(0).toUpperCase() + connType.slice(1);
+              const listEl = document.getElementById('connections-list');
+              listEl.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>';
+              bootstrap.Modal.getOrCreateInstance(modalEl).show();
+              
+              fetchData(`?action=get_connections&id=${uId}&conn_type=${connType}`).then(data => {
+                if (data && data.length > 0) {
+                  listEl.innerHTML = data.map(u => `
+                    <div class="list-group-item bg-transparent text-white border-secondary px-3 py-2 d-flex align-items-center gap-3 user-profile-link hover-bg-dark" data-userid="${u.id}" data-artist="${encodeURIComponent(u.artist)}" style="cursor: pointer;">
+                      <img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle" style="width: 40px; height: 40px; object-fit: cover;">
+                      <div class="fw-bold hover-underline text-truncate flex-grow-1">${escapeHTML(u.artist)}</div>
+                      <i class="bi bi-chevron-right text-secondary"></i>
+                    </div>
+                  `).join('');
+                } else {
+                  listEl.innerHTML = `<div class="p-4 text-center text-secondary">No ${connType} found.</div>`;
+                }
+              });
+            }
             return;
           }
           const addMixBtn = target.closest('.add-mix-to-playlist-btn');
@@ -12234,11 +13401,21 @@ SOFTWARE.</div>
           }
           const viewNoteTrigger = target.closest('.view-note-trigger');
           if (viewNoteTrigger) {
-             e.stopPropagation();
-             document.getElementById('view-note-title').innerHTML = decodeHTML(viewNoteTrigger.dataset.title);
-             document.getElementById('view-note-content').innerHTML = parseUserText(viewNoteTrigger.dataset.content);
-             bootstrap.Modal.getOrCreateInstance(document.getElementById('view-note-modal')).show();
-             return;
+            e.stopPropagation();
+            document.getElementById('view-note-title').innerHTML = decodeHTML(viewNoteTrigger.dataset.title);
+            document.getElementById('view-note-content').innerHTML = parseUserText(viewNoteTrigger.dataset.content);
+             
+            const rawDate = viewNoteTrigger.dataset.date;
+            if (rawDate) {
+              const dateObj = new Date(rawDate);
+              const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+              document.getElementById('view-note-date').innerHTML = `<i class="bi bi-calendar3"></i> Last modified: ${dateObj.toLocaleDateString(undefined, options)}`;
+            } else {
+              document.getElementById('view-note-date').innerHTML = '';
+            }
+             
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('view-note-modal')).show();
+            return;
           }
           const newNoteBtn = target.closest('.new-note-btn');
           if (newNoteBtn) {
@@ -12399,11 +13576,6 @@ SOFTWARE.</div>
                 loadView({ type: 'album_songs', param: albumRaw, sort: 'title_asc', filter_user_id: safeMenuUserId, artist_name: songArtistRaw });
                 hideMobileSidebar();
               }
-              break;
-            case 'go_album':
-              closeOpenModals();
-              loadView({ type: 'album_songs', param: name, sort: 'title_asc', filter_user_id: userid || '', artist_name: item.dataset.artistname || '' });
-              hideMobileSidebar();
               break;
             case 'show_all_genres':
               showAllGenresModal();
@@ -12678,40 +13850,75 @@ SOFTWARE.</div>
                   }
                 };
 
+                const expireSelect = document.getElementById('collab-expire-select');
+                const customExpireInput = document.getElementById('collab-custom-expire');
+                if (expireSelect && customExpireInput) {
+                  expireSelect.onchange = (e) => {
+                    if (e.target.value === 'custom') {
+                      customExpireInput.classList.remove('d-none');
+                    } else {
+                      customExpireInput.classList.add('d-none');
+                    }
+                  };
+                }
+
                 const copyLinkBtn = document.getElementById('collab-copy-link-btn');
                 if (copyLinkBtn) {
-                  // Clean up previous event listeners if necessary
                   const newCopyBtn = copyLinkBtn.cloneNode(true);
                   copyLinkBtn.parentNode.replaceChild(newCopyBtn, copyLinkBtn);
                   
-                  newCopyBtn.addEventListener('click', () => {
-                    const inviteUrl = window.location.origin + window.location.pathname + '?collab_invite=' + publicId;
-                    const onSuccess = () => {
-                      newCopyBtn.innerHTML = '<i class="bi bi-check-lg"></i> Link Copied!';
-                      newCopyBtn.classList.replace('btn-outline-light', 'btn-success');
-                      setTimeout(() => {
-                        newCopyBtn.innerHTML = '<i class="bi bi-link-45deg"></i> Copy Invite Link';
-                        newCopyBtn.classList.replace('btn-success', 'btn-outline-light');
-                      }, 2000);
-                    };
-                    const onError = () => showToast('Failed to copy link.', 'error');
-
-                    if (navigator.clipboard && window.isSecureContext) {
-                      navigator.clipboard.writeText(inviteUrl).then(onSuccess).catch(onError);
-                    } else {
-                      const textArea = document.createElement("textarea");
-                      textArea.value = inviteUrl;
-                      textArea.style.position = "fixed";
-                      textArea.style.opacity = "0";
-                      document.body.appendChild(textArea);
-                      textArea.focus();
-                      textArea.select();
-                      try {
-                        if (document.execCommand('copy')) onSuccess();
-                        else onError();
-                      } catch (err) { onError(); }
-                      document.body.removeChild(textArea);
+                  newCopyBtn.addEventListener('click', async () => {
+                    let expireVal = expireSelect ? expireSelect.value : '1440';
+                    if (expireVal === 'custom') {
+                      expireVal = customExpireInput.value.trim();
+                      if (!expireVal || isNaN(expireVal) || parseInt(expireVal) <= 0) {
+                        return showToast('Please enter a valid number of minutes.', 'error');
+                      }
+                    } else if (expireVal === 'forever') {
+                      expireVal = null;
                     }
+                    
+                    newCopyBtn.disabled = true;
+                    newCopyBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Generating...';
+
+                    const res = await fetchData('?action=manage_collaborators', {
+                      method: 'POST', headers: {'Content-Type': 'application/json'},
+                      body: JSON.stringify({ public_id: publicId, collab_action: 'generate_link', expire: expireVal })
+                    });
+
+                    if (res && res.status === 'success') {
+                      const inviteUrl = window.location.origin + window.location.pathname + '?collab_invite=' + res.token;
+                      const onSuccess = () => {
+                        newCopyBtn.innerHTML = '<i class="bi bi-check-lg"></i> Link Copied!';
+                        newCopyBtn.classList.replace('btn-outline-light', 'btn-success');
+                        setTimeout(() => {
+                          newCopyBtn.innerHTML = '<i class="bi bi-link-45deg"></i> Generate & Copy Link';
+                          newCopyBtn.classList.replace('btn-success', 'btn-outline-light');
+                        }, 2000);
+                      };
+                      const onError = () => showToast('Failed to copy link.', 'error');
+
+                      if (navigator.clipboard && window.isSecureContext) {
+                        navigator.clipboard.writeText(inviteUrl).then(onSuccess).catch(onError);
+                      } else {
+                        const textArea = document.createElement("textarea");
+                        textArea.value = inviteUrl;
+                        textArea.style.position = "fixed";
+                        textArea.style.opacity = "0";
+                        document.body.appendChild(textArea);
+                        textArea.focus();
+                        textArea.select();
+                        try {
+                          if (document.execCommand('copy')) onSuccess();
+                          else onError();
+                        } catch (err) { onError(); }
+                        document.body.removeChild(textArea);
+                      }
+                    } else {
+                      showToast(res?.message || 'Error generating link', 'error');
+                      newCopyBtn.innerHTML = '<i class="bi bi-link-45deg"></i> Generate & Copy Link';
+                    }
+                    newCopyBtn.disabled = false;
                   });
                 }
                 
@@ -13527,6 +14734,27 @@ SOFTWARE.</div>
           }
         });
         
+        let apiDebounceTimer;
+        const getApiBtn = document.getElementById('get-api-btn');
+        if (getApiBtn) {
+          getApiBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            hideMobileSidebar();
+            
+            // Debounce click to prevent prompt spam
+            clearTimeout(apiDebounceTimer);
+            apiDebounceTimer = setTimeout(() => {
+              const pwd = prompt("API Access is locked.\n\nEnter Admin Password to generate endpoints for other sites:");
+              if (pwd === 'admin') { // Automatically matches backend ADMIN_PASSWORD
+                window.adminApiKey = pwd;
+                bootstrap.Modal.getOrCreateInstance(document.getElementById('api-modal')).show();
+              } else if (pwd !== null) {
+                showToast("Incorrect admin password.", "error");
+              }
+            }, 300);
+          });
+        }
+
         const navUploadBtn = document.getElementById('nav-upload-btn');
         if (navUploadBtn) {
           navUploadBtn.addEventListener('click', (e) => {
@@ -14273,6 +15501,50 @@ SOFTWARE.</div>
         document.getElementById('sleep-timer-btn-desktop').addEventListener('click', handleSleepTimer);
         document.getElementById('sleep-timer-btn-mobile').addEventListener('click', handleSleepTimer);
 
+        const profileBgForm = document.getElementById('profile-bg-form');
+        const bioForm = document.getElementById('bio-form');
+
+        if (profileBgForm) {
+          profileBgForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const bgInput = document.getElementById('profile-bg-input');
+            if (bgInput.files.length === 0) return showToast('Select an image', 'error');
+            const submitBtn = document.getElementById('profile-bg-submit-btn');
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Uploading...';
+            const formData = new FormData();
+            formData.append('profile_background', bgInput.files[0]);
+            
+            try {
+              const res = await fetch('?action=upload_profile_background', { method: 'POST', body: formData });
+              const result = await res.json();
+              showToast(result.message, result.status);
+              if (result.status === 'success') {
+                 bgInput.value = '';
+                 await checkSession();
+                 if (currentView.type === 'user_profile') loadView(currentView);
+              }
+            } catch (err) {
+              showToast('Upload failed', 'error');
+            }
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Save Background';
+          });
+        }
+
+        if (bioForm) {
+          bioForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const bio = document.getElementById('settings-bio').value;
+            const res = await fetchData('?action=save_bio', { method: 'POST', body: JSON.stringify({ bio }) });
+            if (res && res.status === 'success') {
+              showToast(res.message, 'success');
+              await checkSession();
+              if (currentView.type === 'user_profile') loadView(currentView);
+            }
+          });
+        }
+
         changeNameForm.addEventListener('submit', async e => {
           e.preventDefault();
           const new_name = document.getElementById('new-name').value;
@@ -14862,6 +16134,19 @@ SOFTWARE.</div>
           } else {
             badges.forEach(b => b.classList.add('d-none'));
           }
+          
+          // Check Unread Messages (Inbox)
+          const inboxData = await fetchData('?action=get_inbox', {}, true);
+          let totalUnread = 0;
+          if (inboxData && inboxData.length > 0) {
+             inboxData.forEach(m => totalUnread += m.unread_count);
+          }
+          const inboxBadges = document.querySelectorAll('.inbox-badge');
+          if (totalUnread > 0) {
+            inboxBadges.forEach(b => { b.textContent = totalUnread; b.classList.remove('d-none'); });
+          } else {
+            inboxBadges.forEach(b => b.classList.add('d-none'));
+          }
         };
 
         function updateUIForAuthState() {
@@ -14943,6 +16228,8 @@ SOFTWARE.</div>
             
             const newNameInput = document.getElementById('new-name');
             if (newNameInput) newNameInput.value = currentUser.artist;
+            const bioInput = document.getElementById('settings-bio');
+            if (bioInput) bioInput.value = currentUser.bio || '';
             if (uploadLimitText) uploadLimitText.textContent = data.upload_limit;
             if (uploadRemainingText) {
               uploadRemainingText.textContent = `Today's remaining uploads: ${currentUser.uploads_remaining}`;
@@ -14981,7 +16268,8 @@ SOFTWARE.</div>
         const init = async () => {
           injectMetaTags();
           
-          audio.preload = 'auto';
+          // Fix: Prevent aggressive audio preloading from causing infinite network buffering spinners on an empty src
+          audio.preload = 'none';
           
           audio.addEventListener('waiting', () => {
             if (isPlaying) updatePlayPauseIcons(true); 
@@ -15034,37 +16322,36 @@ SOFTWARE.</div>
 
           // Intercept Invite Link before normal rendering
           const urlParams = new URLSearchParams(window.location.search);
-          const inviteId = urlParams.get('collab_invite');
-          if (inviteId) {
+          const inviteToken = urlParams.get('collab_invite');
+          if (inviteToken) {
             if (!currentUser) {
               showToast("Please log in to accept the collaboration invite.", "warning");
               const loginModal = new bootstrap.Modal(document.getElementById('login-modal'));
               loginModal.show();
             } else {
-              const playlistInfo = await fetchData(`?action=get_view_data&type=playlist&name=${encodeURIComponent(inviteId)}&sort=manual_order`);
-              if (playlistInfo && playlistInfo.details) {
-                if (playlistInfo.details.user_id == currentUser.id) {
+              const inviteData = await fetchData(`?action=get_invite_info&token=${encodeURIComponent(inviteToken)}`);
+              if (inviteData && inviteData.status === 'success' && inviteData.details) {
+                const playlistInfo = inviteData.details;
+                if (playlistInfo.user_id == currentUser.id) {
                   showToast("Are you try to befriend yourself because you don't have a friend?", "warning");
                   window.history.replaceState({}, document.title, window.location.pathname);
-                } else if (playlistInfo.details.is_private && playlistInfo.details.user_id !== currentUser.id) {
-                    // Falls through safely
                 } else {
                   const inviteModalEl = document.getElementById('collab-invite-modal');
                   if (inviteModalEl) {
-                    document.getElementById('invite-playlist-name').textContent = playlistInfo.details.name;
-                    document.getElementById('invite-playlist-creator').textContent = playlistInfo.details.creator;
+                    document.getElementById('invite-playlist-name').textContent = playlistInfo.name;
+                    document.getElementById('invite-playlist-creator').textContent = playlistInfo.creator;
                     const inviteModal = new bootstrap.Modal(inviteModalEl);
                     
                     document.getElementById('invite-accept-btn').onclick = async () => {
                       const res = await fetchData('?action=manage_collaborators', {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ public_id: inviteId, collab_action: 'join' })
+                        body: JSON.stringify({ public_id: playlistInfo.public_id, collab_action: 'join', token: inviteToken })
                       });
                       if (res) {
                         showToast(res.message, res.status);
                         inviteModal.hide();
                         window.history.replaceState({}, document.title, window.location.pathname);
-                        loadView({ type: 'playlist_songs', param: inviteId, sort: 'manual_order', filter_user_id: '' });
+                        loadView({ type: 'playlist_songs', param: playlistInfo.public_id, sort: 'manual_order', filter_user_id: '' });
                       }
                     };
                     
@@ -15454,9 +16741,9 @@ SOFTWARE.</div>
             if (!artistRaw && artistEl.classList.contains('song-artist-name')) artistRaw = artistEl.textContent.trim();
             
             if (artistRaw && window.innerWidth >= 992) {
-               artistHoverTimeout = setTimeout(() => {
-                  showArtistTooltip(artistEl, artistRaw, userId);
-               }, 500);
+              artistHoverTimeout = setTimeout(() => {
+                showArtistTooltip(artistEl, artistRaw, userId);
+              }, 500);
             }
           } else if (e.target.closest('#artist-hover-tooltip')) {
             clearTimeout(artistHideTimeout);
@@ -15477,39 +16764,164 @@ SOFTWARE.</div>
         artistTooltip.addEventListener('click', async e => {
           const followBtn = e.target.closest('.tooltip-follow-btn');
           if (followBtn) {
-             if (!currentUser) return showToast('Please log in', 'error');
-             const userId = followBtn.dataset.userId;
-             const res = await fetchData('?action=toggle_follow', {
-                method: 'POST', body: JSON.stringify({ following_id: userId })
-             });
-             if (res && (res.status === 'followed' || res.status === 'unfollowed')) {
-                const isFollowing = res.status === 'followed';
-                followBtn.textContent = isFollowing ? 'Unfollow' : 'Follow';
-                followBtn.className = `btn btn-sm w-100 mt-3 tooltip-follow-btn fw-bold ${isFollowing ? 'btn-outline-light' : 'btn-danger'}`;
+            if (!currentUser) return showToast('Please log in', 'error');
+            const userId = followBtn.dataset.userId;
+            const res = await fetchData('?action=toggle_follow', {
+              method: 'POST', body: JSON.stringify({ following_id: userId })
+            });
+            if (res && (res.status === 'followed' || res.status === 'unfollowed')) {
+              const isFollowing = res.status === 'followed';
+              followBtn.textContent = isFollowing ? 'Unfollow' : 'Follow';
+              followBtn.className = `btn btn-sm w-100 mt-3 tooltip-follow-btn fw-bold ${isFollowing ? 'btn-outline-light' : 'btn-danger'}`;
                 
-                for (let key in artistHoverCache) {
-                   if (artistHoverCache[key].user_id == userId) {
-                      artistHoverCache[key].is_following = isFollowing;
-                      artistHoverCache[key].followers_count += isFollowing ? 1 : -1;
-                      const followersText = artistTooltip.querySelector('.text-info');
-                      if (followersText) {
-                         followersText.innerHTML = `<i class="bi bi-people-fill"></i> ${formatSongCount(artistHoverCache[key].followers_count)} followers`;
-                      }
-                   }
+              for (let key in artistHoverCache) {
+                if (artistHoverCache[key].user_id == userId) {
+                  artistHoverCache[key].is_following = isFollowing;
+                  artistHoverCache[key].followers_count += isFollowing ? 1 : -1;
+                  const followersText = artistTooltip.querySelector('.text-info');
+                  if (followersText) {
+                    followersText.innerHTML = `<i class="bi bi-people-fill"></i> ${formatSongCount(artistHoverCache[key].followers_count)} followers`;
+                  }
                 }
-                if (currentView.type === 'artist_songs' || currentView.type === 'get_following' || currentView.type === 'get_recommendations') {
-                   loadView(currentView);
-                }
-             }
+              }
+              if (currentView.type === 'artist_songs' || currentView.type === 'get_following' || currentView.type === 'get_recommendations') {
+                loadView(currentView);
+              }
+            }
           } else {
-             const nameEl = artistTooltip.querySelector('.artist-tt-name');
-             if (nameEl) {
-                artistTooltip.style.opacity = '0';
-                artistTooltip.style.display = 'none';
-                loadView({ type: 'artist_songs', param: nameEl.textContent, sort: 'album_asc', filter_user_id: '', artist_name: '' });
-             }
+            const nameEl = artistTooltip.querySelector('.artist-tt-name');
+            if (nameEl) {
+              artistTooltip.style.opacity = '0';
+              artistTooltip.style.display = 'none';
+              loadView({ type: 'artist_songs', param: nameEl.textContent, sort: 'album_asc', filter_user_id: '', artist_name: '' });
+            }
           }
         });
+
+        // Calendar Modal Logic
+        const calendarModalEl = document.getElementById('calendar-modal');
+        let clockInterval;
+        let calCurrentMonth, calCurrentYear;
+        let calSelectedDate = null;
+
+        const updateClock = () => {
+          const now = new Date();
+          document.getElementById('calendar-time-display').textContent = now.toLocaleTimeString();
+          document.getElementById('calendar-date-display').textContent = now.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+        };
+
+        const renderCalendar = (month, year) => {
+          const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+          document.getElementById('cal-month-year').textContent = `${monthNames[month]} ${year}`;
+          
+          const daysGrid = document.getElementById('cal-days-grid');
+          daysGrid.innerHTML = '';
+          
+          const firstDay = new Date(year, month, 1).getDay();
+          const daysInMonth = new Date(year, month + 1, 0).getDate();
+          const today = new Date();
+          
+          for (let i = 0; i < firstDay; i++) {
+            daysGrid.insertAdjacentHTML('beforeend', `<div></div>`);
+          }
+          
+          for (let i = 1; i <= daysInMonth; i++) {
+            const isToday = (i === today.getDate() && month === today.getMonth() && year === today.getFullYear());
+            const isSelected = (calSelectedDate && i === calSelectedDate.getDate() && month === calSelectedDate.getMonth() && year === calSelectedDate.getFullYear());
+            
+            let classStr = 'text-white rounded';
+            if (isSelected) {
+              classStr = 'bg-danger text-white rounded fw-bold shadow-sm';
+            } else if (isToday) {
+              classStr = 'bg-secondary text-white rounded fw-bold';
+            }
+            
+            const hoverStr = !isSelected ? 'onmouseover="this.style.backgroundColor=\'rgba(255,255,255,0.1)\'" onmouseout="this.style.backgroundColor=\'transparent\'"' : '';
+            daysGrid.insertAdjacentHTML('beforeend', `<div class="p-2 cal-day-item ${classStr}" data-day="${i}" style="cursor: pointer; transition: background 0.2s;" ${hoverStr}>${i}</div>`);
+          }
+        };
+
+        if (calendarModalEl) {
+          calendarModalEl.addEventListener('show.bs.modal', () => {
+            const now = new Date();
+            calCurrentMonth = now.getMonth();
+            calCurrentYear = now.getFullYear();
+            if (!calSelectedDate) calSelectedDate = new Date();
+            
+            const jumpInput = document.getElementById('cal-jump-date');
+            if (jumpInput) {
+              const y = calSelectedDate.getFullYear();
+              const m = String(calSelectedDate.getMonth() + 1).padStart(2, '0');
+              const d = String(calSelectedDate.getDate()).padStart(2, '0');
+              jumpInput.value = `${y}-${m}-${d}`;
+            }
+
+            updateClock();
+            renderCalendar(calCurrentMonth, calCurrentYear);
+            clockInterval = setInterval(updateClock, 1000);
+          });
+          
+          calendarModalEl.addEventListener('hidden.bs.modal', () => {
+            clearInterval(clockInterval);
+          });
+          
+          document.getElementById('cal-prev-month').addEventListener('click', () => {
+            calCurrentMonth--;
+            if (calCurrentMonth < 0) { calCurrentMonth = 11; calCurrentYear--; }
+            renderCalendar(calCurrentMonth, calCurrentYear);
+          });
+          
+          document.getElementById('cal-next-month').addEventListener('click', () => {
+            calCurrentMonth++;
+            if (calCurrentMonth > 11) { calCurrentMonth = 0; calCurrentYear++; }
+            renderCalendar(calCurrentMonth, calCurrentYear);
+          });
+
+          document.getElementById('cal-days-grid').addEventListener('click', (e) => {
+            if (e.target.classList.contains('cal-day-item')) {
+              const day = parseInt(e.target.dataset.day);
+              calSelectedDate = new Date(calCurrentYear, calCurrentMonth, day);
+              renderCalendar(calCurrentMonth, calCurrentYear);
+              
+              const jumpInput = document.getElementById('cal-jump-date');
+              if (jumpInput) {
+                const y = calSelectedDate.getFullYear();
+                const m = String(calSelectedDate.getMonth() + 1).padStart(2, '0');
+                const d = String(calSelectedDate.getDate()).padStart(2, '0');
+                jumpInput.value = `${y}-${m}-${d}`;
+              }
+            }
+          });
+
+          const jumpInput = document.getElementById('cal-jump-date');
+          if (jumpInput) {
+            jumpInput.addEventListener('change', (e) => {
+              if (e.target.value) {
+                const parts = e.target.value.split('-');
+                calCurrentYear = parseInt(parts[0]);
+                calCurrentMonth = parseInt(parts[1]) - 1;
+                const day = parseInt(parts[2]);
+                calSelectedDate = new Date(calCurrentYear, calCurrentMonth, day);
+                renderCalendar(calCurrentMonth, calCurrentYear);
+              }
+            });
+          }
+
+          document.getElementById('cal-today-btn').addEventListener('click', () => {
+            const now = new Date();
+            calCurrentMonth = now.getMonth();
+            calCurrentYear = now.getFullYear();
+            calSelectedDate = now;
+            renderCalendar(calCurrentMonth, calCurrentYear);
+            
+            if (jumpInput) {
+              const y = now.getFullYear();
+              const m = String(now.getMonth() + 1).padStart(2, '0');
+              const d = String(now.getDate()).padStart(2, '0');
+              jumpInput.value = `${y}-${m}-${d}`;
+            }
+          });
+        }
 
         init();
       });
