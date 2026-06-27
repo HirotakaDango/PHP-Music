@@ -135,10 +135,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 $raw_uri = $_SERVER['REQUEST_URI'] ?? '';
 $temp_action = $_GET['action'] ?? '';
 
-// ANTI-SCRAPING FIREWALL: Now runs safely AFTER CORS validation
-$raw_uri = $_SERVER['REQUEST_URI'] ?? '';
-$temp_action = $_GET['action'] ?? '';
-
 // Support JSON bodies sent by cross-origin fetch requests
 $json_body = json_decode(file_get_contents('php://input'), true);
 if (is_array($json_body)) {
@@ -349,7 +345,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '4.1');
+define('APP_VERSION', '4.2');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -437,6 +433,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       }
       $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM tasks WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM play_counts WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM favorites WHERE user_id = ?")->execute([$del_uid]);
@@ -444,8 +441,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $db->prepare("DELETE FROM playlists WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM playlist_collaborators WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?")->execute([$del_uid, $del_uid]);
-      $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$del_uid, $del_uid]);
@@ -1095,7 +1090,15 @@ function init_db($db) {
       PRIMARY KEY (user_id, song_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS personal_notes (
-      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT, content TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT, content TEXT, category TEXT DEFAULT 'all', starred INTEGER DEFAULT 0, note_type TEXT DEFAULT 'note', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS note_categories (
+      id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL, 
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS tasks (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT, items TEXT, category TEXT DEFAULT 'all', starred INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS song_reactions (
@@ -1127,6 +1130,10 @@ function init_db($db) {
       FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
     );
   ");
+
+  try { $db->exec("ALTER TABLE personal_notes ADD COLUMN category TEXT DEFAULT 'all';"); } catch(Exception $e) {}
+  try { $db->exec("ALTER TABLE personal_notes ADD COLUMN starred INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+  try { $db->exec("ALTER TABLE personal_notes ADD COLUMN note_type TEXT DEFAULT 'note';"); } catch(Exception $e) {}
 
   $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
   if (!$stmt->fetch()) {
@@ -1651,12 +1658,15 @@ if (isset($_GET['action'])) {
     case 'get_connections':
       $target_user_id = (int)($_GET['id'] ?? 0);
       $conn_type = $_GET['conn_type'] ?? 'followers';
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * 25;
+      
       if ($conn_type === 'following') {
-        $stmt = $db->prepare("SELECT u.id, u.artist FROM follows f JOIN users u ON f.following_id = u.id WHERE f.follower_id = ? AND u.banned = 0");
+        $stmt = $db->prepare("SELECT u.id, u.artist, (SELECT 1 FROM follows WHERE follower_id = ? AND following_id = u.id) as is_followed FROM follows f JOIN users u ON f.following_id = u.id WHERE f.follower_id = ? AND u.banned = 0 LIMIT 25 OFFSET ?");
       } else {
-        $stmt = $db->prepare("SELECT u.id, u.artist FROM follows f JOIN users u ON f.follower_id = u.id WHERE f.following_id = ? AND u.banned = 0");
+        $stmt = $db->prepare("SELECT u.id, u.artist, (SELECT 1 FROM follows WHERE follower_id = ? AND following_id = u.id) as is_followed FROM follows f JOIN users u ON f.follower_id = u.id WHERE f.following_id = ? AND u.banned = 0 LIMIT 25 OFFSET ?");
       }
-      $stmt->execute([$target_user_id]);
+      $stmt->execute([$user_id ?? 0, $target_user_id, $offset]);
       send_json($stmt->fetchAll());
       break;
 
@@ -1807,6 +1817,7 @@ if (isset($_GET['action'])) {
       while ($row = $stmt->fetch()) { if ($row['file'] && file_exists($row['file'])) @unlink($row['file']); }
       $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM tasks WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM play_counts WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM favorites WHERE user_id = ?")->execute([$user_id]);
@@ -1814,8 +1825,6 @@ if (isset($_GET['action'])) {
       $db->prepare("DELETE FROM playlists WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM playlist_collaborators WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?")->execute([$user_id, $user_id]);
-      $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$user_id]);
-      $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$user_id, $user_id]);
@@ -2640,11 +2649,47 @@ if (isset($_GET['action'])) {
       send_json(['status' => 'success']);
       break;
 
+    case 'get_note_categories':
+      if (!$user_id) { send_json([]); }
+      $stmt = $db->prepare("SELECT id, name FROM note_categories WHERE user_id = ?");
+      $stmt->execute([$user_id]);
+      send_json($stmt->fetchAll());
+      break;
+      
+    case 'save_note_category':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $cat_id = $data['id'] ?? null;
+      $name = trim(htmlspecialchars($data['name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      if ($cat_id) {
+        $stmt = $db->prepare("SELECT id FROM note_categories WHERE id = ? AND user_id = ?");
+        $stmt->execute([$cat_id, $user_id]);
+        if ($stmt->fetch()) {
+          $db->prepare("UPDATE note_categories SET name = ? WHERE id = ?")->execute([$name, $cat_id]);
+        } else {
+          $db->prepare("INSERT INTO note_categories (id, user_id, name) VALUES (?, ?, ?)")->execute([$cat_id, $user_id, $name]);
+        }
+      }
+      send_json(['status' => 'success']);
+      break;
+      
+    case 'delete_note_category':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $cat_id = $data['id'] ?? null;
+      if ($cat_id) {
+        $db->prepare("DELETE FROM note_categories WHERE id = ? AND user_id = ?")->execute([$cat_id, $user_id]);
+        $db->prepare("UPDATE personal_notes SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
+      }
+      send_json(['status' => 'success']);
+      break;
+
     case 'get_notes':
       if (!$user_id) { send_json([]); }
       $sort_key = $_GET['sort'] ?? 'newest';
       $search = $_GET['q'] ?? '';
-      $order_by = ['newest' => 'ORDER BY created_at DESC', 'oldest' => 'ORDER BY created_at ASC', 'modified' => 'ORDER BY updated_at DESC'][$sort_key] ?? 'ORDER BY created_at DESC';
+      $filter = $_GET['filter'] ?? 'all';
+      $order_by = ['newest' => 'ORDER BY updated_at DESC', 'oldest' => 'ORDER BY updated_at ASC', 'modified' => 'ORDER BY updated_at DESC'][$sort_key] ?? 'ORDER BY updated_at DESC';
       
       $where = "WHERE user_id = ?";
       $params = [$user_id];
@@ -2653,24 +2698,94 @@ if (isset($_GET['action'])) {
         $params[] = "%$search%";
         $params[] = "%$search%";
       }
+      if ($filter === 'starred') {
+        $where .= " AND starred = 1";
+      } elseif ($filter === 'tasks') {
+        $where .= " AND note_type = 'task'";
+      } elseif ($filter !== 'all') {
+        $where .= " AND category = ?";
+        $params[] = $filter;
+      }
       
-      $stmt = $db->prepare("SELECT * FROM personal_notes $where $order_by $limit_clause");
+      $stmt = $db->prepare("SELECT id, title, content, category, starred, note_type, created_at, updated_at FROM personal_notes $where $order_by $limit_clause");
       $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
     
+    case 'get_tasks':
+      if (!$user_id) { send_json([]); }
+      $sort_key = $_GET['sort'] ?? 'newest';
+      $search = $_GET['q'] ?? '';
+      $filter = $_GET['filter'] ?? 'all';
+      $order_by = ['newest' => 'ORDER BY updated_at DESC', 'oldest' => 'ORDER BY updated_at ASC', 'modified' => 'ORDER BY updated_at DESC'][$sort_key] ?? 'ORDER BY updated_at DESC';
+      
+      $where = "WHERE user_id = ?";
+      $params = [$user_id];
+      if ($search !== '') {
+        $where .= " AND (title LIKE ? OR items LIKE ?)";
+        $params[] = "%$search%";
+        $params[] = "%$search%";
+      }
+      if ($filter === 'starred') {
+        $where .= " AND starred = 1";
+      } elseif ($filter !== 'all') {
+        $where .= " AND category = ?";
+        $params[] = $filter;
+      }
+      
+      $stmt = $db->prepare("SELECT id, title, items, category, starred, created_at, updated_at FROM tasks $where $order_by $limit_clause");
+      $stmt->execute($params);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'save_task':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $task_id = $data['id'] ?? null;
+      $title = htmlspecialchars($data['title'] ?? '', ENT_QUOTES, 'UTF-8');
+      $items = $data['items'] ?? '[]'; 
+      $title = str_replace(['&#039;', '&#39;', '&quot;'], ["'", "'", '"'], $title);
+      $category = $data['category'] ?? 'all';
+      $starred = !empty($data['starred']) ? 1 : 0;
+      
+      if ($task_id) {
+        $db->prepare("UPDATE tasks SET title = ?, items = ?, category = ?, starred = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")->execute([$title, $items, $category, $starred, $task_id, $user_id]);
+      } else {
+        $db->prepare("INSERT INTO tasks (user_id, title, items, category, starred) VALUES (?, ?, ?, ?, ?)")->execute([$user_id, $title, $items, $category, $starred]);
+        $task_id = $db->lastInsertId();
+      }
+      send_json(['status' => 'success', 'id' => $task_id]);
+      break;
+
+    case 'delete_task':
+      if (!$user_id) { http_response_code(403); exit; }
+      $db->prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
     case 'save_note':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
       $note_id = $data['id'] ?? null;
-      $title = htmlspecialchars($data['title']);
-      $content = format_user_text($data['content']);
+      
+      $title = htmlspecialchars($data['title'] ?? '', ENT_QUOTES, 'UTF-8');
+      $content = htmlspecialchars($data['content'] ?? '', ENT_QUOTES, 'UTF-8');
+      
+      // Fixes the exact "I&#039;m" entity rendering issue
+      $title = str_replace(['&#039;', '&#39;', '&quot;'], ["'", "'", '"'], $title);
+      $content = str_replace(['&#039;', '&#39;', '&quot;'], ["'", "'", '"'], $content);
+      
+      $category = $data['category'] ?? 'all';
+      $starred = !empty($data['starred']) ? 1 : 0;
+      $note_type = $data['note_type'] ?? 'note';
+      
       if ($note_id) {
-        $db->prepare("UPDATE personal_notes SET title = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")->execute([$title, $content, $note_id, $user_id]);
+        $db->prepare("UPDATE personal_notes SET title = ?, content = ?, category = ?, starred = ?, note_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")->execute([$title, $content, $category, $starred, $note_type, $note_id, $user_id]);
       } else {
-        $db->prepare("INSERT INTO personal_notes (user_id, title, content) VALUES (?, ?, ?)")->execute([$user_id, $title, $content]);
+        $db->prepare("INSERT INTO personal_notes (user_id, title, content, category, starred, note_type) VALUES (?, ?, ?, ?, ?, ?)")->execute([$user_id, $title, $content, $category, $starred, $note_type]);
+        $note_id = $db->lastInsertId();
       }
-      send_json(['status' => 'success']);
+      send_json(['status' => 'success', 'id' => $note_id]);
       break;
 
     case 'delete_note':
@@ -3045,8 +3160,6 @@ if (isset($_GET['action'])) {
       $sort = $post_data['sort'] ?? '';
       $filter_user_id = $post_data['filter_user_id'] ?? '';
       $artist_name = $post_data['artist_name'] ?? '';
-
-      $sql = "SELECT m.id FROM music m ";
 
       $sql = "SELECT m.id FROM music m ";
       $conditions = "";
@@ -5496,6 +5609,9 @@ function perform_full_scan($db) {
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css" />
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <?php echo $initialViewJS; ?>
     <style>
       :root {
@@ -5594,10 +5710,6 @@ function perform_full_scan($db) {
       }
       .search-bar.input-group .btn:hover { background-color: #383838; color: var(--ytm-primary-text); }
       .content-title { font-size: 2rem; font-weight: 700; margin-bottom: 0; }
-      .song-list-header, .song-item {
-        display: grid; grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px;
-        align-items: center; gap: 1rem; padding: 0.5rem 1rem; font-size: 0.9rem; color: var(--ytm-secondary-text);
-      }
       .song-list-header, .song-item {
         display: grid; grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px;
         align-items: center; gap: 1rem; padding: 0.5rem 1rem; font-size: 0.9rem; color: var(--ytm-secondary-text);
@@ -5923,7 +6035,169 @@ function perform_full_scan($db) {
         display: none; opacity: 0; transition: opacity 0.2s ease-in-out; pointer-events: auto;
       }
       .tooltip-follow-btn { transition: background-color 0.2s, color 0.2s; }
-    }
+
+      /* Note App Ported Styles */
+      .note-card {
+        background-color: var(--ytm-surface-2);
+        border: 1px solid #404040;
+        border-radius: 12px;
+        padding: 20px;
+        position: relative;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        min-height: 180px;
+        transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+        overflow: hidden;
+      }
+      .note-card:hover {
+        box-shadow: 0 8px 16px rgba(0,0,0,0.4);
+        border-color: #666;
+        transform: translateY(-4px);
+        background-color: #2a2a2a;
+      }
+      .note-card.selected {
+        background-color: rgba(255, 0, 0, 0.15);
+        border-color: var(--ytm-accent);
+      }
+      .note-card-title {
+        font-size: 1.15rem;
+        font-weight: 600;
+        margin-bottom: 8px;
+        padding-right: 32px;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        color: var(--ytm-primary-text);
+      }
+      .note-card-body {
+        font-size: 0.95rem;
+        color: var(--ytm-secondary-text);
+        line-height: 1.5;
+        flex-grow: 1;
+        display: -webkit-box;
+        -webkit-line-clamp: 5;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        word-break: break-word;
+      }
+      .note-card-footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 16px;
+        font-size: 0.8rem;
+        color: #8d9199;
+      }
+      .note-chip {
+        background-color: #333;
+        color: #ccc;
+        padding: 4px 10px;
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 0.75rem;
+      }
+      .card-star-btn {
+        position: absolute;
+        top: 16px;
+        right: 16px;
+        z-index: 2;
+        background: none; border: none; font-size: 1.2rem; cursor: pointer; color: var(--ytm-secondary-text);
+      }
+      .card-star-btn.starred { color: #f5b041; }
+      
+      .editor-overlay {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100dvh;
+        background-color: var(--ytm-bg); z-index: 1050;
+        display: flex; flex-direction: column;
+        transform: translateY(100%); transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+      .editor-overlay.active { transform: translateY(0); }
+      .editor-header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 12px 24px; border-bottom: 1px solid var(--ytm-surface-2); background-color: var(--ytm-bg);
+      }
+      .editor-body {
+        flex: 1; display: flex; flex-direction: column; width: 100%; max-width: 1200px;
+        margin: 0 auto; padding: 24px 32px; overflow: hidden;
+      }
+      .editor-title {
+        font-size: 2rem; font-weight: 700; border: none; outline: none; background: transparent;
+        color: var(--ytm-primary-text); width: 100%; margin-bottom: 16px;
+      }
+      .editor-content {
+        flex: 1; width: 100%; border: none; outline: none; background: transparent;
+        color: var(--ytm-primary-text); font-size: 1.15rem; line-height: 1.7; resize: none; overflow-y: auto; padding-bottom: 40px;
+      }
+      .editor-footer {
+        padding: 12px 32px; border-top: 1px solid var(--ytm-surface-2); display: flex; justify-content: space-between;
+        font-size: 0.85rem; color: var(--ytm-secondary-text); background-color: var(--ytm-bg);
+      }
+      .find-replace-panel {
+        position: absolute; top: 70px; right: 32px; background-color: var(--ytm-surface);
+        border-radius: 12px; padding: 16px; width: 360px; box-shadow: 0 8px 24px rgba(0,0,0,0.8);
+        display: none; flex-direction: column; gap: 12px; z-index: 1100; border: 1px solid var(--ytm-surface-2);
+      }
+      .find-replace-panel.active { display: flex; }
+      .find-row {
+        display: flex; align-items: center; gap: 8px; background-color: var(--ytm-surface-2);
+        border-radius: 8px; padding: 6px 12px; border: 1px solid #404040;
+      }
+      .find-row input { flex-grow: 1; border: none; background: transparent; color: var(--ytm-primary-text); outline: none; }
+      
+      #editorMarkdownPreview h1, #editorMarkdownPreview h2, #editorMarkdownPreview h3 { margin-top: 1rem; margin-bottom: 0.5rem; color: var(--ytm-primary-text); font-weight: 700; }
+      #editorMarkdownPreview p { margin-bottom: 1rem; }
+      #editorMarkdownPreview ul, #editorMarkdownPreview ol { padding-left: 2rem; margin-bottom: 1rem; }
+      #editorMarkdownPreview blockquote { border-left: 4px solid var(--ytm-accent); padding-left: 1rem; color: var(--ytm-secondary-text); }
+      #editorMarkdownPreview pre { background: var(--ytm-surface-2); padding: 1rem; border-radius: 8px; overflow-x: auto; }
+      #editorMarkdownPreview code { background: var(--ytm-surface-2); padding: 0.2rem 0.4rem; border-radius: 4px; font-family: monospace; }
+      #editorMarkdownPreview input[type="checkbox"] { margin-right: 10px; transform: scale(1.3); accent-color: var(--ytm-accent); cursor: pointer; }
+      #editorMarkdownPreview table { width: 100%; margin-bottom: 1rem; color: var(--ytm-primary-text); border-collapse: collapse; }
+      #editorMarkdownPreview table th, #editorMarkdownPreview table td { padding: 0.5rem; border: 1px solid #404040; }
+      #editorMarkdownPreview table th { background-color: var(--ytm-surface-2); font-weight: 700; }
+      .task-list-item { list-style: none; display: flex; align-items: center; }
+      
+      .task-item-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; background: var(--ytm-surface-2); padding: 8px 12px; border-radius: 8px; border: 1px solid #404040; transition: border-color 0.2s; }
+      .task-item-row:focus-within { border-color: var(--ytm-accent); }
+      .task-item-checkbox { transform: scale(1.3); accent-color: var(--ytm-accent); cursor: pointer; flex-shrink: 0; margin-left: 4px; }
+      .task-item-input { flex-grow: 1; border: none; background: transparent; color: var(--ytm-primary-text); outline: none; font-size: 1.05rem; }
+      .task-item-input.completed { text-decoration: line-through; color: var(--ytm-secondary-text); }
+      .task-item-del { background: none; border: none; color: #ff8888; cursor: pointer; font-size: 1.2rem; padding: 4px; flex-shrink: 0; opacity: 0.5; transition: opacity 0.2s; }
+      .task-item-row:hover .task-item-del { opacity: 1; }
+      .task-card-item { display: flex; align-items: flex-start; gap: 8px; font-size: 0.9rem; color: var(--ytm-secondary-text); margin-bottom: 6px; }
+      .task-card-item.completed { text-decoration: line-through; opacity: 0.5; }
+      
+      .cat-manage-list { max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+      .cat-manage-item { display: flex; align-items: center; justify-content: space-between; background: var(--ytm-surface-2); padding: 12px 16px; border-radius: 8px; border: 1px solid #404040; }
+      
+      .note-icon-btn { background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.25rem; cursor: pointer; padding: 4px 8px; border-radius: 4px; transition: 0.2s; }
+      .note-icon-btn:hover { color: var(--ytm-primary-text); background: var(--ytm-surface-2); }
+      
+      .editor-dropdown-menu {
+        position: absolute; top: 100%; right: 0; margin-top: 8px; background-color: var(--ytm-surface-2);
+        border: 1px solid #404040; border-radius: 8px; min-width: 180px; box-shadow: 0 8px 24px rgba(0,0,0,0.8);
+        display: none; flex-direction: column; padding: 8px 0; z-index: 1200;
+      }
+      .editor-dropdown-menu.active { display: flex; }
+      .editor-dropdown-item {
+        display: flex; align-items: center; gap: 12px; padding: 10px 20px; cursor: pointer; color: var(--ytm-primary-text); font-size: 0.95rem; transition: background-color 0.2s;
+      }
+      .editor-dropdown-item:hover { background-color: #404040; }
+      
+      .selection-bar {
+        position: fixed; bottom: -100px; left: 50%; transform: translateX(-50%);
+        background-color: var(--ytm-surface-2); color: var(--ytm-primary-text); padding: 12px 24px; border-radius: 100px;
+        display: flex; align-items: center; justify-content: space-between; width: 90%; max-width: 600px;
+        box-shadow: 0 12px 28px rgba(0,0,0,0.8); transition: bottom 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); z-index: 1040;
+        border: 1px solid #404040;
+      }
+      .selection-bar.active { bottom: 100px; }
+      @media (max-width: 768px) {
+        .editor-body { padding: 20px 24px; }
+        .find-replace-panel { width: 90%; left: 5%; right: 5%; }
+        .selection-bar.active { bottom: 140px; }
+      }
     </style>
   </head>
   <body class="logged-out">
@@ -6009,9 +6283,27 @@ function perform_full_scan($db) {
               <span>Messages</span>
               <span class="badge bg-danger rounded-pill d-none ms-auto inbox-badge">0</span>
             </a>
-            <a href="#" class="nav-link" data-view="get_notes">
-              <i class="bi bi-journal-text"></i>
+            <a href="#notesSubmenu" data-bs-toggle="collapse" class="dl-independent collapsed" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;border-left:3px solid transparent;gap:1rem;text-decoration:none;padding:0.75rem 1.5rem;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'">
+              <i class="bi bi-journal-text" style="font-size:1.25rem;width:24px;text-align:center;"></i>
               <span>Personal Notes</span>
+              <i class="bi bi-chevron-down ms-auto" style="font-size: 0.8rem; transition: transform 0.2s;"></i>
+            </a>
+            <div class="collapse" id="notesSubmenu">
+              <ul class="list-unstyled ms-4 mb-0 pb-2">
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 note-filter-link" data-view="get_notes" data-filter="all"><i class="bi bi-folder2"></i> All Notes</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 note-filter-link" data-view="get_notes" data-filter="starred"><i class="bi bi-star"></i> Starred</a></li>
+                <div id="note-categories-menu-list"></div>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0" data-view="manage_note_categories"><i class="bi bi-tags"></i> Edit Categories</a></li>
+                <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
+                <li><a href="#" class="dl-independent py-2 ps-3 border-0" id="import-txt-btn-menu" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;gap:1rem;text-decoration:none;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'"><i class="bi bi-file-earmark-text" style="font-size:1.25rem;width:24px;text-align:center;"></i> Upload TXT</a></li>
+                <li><a href="#" class="dl-independent py-2 ps-3 border-0" id="import-json-btn-menu" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;gap:1rem;text-decoration:none;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'"><i class="bi bi-filetype-json" style="font-size:1.25rem;width:24px;text-align:center;"></i> Import JSON</a></li>
+                <li><a href="#" class="dl-independent py-2 ps-3 border-0" id="export-json-notes-menu" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;gap:1rem;text-decoration:none;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'"><i class="bi bi-download" style="font-size:1.25rem;width:24px;text-align:center;"></i> Export JSON</a></li>
+              </ul>
+            </ul>
+            </div>
+            <a href="#" class="nav-link" data-view="get_tasks">
+              <i class="bi bi-check2-square"></i>
+              <span>Tasks</span>
             </a>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#calendar-modal">
               <i class="bi bi-calendar3"></i>
@@ -6147,7 +6439,6 @@ function perform_full_scan($db) {
                   <span><i class="bi bi-chat-dots-fill me-2"></i>Direct Messages</span>
                   <span class="badge bg-danger rounded-pill d-none inbox-badge">0</span>
                 </a></li>
-                <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
                 <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
                 <li><a class="dropdown-item" href="#" id="sleep-timer-btn-desktop"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
                 <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill me-2"></i>Settings</a></li>
@@ -7188,22 +7479,127 @@ function perform_full_scan($db) {
       </div>
     </div>
 
-    <div class="modal fade" id="view-note-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
-        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
-          <div class="modal-header border-secondary pb-3">
-            <h5 class="modal-title text-white fw-bold fs-4" id="view-note-title"></h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body text-white p-4 d-flex flex-column">
-            <div style="white-space: pre-wrap; font-size: 1.1rem; line-height: 1.7; flex-grow: 1;" id="view-note-content"></div>
-            <div class="mt-4 pt-3 border-top border-secondary text-secondary small d-flex align-items-center gap-2" id="view-note-date">
-              <!-- Date injected here -->
+    <div class="editor-overlay" id="editorOverlay">
+      <header class="editor-header">
+        <div class="d-flex align-items-center gap-2">
+          <button class="note-icon-btn" id="closeEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
+        </div>
+        <div class="d-flex align-items-center gap-2 position-relative">
+          <button class="note-icon-btn" id="editorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
+          <button class="note-icon-btn" id="editorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
+          <button class="note-icon-btn" id="editorStarBtn" title="Toggle Star"><i class="bi bi-star" id="editorStarIcon"></i></button>
+          <div style="position: relative;" id="editorDropdown">
+            <button class="note-icon-btn" id="editorMoreBtn" title="More Options"><i class="bi bi-three-dots-vertical"></i></button>
+            <div class="editor-dropdown-menu" id="editorMoreMenu">
+              <div class="editor-dropdown-item" id="editorForceSaveBtn"><i class="bi bi-floppy"></i> Save</div>
+              <div class="editor-dropdown-item" id="editorCopyBtn"><i class="bi bi-copy"></i> Copy Content</div>
+              <div class="editor-dropdown-item" id="editorUndoBtn"><i class="bi bi-arrow-counterclockwise"></i> Undo</div>
+              <div class="editor-dropdown-item" id="editorRedoBtn"><i class="bi bi-arrow-clockwise"></i> Redo</div>
+              <div class="editor-dropdown-item" id="editorMarkdownHelpBtn" data-bs-toggle="modal" data-bs-target="#markdown-info-modal"><i class="bi bi-markdown"></i> Markdown Guide</div>
+              <div class="editor-dropdown-item" id="editorDownloadBtn"><i class="bi bi-download"></i> Download</div>
+              <div class="editor-dropdown-item text-danger" id="editorDeleteBtn"><i class="bi bi-trash"></i> Delete</div>
             </div>
           </div>
         </div>
+      </header>
+
+      <div class="find-replace-panel" id="findReplacePanel">
+        <div class="d-flex justify-content-between align-items-center mb-2 fw-bold text-white">
+          <span>Find and Replace</span>
+          <button class="note-icon-btn py-0 px-1" id="closeFindBtn"><i class="bi bi-x-lg"></i></button>
+        </div>
+        <div class="find-row pe-3">
+          <i class="bi bi-search text-secondary flex-shrink-0"></i>
+          <input type="text" id="findInput" placeholder="Find in text..." style="min-width: 0;" />
+          <span class="text-secondary small text-end flex-shrink-0" id="findCounter" style="min-width: 45px;">0/0</span>
+          <div class="d-flex flex-shrink-0 ms-1 gap-1">
+            <button class="note-icon-btn py-0 px-1" id="findPrevBtn" title="Previous"><i class="bi bi-chevron-up"></i></button>
+            <button class="note-icon-btn py-0 px-1" id="findNextBtn" title="Next"><i class="bi bi-chevron-down"></i></button>
+          </div>
+        </div>
+        <div class="find-row pe-3">
+          <i class="bi bi-pencil text-secondary flex-shrink-0"></i>
+          <input type="text" id="replaceInput" placeholder="Replace with..." style="min-width: 0;" />
+        </div>
+        <div class="d-flex gap-2 mt-1">
+          <button class="btn btn-sm btn-outline-light flex-grow-1" id="replaceBtn">Replace</button>
+          <button class="btn btn-sm btn-outline-light flex-grow-1" id="replaceAllBtn">Replace All</button>
+        </div>
+      </div>
+
+      <div class="editor-body">
+        <div class="flex-shrink-0 mb-4">
+          <input type="hidden" id="editorNoteId">
+          <input type="hidden" id="editorNoteType" value="note">
+          <input type="text" class="editor-title" id="editorTitle" placeholder="Note Title" />
+          <div class="d-flex align-items-center gap-3 text-secondary small">
+            <span id="editorDate"></span>
+            <div style="width:1px;height:14px;background:#404040;"></div>
+            <i class="bi bi-folder2"></i>
+            <select id="editorCategorySelect" style="background: transparent; color: var(--ytm-primary-text); border: none; outline: none; cursor: pointer;">
+              <option value="all" style="background: var(--ytm-surface-2);">Uncategorized</option>
+            </select>
+          </div>
+        </div>
+        <textarea class="editor-content" id="editorContent" placeholder="Start typing here... (Markdown & Task-lists supported)"></textarea>
+        <div class="editor-content d-none" id="editorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
+      </div>
+
+      <footer class="editor-footer">
+        <span id="editorWordCount">0 words</span>
+        <span id="editorCharCount">0 characters</span>
+      </footer>
+    </div>
+
+    <div class="editor-overlay" id="taskEditorOverlay">
+      <header class="editor-header">
+        <div class="d-flex align-items-center gap-2">
+          <button class="note-icon-btn" id="closeTaskEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
+        </div>
+        <div class="d-flex align-items-center gap-2 position-relative">
+          <button class="note-icon-btn" id="taskEditorStarBtn" title="Toggle Star"><i class="bi bi-star" id="taskEditorStarIcon"></i></button>
+          <div style="position: relative;">
+            <button class="note-icon-btn" id="taskEditorMoreBtn" title="More Options"><i class="bi bi-three-dots-vertical"></i></button>
+            <div class="editor-dropdown-menu" id="taskEditorMoreMenu">
+              <div class="editor-dropdown-item" id="taskEditorForceSaveBtn"><i class="bi bi-floppy"></i> Save</div>
+              <div class="editor-dropdown-item" id="taskEditorCopyBtn"><i class="bi bi-copy"></i> Copy Content</div>
+              <div class="editor-dropdown-item text-danger" id="taskEditorDeleteBtn"><i class="bi bi-trash"></i> Delete List</div>
+            </div>
+          </div>
+        </div>
+      </header>
+      <div class="editor-body">
+        <div class="flex-shrink-0 mb-4">
+          <input type="hidden" id="taskEditorId">
+          <input type="text" class="editor-title" id="taskEditorTitle" placeholder="Task List Title" />
+          <div class="d-flex align-items-center gap-3 text-secondary small">
+            <span id="taskEditorDate"></span>
+            <div style="width:1px;height:14px;background:#404040;"></div>
+            <i class="bi bi-folder2"></i>
+            <select id="taskEditorCategorySelect" style="background: transparent; color: var(--ytm-primary-text); border: none; outline: none; cursor: pointer;">
+              <option value="all" style="background: var(--ytm-surface-2);">Uncategorized</option>
+            </select>
+          </div>
+        </div>
+        <div class="task-list-container flex-grow-1 overflow-auto pe-2" id="taskItemsContainer"></div>
+        <button class="btn btn-outline-danger w-100 mt-3 fw-bold" id="addTaskItemBtn" style="border-style: dashed; padding: 12px;"><i class="bi bi-plus-lg"></i> Add New Task</button>
       </div>
     </div>
+
+    <div class="selection-bar" id="selectionBarNotes">
+      <div class="d-flex align-items-center gap-2">
+        <button class="note-icon-btn" id="toggleSelectAllNotesBtn" title="Select / Unselect All"><i class="bi bi-check-all fs-5"></i></button>
+        <span class="fw-bold fs-6 ms-2" id="selectionCountNotes">0</span>
+      </div>
+      <div class="d-flex gap-2">
+        <button class="note-icon-btn" id="bulkDownloadNotesBtn" title="Download ZIP"><i class="bi bi-download fs-5"></i></button>
+        <button class="note-icon-btn text-danger" id="bulkDeleteNotesBtn" title="Delete Selected"><i class="bi bi-trash fs-5"></i></button>
+        <button class="note-icon-btn" id="cancelSelectNotesBtn" title="Cancel"><i class="bi bi-x-lg fs-5"></i></button>
+      </div>
+    </div>
+
+    <input type="file" id="fileImportTxt" accept=".txt" multiple style="display: none;" />
+    <input type="file" id="fileImportJson" accept=".json" style="display: none;" />
 
     <div class="modal fade" id="bbcode-info-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
@@ -7228,6 +7624,110 @@ function perform_full_scan($db) {
                 <span class="text-secondary small">Use <code>@Username</code> (without spaces) to link directly to a user's profile.</span>
               </li>
             </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="markdown-info-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-markdown-fill text-info me-2"></i> Markdown Guide</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-light">
+            <p class="text-secondary small mb-3">Use these markdown formats to style your personal notes. Toggle the <i class="bi bi-markdown"></i> button in the editor to see the preview!</p>
+            <div class="table-responsive">
+              <table class="table table-dark table-bordered table-striped text-white small m-0">
+                <thead>
+                  <tr>
+                    <th>Element</th>
+                    <th>Syntax</th>
+                    <th>Example Preview</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><strong>Headings</strong></td>
+                    <td><code># H1<br>## H2<br>### H3</code></td>
+                    <td><span class="fs-5 fw-bold">H1</span><br><span class="fs-6 fw-bold">H2</span></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Bold</strong></td>
+                    <td><code>**bold text**</code></td>
+                    <td><strong>bold text</strong></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Italic</strong></td>
+                    <td><code>*italicized text*</code></td>
+                    <td><em>italicized text</em></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Strikethrough</strong></td>
+                    <td><code>~~strikethrough~~</code></td>
+                    <td><del>strikethrough</del></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Blockquote</strong></td>
+                    <td><code>> blockquote</code></td>
+                    <td><blockquote class="border-start border-4 border-danger ps-2 m-0 text-secondary">blockquote</blockquote></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Ordered List</strong></td>
+                    <td><code>1. First item<br>2. Second item</code></td>
+                    <td><ol class="mb-0 ps-3"><li>First item</li><li>Second item</li></ol></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Unordered List</strong></td>
+                    <td><code>- First item<br>- Second item</code></td>
+                    <td><ul class="mb-0 ps-3"><li>First item</li><li>Second item</li></ul></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Task List</strong></td>
+                    <td><code>- [ ] To do<br>- [x] Done</code></td>
+                    <td><ul class="list-unstyled mb-0"><li><i class="bi bi-square"></i> To do</li><li><i class="bi bi-check2-square text-success"></i> Done</li></ul></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Code</strong></td>
+                    <td><code>`code`</code></td>
+                    <td><code class="bg-dark p-1 rounded">code</code></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Code Block</strong></td>
+                    <td><code>```<br>code block<br>```</code></td>
+                    <td><pre class="m-0 bg-dark p-1 rounded">code block</pre></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Link</strong></td>
+                    <td><code>[title](https://url.com)</code></td>
+                    <td><a href="#" class="text-info text-decoration-none">title</a></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Image</strong></td>
+                    <td><code>![alt](https://img.url)</code></td>
+                    <td><i class="bi bi-image"></i> image</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Table</strong></td>
+                    <td><pre class="m-0">| Col | Col |
+| --- | --- |
+| Val | Val |</pre></td>
+                    <td>
+                      <table class="table table-sm table-bordered m-0 text-white" style="background: transparent;">
+                        <tr><th class="bg-dark text-white">Col</th><th class="bg-dark text-white">Col</th></tr>
+                        <tr><td>Val</td><td>Val</td></tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><strong>Horizontal Rule</strong></td>
+                    <td><code>---</code></td>
+                    <td><hr class="m-0 border-secondary"></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
@@ -7265,28 +7765,6 @@ function perform_full_scan($db) {
               <input type="date" id="cal-jump-date" class="form-control form-control-sm bg-dark text-white border-secondary" title="Jump to Date">
               <button class="btn btn-sm btn-outline-info fw-bold w-100" id="cal-today-btn">Jump to Today</button>
             </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="modal fade" id="note-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content" style="background-color: var(--ytm-surface);">
-          <div class="modal-header border-0">
-            <h5 class="modal-title text-white">Edit Note</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body">
-            <form id="note-form">
-              <input type="hidden" id="note-id">
-              <input type="text" id="note-title" class="form-control bg-dark text-white border-secondary mb-3" placeholder="Title" required>
-              <textarea id="note-content" class="form-control bg-dark text-white border-secondary mb-2" rows="6" placeholder="Write your note here..." maxlength="25000" required></textarea>
-              <div class="d-flex justify-content-end mb-3">
-                <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
-              </div>
-              <button type="submit" class="btn btn-danger w-100">Save Note</button>
-            </form>
           </div>
         </div>
       </div>
@@ -8408,6 +8886,45 @@ SOFTWARE.</div>
           };
 
           activityModalEl.addEventListener('show.bs.modal', loadActivityFeed);
+
+          const connectionsModalEl = document.getElementById('connections-modal');
+          if (connectionsModalEl) {
+            connectionsModalEl.addEventListener('click', async (e) => {
+              const loadMoreBtn = e.target.closest('#load-more-conn-btn');
+              if (loadMoreBtn) {
+                e.preventDefault();
+                window.connPage++;
+                window.loadConnections(true);
+                return;
+              }
+              
+              const followBtn = e.target.closest('.follow-btn-modal');
+              if (followBtn) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!currentUser) return showToast('Please log in', 'error');
+                const userId = followBtn.dataset.userId;
+                const res = await fetchData('?action=toggle_follow', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({ following_id: userId })
+                });
+                
+                if (res && (res.status === 'followed' || res.status === 'unfollowed')) {
+                  const isFollowing = res.status === 'followed';
+                  followBtn.textContent = isFollowing ? 'Unfollow' : 'Follow';
+                  followBtn.className = `btn btn-sm rounded-pill fw-bold follow-btn-modal px-3 flex-shrink-0 ${isFollowing ? 'btn-outline-light' : 'btn-danger'}`;
+                  
+                  if (currentView.type === 'artist_songs' || currentView.type === 'user_profile' || currentView.type === 'get_following') {
+                    loadView(currentView); // Sync background view numbers
+                  }
+                } else {
+                  showToast(res?.message || 'Error toggling follow', 'error');
+                }
+                return;
+              }
+            });
+          }
 
           const inboxModalEl = document.getElementById('inbox-modal');
           const chatModalEl = document.getElementById('chat-modal');
@@ -10382,13 +10899,22 @@ SOFTWARE.</div>
                   <button class="btn btn-danger rounded-pill px-4 fw-medium shadow-sm" id="create-new-playlist-btn"><i class="bi bi-plus-lg me-1"></i> Create</button>
                   <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-playlist-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
                 </div>
-              </div>`;
+              </div>
+            `;
           } else if (type === 'get_collab_playlists' && !append && currentUser) {
             contentArea.innerHTML = `
               <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
                 <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-people-fill text-info me-3 fs-3"></i> Shared With Me</div>
-              </div>`;
+              </div>
+            `;
+          } else if (type === 'get_following' && !append && currentUser) {
+            contentArea.innerHTML = `
+              <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-person-lines-fill text-primary me-3 fs-3"></i> Following</div>
+              </div>
+            `;
           }
+          
           if (!items || items.length === 0) {
             if (!append && type !== 'get_user_playlists') {
               contentArea.innerHTML += `<div class="text-center p-5 text-secondary">No ${type.replace('get_','')} found.</div>`;
@@ -10857,6 +11383,8 @@ SOFTWARE.</div>
           if (artist_name) {
             params.append('artist_name', artist_name);
           }
+          if (currentView.searchQuery) params.append('q', currentView.searchQuery);
+          if (currentView.filter) params.append('filter', currentView.filter);
 
           switch (type) {
             case 'get_songs':
@@ -10924,31 +11452,69 @@ SOFTWARE.</div>
               if (data && data.length > 0) {
                  const grid = document.getElementById('notes-grid');
                  if(grid) {
-                   grid.insertAdjacentHTML('beforeend', data.map(n => `
-                    <div class="col">
-                      <div class="card h-100 bg-dark text-white border-secondary">
-                        <div class="card-body">
-                          <h5 class="card-title fw-bold text-truncate">${escapeHTML(n.title)}</h5>
-                          <p class="card-text text-secondary small" style="white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">${parseUserText(n.content)}</p>
-                        </div>
-                        <div class="card-footer border-secondary d-flex justify-content-between align-items-center">
-                          <small class="text-secondary">${timeAgo(n.updated_at)}</small>
-                          <div>
-                            <button class="btn btn-sm btn-outline-light me-1 edit-note-btn" data-id="${n.id}" data-title="${escapeHTML(n.title)}" data-content="${escapeHTML(n.content)}"><i class="bi bi-pencil"></i></button>
-                            <button class="btn btn-sm btn-outline-danger delete-note-btn" data-id="${n.id}"><i class="bi bi-trash"></i></button>
-                          </div>
+                   const html = data.map(n => {
+                    const decodedTitle = decodeHTML(n.title || '');
+                    const decodedContent = decodeHTML(n.content || '');
+                    const cleanContent = decodedContent.replace(/<[^>]*>?/gm, '');
+                    const catName = window.getCategoryName(n.category);
+                    return `
+                      <div class="note-card note-card-item" data-id="${n.id}">
+                        ${n.starred == 1 ? '<button class="card-star-btn starred"><i class="bi bi-star-fill text-warning"></i></button>' : '<button class="card-star-btn"><i class="bi bi-star"></i></button>'}
+                        <div class="note-card-title">${escapeHTML(decodedTitle || cleanContent.split(/\s+/).slice(0, 5).join(' ') || 'Untitled Note')}</div>
+                        <div class="note-card-body">${escapeHTML(cleanContent)}</div>
+                        <div class="note-card-footer">
+                          <span>${new Date(n.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString()}</span>
+                          ${n.category && n.category !== 'all' ? `<span class="note-chip">${escapeHTML(catName)}</span>` : ''}
                         </div>
                       </div>
-                    </div>`).join(''));
+                    `;
+                   }).join('');
+                   grid.insertAdjacentHTML('beforeend', html);
+                   window.currentNotesList = window.currentNotesList.concat(data);
+                   if (typeof window.bindNoteCardEvents === 'function') window.bindNoteCardEvents(grid);
+                 }
+              }
+              break;
+            case 'get_tasks':
+              data = await fetchData(`?action=get_tasks&${params.toString()}`);
+              if (data && data.length > 0) {
+                 const grid = document.getElementById('tasks-grid');
+                 if(grid) {
+                   const html = data.map(t => {
+                    let items = [];
+                    try { items = JSON.parse(t.items); } catch(e) {}
+                    const catName = window.getCategoryName(t.category);
+                    const itemsHtml = items.slice(0, 4).map(item => `
+                      <div class="task-card-item ${item.completed ? 'completed' : ''}">
+                        <i class="bi ${item.completed ? 'bi-check-square-fill text-success' : 'bi-square'}"></i>
+                        <span class="text-truncate">${escapeHTML(item.text)}</span>
+                      </div>
+                    `).join('') + (items.length > 4 ? `<div class="text-secondary small mt-1">+${items.length - 4} more</div>` : '');
+
+                    return `
+                      <div class="note-card task-card-wrapper" data-id="${t.id}">
+                        ${t.starred == 1 ? '<button class="card-star-btn starred"><i class="bi bi-star-fill text-warning"></i></button>' : '<button class="card-star-btn"><i class="bi bi-star"></i></button>'}
+                        <div class="note-card-title">${escapeHTML(decodeHTML(t.title) || 'Untitled Task List')}</div>
+                        <div class="flex-grow-1 overflow-hidden mt-2">${itemsHtml}</div>
+                        <div class="note-card-footer mt-3">
+                          <span>${new Date(t.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString()}</span>
+                          ${t.category && t.category !== 'all' ? `<span class="note-chip">${escapeHTML(catName)}</span>` : ''}
+                        </div>
+                      </div>
+                    `;
+                   }).join('');
+                   grid.insertAdjacentHTML('beforeend', html);
+                   window.currentTasksList = window.currentTasksList.concat(data);
+                   if (typeof window.bindNoteCardEvents === 'function') window.bindNoteCardEvents(grid, true);
                  }
               }
               break;
             case 'get_community':
               data = await fetchData(`?action=get_community&${params.toString()}`);
               if (data && data.length > 0) {
-                 const feed = document.getElementById('community-feed');
-                 if(feed) {
-                   feed.insertAdjacentHTML('beforeend', data.map(p => `
+                  const feed = document.getElementById('community-feed');
+                  if(feed) {
+                    feed.insertAdjacentHTML('beforeend', data.map(p => `
                     <div class="card bg-transparent border-secondary text-white">
                       <div class="card-body">
                         <div class="d-flex justify-content-between align-items-start mb-3">
@@ -10976,7 +11542,7 @@ SOFTWARE.</div>
                         </div>
                       </div>
                     </div>`).join(''));
-                 }
+                  }
               }
               break;
             default:
@@ -10997,6 +11563,7 @@ SOFTWARE.</div>
 
         const updateActiveNavLink = (viewType) => {
           allNavLinks.forEach(l => l.classList.remove('active'));
+          document.querySelectorAll('.note-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
           let activeLink;
           switch (viewType) {
             case 'artist_songs': activeLink = document.querySelector('.nav-link[data-view="get_artists"]'); break;
@@ -11004,6 +11571,19 @@ SOFTWARE.</div>
             case 'genre_songs': activeLink = document.querySelector('.nav-link[data-view="get_genres"]'); break;
             case 'year_songs': activeLink = document.querySelector('.nav-link[data-view="get_years"]'); break;
             case 'playlist_songs': activeLink = document.querySelector('.nav-link[data-view="get_user_playlists"]'); break;
+            case 'get_notes': 
+              const noteFilter = currentView.filter || 'all';
+              const filterLink = document.querySelector(`.note-filter-link[data-view="${viewType}"][data-filter="${noteFilter}"]`) 
+                              || document.querySelector(`.note-filter-link[data-filter="${noteFilter}"]`);
+              if (filterLink) {
+                filterLink.classList.add('active', 'text-white');
+                const collapseParent = filterLink.closest('.collapse');
+                if (collapseParent && !collapseParent.classList.contains('show')) {
+                   bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              }
+              activeLink = document.querySelector('a[href="#notesSubmenu"]');
+              break;
             default: activeLink = document.querySelector(`.nav-link[data-view="${viewType}"]`);
           }
           if (activeLink) {
@@ -11221,25 +11801,59 @@ SOFTWARE.</div>
               renderSongs(data, true);
               break;
 
-            case 'get_notes':
-              updateContentTitle('Personal Notes', !!currentUser);
+            case 'manage_note_categories':
+              updateContentTitle('Manage Categories', !!currentUser);
               if (currentUser) {
+                if (!window.noteCategories) {
+                  window.noteCategories = await fetchData('?action=get_note_categories') || [];
+                }
                 contentArea.innerHTML = `
-                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
-                    <div class="d-flex w-100 justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                      <div class="text-white fw-bold fs-5 d-flex align-items-center"><i class="bi bi-journal-text text-primary me-3 fs-3"></i> My Notes</div>
-                      <div class="d-flex gap-2 flex-wrap">
-                        <a href="?action=export_notes" class="btn btn-outline-light rounded-pill px-3 fw-medium shadow-sm" id="export-notes-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</a>
-                        <button class="btn btn-outline-light rounded-pill px-3 fw-medium shadow-sm" id="import-notes-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
-                        <button class="btn btn-primary rounded-pill px-3 fw-medium shadow-sm new-note-btn"><i class="bi bi-plus-lg me-1"></i> New</button>
-                      </div>
-                    </div>
-                    <div class="w-100 position-relative">
-                      <input type="text" id="notes-search-input" class="form-control bg-dark text-white border-secondary" placeholder="Search notes..." value="${escapeHTML(currentView.searchQuery || '')}">
-                    </div>
+                  <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3">
+                    <h4 class="text-white fw-bold m-0"><i class="bi bi-tags text-danger me-2"></i> Edit Categories</h4>
                   </div>
-                  <div id="notes-grid" class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4 mx-md-1 mb-4"></div>`;
-                
+                  <div class="px-md-3 mb-5" style="max-width: 600px;">
+                    <div class="d-flex gap-2 mb-4">
+                      <input type="text" id="newCatInputPage" class="form-control bg-dark text-white border-secondary" placeholder="New Category Name" />
+                      <button class="btn btn-danger px-4 fw-bold" id="addCatBtnPage">Add</button>
+                    </div>
+                    <div class="cat-manage-list d-flex flex-column gap-2" id="cat-manage-list-page"></div>
+                  </div>
+                `;
+                window.loadManageCategoriesPage();
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to manage categories.</div>`;
+              }
+              break;
+
+            case 'get_notes':
+              let noteFilter = currentView.filter || 'all';
+              let filterName = noteFilter === 'all' ? 'All Notes' : (noteFilter === 'starred' ? 'Starred' : 'Category');
+              if (noteFilter !== 'all' && noteFilter !== 'starred') {
+                const catText = document.querySelector(`.note-filter-link[data-filter="${noteFilter}"]`)?.textContent;
+                if (catText) filterName = catText.trim();
+              }
+              updateContentTitle(filterName, !!currentUser);
+
+              if (currentUser) {
+                // Ensure categories are loaded
+                if (!window.noteCategories) {
+                  window.noteCategories = await fetchData('?action=get_note_categories') || [];
+                  window.renderNoteCategories();
+                }
+
+                contentArea.innerHTML = `
+                  <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3">
+                    <div class="position-relative" style="max-width: 400px; width: 100%;">
+                      <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                      <input type="text" id="notes-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search notes..." value="${escapeHTML(currentView.searchQuery || '')}">
+                    </div>
+                    <button class="btn btn-danger rounded-pill px-4 shadow-sm fw-bold new-note-btn ms-2 text-nowrap">
+                      <i class="bi bi-plus-lg me-1"></i> New
+                    </button>
+                  </div>
+                  <div id="notes-grid" class="notes-grid px-md-3 mb-5" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;"></div>
+                `;
+
                 document.getElementById('notes-search-input').addEventListener('input', (e) => {
                   clearTimeout(window.notesSearchTimeout);
                   window.notesSearchTimeout = setTimeout(() => {
@@ -11247,35 +11861,153 @@ SOFTWARE.</div>
                     loadView(currentView);
                   }, 400);
                 });
-                
+
                 if (currentView.searchQuery) pageParams.append('q', currentView.searchQuery);
+                pageParams.append('filter', noteFilter);
+                
                 const notes = await fetchData(`?action=get_notes&${pageParams.toString()}`);
                 const grid = document.getElementById('notes-grid');
+                window.currentNotesList = notes || [];
+                window.selectedNoteIds = new Set();
+                window.multiSelectNoteMode = false;
+                
                 if (notes && notes.length > 0) {
                   grid.innerHTML = notes.map(n => {
-                    const truncContent = n.content.length > 300 ? n.content.substring(0, 300) + '...' : n.content;
+                    // Force decode &#039; into standard strings so preview renders them normally
+                    const decodedTitle = decodeHTML(n.title || '');
+                    const decodedContent = decodeHTML(n.content || '');
+                    const cleanContent = decodedContent.replace(/<[^>]*>?/gm, ''); // Strip html for preview
+                    const catName = window.getCategoryName(n.category);
                     return `
-                    <div class="col">
-                      <div class="card h-100 bg-dark text-white border-secondary">
-                        <div class="card-body view-note-trigger" data-title="${escapeHTML(n.title)}" data-content="${escapeHTML(n.content)}" data-date="${n.updated_at}" style="cursor: pointer;">
-                          <h5 class="card-title fw-bold text-truncate">${escapeHTML(n.title)}</h5>
-                          <p class="card-text text-secondary small" style="white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">${parseUserText(truncContent)}</p>
-                        </div>
-                        <div class="card-footer border-secondary d-flex justify-content-between align-items-center">
-                          <small class="text-secondary"><i class="bi bi-clock"></i> ${timeAgo(n.updated_at)}</small>
-                          <div>
-                            <button class="btn btn-sm btn-outline-light me-1 edit-note-btn" data-id="${n.id}" data-title="${escapeHTML(n.title)}" data-content="${escapeHTML(n.content)}"><i class="bi bi-pencil"></i></button>
-                            <button class="btn btn-sm btn-outline-danger delete-note-btn" data-id="${n.id}"><i class="bi bi-trash"></i></button>
-                          </div>
+                      <div class="note-card note-card-item" data-id="${n.id}">
+                        ${n.starred == 1 ? '<button class="card-star-btn starred"><i class="bi bi-star-fill text-warning"></i></button>' : '<button class="card-star-btn"><i class="bi bi-star"></i></button>'}
+                        <div class="note-card-title">${escapeHTML(decodedTitle || cleanContent.split(/\s+/).slice(0, 5).join(' ') || 'Untitled Note')}</div>
+                        <div class="note-card-body">${escapeHTML(cleanContent)}</div>
+                        <div class="note-card-footer">
+                          <span>${new Date(n.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString()}</span>
+                          ${n.category && n.category !== 'all' ? `<span class="note-chip">${escapeHTML(catName)}</span>` : ''}
                         </div>
                       </div>
-                    </div>`;
+                    `;
                   }).join('');
+                  
+                  window.bindNoteCardEvents = (container, isTask = false) => {
+                    const selector = isTask ? '.task-card-wrapper:not(.bound)' : '.note-card-item:not(.bound)';
+                    container.querySelectorAll(selector).forEach(card => {
+                      card.classList.add('bound');
+                      let pressTimer;
+                      let startX = 0, startY = 0;
+                      
+                      const startPress = (e) => { 
+                        if (e.target.closest('.card-star-btn')) return;
+                        if (e.touches) { startX = e.touches[0].clientX; startY = e.touches[0].clientY; }
+                        pressTimer = setTimeout(() => { 
+                          toggleNoteMultiSelect(card.dataset.id); 
+                          if (navigator.vibrate) navigator.vibrate(50);
+                        }, 300); // Super fast 300ms hold time for multi-select
+                      };
+                      const cancelPress = () => clearTimeout(pressTimer);
+                      const movePress = (e) => {
+                        if (!e.touches) return;
+                        const dx = Math.abs(e.touches[0].clientX - startX);
+                        const dy = Math.abs(e.touches[0].clientY - startY);
+                        if (dx > 10 || dy > 10) clearTimeout(pressTimer);
+                      };
+                      
+                      card.addEventListener('mousedown', startPress);
+                      card.addEventListener('touchstart', startPress, { passive: true });
+                      card.addEventListener('mouseup', cancelPress);
+                      card.addEventListener('mouseleave', cancelPress);
+                      card.addEventListener('touchend', cancelPress);
+                      card.addEventListener('touchmove', movePress, { passive: true });
+                    });
+                  };
+                  window.bindNoteCardEvents(grid);
+
                 } else {
-                  grid.innerHTML = '<div class="col-12 text-center text-secondary py-5">No notes found.</div>';
+                  grid.style.display = 'block';
+                  grid.innerHTML = '<div class="text-center text-secondary py-5">No notes found.</div>';
                 }
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your notes.</div>`;
+              }
+              break;
+
+            case 'get_tasks':
+              let taskFilter = currentView.filter || 'all';
+              let taskFilterName = taskFilter === 'all' ? 'All Tasks' : (taskFilter === 'starred' ? 'Starred Tasks' : 'Category Tasks');
+              updateContentTitle(taskFilterName, !!currentUser);
+
+              if (currentUser) {
+                if (!window.noteCategories) {
+                  window.noteCategories = await fetchData('?action=get_note_categories') || [];
+                  window.renderNoteCategories();
+                }
+
+                contentArea.innerHTML = `
+                  <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3">
+                    <div class="position-relative" style="max-width: 400px; width: 100%;">
+                      <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                      <input type="text" id="tasks-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search tasks..." value="${escapeHTML(currentView.searchQuery || '')}">
+                    </div>
+                    <button class="btn btn-danger rounded-pill px-4 shadow-sm fw-bold new-task-btn ms-2 text-nowrap">
+                      <i class="bi bi-plus-lg me-1"></i> New
+                    </button>
+                  </div>
+                  <div id="tasks-grid" class="notes-grid px-md-3 mb-5" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;"></div>
+                `;
+
+                document.getElementById('tasks-search-input').addEventListener('input', (e) => {
+                  clearTimeout(window.notesSearchTimeout);
+                  window.notesSearchTimeout = setTimeout(() => {
+                    currentView.searchQuery = e.target.value;
+                    loadView(currentView);
+                  }, 400);
+                });
+
+                if (currentView.searchQuery) pageParams.append('q', currentView.searchQuery);
+                pageParams.append('filter', taskFilter);
+                
+                const tasks = await fetchData(`?action=get_tasks&${pageParams.toString()}`);
+                const grid = document.getElementById('tasks-grid');
+                window.currentTasksList = tasks || [];
+                window.selectedNoteIds = new Set();
+                window.multiSelectNoteMode = false;
+                
+                if (tasks && tasks.length > 0) {
+                  grid.innerHTML = tasks.map(t => {
+                    let items = [];
+                    try { items = JSON.parse(t.items); } catch(e) {}
+                    const catName = window.getCategoryName(t.category);
+                    
+                    const itemsHtml = items.slice(0, 4).map(item => `
+                      <div class="task-card-item ${item.completed ? 'completed' : ''}">
+                        <i class="bi ${item.completed ? 'bi-check-square-fill text-success' : 'bi-square'}"></i>
+                        <span class="text-truncate">${escapeHTML(item.text)}</span>
+                      </div>
+                    `).join('') + (items.length > 4 ? `<div class="text-secondary small mt-1">+${items.length - 4} more</div>` : '');
+
+                    return `
+                      <div class="note-card task-card-wrapper" data-id="${t.id}">
+                        ${t.starred == 1 ? '<button class="card-star-btn starred"><i class="bi bi-star-fill text-warning"></i></button>' : '<button class="card-star-btn"><i class="bi bi-star"></i></button>'}
+                        <div class="note-card-title">${escapeHTML(decodeHTML(t.title) || 'Untitled Task List')}</div>
+                        <div class="flex-grow-1 overflow-hidden mt-2">${itemsHtml}</div>
+                        <div class="note-card-footer mt-3">
+                          <span>${new Date(t.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString()}</span>
+                          ${t.category && t.category !== 'all' ? `<span class="note-chip">${escapeHTML(catName)}</span>` : ''}
+                        </div>
+                      </div>
+                    `;
+                  }).join('');
+                  
+                  window.bindNoteCardEvents(grid, true);
+
+                } else {
+                  grid.style.display = 'block';
+                  grid.innerHTML = '<div class="text-center text-secondary py-5">No tasks found.</div>';
+                }
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your tasks.</div>`;
               }
               break;
 
@@ -11438,6 +12170,7 @@ SOFTWARE.</div>
             case 'get_years':
             case 'get_user_playlists':
             case 'get_collab_playlists':
+            case 'get_following':
               let title = currentView.type.replace('get_', '');
               title = title.charAt(0).toUpperCase() + title.slice(1);
               if (title === 'User_playlists') title = 'Playlists';
@@ -12927,6 +13660,8 @@ SOFTWARE.</div>
               const artistName = decodeURIComponent(userLink.dataset.artist);
               const commentsModal = bootstrap.Modal.getInstance(document.getElementById('comments-modal'));
               if (commentsModal) commentsModal.hide();
+              const connectionsModal = bootstrap.Modal.getInstance(document.getElementById('connections-modal'));
+              if (connectionsModal) connectionsModal.hide();
               loadView({ type: 'artist_songs', param: artistName, sort: 'album_asc', filter_user_id: userId, artist_name: '' });
               return;
             }
@@ -13045,18 +13780,118 @@ SOFTWARE.</div>
           loadView(currentView);
         };
 
-        const noteForm = document.getElementById('note-form');
-        if (noteForm) {
-          noteForm.addEventListener('submit', async e => {
-            e.preventDefault();
-            const id = document.getElementById('note-id').value;
-            const title = document.getElementById('note-title').value;
-            const content = document.getElementById('note-content').value;
-            await fetchData('?action=save_note', { method:'POST', body: JSON.stringify({id, title, content}) });
-            bootstrap.Modal.getInstance(document.getElementById('note-modal')).hide();
-            loadView(currentView);
+        window.loadManageCategoriesPage = () => {
+          const list = document.getElementById('cat-manage-list-page');
+          if (list && window.noteCategories) {
+            list.innerHTML = window.noteCategories.map(c => `
+              <div class="cat-manage-item">
+                <span class="text-white fw-medium">${escapeHTML(c.name)}</span>
+                <div class="d-flex gap-2">
+                  <button class="note-icon-btn edit-cat-btn" data-id="${c.id}" data-name="${escapeHTML(c.name)}"><i class="bi bi-pencil"></i></button>
+                  <button class="note-icon-btn text-danger del-cat-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
+                </div>
+              </div>
+              `).join('');
+            }
+          };
+
+          // Event Delegation for the dynamically rendered Category Page
+          document.addEventListener('click', async (e) => {
+            const addCatBtnPage = e.target.closest('#addCatBtnPage');
+            if (addCatBtnPage) {
+              const input = document.getElementById('newCatInputPage');
+              const name = input.value.trim();
+              if (!name) return;
+              const id = 'cat_' + Date.now();
+              await fetchData('?action=save_note_category', { method:'POST', body: JSON.stringify({id, name}) });
+              window.noteCategories.push({id, name});
+              input.value = '';
+              window.loadManageCategoriesPage();
+              window.renderNoteCategories();
+              return;
+            }
+
+            const editBtn = e.target.closest('.edit-cat-btn');
+            if (editBtn && e.target.closest('#cat-manage-list-page')) {
+              const newName = prompt('Rename category:', decodeHTML(editBtn.dataset.name));
+              if (newName && newName.trim()) {
+                await fetchData('?action=save_note_category', { method:'POST', body: JSON.stringify({id: editBtn.dataset.id, name: newName.trim()}) });
+                const cat = window.noteCategories.find(c => c.id === editBtn.dataset.id);
+                if (cat) cat.name = newName.trim();
+                window.loadManageCategoriesPage();
+                window.renderNoteCategories();
+              }
+              return;
+            }
+
+            const delBtn = e.target.closest('.del-cat-btn');
+            if (delBtn && e.target.closest('#cat-manage-list-page')) {
+              if (confirm('Delete category? Notes will become Uncategorized.')) {
+                await fetchData('?action=delete_note_category', { method:'POST', body: JSON.stringify({id: delBtn.dataset.id}) });
+                window.noteCategories = window.noteCategories.filter(c => c.id !== delBtn.dataset.id);
+                window.loadManageCategoriesPage();
+                window.renderNoteCategories();
+              }
+              return;
+            }
           });
-        }
+
+          document.addEventListener('click', (e) => {
+            const filterLink = e.target.closest('.note-filter-link');
+            if (filterLink) {
+              e.preventDefault();
+              e.stopPropagation();
+              const filter = filterLink.dataset.filter;
+              document.querySelectorAll('.note-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
+              filterLink.classList.add('active', 'text-white');
+              loadView({ type: 'get_notes', param: '', sort: 'newest', filter: filter });
+            }
+          });
+          
+          document.getElementById('import-txt-btn-menu')?.addEventListener('click', (e) => { e.preventDefault(); document.getElementById('fileImportTxt').click(); });
+          document.getElementById('import-json-btn-menu')?.addEventListener('click', (e) => { e.preventDefault(); document.getElementById('fileImportJson').click(); });
+          document.getElementById('export-json-notes-menu')?.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const notes = await fetchData('?action=get_notes&filter=all');
+            const blob = new Blob([JSON.stringify(notes, null, 2)], { type: 'application/json' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `NotesBackup_${Date.now()}.json`;
+            a.click();
+          });
+          
+          document.getElementById('fileImportTxt')?.addEventListener('change', async (e) => {
+             const files = e.target.files;
+             if (!files.length) return;
+             for (let file of files) {
+               const text = await file.text();
+               await fetchData('?action=save_note', { method:'POST', body: JSON.stringify({ id: null, title: file.name.replace(/\.txt$/i, ''), content: text, category: 'all', starred: 0 }) }, true);
+             }
+             showToast('Imported TXT files', 'success');
+             e.target.value = '';
+             if (currentView.type === 'get_notes') loadView(currentView);
+          });
+          
+          document.getElementById('fileImportJson')?.addEventListener('change', async (e) => {
+             const file = e.target.files[0];
+             if (!file) return;
+             const text = await file.text();
+             try {
+               let data = JSON.parse(text);
+               if (data && typeof data === 'object' && !Array.isArray(data)) data = Object.values(data);
+               if (Array.isArray(data)) {
+                 for (let n of data) {
+                   if (!n.id) continue;
+                   await fetchData('?action=save_note', { method:'POST', body: JSON.stringify({ 
+                      id: null, title: n.title || '', content: n.content || '', category: 'all', starred: n.starred || n.favorite ? 1 : 0 
+                   }) }, true);
+                 }
+                 showToast('Imported JSON successfully', 'success');
+                 if (currentView.type === 'get_notes') loadView(currentView);
+               }
+             } catch(err) { showToast('Invalid JSON file.', 'error'); }
+             e.target.value = '';
+          });
 
         window.togglePostReaction = async (post_id, reaction) => {
           await fetchData('?action=toggle_post_reaction', { method:'POST', body: JSON.stringify({post_id, reaction}) });
@@ -13170,19 +14005,65 @@ SOFTWARE.</div>
               listEl.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>';
               bootstrap.Modal.getOrCreateInstance(modalEl).show();
               
-              fetchData(`?action=get_connections&id=${uId}&conn_type=${connType}`).then(data => {
+              window.connPage = 1;
+              window.connType = connType;
+              window.connUserId = uId;
+              window.isLoadingConn = false;
+
+              window.loadConnections = async (append = false) => {
+                if (window.isLoadingConn) return;
+                window.isLoadingConn = true;
+                
+                if (!append) {
+                   listEl.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>';
+                } else {
+                   const btn = document.getElementById('load-more-conn-btn');
+                   if (btn) btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Loading...';
+                }
+                
+                const data = await fetchData(`?action=get_connections&id=${window.connUserId}&conn_type=${window.connType}&page=${window.connPage}`);
+                
+                const loadMoreBtnEl = document.getElementById('load-more-conn-btn-container');
+                if (loadMoreBtnEl) loadMoreBtnEl.remove();
+
                 if (data && data.length > 0) {
-                  listEl.innerHTML = data.map(u => `
-                    <div class="list-group-item bg-transparent text-white border-secondary px-3 py-2 d-flex align-items-center gap-3 user-profile-link hover-bg-dark" data-userid="${u.id}" data-artist="${encodeURIComponent(u.artist)}" style="cursor: pointer;">
-                      <img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle" style="width: 40px; height: 40px; object-fit: cover;">
-                      <div class="fw-bold hover-underline text-truncate flex-grow-1">${escapeHTML(u.artist)}</div>
-                      <i class="bi bi-chevron-right text-secondary"></i>
+                  const html = data.map(u => `
+                    <div class="list-group-item bg-transparent text-white border-secondary px-3 py-3 d-flex align-items-center gap-3 hover-bg-dark">
+                      <div class="user-profile-link flex-shrink-0" data-userid="${u.id}" data-artist="${encodeURIComponent(u.artist)}" style="cursor: pointer;" title="View Profile">
+                        <img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle shadow-sm" style="width: 50px; height: 50px; object-fit: cover;">
+                      </div>
+                      <div class="d-flex flex-column flex-grow-1" style="min-width: 0;">
+                         <div class="d-flex justify-content-between align-items-center w-100 gap-2">
+                           <div class="d-flex flex-column text-truncate user-profile-link" data-userid="${u.id}" data-artist="${encodeURIComponent(u.artist)}" style="cursor: pointer; min-width: 0;" title="View Profile">
+                             <span class="fw-bold hover-underline text-truncate fs-6">${escapeHTML(u.artist)}</span>
+                             <span class="text-secondary" style="font-size: 0.8rem;">ID: ${u.id}</span>
+                           </div>
+                           ${currentUser && currentUser.id != u.id ? 
+                             `<button class="btn btn-sm ${u.is_followed ? 'btn-outline-light' : 'btn-danger'} rounded-pill fw-bold follow-btn-modal px-3 flex-shrink-0" data-user-id="${u.id}">
+                                ${u.is_followed ? 'Unfollow' : 'Follow'}
+                              </button>` : ''}
+                         </div>
+                      </div>
                     </div>
                   `).join('');
+                  
+                  if (!append) listEl.innerHTML = html;
+                  else listEl.insertAdjacentHTML('beforeend', html);
+                  
+                  if (data.length === 25) {
+                     listEl.insertAdjacentHTML('beforeend', `
+                       <div class="text-center p-3" id="load-more-conn-btn-container">
+                         <button class="btn btn-sm btn-outline-light rounded-pill px-4" id="load-more-conn-btn">Load More</button>
+                       </div>
+                     `);
+                  }
                 } else {
-                  listEl.innerHTML = `<div class="p-4 text-center text-secondary">No ${connType} found.</div>`;
+                  if (!append) listEl.innerHTML = `<div class="p-4 text-center text-secondary">No ${window.connType} found.</div>`;
                 }
-              });
+                window.isLoadingConn = false;
+              };
+              
+              window.loadConnections();
             }
             return;
           }
@@ -13399,40 +14280,59 @@ SOFTWARE.</div>
               return;
             }
           }
-          const viewNoteTrigger = target.closest('.view-note-trigger');
-          if (viewNoteTrigger) {
+          // Notes & Tasks UI handlers
+          const anyCard = target.closest('.note-card-item, .task-card-wrapper');
+          if (anyCard) {
             e.stopPropagation();
-            document.getElementById('view-note-title').innerHTML = decodeHTML(viewNoteTrigger.dataset.title);
-            document.getElementById('view-note-content').innerHTML = parseUserText(viewNoteTrigger.dataset.content);
-             
-            const rawDate = viewNoteTrigger.dataset.date;
-            if (rawDate) {
-              const dateObj = new Date(rawDate);
-              const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' };
-              document.getElementById('view-note-date').innerHTML = `<i class="bi bi-calendar3"></i> Last modified: ${dateObj.toLocaleDateString(undefined, options)}`;
-            } else {
-              document.getElementById('view-note-date').innerHTML = '';
+            const id = anyCard.dataset.id;
+            const isTaskCard = anyCard.classList.contains('task-card-wrapper');
+            const dataList = isTaskCard ? window.currentTasksList : window.currentNotesList;
+              
+            if (target.closest('.card-star-btn')) {
+              const isStarred = !target.closest('.card-star-btn').classList.contains('starred');
+              const n = dataList.find(x => x.id == id);
+              if (n) {
+                const endpoint = isTaskCard ? '?action=save_task' : '?action=save_note';
+                fetchData(endpoint, { method:'POST', body: JSON.stringify({...n, starred: isStarred?1:0}) }, true).then(() => loadView(currentView));
+              }
+              return;
             }
-             
-            bootstrap.Modal.getOrCreateInstance(document.getElementById('view-note-modal')).show();
+
+            if (window.multiSelectNoteMode) {
+              toggleNoteMultiSelect(id);
+            } else {
+              const obj = dataList.find(n => n.id.toString() === id.toString());
+              if (obj) {
+                if (isTaskCard) window.openTaskEditor(obj);
+                else openEditorNote(obj);
+              }
+            }
             return;
           }
+
+          const newTaskBtn = target.closest('.new-task-btn');
+          if (newTaskBtn) {
+            e.stopPropagation();
+            window.openTaskEditor({ 
+              id: '', title: '', items: '[]',
+              category: currentView.filter && currentView.filter !== 'all' && currentView.filter !== 'starred' ? currentView.filter : 'all', 
+              starred: 0 
+            });
+            return;
+          }
+
           const newNoteBtn = target.closest('.new-note-btn');
           if (newNoteBtn) {
             e.stopPropagation();
-            openNoteModal();
-            return;
-          }
-          const editNoteBtn = target.closest('.edit-note-btn');
-          if (editNoteBtn) {
-            e.stopPropagation();
-            openNoteModal(editNoteBtn.dataset.id, decodeHTML(editNoteBtn.dataset.title), decodeHTML(editNoteBtn.dataset.content));
-            return;
-          }
-          const deleteNoteBtn = target.closest('.delete-note-btn');
-          if (deleteNoteBtn) {
-            e.stopPropagation();
-            deleteNote(deleteNoteBtn.dataset.id);
+            const isTask = currentView.filter === 'tasks';
+            openEditorNote({ 
+              id: '', 
+              title: '', 
+              content: isTask ? '- [ ] ' : '', 
+              note_type: isTask ? 'task' : 'note',
+              category: currentView.filter && currentView.filter !== 'all' && currentView.filter !== 'starred' && currentView.filter !== 'tasks' ? currentView.filter : 'all', 
+              starred: 0 
+            });
             return;
           }
           const communityReactBtn = target.closest('.community-react-btn');
@@ -16244,6 +17144,599 @@ SOFTWARE.</div>
           }
           updateUIForAuthState();
         }
+
+        window.noteCategories = [];
+        window.getCategoryName = (id) => {
+          const c = window.noteCategories.find(c => c.id === id);
+          return c ? c.name : 'Uncategorized';
+        };
+
+        window.renderNoteCategories = () => {
+          const menuList = document.getElementById('note-categories-menu-list');
+          if (menuList) {
+            menuList.innerHTML = window.noteCategories.map(c => `
+              <li><a href="#" class="nav-link py-2 ps-3 border-0 note-filter-link" data-view="get_notes" data-filter="${c.id}"><i class="bi bi-folder"></i> ${escapeHTML(c.name)}</a></li>
+            `).join('');
+          }
+          const catSelect = document.getElementById('editorCategorySelect');
+          if (catSelect) {
+            catSelect.innerHTML = '<option value="all" style="background: var(--ytm-surface-2);">Uncategorized</option>';
+            window.noteCategories.forEach(c => {
+              const opt = document.createElement('option');
+              opt.value = c.id; opt.innerText = c.name;
+              opt.style.background = 'var(--ytm-surface-2)';
+              catSelect.appendChild(opt);
+            });
+          }
+        };
+
+        const updateNoteSelectionUI = () => {
+          document.getElementById('selectionCountNotes').innerText = window.selectedNoteIds.size;
+          document.querySelectorAll('.note-card-item').forEach(card => {
+            if (window.selectedNoteIds.has(card.dataset.id)) card.classList.add('selected');
+            else card.classList.remove('selected');
+          });
+          const bar = document.getElementById('selectionBarNotes');
+          if (window.multiSelectNoteMode) bar.classList.add('active');
+          else bar.classList.remove('active');
+        };
+
+        const toggleNoteMultiSelect = (id) => {
+          if (!window.multiSelectNoteMode) {
+            window.multiSelectNoteMode = true;
+          }
+          if (window.selectedNoteIds.has(id)) window.selectedNoteIds.delete(id);
+          else window.selectedNoteIds.add(id);
+          
+          if (window.selectedNoteIds.size === 0) window.multiSelectNoteMode = false;
+          updateNoteSelectionUI();
+        };
+
+        let noteTextHistory = [];
+        let noteHistoryIdx = -1;
+        let noteSaveTimeout = null;
+        let noteHistoryTimeout = null;
+        let activeEditorNote = null;
+        let isMarkdownPreview = false;
+        
+        window.openEditorNote = (note) => {
+          activeEditorNote = note;
+          document.getElementById('editorNoteId').value = note.id || '';
+          document.getElementById('editorNoteType').value = note.note_type || 'note';
+          document.getElementById('editorTitle').value = note.title ? decodeHTML(note.title) : '';
+          document.getElementById('editorContent').value = note.content ? decodeHTML(note.content) : '';
+          document.getElementById('editorDate').innerText = note.updated_at ? new Date(note.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString() : new Date().toLocaleDateString();
+          
+          const catSelect = document.getElementById('editorCategorySelect');
+          if (catSelect && note.category) catSelect.value = note.category;
+          
+          isMarkdownPreview = false;
+          const mdIcon = document.getElementById('editorMarkdownBtn').querySelector('i');
+          mdIcon.className = 'bi bi-markdown';
+          document.getElementById('editorContent').classList.remove('d-none');
+          document.getElementById('editorMarkdownPreview').classList.add('d-none');
+          
+          noteTextHistory = [document.getElementById('editorContent').value];
+          noteHistoryIdx = 0;
+          
+          const starIcon = document.getElementById('editorStarIcon');
+          if (starIcon) {
+            starIcon.className = note.starred == 1 ? 'bi bi-star-fill text-warning' : 'bi bi-star';
+          }
+          
+          updateEditorWordCount();
+          document.getElementById('findReplacePanel').classList.remove('active');
+          document.getElementById('editorMoreMenu').classList.remove('active');
+          document.getElementById('editorOverlay').classList.add('active');
+        };
+
+        const saveCurrentEditorNote = async (force = false) => {
+          const idInput = document.getElementById('editorNoteId');
+          const id = idInput.value;
+          const title = document.getElementById('editorTitle').value.trim();
+          const content = document.getElementById('editorContent').value;
+          const category = document.getElementById('editorCategorySelect').value;
+          const noteType = document.getElementById('editorNoteType').value || 'note';
+          const isStarred = document.getElementById('editorStarIcon').classList.contains('bi-star-fill') ? 1 : 0;
+          
+          if (!title && !content) return; // don't save empty notes automatically
+          
+          // CONDITIONAL SAVE: Do not auto-save a brand new note unless the user explicitly hits Save/Close
+          if (!id && !force) return;
+          
+          const res = await fetchData('?action=save_note', { 
+            method: 'POST', body: JSON.stringify({id: id || null, title, content, category, starred: isStarred, note_type: noteType}) 
+          }, true);
+
+          if (res && res.status === 'success' && res.id && !id) {
+            idInput.value = res.id;
+          }
+        };
+
+        document.getElementById('editorMarkdownBtn').addEventListener('click', () => {
+          isMarkdownPreview = !isMarkdownPreview;
+          const contentArea = document.getElementById('editorContent');
+          const previewArea = document.getElementById('editorMarkdownPreview');
+          const icon = document.getElementById('editorMarkdownBtn').querySelector('i');
+          
+          if (isMarkdownPreview) {
+            icon.className = 'bi bi-pencil-square';
+            contentArea.classList.add('d-none');
+            previewArea.classList.remove('d-none');
+            
+            // Render markdown using Marked.js (with Github Flavored Markdown for Tasks)
+            if (typeof marked !== 'undefined') {
+              marked.use({ gfm: true });
+              previewArea.innerHTML = marked.parse(contentArea.value);
+               
+              // Notion-style live checkboxes inside the preview
+              previewArea.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                cb.addEventListener('change', (e) => {
+                  const isChecked = e.target.checked;
+                  const regex = new RegExp(`\\[[ xX]\\]`, 'g');
+                  let matchCount = 0;
+                  let cbIndex = Array.from(previewArea.querySelectorAll('input[type="checkbox"]')).indexOf(e.target);
+                   
+                  contentArea.value = contentArea.value.replace(regex, (match) => {
+                    if (matchCount === cbIndex) {
+                      matchCount++;
+                      return isChecked ? `[x]` : `[ ]`;
+                    }
+                    matchCount++;
+                    return match;
+                  });
+                  saveCurrentEditorNote(false);
+                });
+              });
+            } else {
+              previewArea.innerHTML = '<p class="text-secondary text-center p-5">Markdown renderer is loading or unavailable.</p>';
+            }
+          } else {
+            icon.className = 'bi bi-markdown';
+            previewArea.classList.add('d-none');
+            contentArea.classList.remove('d-none');
+            contentArea.focus();
+          }
+        });
+
+        let wordCountTimeout = null;
+        const updateEditorWordCount = () => {
+          const text = document.getElementById('editorContent').value;
+          document.getElementById('editorCharCount').innerText = `${new Intl.NumberFormat().format(text.length)} chars`;
+          
+          clearTimeout(wordCountTimeout);
+          wordCountTimeout = setTimeout(() => {
+            let words = 0;
+            // ADVANCED RENDERING: Prevent browser freeze by bypassing regex on documents over 500k chars
+            if (text.length > 500000) {
+              document.getElementById('editorWordCount').innerText = `Massive Document`;
+            } else if (text.trim()) {
+              const matches = text.match(/\S+/g);
+              words = matches ? matches.length : 0;
+              document.getElementById('editorWordCount').innerText = `${new Intl.NumberFormat().format(words)} words`;
+            } else {
+              document.getElementById('editorWordCount').innerText = `0 words`;
+            }
+          }, 600);
+        };
+
+        document.getElementById('editorCopyBtn')?.addEventListener('click', () => {
+          document.getElementById('editorMoreMenu').classList.remove('active');
+          const text = document.getElementById('editorContent').value;
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(() => showToast('Copied to clipboard!', 'success'));
+          }
+        });
+
+        let taskSaveTimeout = null;
+
+        window.openTaskEditor = (task) => {
+          document.getElementById('taskEditorId').value = task.id || '';
+          document.getElementById('taskEditorTitle').value = task.title ? decodeHTML(task.title) : '';
+          document.getElementById('taskEditorDate').innerText = task.updated_at ? new Date(task.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString() : new Date().toLocaleDateString();
+          
+          const catSelect = document.getElementById('taskEditorCategorySelect');
+          if (catSelect) {
+            catSelect.innerHTML = document.getElementById('editorCategorySelect').innerHTML;
+            if (task.category) catSelect.value = task.category;
+          }
+          
+          const starIcon = document.getElementById('taskEditorStarIcon');
+          if (starIcon) starIcon.className = task.starred == 1 ? 'bi bi-star-fill text-warning' : 'bi bi-star';
+
+          let items = [];
+          try { items = task.items ? JSON.parse(task.items) : []; } catch(e) {}
+          window.currentTaskItems = items;
+          
+          window.renderTaskItems();
+
+          document.getElementById('taskEditorMoreMenu').classList.remove('active');
+          document.getElementById('taskEditorOverlay').classList.add('active');
+        };
+
+        window.renderTaskItems = () => {
+          const container = document.getElementById('taskItemsContainer');
+          if (!container) return;
+          container.innerHTML = window.currentTaskItems.map((item, idx) => `
+            <div class="task-item-row">
+              <input type="checkbox" class="task-item-checkbox" data-idx="${idx}" ${item.completed ? 'checked' : ''}>
+              <input type="text" class="task-item-input ${item.completed ? 'completed' : ''}" data-idx="${idx}" value="${escapeHTML(item.text)}" placeholder="Task description...">
+              <button class="task-item-del" data-idx="${idx}"><i class="bi bi-x-lg"></i></button>
+            </div>
+          `).join('');
+
+          container.querySelectorAll('.task-item-input').forEach(input => {
+            input.addEventListener('input', (e) => {
+              window.currentTaskItems[e.target.dataset.idx].text = e.target.value;
+              clearTimeout(taskSaveTimeout);
+              taskSaveTimeout = setTimeout(() => window.saveCurrentTask(false), 800);
+            });
+            input.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                const idx = parseInt(e.target.dataset.idx);
+                window.currentTaskItems.splice(idx + 1, 0, { text: '', completed: false });
+                window.renderTaskItems();
+                const inputs = document.querySelectorAll('.task-item-input');
+                if (inputs.length > idx + 1) inputs[idx + 1].focus();
+                window.saveCurrentTask(false);
+              } else if (e.key === 'Backspace' && e.target.value === '') {
+                e.preventDefault();
+                const idx = parseInt(e.target.dataset.idx);
+                if (idx > 0) {
+                  window.currentTaskItems.splice(idx, 1);
+                  window.renderTaskItems();
+                  const inputs = document.querySelectorAll('.task-item-input');
+                  if (inputs.length > idx - 1) {
+                    inputs[idx - 1].focus();
+                    // Instantly move the cursor to the end of the previous line
+                    const val = inputs[idx - 1].value;
+                    inputs[idx - 1].value = '';
+                    inputs[idx - 1].value = val;
+                  }
+                  window.saveCurrentTask(false);
+                }
+              }
+            });
+          });
+
+          container.querySelectorAll('.task-item-checkbox').forEach(chk => {
+            chk.addEventListener('change', (e) => {
+              const idx = e.target.dataset.idx;
+              const isChecked = e.target.checked;
+              window.currentTaskItems[idx].completed = isChecked;
+                
+              // ADVANCED DOM RENDERING: Bypass full array re-rendering to prevent UI lag on massive lists
+              const row = e.target.closest('.task-item-row');
+              if (row) {
+                const inputField = row.querySelector('.task-item-input');
+                if (inputField) {
+                  if (isChecked) inputField.classList.add('completed');
+                  else inputField.classList.remove('completed');
+                }
+              }
+              window.saveCurrentTask(false);
+            });
+          });
+
+          container.querySelectorAll('.task-item-del').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+              window.currentTaskItems.splice(e.currentTarget.dataset.idx, 1);
+              window.renderTaskItems();
+              window.saveCurrentTask(false);
+            });
+          });
+        };
+
+        window.saveCurrentTask = async (force = false) => {
+          const idInput = document.getElementById('taskEditorId');
+          const id = idInput.value;
+          const title = document.getElementById('taskEditorTitle').value.trim();
+          const category = document.getElementById('taskEditorCategorySelect').value;
+          const isStarred = document.getElementById('taskEditorStarIcon').classList.contains('bi-star-fill') ? 1 : 0;
+          const items = JSON.stringify(window.currentTaskItems);
+          
+          if (!title && window.currentTaskItems.length === 0) return;
+          
+          // CONDITIONAL SAVE: Do not auto-save a brand new task list unless explicitly requested
+          if (!id && !force) return;
+          
+          const res = await fetchData('?action=save_task', { 
+            method: 'POST', body: JSON.stringify({id: id || null, title, items, category, starred: isStarred}) 
+          }, true);
+
+          if (res && res.status === 'success' && res.id && !id) {
+            idInput.value = res.id;
+          }
+        };
+
+        document.getElementById('addTaskItemBtn')?.addEventListener('click', () => {
+          window.currentTaskItems.push({ text: '', completed: false });
+          window.renderTaskItems();
+          const inputs = document.querySelectorAll('.task-item-input');
+          if (inputs.length > 0) inputs[inputs.length - 1].focus();
+        });
+
+        document.getElementById('taskEditorTitle')?.addEventListener('input', () => {
+          clearTimeout(taskSaveTimeout);
+          taskSaveTimeout = setTimeout(() => window.saveCurrentTask(false), 800);
+        });
+
+        document.getElementById('taskEditorCategorySelect')?.addEventListener('change', () => window.saveCurrentTask(false));
+
+        document.getElementById('closeTaskEditorBtn')?.addEventListener('click', async () => {
+          await window.saveCurrentTask(true);
+          document.getElementById('taskEditorOverlay').classList.remove('active');
+          if (currentView.type === 'get_tasks') loadView(currentView);
+        });
+
+        document.getElementById('taskEditorStarBtn')?.addEventListener('click', () => {
+          const starIcon = document.getElementById('taskEditorStarIcon');
+          starIcon.className = starIcon.classList.contains('bi-star-fill') ? 'bi bi-star' : 'bi bi-star-fill text-warning';
+          window.saveCurrentTask(true);
+        });
+
+        document.getElementById('taskEditorMoreBtn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          document.getElementById('taskEditorMoreMenu').classList.toggle('active');
+        });
+
+        document.getElementById('taskEditorForceSaveBtn')?.addEventListener('click', async () => {
+          await window.saveCurrentTask(true);
+          showToast('Tasks saved!', 'success');
+          document.getElementById('taskEditorMoreMenu').classList.remove('active');
+        });
+
+        document.getElementById('taskEditorCopyBtn')?.addEventListener('click', () => {
+          document.getElementById('taskEditorMoreMenu').classList.remove('active');
+          const text = window.currentTaskItems.map(t => (t.completed ? '[x] ' : '[ ] ') + t.text).join('\n');
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(() => showToast('Copied to clipboard!', 'success'));
+          }
+        });
+
+        document.getElementById('taskEditorDeleteBtn')?.addEventListener('click', async () => {
+          document.getElementById('taskEditorMoreMenu').classList.remove('active');
+          const id = document.getElementById('taskEditorId').value;
+          if (id && confirm('Delete this task list?')) {
+            await fetchData('?action=delete_task', { method:'POST', body: JSON.stringify({id}) });
+            document.getElementById('taskEditorOverlay').classList.remove('active');
+            if (currentView.type === 'get_tasks') loadView(currentView);
+          }
+        });
+
+        document.getElementById('editorContent').addEventListener('input', (e) => {
+          clearTimeout(noteSaveTimeout);
+          clearTimeout(noteHistoryTimeout);
+          updateEditorWordCount();
+          if (document.getElementById('findReplacePanel').classList.contains('active')) executeNoteFind();
+          noteSaveTimeout = setTimeout(() => saveCurrentEditorNote(false), 1000);
+          noteHistoryTimeout = setTimeout(() => {
+            if (noteTextHistory[noteHistoryIdx] === e.target.value) return;
+            noteTextHistory = noteTextHistory.slice(0, noteHistoryIdx + 1);
+            noteTextHistory.push(e.target.value);
+            
+            // ADVANCED MEMORY MGMT: Cap history dynamically to prevent RAM crashes on massive documents
+            const maxHistory = e.target.value.length > 200000 ? 5 : 50; 
+            if (noteTextHistory.length > maxHistory) noteTextHistory.shift();
+            else noteHistoryIdx++;
+          }, 600);
+        });
+
+        document.getElementById('editorTitle').addEventListener('input', () => {
+          clearTimeout(noteSaveTimeout);
+          noteSaveTimeout = setTimeout(() => saveCurrentEditorNote(false), 1000);
+        });
+        
+        document.getElementById('editorCategorySelect').addEventListener('change', () => saveCurrentEditorNote(false));
+
+        document.getElementById('closeEditorBtn').addEventListener('click', async () => {
+          await saveCurrentEditorNote(true);
+          document.getElementById('editorOverlay').classList.remove('active');
+          activeEditorNote = null;
+          if (currentView.type === 'get_notes') loadView(currentView);
+        });
+
+        document.getElementById('editorForceSaveBtn').addEventListener('click', async () => {
+          await saveCurrentEditorNote(true);
+          showToast('Note saved!', 'success');
+          document.getElementById('editorMoreMenu').classList.remove('active');
+        });
+
+        document.getElementById('editorStarBtn').addEventListener('click', () => {
+          const starIcon = document.getElementById('editorStarIcon');
+          const isStarred = starIcon.classList.contains('bi-star-fill');
+          starIcon.className = isStarred ? 'bi bi-star' : 'bi bi-star-fill text-warning';
+          saveCurrentEditorNote(true);
+        });
+
+        document.getElementById('editorMoreBtn').addEventListener('click', (e) => {
+          e.stopPropagation();
+          document.getElementById('editorMoreMenu').classList.toggle('active');
+        });
+
+        document.getElementById('editorUndoBtn').addEventListener('click', () => {
+          document.getElementById('editorMoreMenu').classList.remove('active');
+          if (noteHistoryIdx > 0) {
+            noteHistoryIdx--;
+            document.getElementById('editorContent').value = noteTextHistory[noteHistoryIdx];
+            updateEditorWordCount();
+            saveCurrentEditorNote(false);
+          }
+        });
+
+        document.getElementById('editorRedoBtn').addEventListener('click', () => {
+          document.getElementById('editorMoreMenu').classList.remove('active');
+          if (noteHistoryIdx < noteTextHistory.length - 1) {
+            noteHistoryIdx++;
+            document.getElementById('editorContent').value = noteTextHistory[noteHistoryIdx];
+            updateEditorWordCount();
+            saveCurrentEditorNote(false);
+          }
+        });
+
+        document.getElementById('editorMarkdownHelpBtn')?.addEventListener('click', () => {
+          document.getElementById('editorMoreMenu').classList.remove('active');
+        });
+
+        document.getElementById('editorDownloadBtn').addEventListener('click', () => {
+          document.getElementById('editorMoreMenu').classList.remove('active');
+          const title = document.getElementById('editorTitle').value || 'Note';
+          const content = document.getElementById('editorContent').value;
+          const safeTitle = title.replace(/[^\w\s-]/gi, '_');
+          
+          if (confirm('Download as TXT? (Click Cancel to download as PDF)')) {
+            const blob = new Blob([content], { type: 'text/plain' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = safeTitle + '.txt';
+            a.click();
+          } else {
+            const div = document.createElement('div');
+            div.style.padding = '30px';
+            div.style.fontFamily = 'Roboto, sans-serif';
+            div.innerHTML = `<h1 style="margin-bottom:10px;">${escapeHTML(title)}</h1><hr style="border-bottom:1px solid #ccc; margin-bottom: 20px;"><div style="white-space:pre-wrap; line-height: 1.6; font-size: 14px;">${escapeHTML(content)}</div>`;
+            html2pdf().from(div).save(safeTitle + '.pdf');
+          }
+        });
+
+        document.getElementById('editorDeleteBtn').addEventListener('click', async () => {
+          document.getElementById('editorMoreMenu').classList.remove('active');
+          const id = document.getElementById('editorNoteId').value;
+          if (id && confirm('Delete this note?')) {
+            await fetchData('?action=delete_note', { method:'POST', body: JSON.stringify({id}) });
+            document.getElementById('editorOverlay').classList.remove('active');
+            activeEditorNote = null;
+            if (currentView.type === 'get_notes') loadView(currentView);
+          }
+        });
+
+        let findNoteMatches = [];
+        let currentNoteMatchIdx = -1;
+
+        const executeNoteFind = () => {
+          const text = document.getElementById('editorContent').value;
+          const query = document.getElementById('findInput').value;
+          findNoteMatches = [];
+          if (!query) { updateNoteFindUI(-1); return; }
+
+          const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+          let match;
+          while ((match = regex.exec(text)) !== null) {
+            findNoteMatches.push({ index: match.index, length: match[0].length });
+          }
+          currentNoteMatchIdx = findNoteMatches.length > 0 ? 0 : -1;
+          updateNoteFindUI(currentNoteMatchIdx);
+        };
+
+        const updateNoteFindUI = (idx) => {
+          currentNoteMatchIdx = idx;
+          const counter = document.getElementById('findCounter');
+          if (findNoteMatches.length === 0) {
+            counter.innerText = '0/0'; return;
+          }
+          counter.innerText = `${idx + 1}/${findNoteMatches.length}`;
+          
+          const ta = document.getElementById('editorContent');
+          const match = findNoteMatches[idx];
+          ta.focus({ preventScroll: true });
+          ta.setSelectionRange(match.index, match.index + match.length);
+        };
+
+        document.getElementById('editorFindBtn').addEventListener('click', () => {
+          const p = document.getElementById('findReplacePanel');
+          p.classList.toggle('active');
+          if (p.classList.contains('active')) {
+            document.getElementById('findInput').focus();
+            executeNoteFind();
+          } else {
+            document.getElementById('editorContent').focus();
+          }
+        });
+        document.getElementById('closeFindBtn').addEventListener('click', () => document.getElementById('findReplacePanel').classList.remove('active'));
+        document.getElementById('findInput').addEventListener('input', executeNoteFind);
+        document.getElementById('findNextBtn').addEventListener('click', () => {
+          if (findNoteMatches.length === 0) return;
+          let next = currentNoteMatchIdx + 1;
+          if (next >= findNoteMatches.length) next = 0;
+          updateNoteFindUI(next);
+        });
+        document.getElementById('findPrevBtn').addEventListener('click', () => {
+          if (findNoteMatches.length === 0) return;
+          let next = currentNoteMatchIdx - 1;
+          if (next < 0) next = findNoteMatches.length - 1;
+          updateNoteFindUI(next);
+        });
+        document.getElementById('replaceBtn').addEventListener('click', () => {
+          if (currentNoteMatchIdx < 0 || findNoteMatches.length === 0) return;
+          const rep = document.getElementById('replaceInput').value;
+          const ta = document.getElementById('editorContent');
+          const match = findNoteMatches[currentNoteMatchIdx];
+          ta.value = ta.value.substring(0, match.index) + rep + ta.value.substring(match.index + match.length);
+          executeNoteFind();
+        });
+        document.getElementById('replaceAllBtn').addEventListener('click', () => {
+          const query = document.getElementById('findInput').value;
+          if (!query) return;
+          const rep = document.getElementById('replaceInput').value;
+          const ta = document.getElementById('editorContent');
+          const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+          ta.value = ta.value.replace(regex, rep);
+          executeNoteFind();
+        });
+
+        document.getElementById('toggleSelectAllNotesBtn').addEventListener('click', () => {
+          const allSelected = window.currentNotesList && window.currentNotesList.length > 0 && window.currentNotesList.every(n => window.selectedNoteIds.has(n.id.toString()));
+          if (allSelected) {
+            window.currentNotesList.forEach(n => window.selectedNoteIds.delete(n.id.toString()));
+            if (window.selectedNoteIds.size === 0) window.multiSelectNoteMode = false;
+          } else {
+            window.currentNotesList.forEach(n => window.selectedNoteIds.add(n.id.toString()));
+          }
+          updateNoteSelectionUI();
+        });
+
+        document.getElementById('cancelSelectNotesBtn').addEventListener('click', () => {
+          window.multiSelectNoteMode = false; 
+          window.selectedNoteIds.clear();
+          updateNoteSelectionUI();
+        });
+
+        document.getElementById('bulkDeleteNotesBtn').addEventListener('click', async () => {
+          const isTask = currentView.type === 'get_tasks';
+          if (confirm(`Delete ${window.selectedNoteIds.size} ${isTask ? 'tasks' : 'notes'} permanently?`)) {
+            for (let id of window.selectedNoteIds) {
+              const endpoint = isTask ? '?action=delete_task' : '?action=delete_note';
+              await fetchData(endpoint, { method:'POST', body: JSON.stringify({id}) }, true);
+            }
+            window.selectedNoteIds.clear(); 
+            window.multiSelectNoteMode = false;
+            updateNoteSelectionUI();
+            loadView(currentView);
+          }
+        });
+
+        document.getElementById('bulkDownloadNotesBtn').addEventListener('click', async () => {
+          const zip = new JSZip();
+          window.selectedNoteIds.forEach(id => {
+            const n = window.currentNotesList.find(x => x.id.toString() === id.toString());
+            if (n) {
+              const cleanContent = n.content.replace(/<[^>]*>?/gm, '');
+              const displayTitle = (n.title && n.title.trim()) ? decodeHTML(n.title) : 
+                                   (cleanContent.trim() ? cleanContent.split(/\s+/).slice(0, 5).join(' ') : 'title');
+              zip.file(`${displayTitle.replace(/[^\w\s-]/gi, '_')}.txt`, decodeHTML(n.content) || '');
+            }
+          });
+          const blob = await zip.generateAsync({ type: 'blob' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `Notes_Selection_${Date.now()}.zip`;
+          a.click();
+          
+          window.selectedNoteIds.clear();
+          window.multiSelectNoteMode = false;
+          updateNoteSelectionUI();
+        });
 
         const injectMetaTags = () => {
           const metaTags = [
