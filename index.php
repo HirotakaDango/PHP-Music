@@ -7500,7 +7500,7 @@ function perform_full_scan($db) {
               <div class="editor-dropdown-item" id="editorUndoBtn"><i class="bi bi-arrow-counterclockwise"></i> Undo</div>
               <div class="editor-dropdown-item" id="editorRedoBtn"><i class="bi bi-arrow-clockwise"></i> Redo</div>
               <div class="editor-dropdown-item" id="editorMarkdownHelpBtn" data-bs-toggle="modal" data-bs-target="#markdown-info-modal"><i class="bi bi-markdown"></i> Markdown Guide</div>
-              <div class="editor-dropdown-item" id="editorDownloadBtn"><i class="bi bi-download"></i> Download</div>
+              <div class="editor-dropdown-item" id="editorDownloadModalBtn" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Note...</div>
               <div class="editor-dropdown-item text-danger" id="editorDeleteBtn"><i class="bi bi-trash"></i> Delete</div>
             </div>
           </div>
@@ -7559,8 +7559,12 @@ function perform_full_scan($db) {
           <button class="btn btn-sm btn-outline-secondary border-0" data-md="code" title="Code Block"><i class="bi bi-code-slash"></i></button>
           <button class="btn btn-sm btn-outline-secondary border-0" data-md="table" title="Table"><i class="bi bi-table"></i></button>
           <div class="vr bg-secondary mx-1 opacity-50"></div>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-left" title="Align Left"><i class="bi bi-text-left"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-center" title="Align Center"><i class="bi bi-text-center"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-right" title="Align Right"><i class="bi bi-text-right"></i></button>
+          <div class="vr bg-secondary mx-1 opacity-50"></div>
           <button class="btn btn-sm btn-outline-secondary border-0" data-md="link" title="Link"><i class="bi bi-link-45deg"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="image" title="Image URL"><i class="bi bi-image"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="image" title="Image URL & Resize"><i class="bi bi-image"></i></button>
         </div>
         <textarea class="editor-content" id="editorContent" placeholder="Start typing here... (Markdown & Task-lists supported)"></textarea>
         <div class="editor-content d-none" id="editorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
@@ -7742,6 +7746,26 @@ function perform_full_scan($db) {
                     </td>
                   </tr>
                   <tr>
+                    <td><strong>Align Left</strong></td>
+                    <td><code>&lt;div style="text-align: left;"&gt;Left&lt;/div&gt;</code></td>
+                    <td><div style="text-align: left;" class="m-0">Left</div></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Align Center</strong></td>
+                    <td><code>&lt;div style="text-align: center;"&gt;Center&lt;/div&gt;</code></td>
+                    <td><div style="text-align: center;" class="m-0">Center</div></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Align Right</strong></td>
+                    <td><code>&lt;div style="text-align: right;"&gt;Right&lt;/div&gt;</code></td>
+                    <td><div style="text-align: right;" class="m-0">Right</div></td>
+                  </tr>
+                  <tr>
+                    <td><strong>Resize Image</strong></td>
+                    <td><code>&lt;img src="url" width="50%" height="auto"&gt;</code></td>
+                    <td><i class="bi bi-image"></i> Resized Image</td>
+                  </tr>
+                  <tr>
                     <td><strong>Horizontal Rule</strong></td>
                     <td><code>---</code></td>
                     <td><hr class="m-0 border-secondary"></td>
@@ -7749,6 +7773,30 @@ function perform_full_scan($db) {
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="download-note-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-cloud-arrow-down-fill text-danger me-2"></i> Download Note</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4">
+            <label class="form-label text-secondary small fw-bold mb-2">SELECT FORMAT</label>
+            <div style="position: relative; display: flex; align-items: center; margin-bottom: 1.5rem;">
+              <select id="dlFormat" class="form-control bg-dark text-white border-secondary" style="appearance: none; -webkit-appearance: none; padding-right: 48px; cursor: pointer; z-index: 1; height: 45px; font-weight: 500;">
+                <option value="txt">Plain Text (.txt)</option>
+                <option value="md">Markdown (.md)</option>
+                <option value="html">HTML Document (.html)</option>
+                <option value="pdf">PDF Document (.pdf)</option>
+              </select>
+              <i class="bi bi-chevron-down text-secondary" style="position: absolute; right: 16px; pointer-events: none; font-size: 1.2rem; z-index: 2;"></i>
+            </div>
+            <button type="button" class="btn btn-danger w-100 fw-bold" id="confirm-download-note-btn" style="height: 45px;">Download</button>
           </div>
         </div>
       </div>
@@ -11918,6 +11966,16 @@ SOFTWARE.</div>
                       card.classList.add('bound');
                       let pressTimer;
                       let startX = 0, startY = 0;
+
+                      const doToggle = () => {
+                        const now = Date.now();
+                        // Prevent double-toggle if contextmenu or click fires right after the touch timer
+                        if (card.dataset.lastToggle && now - parseInt(card.dataset.lastToggle) < 800) {
+                          return; 
+                        }
+                        card.dataset.lastToggle = now;
+                        toggleNoteMultiSelect(card.dataset.id);
+                      };
                       
                       // Touch (Mobile) long-press
                       const startTouch = (e) => { 
@@ -11926,7 +11984,7 @@ SOFTWARE.</div>
                           startX = e.touches[0].clientX; startY = e.touches[0].clientY;
                         }
                         pressTimer = setTimeout(() => { 
-                          toggleNoteMultiSelect(card.dataset.id); 
+                          doToggle(); 
                           if (navigator.vibrate) navigator.vibrate(50);
                         }, 400); 
                       };
@@ -11943,11 +12001,11 @@ SOFTWARE.</div>
                       card.addEventListener('touchcancel', cancelTouch);
                       card.addEventListener('touchmove', moveTouch, { passive: true });
 
-                      // Desktop Right-Click
+                      // Desktop Right-Click (and mobile simulated context menu)
                       card.addEventListener('contextmenu', (e) => {
                         if (e.target.closest('.card-star-btn')) return;
                         e.preventDefault(); 
-                        toggleNoteMultiSelect(card.dataset.id);
+                        doToggle();
                       });
                     });
                   };
@@ -14313,6 +14371,11 @@ SOFTWARE.</div>
           const anyCard = target.closest('.note-card-item, .task-card-wrapper');
           if (anyCard) {
             e.stopPropagation();
+            const now = Date.now();
+            if (anyCard.dataset.lastToggle && now - parseInt(anyCard.dataset.lastToggle) < 800) {
+              // Ignore click triggered by releasing the long press
+              return;
+            }
             const id = anyCard.dataset.id;
             const isTaskCard = anyCard.classList.contains('task-card-wrapper');
             const dataList = isTaskCard ? window.currentTasksList : window.currentNotesList;
@@ -17378,8 +17441,22 @@ SOFTWARE.</div>
               case 'quote': pre = '> '; def = 'Quote'; break;
               case 'code': pre = '```\n'; suf = '\n```'; def = 'code block'; break;
               case 'table': pre = '| Header | Header |\n| --- | --- |\n| Cell | Cell |'; break;
+              case 'align-left': pre = '<div style="text-align: left;">\n'; suf = '\n</div>'; def = 'Left aligned text'; break;
+              case 'align-center': pre = '<div style="text-align: center;">\n'; suf = '\n</div>'; def = 'Center aligned text'; break;
+              case 'align-right': pre = '<div style="text-align: right;">\n'; suf = '\n</div>'; def = 'Right aligned text'; break;
               case 'link': pre = '['; suf = '](url)'; def = 'link text'; break;
-              case 'image': pre = '!['; suf = '](https://example.com/image.jpg)'; def = 'alt text'; break;
+              case 'image': 
+                const imgUrl = prompt("Enter image URL:", "https://example.com/image.jpg");
+                if (imgUrl) {
+                  const imgWidth = prompt("Enter width (e.g. 100%, 300px, auto):", "100%");
+                  const imgHeight = prompt("Enter height (e.g. auto, 300px):", "auto");
+                  pre = `<img src="${imgUrl}" width="${imgWidth || '100%'}" height="${imgHeight || 'auto'}" alt="`;
+                  suf = '">';
+                  def = 'image description';
+                } else {
+                  return; // Cancelled
+                }
+                break;
             }
 
             const insertText = selectedText || def;
@@ -17656,25 +17733,64 @@ SOFTWARE.</div>
           document.getElementById('editorMoreMenu').classList.remove('active');
         });
 
-        document.getElementById('editorDownloadBtn').addEventListener('click', () => {
+        const downloadFile = (type) => {
           document.getElementById('editorMoreMenu').classList.remove('active');
           const title = document.getElementById('editorTitle').value || 'Note';
           const content = document.getElementById('editorContent').value;
           const safeTitle = title.replace(/[^\w\s-]/gi, '_');
           
-          if (confirm('Download as TXT? (Click Cancel to download as PDF)')) {
+          if (type === 'txt' || type === 'md') {
             const blob = new Blob([content], { type: 'text/plain' });
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
-            a.download = safeTitle + '.txt';
+            a.download = `${safeTitle}.${type}`;
             a.click();
-          } else {
+          } else if (type === 'html') {
+            let htmlContent = content;
+            if (typeof marked !== 'undefined') {
+              marked.use({ gfm: true });
+              htmlContent = marked.parse(content);
+            } else {
+              htmlContent = `<pre>${escapeHTML(content)}</pre>`;
+            }
+            const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHTML(title)}</title></head><body style="font-family: sans-serif; padding: 20px; max-width: 800px; margin: auto;"><h1>${escapeHTML(title)}</h1><hr>${htmlContent}</body></html>`;
+            const blob = new Blob([fullHtml], { type: 'text/html' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `${safeTitle}.html`;
+            a.click();
+          } else if (type === 'pdf') {
             const div = document.createElement('div');
             div.style.padding = '30px';
             div.style.fontFamily = 'Roboto, sans-serif';
-            div.innerHTML = `<h1 style="margin-bottom:10px;">${escapeHTML(title)}</h1><hr style="border-bottom:1px solid #ccc; margin-bottom: 20px;"><div style="white-space:pre-wrap; line-height: 1.6; font-size: 14px;">${escapeHTML(content)}</div>`;
-            html2pdf().from(div).save(safeTitle + '.pdf');
+            
+            let htmlContent = content;
+            if (typeof marked !== 'undefined') {
+              marked.use({ gfm: true });
+              htmlContent = marked.parse(content);
+            } else {
+              htmlContent = `<div style="white-space:pre-wrap; line-height: 1.6;">${escapeHTML(content)}</div>`;
+            }
+            
+            div.innerHTML = `<h1 style="margin-bottom:10px;">${escapeHTML(title)}</h1><hr style="border-bottom:1px solid #ccc; margin-bottom: 20px;">${htmlContent}`;
+            html2pdf().from(div).set({
+              margin: 10,
+              filename: `${safeTitle}.pdf`,
+              image: { type: 'jpeg', quality: 0.98 },
+              html2canvas: { scale: 2 },
+              jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+            }).save();
           }
+        };
+
+        document.getElementById('editorDownloadModalBtn')?.addEventListener('click', () => {
+          document.getElementById('editorMoreMenu').classList.remove('active');
+        });
+
+        document.getElementById('confirm-download-note-btn')?.addEventListener('click', () => {
+          const format = document.getElementById('dlFormat').value;
+          downloadFile(format);
+          bootstrap.Modal.getInstance(document.getElementById('download-note-modal')).hide();
         });
 
         document.getElementById('editorDeleteBtn').addEventListener('click', async () => {
