@@ -6156,6 +6156,10 @@ function perform_full_scan($db) {
       #editorMarkdownPreview table { width: 100%; margin-bottom: 1rem; color: var(--ytm-primary-text); border-collapse: collapse; }
       #editorMarkdownPreview table th, #editorMarkdownPreview table td { padding: 0.5rem; border: 1px solid #404040; }
       #editorMarkdownPreview table th { background-color: var(--ytm-surface-2); font-weight: 700; }
+      #editorMarkdownPreview img { max-width: 100%; border-radius: 8px; margin-bottom: 1rem; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+      .editor-toolbar { background-color: var(--ytm-surface-2); padding: 8px; border-radius: 8px; border: 1px solid #404040; margin-bottom: 12px; }
+      .editor-toolbar .btn { color: var(--ytm-secondary-text); transition: all 0.2s; }
+      .editor-toolbar .btn:hover { color: var(--ytm-primary-text); background-color: #404040; }
       .task-list-item { list-style: none; display: flex; align-items: center; }
       
       .task-item-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; background: var(--ytm-surface-2); padding: 8px 12px; border-radius: 8px; border: 1px solid #404040; transition: border-color 0.2s; }
@@ -7540,6 +7544,23 @@ function perform_full_scan($db) {
               <option value="all" style="background: var(--ytm-surface-2);">Uncategorized</option>
             </select>
           </div>
+        </div>
+        <div class="editor-toolbar d-flex flex-wrap gap-1">
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="bold" title="Bold"><i class="bi bi-type-bold"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="italic" title="Italic"><i class="bi bi-type-italic"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="heading" title="Heading"><i class="bi bi-type-h1"></i></button>
+          <div class="vr bg-secondary mx-1 opacity-50"></div>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="ul" title="Bullet List"><i class="bi bi-list-ul"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="ol" title="Numbered List"><i class="bi bi-list-ol"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="task" title="Task List"><i class="bi bi-ui-checks"></i></button>
+          <div class="vr bg-secondary mx-1 opacity-50"></div>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="quote" title="Blockquote"><i class="bi bi-quote"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="code" title="Code Block"><i class="bi bi-code-slash"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="table" title="Table"><i class="bi bi-table"></i></button>
+          <div class="vr bg-secondary mx-1 opacity-50"></div>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="link" title="Link"><i class="bi bi-link-45deg"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="image" title="Image URL"><i class="bi bi-image"></i></button>
         </div>
         <textarea class="editor-content" id="editorContent" placeholder="Start typing here... (Markdown & Task-lists supported)"></textarea>
         <div class="editor-content d-none" id="editorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
@@ -11898,28 +11919,36 @@ SOFTWARE.</div>
                       let pressTimer;
                       let startX = 0, startY = 0;
                       
-                      const startPress = (e) => { 
+                      // Touch (Mobile) long-press
+                      const startTouch = (e) => { 
                         if (e.target.closest('.card-star-btn')) return;
-                        if (e.touches) { startX = e.touches[0].clientX; startY = e.touches[0].clientY; }
+                        if (e.touches && e.touches.length > 0) {
+                          startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+                        }
                         pressTimer = setTimeout(() => { 
                           toggleNoteMultiSelect(card.dataset.id); 
                           if (navigator.vibrate) navigator.vibrate(50);
-                        }, 300); // Super fast 300ms hold time for multi-select
+                        }, 400); 
                       };
-                      const cancelPress = () => clearTimeout(pressTimer);
-                      const movePress = (e) => {
+                      const cancelTouch = () => clearTimeout(pressTimer);
+                      const moveTouch = (e) => {
                         if (!e.touches) return;
                         const dx = Math.abs(e.touches[0].clientX - startX);
                         const dy = Math.abs(e.touches[0].clientY - startY);
                         if (dx > 10 || dy > 10) clearTimeout(pressTimer);
                       };
                       
-                      card.addEventListener('mousedown', startPress);
-                      card.addEventListener('touchstart', startPress, { passive: true });
-                      card.addEventListener('mouseup', cancelPress);
-                      card.addEventListener('mouseleave', cancelPress);
-                      card.addEventListener('touchend', cancelPress);
-                      card.addEventListener('touchmove', movePress, { passive: true });
+                      card.addEventListener('touchstart', startTouch, { passive: true });
+                      card.addEventListener('touchend', cancelTouch);
+                      card.addEventListener('touchcancel', cancelTouch);
+                      card.addEventListener('touchmove', moveTouch, { passive: true });
+
+                      // Desktop Right-Click
+                      card.addEventListener('contextmenu', (e) => {
+                        if (e.target.closest('.card-star-btn')) return;
+                        e.preventDefault(); 
+                        toggleNoteMultiSelect(card.dataset.id);
+                      });
                     });
                   };
                   window.bindNoteCardEvents(grid);
@@ -17328,6 +17357,49 @@ SOFTWARE.</div>
           }
         });
 
+        document.querySelectorAll('.editor-toolbar button').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            const md = btn.dataset.md;
+            const ta = document.getElementById('editorContent');
+            const start = ta.selectionStart;
+            const end = ta.selectionEnd;
+            const selectedText = ta.value.substring(start, end);
+            let pre = '', suf = '', def = '';
+
+            switch(md) {
+              case 'bold': pre = '**'; suf = '**'; def = 'bold text'; break;
+              case 'italic': pre = '*'; suf = '*'; def = 'italic text'; break;
+              case 'heading': pre = '### '; def = 'Heading'; break;
+              case 'strikethrough': pre = '~~'; suf = '~~'; def = 'strikethrough'; break;
+              case 'ul': pre = '- '; def = 'List item'; break;
+              case 'ol': pre = '1. '; def = 'List item'; break;
+              case 'task': pre = '- [ ] '; def = 'Task'; break;
+              case 'quote': pre = '> '; def = 'Quote'; break;
+              case 'code': pre = '```\n'; suf = '\n```'; def = 'code block'; break;
+              case 'table': pre = '| Header | Header |\n| --- | --- |\n| Cell | Cell |'; break;
+              case 'link': pre = '['; suf = '](url)'; def = 'link text'; break;
+              case 'image': pre = '!['; suf = '](https://example.com/image.jpg)'; def = 'alt text'; break;
+            }
+
+            const insertText = selectedText || def;
+            const finalInsert = md === 'table' ? pre : pre + insertText + suf;
+            
+            ta.value = ta.value.substring(0, start) + finalInsert + ta.value.substring(end);
+            ta.focus();
+            
+            if (md === 'table') {
+              ta.setSelectionRange(start + 2, start + 8);
+            } else if (selectedText) {
+               ta.setSelectionRange(start, start + finalInsert.length);
+            } else {
+               ta.setSelectionRange(start + pre.length, start + pre.length + def.length);
+            }
+            
+            ta.dispatchEvent(new Event('input'));
+          });
+        });
+
         let taskSaveTimeout = null;
 
         window.openTaskEditor = (task) => {
@@ -17498,7 +17570,12 @@ SOFTWARE.</div>
         document.getElementById('taskEditorDeleteBtn')?.addEventListener('click', async () => {
           document.getElementById('taskEditorMoreMenu').classList.remove('active');
           const id = document.getElementById('taskEditorId').value;
-          if (id && confirm('Delete this task list?')) {
+          if (!id) {
+            document.getElementById('taskEditorOverlay').classList.remove('active');
+            showToast('Discarded unsaved task list.', 'info');
+            return;
+          }
+          if (confirm('Delete this task list?')) {
             await fetchData('?action=delete_task', { method:'POST', body: JSON.stringify({id}) });
             document.getElementById('taskEditorOverlay').classList.remove('active');
             if (currentView.type === 'get_tasks') loadView(currentView);
@@ -17603,7 +17680,13 @@ SOFTWARE.</div>
         document.getElementById('editorDeleteBtn').addEventListener('click', async () => {
           document.getElementById('editorMoreMenu').classList.remove('active');
           const id = document.getElementById('editorNoteId').value;
-          if (id && confirm('Delete this note?')) {
+          if (!id) {
+            document.getElementById('editorOverlay').classList.remove('active');
+            activeEditorNote = null;
+            showToast('Discarded unsaved note.', 'info');
+            return;
+          }
+          if (confirm('Delete this note?')) {
             await fetchData('?action=delete_note', { method:'POST', body: JSON.stringify({id}) });
             document.getElementById('editorOverlay').classList.remove('active');
             activeEditorNote = null;
