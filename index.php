@@ -345,7 +345,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '4.2');
+define('APP_VERSION', '4.3');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -2138,9 +2138,11 @@ if (isset($_GET['action'])) {
           if ($ext === 'mp3') {
             $tagwriter->tagformats = ['id3v1', 'id3v2.3'];
           } elseif ($ext === 'flac') {
-            $tagformats = ['metaflac'];
+            $tagwriter->tagformats = ['metaflac']; // Fixed critical missing object pointer
           } elseif ($ext === 'ogg') {
             $tagwriter->tagformats = ['vorbiscomment'];
+          } elseif ($ext === 'm4a') {
+            $tagwriter->tagformats = ['mp4']; // Added M4A support
           } else {
             $tagwriter->tagformats = ['id3v2.3'];
           }
@@ -2158,14 +2160,21 @@ if (isset($_GET['action'])) {
           if ($jpeg_data) {
             $tagwriter->tag_data['attached_picture'] = [
               [
-                'data' => $jpeg_data,
-                'picturetypeid' => 3,
-                'description' => 'Cover',
-                'mime' => 'image/jpeg'
+                'data'          => $jpeg_data,
+                'picturetypeid' => 3, // Cover (front)
+                'description'   => 'Cover',
+                'mime'          => 'image/jpeg'
               ]
             ];
           }
-          $tagwriter->WriteTags();
+          
+          // Force write operation.
+          if (!$tagwriter->WriteTags()) {
+            // Fallback: If writing the image fails due to an already corrupted ID3 frame inside the physical file, 
+            // we wipe the corrupted tags entirely and rewrite the fresh data cleanly.
+            $tagwriter->remove_other_tags = true;
+            $tagwriter->WriteTags();
+          }
           clearstatcache(true, $song['file']);
           $new_mtime = filemtime($song['file']);
           $db->prepare("UPDATE music SET last_modified = ? WHERE id = ?")->execute([$new_mtime, $song_id]);
@@ -3472,6 +3481,11 @@ if (isset($_GET['action'])) {
         $stmt_rec_art->execute([$user_id]);
         $details['recommended_artists'] = $stmt_rec_art->fetchAll();
 
+        // FIX: Fetch the user's playlists for the "My Profile" view
+        $stmt_playlists = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count FROM playlists p WHERE p.user_id = ? ORDER BY p.created_at DESC");
+        $stmt_playlists->execute([$user_id]);
+        $details['playlists'] = $stmt_playlists->fetchAll();
+
         $details['public_id'] = null;
         $details['user_id'] = $user_id;
 
@@ -3647,7 +3661,8 @@ if (isset($_GET['action'])) {
             } else {
               $details['is_following'] = false;
             }
-            $stmt_playlists = $db->prepare("SELECT p.name, p.public_id, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count FROM playlists p WHERE p.user_id = ? AND (p.is_private = 0 OR {$is_super_admin} = 1) ORDER BY p.created_at DESC");
+            // FIX: Added 'is_collaborative' and 'is_private' so the UI context menus work correctly on artist views
+            $stmt_playlists = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count FROM playlists p WHERE p.user_id = ? AND (p.is_private = 0 OR {$is_super_admin} = 1) ORDER BY p.created_at DESC");
             $stmt_playlists->execute([$artist_user_id]);
             $details['playlists'] = $stmt_playlists->fetchAll();
           }
@@ -3979,6 +3994,29 @@ if (isset($_GET['action'])) {
         }
       }
       http_response_code(404);
+      exit;
+
+    case 'download_cover':
+      $id = intval($_GET['id'] ?? 0);
+      $stmt = $db->prepare("SELECT image, title, artist FROM music WHERE id = ?");
+      $stmt->execute([$id]);
+      $row = $stmt->fetch();
+      
+      $safeTitle = preg_replace('/[^a-zA-Z0-9_]/', '_', ($row['title'] ?? 'Unknown') . '_' . ($row['artist'] ?? 'Unknown'));
+
+      if ($row && $row['image']) {
+        header('Content-Type: image/webp');
+        header('Content-Disposition: attachment; filename="' . $safeTitle . '_cover.webp"');
+        echo $row['image'];
+      } else {
+        header('Content-Type: image/svg+xml');
+        header('Content-Disposition: attachment; filename="' . $safeTitle . '_cover.svg"');
+        $seed = ($row['title'] ?? 'Unknown') . ($row['artist'] ?? 'Unknown');
+        $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
+        $c1 = $colors[hexdec(substr(md5($seed . 'cov1'), 0, 6)) % count($colors)];
+        $c2 = $colors[hexdec(substr(md5($seed . 'cov2'), 0, 6)) % count($colors)];
+        echo '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="'.$c1.'"/><stop offset="100%" stop-color="'.$c2.'"/></linearGradient></defs><rect width="16" height="16" fill="url(#g)"/><path d="M9 13c0 1.105-1.12 2-2.5 2S4 14.105 4 13s1.12-2 2.5-2 2.5.895 2.5 2" fill="#ffffff" opacity="0.6"/><path fill-rule="evenodd" d="M9 3v10H8V3h1z" fill="#ffffff" opacity="0.6"/><path d="M8 2.82a1 1 0 0 1 .804-.98l3-.6A1 1 0 0 1 13 2.22V4L8 5V2.82z" fill="#ffffff" opacity="0.6"/></svg>';
+      }
       exit;
 
     case 'get_image':
@@ -5612,6 +5650,7 @@ function perform_full_scan($db) {
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@multiavatar/multiavatar/multiavatar.min.js"></script>
     <?php echo $initialViewJS; ?>
     <style>
       :root {
@@ -5636,10 +5675,19 @@ function perform_full_scan($db) {
       ::-webkit-scrollbar-thumb { background: var(--ytm-surface-2); border-radius: 4px; }
       ::-webkit-scrollbar-thumb:hover { background: #555; }
       .nav-tabs { border-bottom-color: var(--ytm-surface-2) !important; }
-      .nav-tabs .nav-link { color: var(--ytm-secondary-text) !important; border: none !important; border-bottom: 2px solid transparent !important; padding: 0.75rem 1.5rem; font-weight: 500; cursor: pointer; background: transparent !important; transition: color 0.2s, border-color 0.2s; }
-      .nav-tabs .nav-link:hover { color: var(--ytm-primary-text) !important; border-bottom: 2px solid rgba(255,255,255,0.2) !important; }
+      .nav-tabs .nav-link { color: var(--ytm-primary-text) !important; border: none !important; border-bottom: 2px solid transparent !important; padding: 0.75rem 1.5rem; font-weight: 500; cursor: pointer; background: transparent !important; transition: color 0.2s, border-color 0.2s; }
+      .nav-tabs .nav-link:hover { border-bottom: 2px solid rgba(255,255,255,0.2) !important; }
       /* Locks the active tab highlight so it never vanishes */
-      .nav-tabs .nav-link.active { background-color: transparent !important; color: var(--ytm-primary-text) !important; border-bottom: 2px solid var(--ytm-accent) !important; font-weight: bold !important; text-shadow: 0 0 10px rgba(255,255,255,0.3); }
+      .nav-tabs .nav-link.active,
+      .nav-tabs .nav-link.active:hover,
+      .nav-tabs .nav-link.active:focus { 
+        background-color: rgba(255,0,0,0.15) !important; 
+        color: var(--ytm-accent) !important; 
+        border-bottom: 2px solid var(--ytm-accent) !important; 
+        font-weight: bold !important; 
+        border-radius: 6px 6px 0 0 !important; 
+        text-shadow: none !important; 
+      }
       .app-container { display: flex; height: 100%; }
       .sidebar {
         width: 240px; background-color: var(--ytm-bg);
@@ -5736,6 +5784,7 @@ function perform_full_scan($db) {
       }
       .song-item .song-title-wrapper { grid-column: 2; grid-row: 1; min-width: 0; }
       .song-item .song-title { color: var(--ytm-primary-text); font-weight: 500; }
+      .song-item .song-artist, .song-item .song-artist-name, .song-item .song-duration, .song-item .song-duration-mobile { color: var(--ytm-primary-text) !important; }
       .song-item .song-thumb {
         width: 40px; height: 40px; object-fit: cover; border-radius: 4px; background-color: var(--ytm-surface);
       }
@@ -5831,7 +5880,14 @@ function perform_full_scan($db) {
       .song-item .playing-icon { display: none; font-size: 1.5rem; color: var(--ytm-accent); }
       .song-item.now-playing .song-thumb { display: none; }
       .song-item.now-playing .playing-icon { display: inline-block; animation: soundwave-pulse 1.2s ease-in-out infinite; }
-      .song-item.now-playing .song-title { color: var(--ytm-accent); }
+      .song-item.now-playing .song-title,
+      .song-item.now-playing .song-artist,
+      .song-item.now-playing .song-artist *,
+      .song-item.now-playing .song-artist-name {
+        color: var(--ytm-accent) !important;
+        opacity: 0.9 !important;
+        font-weight: 500 !important;
+      }
       .profile-picture, .profile-picture-sm { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; background-color: var(--ytm-surface-2); }
       .profile-picture-lg { border-radius: 50%; }
       .history-item .played-at-text { font-size: 0.8rem; color: var(--ytm-secondary-text); }
@@ -5932,11 +5988,30 @@ function perform_full_scan($db) {
       .player-modal-content.theme-light-bg .progress-bar-fg { background-color: #000000 !important; }
       .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg { background-color: var(--ytm-accent) !important; }
       .player-modal-content.theme-light-bg .progress-bar-fg::after { background-color: #000000 !important; }
-      .player-modal-content.theme-light-bg .nav-tabs .nav-link { color: rgba(0,0,0,0.6) !important; font-weight: 600 !important; border-bottom: 2px solid transparent !important; }
-      .player-modal-content.theme-light-bg .nav-tabs .nav-link:hover { color: #000000 !important; border-bottom: 2px solid rgba(0,0,0,0.2) !important; }
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link { color: #000000 !important; font-weight: 600 !important; border-bottom: 2px solid transparent !important; }
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link:hover { border-bottom: 2px solid rgba(0,0,0,0.2) !important; }
       /* Locks the active tab highlight in Light Mode */
-      .player-modal-content.theme-light-bg .nav-tabs .nav-link.active { color: #000000 !important; border-bottom: 2px solid #000000 !important; font-weight: 800 !important; text-shadow: none !important; }
-      .player-modal-content.theme-light-bg .song-item .song-title { color: #000000 !important; font-weight: 600; }
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link.active,
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link.active:hover,
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link.active:focus { 
+        background-color: rgba(0,0,0,0.1) !important; 
+        color: #000000 !important; 
+        border-bottom: 2px solid #000000 !important; 
+        font-weight: 800 !important; 
+        border-radius: 6px 6px 0 0 !important; 
+        text-shadow: none !important; 
+      }
+      .player-modal-content.theme-light-bg .song-item .song-title,
+      .player-modal-content.theme-light-bg .song-item .song-artist,
+      .player-modal-content.theme-light-bg .song-item .song-artist-name,
+      .player-modal-content.theme-light-bg .song-item .song-duration,
+      .player-modal-content.theme-light-bg .song-item .song-duration-mobile { color: #000000 !important; font-weight: 600; }
+      .player-modal-content.theme-light-bg .song-item.now-playing .song-title,
+      .player-modal-content.theme-light-bg .song-item.now-playing .song-artist, 
+      .player-modal-content.theme-light-bg .song-item.now-playing .song-artist *, 
+      .player-modal-content.theme-light-bg .song-item.now-playing .song-artist-name { 
+          color: var(--ytm-accent) !important; 
+      }
       .player-modal-content.theme-light-bg .song-item:hover { background-color: rgba(0,0,0,0.08) !important; }
       .player-modal-content.theme-light-bg .lyric-line { color: rgba(0,0,0,0.6) !important; }
       .player-modal-content.theme-light-bg .lyric-line:hover { color: #000000 !important; }
@@ -6202,6 +6277,177 @@ function perform_full_scan($db) {
         .find-replace-panel { width: 90%; left: 5%; right: 5%; }
         .selection-bar.active { bottom: 140px; }
       }
+      .phpmusic-settings-wrapper { height: 100%; overflow: hidden; background-color: var(--ytm-bg); }
+      .phpmusic-settings-sidebar {
+        background-color: var(--ytm-surface);
+        border-right: 1px solid var(--ytm-surface-2);
+        flex-shrink: 0;
+        width: 260px;
+        overflow-y: auto;
+      }
+      .phpmusic-settings-nav .nav-link {
+        color: var(--ytm-secondary-text);
+        text-align: left;
+        padding: 1.15rem 1.5rem;
+        border-radius: 0;
+        border-left: 3px solid transparent;
+        transition: all 0.2s;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        cursor: pointer;
+      }
+      .phpmusic-settings-nav .nav-link i { font-size: 1.25rem; }
+      .phpmusic-settings-nav .nav-link:hover { color: var(--ytm-primary-text); background-color: rgba(255,255,255,0.03); }
+      .phpmusic-settings-nav .nav-link.active {
+        background-color: rgba(255,0,0,0.1);
+        color: var(--ytm-primary-text);
+        border-left-color: var(--ytm-accent);
+        font-weight: 700;
+      }
+      .phpmusic-settings-content { overflow-y: auto; background-color: var(--ytm-bg); scrollbar-width: thin; }
+      .phpmusic-settings-pane { max-width: 800px; margin: 0 auto; padding-bottom: 3rem; }
+      .phpmusic-settings-section {
+        background-color: var(--ytm-surface);
+        border: 1px solid var(--ytm-surface-2);
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+      }
+      .phpmusic-settings-section-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: var(--ytm-primary-text);
+        margin-bottom: 1.25rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--ytm-surface-2);
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+      }
+      
+      @media (max-width: 767.98px) {
+        .phpmusic-settings-wrapper { flex-direction: column !important; }
+        .phpmusic-settings-sidebar {
+          width: 100%;
+          border-right: none;
+          border-bottom: 1px solid var(--ytm-surface-2);
+          overflow-x: auto;
+          overflow-y: hidden;
+          scrollbar-width: none;
+        }
+        .phpmusic-settings-sidebar::-webkit-scrollbar { display: none; }
+        .phpmusic-settings-nav {
+          flex-direction: row !important;
+          flex-wrap: nowrap;
+          padding: 0;
+        }
+        .phpmusic-settings-nav .nav-link {
+          white-space: nowrap;
+          padding: 1rem 1.25rem;
+          border-left: none;
+          border-bottom: 3px solid transparent;
+          justify-content: center;
+        }
+        .phpmusic-settings-nav .nav-link.active {
+          border-left-color: transparent;
+          border-bottom-color: var(--ytm-accent);
+        }
+        .phpmusic-settings-content { padding: 1rem 0.5rem !important; }
+        .phpmusic-settings-section { padding: 1rem; border-radius: 8px; }
+      }
+      .phpmusic-profile-dropdown {
+        background-color: var(--ytm-surface) !important;
+        border: 1px solid var(--ytm-surface-2) !important;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.8) !important;
+        border-radius: 14px !important;
+        min-width: 280px !important;
+        padding: 0.5rem 0 !important;
+        backdrop-filter: blur(10px) !important;
+      }
+      .phpmusic-profile-header-card {
+        padding: 1rem 1.25rem;
+        border-bottom: 1px solid var(--ytm-surface-2);
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 0.5rem;
+      }
+      .phpmusic-profile-header-card img {
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        object-fit: cover;
+        border: 1px solid rgba(255,255,255,0.1);
+      }
+      .phpmusic-profile-header-card .info {
+        min-width: 0;
+        flex-grow: 1;
+      }
+      .phpmusic-profile-header-card .info .name {
+        font-weight: 700;
+        color: var(--ytm-primary-text);
+        font-size: 0.95rem;
+        margin-bottom: 0.15rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .phpmusic-profile-header-card .info .meta {
+        font-size: 0.75rem;
+        color: var(--ytm-secondary-text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .phpmusic-profile-dropdown .dropdown-item {
+        padding: 0.75rem 1.25rem !important;
+        color: var(--ytm-secondary-text) !important;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        transition: all 0.2s;
+      }
+      .phpmusic-profile-dropdown .dropdown-item:hover {
+        background-color: var(--ytm-surface-2) !important;
+        color: var(--ytm-primary-text) !important;
+      }
+      .phpmusic-profile-dropdown .dropdown-item i {
+        font-size: 1.15rem;
+        color: var(--ytm-secondary-text);
+      }
+      .phpmusic-profile-dropdown .dropdown-item:hover i {
+        color: var(--ytm-primary-text);
+      }
+      .api-content pre {
+        white-space: pre-wrap !important;
+        word-break: break-word !important;
+        overflow-wrap: break-word !important;
+      }
+      /* Break long URLs in paragraphs/headers, but NOT inside tables */
+      .api-content p code, 
+      .api-content div.bg-black > code {
+        word-break: break-all !important;
+        overflow-wrap: break-word !important;
+      }
+      /* Enable smooth horizontal scrolling for API tables */
+      .api-content .table-responsive {
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch;
+        width: 100%;
+      }
+      .api-content table td, 
+      .api-content table th {
+        word-break: normal !important;
+        white-space: nowrap !important;
+      }
+      .api-content table td:last-child {
+        white-space: normal !important;
+        min-width: 250px;
+        line-height: 1.5;
+      }
     </style>
   </head>
   <body class="logged-out">
@@ -6305,10 +6551,17 @@ function perform_full_scan($db) {
               </ul>
             </ul>
             </div>
-            <a href="#" class="nav-link" data-view="get_tasks">
-              <i class="bi bi-check2-square"></i>
+            <a href="#tasksSubmenu" data-bs-toggle="collapse" class="dl-independent collapsed" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;border-left:3px solid transparent;gap:1rem;text-decoration:none;padding:0.75rem 1.5rem;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'">
+              <i class="bi bi-check2-square" style="font-size:1.25rem;width:24px;text-align:center;"></i>
               <span>Tasks</span>
+              <i class="bi bi-chevron-down ms-auto" style="font-size: 0.8rem; transition: transform 0.2s;"></i>
             </a>
+            <div class="collapse" id="tasksSubmenu">
+              <ul class="list-unstyled ms-4 mb-0 pb-2">
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 task-filter-link" data-view="get_tasks" data-filter="all"><i class="bi bi-ui-checks"></i> All Tasks</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 task-filter-link" data-view="get_tasks" data-filter="starred"><i class="bi bi-star"></i> Starred Tasks</a></li>
+              </ul>
+            </div>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#calendar-modal">
               <i class="bi bi-calendar3"></i>
               <span>Calendar</span>
@@ -6398,20 +6651,29 @@ function perform_full_scan($db) {
           </div>
           <div class="dropdown logged-in-only">
             <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-mobile" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
-            <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
+            <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end phpmusic-profile-dropdown">
+              <li>
+                <div class="phpmusic-profile-header-card">
+                  <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="phpmusic-profile-img-placeholder" alt="Profile">
+                  <div class="info">
+                    <div class="name phpmusic-profile-name">Loading...</div>
+                    <div class="meta phpmusic-profile-subtext">Loading...</div>
+                  </div>
+                </div>
+              </li>
               <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#activity-modal">
-                <span><i class="bi bi-bell-fill me-2"></i>My Activity</span>
+                <span><i class="bi bi-bell-fill"></i> My Activity</span>
                 <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
               </a></li>
               <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#inbox-modal">
-                <span><i class="bi bi-chat-dots-fill me-2"></i>Direct Messages</span>
+                <span><i class="bi bi-chat-dots-fill"></i> Direct Messages</span>
                 <span class="badge bg-danger rounded-pill d-none inbox-badge">0</span>
               </a></li>
-              <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-mobile"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
-              <li><a class="dropdown-item" href="#" id="sleep-timer-btn-mobile"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
-              <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill me-2"></i>Settings</a></li>
+              <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-mobile"><i class="bi bi-bar-chart-line-fill"></i> Statistics</a></li>
+              <li><a class="dropdown-item" href="#" id="sleep-timer-btn-mobile"><i class="bi bi-moon-stars-fill"></i> Sleep Timer</a></li>
+              <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill"></i> Settings</a></li>
               <li><hr class="dropdown-divider"></li>
-              <li><a class="dropdown-item" href="#" id="profile-dropdown-logout-mobile"><i class="bi bi-box-arrow-left me-2"></i>Logout</a></li>
+              <li><a class="dropdown-item text-danger" href="#" id="profile-dropdown-logout-mobile"><i class="bi bi-box-arrow-left"></i> Logout</a></li>
             </ul>
           </div>
         </div>
@@ -6434,20 +6696,29 @@ function perform_full_scan($db) {
             </div>
             <div class="dropdown logged-in-only d-none d-md-block">
               <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-desktop" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
-              <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
+              <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end phpmusic-profile-dropdown">
+                <li>
+                  <div class="phpmusic-profile-header-card">
+                    <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="phpmusic-profile-img-placeholder" alt="Profile">
+                    <div class="info">
+                      <div class="name phpmusic-profile-name">Loading...</div>
+                      <div class="meta phpmusic-profile-subtext">Loading...</div>
+                    </div>
+                  </div>
+                </li>
                 <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#activity-modal">
-                  <span><i class="bi bi-bell-fill me-2"></i>My Activity</span>
+                  <span><i class="bi bi-bell-fill"></i> My Activity</span>
                   <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
                 </a></li>
                 <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#inbox-modal">
-                  <span><i class="bi bi-chat-dots-fill me-2"></i>Direct Messages</span>
+                  <span><i class="bi bi-chat-dots-fill"></i> Direct Messages</span>
                   <span class="badge bg-danger rounded-pill d-none inbox-badge">0</span>
                 </a></li>
-                <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill me-2"></i>Statistics</a></li>
-                <li><a class="dropdown-item" href="#" id="sleep-timer-btn-desktop"><i class="bi bi-moon-stars-fill me-2"></i>Sleep Timer</a></li>
-                <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill me-2"></i>Settings</a></li>
+                <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill"></i> Statistics</a></li>
+                <li><a class="dropdown-item" href="#" id="sleep-timer-btn-desktop"><i class="bi bi-moon-stars-fill"></i> Sleep Timer</a></li>
+                <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill"></i> Settings</a></li>
                 <li><hr class="dropdown-divider"></li>
-                <li><a class="dropdown-item" href="#" id="profile-dropdown-logout-desktop"><i class="bi bi-box-arrow-left me-2"></i>Logout</a></li>
+                <li><a class="dropdown-item text-danger" href="#" id="profile-dropdown-logout-desktop"><i class="bi bi-box-arrow-left"></i> Logout</a></li>
               </ul>
             </div>
           </div>
@@ -7248,6 +7519,7 @@ function perform_full_scan($db) {
             <div class="title" id="player-title-mobile">Song Title</div>
             <div class="artist" id="player-artist-mobile">Artist Name</div>
           </div>
+          <button class="player-btn ms-2 me-3" id="pip-btn-mobile" title="Mini Player"><i class="bi bi-pip"></i></button>
           <button class="player-btn" id="player-more-btn-mobile" title="More"><i class="bi bi-three-dots-vertical"></i></button>
         </div>
         <div class="playback-bar">
@@ -7306,7 +7578,7 @@ function perform_full_scan($db) {
           <div class="modal-body p-0 tab-content flex-grow-1 overflow-hidden d-block">
             
             <!-- PLAYER TAB -->
-            <div class="tab-pane fade show active h-100" id="mp-player-pane">
+            <div class="tab-pane show active h-100" id="mp-player-pane">
               <!-- Wrapped the flexbox INSIDE the tab -->
               <div class="h-100 w-100 overflow-auto p-4 d-flex flex-column justify-content-evenly">
                 
@@ -7343,7 +7615,7 @@ function perform_full_scan($db) {
             </div>
 
             <!-- UP NEXT TAB (No longer squished to the bottom!) -->
-            <div class="tab-pane fade h-100 overflow-auto" id="mp-queue-pane">
+            <div class="tab-pane h-100 overflow-auto" id="mp-queue-pane">
                <div id="mobile-player-queue-list" class="p-2"></div>
             </div>
 
@@ -7390,13 +7662,13 @@ function perform_full_scan($db) {
               
               <div class="tab-content flex-grow-1 overflow-hidden d-flex flex-column mb-4 rounded" style="background-color: rgba(18, 18, 18, 0.4); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.05);" id="dp-tabs-content">
                 
-                <div class="tab-pane fade show active h-100 overflow-auto" id="dp-queue-pane" role="tabpanel">
+                <div class="tab-pane show active h-100 overflow-auto" id="dp-queue-pane" role="tabpanel">
                    <div id="desktop-player-queue-list" class="p-2">
                      <!-- Populated dynamically by JS -->
                    </div>
                 </div>
 
-                <div class="tab-pane fade h-100 overflow-hidden text-center position-relative fs-4" id="dp-lyrics-pane" role="tabpanel">
+                <div class="tab-pane h-100 overflow-hidden text-center position-relative fs-4" id="dp-lyrics-pane" role="tabpanel">
                    <div class="h-100 overflow-auto p-4" id="desktop-player-modal-lyrics-container">
                      <div id="desktop-synced-lyrics" style="padding: 20% 0; transition: all 0.3s ease;"></div>
                    </div>
@@ -7806,7 +8078,7 @@ function perform_full_scan($db) {
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-secondary pb-2">
-            <h5 class="modal-title text-white"><i class="bi bi-calendar3 text-info me-2"></i>Calendar & Time</h5>
+            <h5 class="modal-title text-white"><i class="bi bi-calendar3 text-danger me-2"></i>Calendar & Time</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body text-center p-4">
@@ -7832,7 +8104,7 @@ function perform_full_scan($db) {
             </div>
             <div class="d-flex gap-2 mt-3">
               <input type="date" id="cal-jump-date" class="form-control form-control-sm bg-dark text-white border-secondary" title="Jump to Date">
-              <button class="btn btn-sm btn-outline-info fw-bold w-100" id="cal-today-btn">Jump to Today</button>
+              <button class="btn btn-sm btn-outline-danger fw-bold w-100" id="cal-today-btn">Jump to Today</button>
             </div>
           </div>
         </div>
@@ -7965,124 +8237,515 @@ function perform_full_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="settings-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
-        <div class="modal-content">
-          <div class="modal-header border-0">
-            <h5 class="modal-title">Settings</h5>
+      <div class="modal-dialog modal-fullscreen">
+        <div class="modal-content" style="background-color: var(--ytm-bg);">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-gear-fill text-secondary me-2"></i> Settings</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body">
-            <h6>Profile Picture</h6>
-            <form id="profile-picture-form" class="mb-4 text-center">
-              <div style="max-width: 300px; margin: 0 auto;" class="mb-3">
-                <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="profile-picture-preview" class="profile-picture-lg" style="width: 100%; display: block; max-width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;" alt="Profile Picture Preview">
+          <div class="modal-body p-0 d-flex flex-column flex-md-row phpmusic-settings-wrapper">
+            
+            <div class="phpmusic-settings-sidebar">
+              <div class="nav flex-row flex-md-column nav-pills phpmusic-settings-nav" id="settings-tabs" role="tablist">
+                <button class="nav-link active" data-bs-toggle="pill" data-bs-target="#settings-profile" type="button" role="tab"><i class="bi bi-person-badge"></i> Profile</button>
+                <button class="nav-link" data-bs-toggle="pill" data-bs-target="#settings-appearance" type="button" role="tab"><i class="bi bi-palette"></i> Appearance</button>
+                <button class="nav-link" data-bs-toggle="pill" data-bs-target="#settings-audio" type="button" role="tab"><i class="bi bi-sliders"></i> Audio Engine</button>
+                <button class="nav-link" data-bs-toggle="pill" data-bs-target="#settings-account" type="button" role="tab"><i class="bi bi-shield-lock"></i> Account & Data</button>
               </div>
-              <div class="mb-3">
-                <label for="profile-picture-input" class="form-label">Upload new picture</label>
-                <input class="form-control" type="file" id="profile-picture-input" accept="image/png, image/jpeg, image/gif">
-              </div>
-              <button type="submit" class="btn btn-danger w-100" id="profile-picture-submit-btn">Save Picture</button>
-              <div class="progress mt-3 d-none" id="profile-pic-progress-container" style="height: 15px;">
-                <div id="profile-pic-progress" class="progress-bar progress-bar-striped progress-bar-animated bg-danger" role="progressbar" style="width: 0%;">0%</div>
-              </div>
-            </form>
-            <hr class="text-secondary">
-            <h6>Profile Background Picture</h6>
-            <form id="profile-bg-form" class="mb-4">
-              <div class="mb-3">
-                <input class="form-control" type="file" id="profile-bg-input" accept="image/png, image/jpeg, image/gif, image/webp">
-              </div>
-              <button type="submit" class="btn btn-danger w-100" id="profile-bg-submit-btn">Save Background</button>
-            </form>
-            <hr class="text-secondary">
-            <h6 class="mt-4">Profile Info</h6>
-            <form id="bio-form" class="mb-4">
-              <div class="mb-3">
-                <label for="settings-bio" class="form-label">Bio</label>
-                <textarea class="form-control" id="settings-bio" rows="3" placeholder="Tell us about yourself..."></textarea>
-                <div class="d-flex justify-content-end mt-1">
-                  <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+            </div>
+            
+            <div class="phpmusic-settings-content tab-content flex-grow-1 p-3 p-md-5" id="settings-tabContent">
+              
+              <!-- Profile Tab -->
+              <div class="tab-pane fade show active phpmusic-settings-pane" id="settings-profile" role="tabpanel">
+                <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-person-bounding-box text-danger"></i> Profile Picture</h6>
+                  <form id="profile-picture-form" class="text-center">
+                    <div style="width: 200px; height: 200px; margin: 0 auto;" class="mb-3 position-relative">
+                      <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="profile-picture-preview" class="profile-picture-lg" style="width: 100%; height: 100%; display: block; object-fit: cover; border-radius: 50%; border: 4px solid var(--ytm-surface-2); box-shadow: 0 8px 30px rgba(0,0,0,0.5);" alt="Profile Preview">
+                    </div>
+                    <div class="mb-3">
+                      <input class="form-control" type="file" id="profile-picture-input" accept="image/png, image/jpeg, image/gif">
+                    </div>
+                    <div class="mb-4 text-start">
+                      <label class="form-label text-secondary small fw-bold mb-2">OR CHOOSE A PRESET</label>
+                      <div class="d-flex align-items-center gap-3 overflow-auto pb-2" id="preset-avatar-container" style="scrollbar-width: thin;"></div>
+                      <button type="button" class="btn btn-sm btn-outline-secondary mt-1" id="refresh-presets-btn"><i class="bi bi-arrow-clockwise"></i> Generate New Presets</button>
+                    </div>
+                    <button type="submit" class="btn btn-danger w-100 fw-bold" id="profile-picture-submit-btn">Save Picture</button>
+                    <div class="progress mt-3 d-none" id="profile-pic-progress-container" style="height: 15px;">
+                      <div id="profile-pic-progress" class="progress-bar progress-bar-striped progress-bar-animated bg-danger" role="progressbar" style="width: 0%;">0%</div>
+                    </div>
+                  </form>
+                </div>
+                
+                <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-textarea-t text-primary"></i> Public Info</h6>
+                  <form id="change-name-form" class="mb-4">
+                    <div class="mb-3">
+                      <label for="new-name" class="form-label text-secondary small fw-bold mb-1">DISPLAY NAME</label>
+                      <input type="text" class="form-control" id="new-name" required>
+                    </div>
+                    <button type="submit" class="btn btn-danger w-100 fw-bold">Save Name</button>
+                  </form>
+                  <hr class="border-secondary mb-4 mt-4">
+                  <form id="bio-form">
+                    <div class="mb-3">
+                      <label for="settings-bio" class="form-label text-secondary small fw-bold mb-1">BIOGRAPHY</label>
+                      <textarea class="form-control" id="settings-bio" rows="4" placeholder="Tell us about yourself..."></textarea>
+                      <div class="d-flex justify-content-end mt-2">
+                        <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+                      </div>
+                    </div>
+                    <button type="submit" class="btn btn-danger w-100 fw-bold">Save Bio</button>
+                  </form>
                 </div>
               </div>
-              <button type="submit" class="btn btn-danger w-100">Save Bio</button>
-            </form>
-            <hr class="text-secondary">
-            <h6 class="mt-4">Change Display Name</h6>
-            <form id="change-name-form">
-              <div class="mb-3">
-                <label for="new-name" class="form-label">New Name</label>
-                <input type="text" class="form-control" id="new-name" required>
+
+              <!-- Appearance Tab -->
+              <div class="tab-pane fade phpmusic-settings-pane" id="settings-appearance" role="tabpanel">
+                <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-image text-success"></i> Custom Background</h6>
+                  <form id="profile-bg-form" class="mb-2">
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">UPLOAD IMAGE</label>
+                      <input class="form-control" type="file" id="profile-bg-input" accept="image/png, image/jpeg, image/gif, image/webp">
+                    </div>
+                    <button type="submit" class="btn btn-danger w-100 fw-bold" id="profile-bg-submit-btn">Save Uploaded Background</button>
+                  </form>
+                </div>
+                
+                <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-magic text-warning"></i> Wallpaper Generator</h6>
+                  <div class="mb-2">
+                    <canvas id="bg-gen-canvas" class="w-100 mb-4 rounded shadow-lg border border-secondary" style="height: 160px; object-fit: cover; background-color: var(--ytm-surface-2);"></canvas>
+                    <div class="row g-3 mb-4">
+                      <div class="col-12 col-md-6">
+                        <label class="form-label text-secondary small fw-bold mb-1">PATTERN</label>
+                        <select id="bg-gen-pattern" class="form-select bg-dark text-white border-secondary">
+                          <optgroup label="Classic Patterns">
+                            <option value="blobs">Blobs</option>
+                            <option value="geometric">Geometric</option>
+                            <option value="mesh">Mesh</option>
+                            <option value="waves">Waves</option>
+                            <option value="stripes">Stripes</option>
+                            <option value="dots">Dots</option>
+                            <option value="particles">Particles</option>
+                            <option value="triangles">Triangles</option>
+                            <option value="rays">Rays</option>
+                            <option value="squares">Squares</option>
+                            <option value="hexagons">Hexagons</option>
+                            <option value="concentric">Concentric</option>
+                            <option value="noise">Noise</option>
+                            <option value="scribble">Scribble</option>
+                            <option value="diamonds">Diamonds</option>
+                            <option value="checkers">Checkers</option>
+                            <option value="maze">Maze</option>
+                            <option value="lines">Lines</option>
+                            <option value="crosses">Crosses</option>
+                            <option value="spirals">Spirals</option>
+                          </optgroup>
+                          <optgroup label="Scatter Forms">
+                            <option value="scatter_circle">Scatter Circles</option>
+                            <option value="scatter_square">Scatter Squares</option>
+                            <option value="scatter_diamond">Scatter Diamonds</option>
+                            <option value="scatter_triangle">Scatter Triangles</option>
+                            <option value="scatter_star">Scatter Stars</option>
+                            <option value="scatter_cross">Scatter Crosses</option>
+                            <option value="scatter_hexagon">Scatter Hexagons</option>
+                            <option value="scatter_pentagon">Scatter Pentagons</option>
+                            <option value="scatter_octagon">Scatter Octagons</option>
+                            <option value="scatter_ring">Scatter Rings</option>
+                            <option value="scatter_heart">Scatter Hearts</option>
+                            <option value="scatter_moon">Scatter Moons</option>
+                            <option value="scatter_spade">Scatter Spades</option>
+                            <option value="scatter_club">Scatter Clubs</option>
+                            <option value="scatter_leaf">Scatter Leaves</option>
+                            <option value="scatter_shield">Scatter Shields</option>
+                            <option value="scatter_gem">Scatter Gems</option>
+                            <option value="scatter_droplet">Scatter Droplets</option>
+                            <option value="scatter_burst">Scatter Bursts</option>
+                            <option value="scatter_sparkle">Scatter Sparkles</option>
+                            <option value="scatter_clover">Scatter Clovers</option>
+                            <option value="scatter_flower">Scatter Flowers</option>
+                          </optgroup>
+                          <optgroup label="Grid Layouts">
+                            <option value="grid_circle">Grid Circles</option>
+                            <option value="grid_square">Grid Squares</option>
+                            <option value="grid_diamond">Grid Diamonds</option>
+                            <option value="grid_triangle">Grid Triangles</option>
+                            <option value="grid_star">Grid Stars</option>
+                            <option value="grid_cross">Grid Crosses</option>
+                            <option value="grid_hexagon">Grid Hexagons</option>
+                            <option value="grid_pentagon">Grid Pentagons</option>
+                            <option value="grid_octagon">Grid Octagons</option>
+                            <option value="grid_ring">Grid Rings</option>
+                            <option value="grid_heart">Grid Hearts</option>
+                            <option value="grid_moon">Grid Moons</option>
+                            <option value="grid_spade">Grid Spades</option>
+                            <option value="grid_club">Grid Clubs</option>
+                            <option value="grid_leaf">Grid Leaves</option>
+                            <option value="grid_shield">Grid Shields</option>
+                            <option value="grid_gem">Grid Gems</option>
+                            <option value="grid_droplet">Grid Droplets</option>
+                            <option value="grid_burst">Grid Bursts</option>
+                            <option value="grid_sparkle">Grid Sparkles</option>
+                            <option value="grid_clover">Grid Clovers</option>
+                            <option value="grid_flower">Grid Flowers</option>
+                          </optgroup>
+                          <optgroup label="Isometric Grids">
+                            <option value="isometric_circle">Isometric Circles</option>
+                            <option value="isometric_square">Isometric Squares</option>
+                            <option value="isometric_diamond">Isometric Diamonds</option>
+                            <option value="isometric_triangle">Isometric Triangles</option>
+                            <option value="isometric_star">Isometric Stars</option>
+                            <option value="isometric_cross">Isometric Crosses</option>
+                            <option value="isometric_hexagon">Isometric Hexagons</option>
+                            <option value="isometric_pentagon">Isometric Pentagons</option>
+                            <option value="isometric_octagon">Isometric Octagons</option>
+                            <option value="isometric_ring">Isometric Rings</option>
+                            <option value="isometric_heart">Isometric Hearts</option>
+                            <option value="isometric_moon">Isometric Moons</option>
+                            <option value="isometric_spade">Isometric Spades</option>
+                            <option value="isometric_club">Isometric Clubs</option>
+                            <option value="isometric_leaf">Isometric Leaves</option>
+                            <option value="isometric_shield">Isometric Shields</option>
+                            <option value="isometric_gem">Isometric Gems</option>
+                            <option value="isometric_droplet">Isometric Droplets</option>
+                            <option value="isometric_burst">Isometric Bursts</option>
+                            <option value="isometric_sparkle">Isometric Sparkles</option>
+                            <option value="isometric_clover">Isometric Clovers</option>
+                            <option value="isometric_flower">Isometric Flowers</option>
+                          </optgroup>
+                          <optgroup label="Concentric Clusters">
+                            <option value="concentric_circle">Concentric Circles</option>
+                            <option value="concentric_square">Concentric Squares</option>
+                            <option value="concentric_diamond">Concentric Diamonds</option>
+                            <option value="concentric_triangle">Concentric Triangles</option>
+                            <option value="concentric_star">Concentric Stars</option>
+                            <option value="concentric_cross">Concentric Crosses</option>
+                            <option value="concentric_hexagon">Concentric Hexagons</option>
+                            <option value="concentric_pentagon">Concentric Pentagons</option>
+                            <option value="concentric_octagon">Concentric Octagons</option>
+                            <option value="concentric_ring">Concentric Rings</option>
+                            <option value="concentric_heart">Concentric Hearts</option>
+                            <option value="concentric_moon">Concentric Moons</option>
+                            <option value="concentric_spade">Concentric Spades</option>
+                            <option value="concentric_club">Concentric Clubs</option>
+                            <option value="concentric_leaf">Concentric Leaves</option>
+                            <option value="concentric_shield">Concentric Shields</option>
+                            <option value="concentric_gem">Concentric Gems</option>
+                            <option value="concentric_droplet">Concentric Droplets</option>
+                            <option value="concentric_burst">Concentric Bursts</option>
+                            <option value="concentric_sparkle">Concentric Sparkles</option>
+                            <option value="concentric_clover">Concentric Clovers</option>
+                            <option value="concentric_flower">Concentric Flowers</option>
+                          </optgroup>
+                          <optgroup label="Radial Bursts">
+                            <option value="radial_circle">Radial Circles</option>
+                            <option value="radial_square">Radial Squares</option>
+                            <option value="radial_diamond">Radial Diamonds</option>
+                            <option value="radial_triangle">Radial Triangles</option>
+                            <option value="radial_star">Radial Stars</option>
+                            <option value="radial_cross">Radial Crosses</option>
+                            <option value="radial_hexagon">Radial Hexagons</option>
+                            <option value="radial_pentagon">Radial Pentagons</option>
+                            <option value="radial_octagon">Radial Octagons</option>
+                            <option value="radial_ring">Radial Rings</option>
+                            <option value="radial_heart">Radial Hearts</option>
+                            <option value="radial_moon">Radial Moons</option>
+                            <option value="radial_spade">Radial Spades</option>
+                            <option value="radial_club">Radial Clubs</option>
+                            <option value="radial_leaf">Radial Leaves</option>
+                            <option value="radial_shield">Radial Shields</option>
+                            <option value="radial_gem">Radial Gems</option>
+                            <option value="radial_droplet">Radial Droplets</option>
+                            <option value="radial_burst">Radial Bursts</option>
+                            <option value="radial_sparkle">Radial Sparkles</option>
+                            <option value="radial_clover">Radial Clovers</option>
+                            <option value="radial_flower">Radial Flowers</option>
+                          </optgroup>
+                          <optgroup label="Spiral Galaxies">
+                            <option value="spiral_circle">Spiral Circles</option>
+                            <option value="spiral_square">Spiral Squares</option>
+                            <option value="spiral_diamond">Spiral Diamonds</option>
+                            <option value="spiral_triangle">Spiral Triangles</option>
+                            <option value="spiral_star">Spiral Stars</option>
+                            <option value="spiral_cross">Spiral Crosses</option>
+                            <option value="spiral_hexagon">Spiral Hexagons</option>
+                            <option value="spiral_pentagon">Spiral Pentagons</option>
+                            <option value="spiral_octagon">Spiral Octagons</option>
+                            <option value="spiral_ring">Spiral Rings</option>
+                            <option value="spiral_heart">Spiral Hearts</option>
+                            <option value="spiral_moon">Spiral Moons</option>
+                            <option value="spiral_spade">Spiral Spades</option>
+                            <option value="spiral_club">Spiral Clubs</option>
+                            <option value="spiral_leaf">Spiral Leaves</option>
+                            <option value="spiral_shield">Spiral Shields</option>
+                            <option value="spiral_gem">Spiral Gems</option>
+                            <option value="spiral_droplet">Spiral Droplets</option>
+                            <option value="spiral_burst">Spiral Bursts</option>
+                            <option value="spiral_sparkle">Spiral Sparkles</option>
+                            <option value="spiral_clover">Spiral Clovers</option>
+                            <option value="spiral_flower">Spiral Flowers</option>
+                          </optgroup>
+                          <optgroup label="Wave Matrices">
+                            <option value="waveGrid_circle">Wave Circles</option>
+                            <option value="waveGrid_square">Wave Squares</option>
+                            <option value="waveGrid_diamond">Wave Diamonds</option>
+                            <option value="waveGrid_triangle">Wave Triangles</option>
+                            <option value="waveGrid_star">Wave Stars</option>
+                            <option value="waveGrid_cross">Wave Crosses</option>
+                            <option value="waveGrid_hexagon">Wave Hexagons</option>
+                            <option value="waveGrid_pentagon">Wave Pentagons</option>
+                            <option value="waveGrid_octagon">Wave Octagons</option>
+                            <option value="waveGrid_ring">Wave Rings</option>
+                            <option value="waveGrid_heart">Wave Hearts</option>
+                            <option value="waveGrid_moon">Wave Moons</option>
+                            <option value="waveGrid_spade">Wave Spades</option>
+                            <option value="waveGrid_club">Wave Clubs</option>
+                            <option value="waveGrid_leaf">Wave Leaves</option>
+                            <option value="waveGrid_shield">Wave Shields</option>
+                            <option value="waveGrid_gem">Wave Gems</option>
+                            <option value="waveGrid_droplet">Wave Droplets</option>
+                            <option value="waveGrid_burst">Wave Bursts</option>
+                            <option value="waveGrid_sparkle">Wave Sparkles</option>
+                            <option value="waveGrid_clover">Wave Clovers</option>
+                            <option value="waveGrid_flower">Wave Flowers</option>
+                          </optgroup>
+                          <optgroup label="Zigzag Arrays">
+                            <option value="zigzag_circle">Zigzag Circles</option>
+                            <option value="zigzag_square">Zigzag Squares</option>
+                            <option value="zigzag_diamond">Zigzag Diamonds</option>
+                            <option value="zigzag_triangle">Zigzag Triangles</option>
+                            <option value="zigzag_star">Zigzag Stars</option>
+                            <option value="zigzag_cross">Zigzag Crosses</option>
+                            <option value="zigzag_hexagon">Zigzag Hexagons</option>
+                            <option value="zigzag_pentagon">Zigzag Pentagons</option>
+                            <option value="zigzag_octagon">Zigzag Octagons</option>
+                            <option value="zigzag_ring">Zigzag Rings</option>
+                            <option value="zigzag_heart">Zigzag Hearts</option>
+                            <option value="zigzag_moon">Zigzag Moons</option>
+                            <option value="zigzag_spade">Zigzag Spades</option>
+                            <option value="zigzag_club">Zigzag Clubs</option>
+                            <option value="zigzag_leaf">Zigzag Leaves</option>
+                            <option value="zigzag_shield">Zigzag Shields</option>
+                            <option value="zigzag_gem">Zigzag Gems</option>
+                            <option value="zigzag_droplet">Zigzag Droplets</option>
+                            <option value="zigzag_burst">Zigzag Bursts</option>
+                            <option value="zigzag_sparkle">Zigzag Sparkles</option>
+                            <option value="zigzag_clover">Zigzag Clovers</option>
+                            <option value="zigzag_flower">Zigzag Flowers</option>
+                          </optgroup>
+                          <optgroup label="Orbital Paths">
+                            <option value="orbit_circle">Orbit Circles</option>
+                            <option value="orbit_square">Orbit Squares</option>
+                            <option value="orbit_diamond">Orbit Diamonds</option>
+                            <option value="orbit_triangle">Orbit Triangles</option>
+                            <option value="orbit_star">Orbit Stars</option>
+                            <option value="orbit_cross">Orbit Crosses</option>
+                            <option value="orbit_hexagon">Orbit Hexagons</option>
+                            <option value="orbit_pentagon">Orbit Pentagons</option>
+                            <option value="orbit_octagon">Orbit Octagons</option>
+                            <option value="orbit_ring">Orbit Rings</option>
+                            <option value="orbit_heart">Orbit Hearts</option>
+                            <option value="orbit_moon">Orbit Moons</option>
+                            <option value="orbit_spade">Orbit Spades</option>
+                            <option value="orbit_club">Orbit Clubs</option>
+                            <option value="orbit_leaf">Orbit Leaves</option>
+                            <option value="orbit_shield">Orbit Shields</option>
+                            <option value="orbit_gem">Orbit Gems</option>
+                            <option value="orbit_droplet">Orbit Droplets</option>
+                            <option value="orbit_burst">Orbit Bursts</option>
+                            <option value="orbit_sparkle">Orbit Sparkles</option>
+                            <option value="orbit_clover">Orbit Clovers</option>
+                            <option value="orbit_flower">Orbit Flowers</option>
+                          </optgroup>
+                          <optgroup label="Pyramid Stacks">
+                            <option value="pyramid_circle">Pyramid Circles</option>
+                            <option value="pyramid_square">Pyramid Squares</option>
+                            <option value="pyramid_diamond">Pyramid Diamonds</option>
+                            <option value="pyramid_triangle">Pyramid Triangles</option>
+                            <option value="pyramid_star">Pyramid Stars</option>
+                            <option value="pyramid_cross">Pyramid Crosses</option>
+                            <option value="pyramid_hexagon">Pyramid Hexagons</option>
+                            <option value="pyramid_pentagon">Pyramid Pentagons</option>
+                            <option value="pyramid_octagon">Pyramid Octagons</option>
+                            <option value="pyramid_ring">Pyramid Rings</option>
+                            <option value="pyramid_heart">Pyramid Hearts</option>
+                            <option value="pyramid_moon">Pyramid Moons</option>
+                            <option value="pyramid_spade">Pyramid Spades</option>
+                            <option value="pyramid_club">Pyramid Clubs</option>
+                            <option value="pyramid_leaf">Pyramid Leaves</option>
+                            <option value="pyramid_shield">Pyramid Shields</option>
+                            <option value="pyramid_gem">Pyramid Gems</option>
+                            <option value="pyramid_droplet">Pyramid Droplets</option>
+                            <option value="pyramid_burst">Pyramid Bursts</option>
+                            <option value="pyramid_sparkle">Pyramid Sparkles</option>
+                            <option value="pyramid_clover">Pyramid Clovers</option>
+                            <option value="pyramid_flower">Pyramid Flowers</option>
+                          </optgroup>
+                          <optgroup label="Waterfall Streams">
+                            <option value="waterfall_circle">Waterfall Circles</option>
+                            <option value="waterfall_square">Waterfall Squares</option>
+                            <option value="waterfall_diamond">Waterfall Diamonds</option>
+                            <option value="waterfall_triangle">Waterfall Triangles</option>
+                            <option value="waterfall_star">Waterfall Stars</option>
+                            <option value="waterfall_cross">Waterfall Crosses</option>
+                            <option value="waterfall_hexagon">Waterfall Hexagons</option>
+                            <option value="waterfall_pentagon">Waterfall Pentagons</option>
+                            <option value="waterfall_octagon">Waterfall Octagons</option>
+                            <option value="waterfall_ring">Waterfall Rings</option>
+                            <option value="waterfall_heart">Waterfall Hearts</option>
+                            <option value="waterfall_moon">Waterfall Moons</option>
+                            <option value="waterfall_spade">Waterfall Spades</option>
+                            <option value="waterfall_club">Waterfall Clubs</option>
+                            <option value="waterfall_leaf">Waterfall Leaves</option>
+                            <option value="waterfall_shield">Waterfall Shields</option>
+                            <option value="waterfall_gem">Waterfall Gems</option>
+                            <option value="waterfall_droplet">Waterfall Droplets</option>
+                            <option value="waterfall_burst">Waterfall Bursts</option>
+                            <option value="waterfall_sparkle">Waterfall Sparkles</option>
+                            <option value="waterfall_clover">Waterfall Clovers</option>
+                            <option value="waterfall_flower">Waterfall Flowers</option>
+                          </optgroup>
+                          <optgroup label="Vortex Swirls">
+                            <option value="vortex_circle">Vortex Circles</option>
+                            <option value="vortex_square">Vortex Squares</option>
+                            <option value="vortex_diamond">Vortex Diamonds</option>
+                            <option value="vortex_triangle">Vortex Triangles</option>
+                            <option value="vortex_star">Vortex Stars</option>
+                            <option value="vortex_cross">Vortex Crosses</option>
+                            <option value="vortex_hexagon">Vortex Hexagons</option>
+                            <option value="vortex_pentagon">Vortex Pentagons</option>
+                            <option value="vortex_octagon">Vortex Octagons</option>
+                            <option value="vortex_ring">Vortex Rings</option>
+                            <option value="vortex_heart">Vortex Hearts</option>
+                            <option value="vortex_moon">Vortex Moons</option>
+                            <option value="vortex_spade">Vortex Spades</option>
+                            <option value="vortex_club">Vortex Clubs</option>
+                            <option value="vortex_leaf">Vortex Leaves</option>
+                            <option value="vortex_shield">Vortex Shields</option>
+                            <option value="vortex_gem">Vortex Gems</option>
+                            <option value="vortex_droplet">Vortex Droplets</option>
+                            <option value="vortex_burst">Vortex Bursts</option>
+                            <option value="vortex_sparkle">Vortex Sparkles</option>
+                            <option value="vortex_clover">Vortex Clovers</option>
+                            <option value="vortex_flower">Vortex Flowers</option>
+                          </optgroup>
+                        </select>
+                      </div>
+                      <div class="col-12 col-md-6">
+                        <label class="form-label text-secondary small fw-bold mb-1">STYLE</label>
+                        <select id="bg-gen-style" class="form-select bg-dark text-white border-secondary">
+                          <option value="fill">Fill</option>
+                          <option value="stroke">Line</option>
+                          <option value="mixed">Mixed</option>
+                        </select>
+                      </div>
+                      <div class="col-12 d-flex flex-column gap-1 mt-3">
+                        <label class="form-label text-secondary small fw-bold mb-1">HUE SPECTRUM</label>
+                        <input type="range" class="form-range" id="bg-gen-hue" min="0" max="360" value="260" style="background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); height: 12px; border-radius: 6px; -webkit-appearance: none;">
+                      </div>
+                    </div>
+                    <div class="d-flex gap-3">
+                      <button type="button" class="btn btn-outline-light w-50 py-2 fw-bold" id="bg-gen-random-btn"><i class="bi bi-shuffle"></i> Randomize</button>
+                      <button type="button" class="btn btn-danger w-50 py-2 fw-bold" id="bg-gen-save-btn">Set Background</button>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <button type="submit" class="btn btn-danger w-100">Save Name</button>
-            </form>
-            <hr class="text-secondary">
-            <h6 class="mt-4">Change Password</h6>
-            <form id="change-password-form">
-              <div class="mb-3">
-                <label for="new-password" class="form-label">New Password</label>
-                <input type="password" class="form-control" id="new-password" required minlength="6">
+
+              <!-- Audio Tab -->
+              <div class="tab-pane fade phpmusic-settings-pane" id="settings-audio" role="tabpanel">
+                <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-speaker-fill text-info"></i> Playback Controls</h6>
+                  <div class="mb-4 mt-3">
+                    <label class="form-label d-flex justify-content-between text-secondary fw-bold small">
+                      <span>GLOBAL VOLUME MULTIPLIER</span>
+                      <span id="global-vol-val" class="text-white">1.0x</span>
+                    </label>
+                    <input type="range" class="form-range" id="global-vol-slider" min="0" max="3" step="0.1" value="1">
+                  </div>
+                  <div class="mb-2">
+                    <label class="form-label d-flex justify-content-between text-secondary fw-bold small">
+                      <span>CROSSFADE DURATION</span>
+                      <span id="crossfade-val" class="text-white">3.0s</span>
+                    </label>
+                    <input type="range" class="form-range" id="crossfade-slider" min="0" max="10" step="0.5" value="3.0">
+                  </div>
+                </div>
+                
+                <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-cpu-fill text-primary"></i> Audio Processors</h6>
+                  <div class="form-check form-switch mb-4 d-flex align-items-center gap-3">
+                    <input class="form-check-input fs-4 m-0" type="checkbox" id="toggle-normalization" checked>
+                    <label class="form-check-label text-white m-0" for="toggle-normalization">Volume Normalization (AGC)<br><small class="text-secondary fw-normal">Balance volumes between different songs automatically</small></label>
+                  </div>
+                  <div class="form-check form-switch mb-4 d-flex align-items-center gap-3">
+                    <input class="form-check-input fs-4 m-0" type="checkbox" id="toggle-spatial">
+                    <label class="form-check-label text-white m-0" for="toggle-spatial">Enable Spatial Audio (3D HRTF)<br><small class="text-secondary fw-normal">Simulate surround sound depth for headphone users</small></label>
+                  </div>
+                  <div class="form-check form-switch mb-2 d-flex align-items-center gap-3">
+                    <input class="form-check-input fs-4 m-0" type="checkbox" id="toggle-eq">
+                    <label class="form-check-label text-white m-0" for="toggle-eq">Enable Equalizer<br><small class="text-secondary fw-normal">Customize frequency bands globally</small></label>
+                  </div>
+                </div>
+
+                <div class="phpmusic-settings-section d-none" id="eq-sliders">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-soundwave text-warning"></i> 5-Band Equalizer</h6>
+                  <div class="mb-4">
+                    <label class="form-label text-secondary small fw-bold mb-1">PRESET</label>
+                    <select class="form-select bg-dark text-white border-secondary" id="eq-preset-select">
+                      <option value="Custom">Custom</option>
+                      <option value="Flat">Flat</option>
+                      <option value="Rock">Rock</option>
+                      <option value="Jazz">Jazz</option>
+                      <option value="Classical">Classical</option>
+                      <option value="Pop">Pop</option>
+                      <option value="Bass Boost">Bass Boost</option>
+                    </select>
+                  </div>
+                  <div class="d-flex justify-content-between text-center small text-secondary fw-bold" style="padding: 0 10px;">
+                    <span>60Hz</span><span>230Hz</span><span>910Hz</span><span>3.6kHz</span><span>14kHz</span>
+                  </div>
+                  <div class="d-flex justify-content-between mt-4 mb-5">
+                    <input type="range" class="form-range eq-band" data-band="0" min="-12" max="12" step="1" value="0" style="width: 18%; transform: rotate(-90deg); margin: 60px 0;">
+                    <input type="range" class="form-range eq-band" data-band="1" min="-12" max="12" step="1" value="0" style="width: 18%; transform: rotate(-90deg); margin: 60px 0;">
+                    <input type="range" class="form-range eq-band" data-band="2" min="-12" max="12" step="1" value="0" style="width: 18%; transform: rotate(-90deg); margin: 60px 0;">
+                    <input type="range" class="form-range eq-band" data-band="3" min="-12" max="12" step="1" value="0" style="width: 18%; transform: rotate(-90deg); margin: 60px 0;">
+                    <input type="range" class="form-range eq-band" data-band="4" min="-12" max="12" step="1" value="0" style="width: 18%; transform: rotate(-90deg); margin: 60px 0;">
+                  </div>
+                </div>
               </div>
-              <button type="submit" class="btn btn-danger w-100">Save Password</button>
-            </form>
-            <hr class="text-secondary">
-            <h6 class="mt-4"><i class="bi bi-sliders me-2"></i>Audio Enhancements</h6>
-            <div class="mb-3">
-              <label class="form-label d-flex justify-content-between">
-                <span>Global Volume Multiplier</span>
-                <span id="global-vol-val">1.0x</span>
-              </label>
-              <input type="range" class="form-range" id="global-vol-slider" min="0" max="3" step="0.1" value="1">
+
+              <!-- Account Tab -->
+              <div class="tab-pane fade phpmusic-settings-pane" id="settings-account" role="tabpanel">
+                <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-key text-white"></i> Security</h6>
+                  <form id="change-password-form">
+                    <div class="mb-3">
+                      <label for="new-password" class="form-label text-secondary small fw-bold mb-1">NEW PASSWORD</label>
+                      <input type="password" class="form-control" id="new-password" required minlength="6">
+                    </div>
+                    <button type="submit" class="btn btn-danger w-100 fw-bold">Update Password</button>
+                  </form>
+                </div>
+                
+                <div class="phpmusic-settings-section border-danger" style="background-color: rgba(255,0,0,0.03);">
+                  <h6 class="phpmusic-settings-section-title text-danger border-danger"><i class="bi bi-exclamation-triangle-fill"></i> Danger Zone</h6>
+                  <p class="text-secondary small mb-4">Once you delete your account, there is no going back. Please be certain.</p>
+                  <button type="button" class="btn btn-outline-danger w-100 mb-3 fw-bold py-2" id="btn-delete-keep">Delete Account but Keep Data</button>
+                  <button type="button" class="btn btn-danger w-100 fw-bold py-2" id="btn-delete-all">Permanently Delete Account & Data</button>
+                </div>
+              </div>
+              
             </div>
-            <div class="form-check form-switch mb-3">
-              <input class="form-check-input" type="checkbox" id="toggle-normalization" checked>
-              <label class="form-check-label" for="toggle-normalization">Volume Normalization (AGC)</label>
-            </div>
-            <div class="form-check form-switch mb-3">
-              <input class="form-check-input" type="checkbox" id="toggle-eq">
-              <label class="form-check-label" for="toggle-eq">Enable Equalizer</label>
-            </div>
-            <div class="form-check form-switch mb-3">
-              <input class="form-check-input" type="checkbox" id="toggle-spatial">
-              <label class="form-check-label" for="toggle-spatial">Enable Spatial Audio (3D HRTF)</label>
-            </div>
-            <div class="mb-3">
-              <label class="form-label d-flex justify-content-between">
-                <span>Crossfade Duration</span>
-                <span id="crossfade-val">3.0s</span>
-              </label>
-              <input type="range" class="form-range" id="crossfade-slider" min="0" max="10" step="0.5" value="3.0">
-            </div>
-            <div id="eq-sliders" class="d-none mb-4">
-               <div class="mb-3">
-                 <select class="form-select form-select-sm" id="eq-preset-select">
-                   <option value="Custom">Custom</option>
-                   <option value="Flat">Flat</option>
-                   <option value="Rock">Rock</option>
-                   <option value="Jazz">Jazz</option>
-                   <option value="Classical">Classical</option>
-                   <option value="Pop">Pop</option>
-                   <option value="Bass Boost">Bass Boost</option>
-                 </select>
-               </div>
-               <div class="d-flex justify-content-between text-center small text-secondary">
-                 <span>60Hz</span><span>230Hz</span><span>910Hz</span><span>3.6kHz</span><span>14kHz</span>
-               </div>
-               <div class="d-flex justify-content-between mt-2">
-                 <input type="range" class="form-range eq-band" data-band="0" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
-                 <input type="range" class="form-range eq-band" data-band="1" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
-                 <input type="range" class="form-range eq-band" data-band="2" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
-                 <input type="range" class="form-range eq-band" data-band="3" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
-                 <input type="range" class="form-range eq-band" data-band="4" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
-               </div>
-            </div>
-            <hr class="text-secondary">
-            <h6 class="mt-4 text-danger">Data Management</h6>
-            <button type="button" class="btn btn-outline-danger w-100 mb-2" id="btn-delete-keep">Delete Account but Keep Data</button>
-            <button type="button" class="btn btn-danger w-100" id="btn-delete-all">Permanently Delete Account & Data</button>
           </div>
         </div>
       </div>
     </div>
+
     <div class="modal fade" id="inbox-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; height: 85vh;">
@@ -8541,76 +9204,1822 @@ function perform_full_scan($db) {
       </div>
     </div>
 
-    <div class="modal fade" id="api-modal" tabindex="-1">
+    <!-- API AUTHENTICATION MODAL -->
+    <div class="modal fade" id="api-auth-modal" tabindex="-1" data-bs-backdrop="static">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
-          <div class="modal-header border-0" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
-            <h5 class="modal-title text-white"><i class="bi bi-code-slash text-danger me-2"></i> API Access</h5>
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-shield-lock-fill text-warning me-2"></i> API Authentication</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body">
-            <p class="text-secondary mb-3 small">Use the following endpoints to interface with your music library programmatically.</p>
-            
-            <div class="mb-3">
-              <label for="api-action-select" class="form-label text-white">Select API Action</label>
-              <select class="form-select mb-3" id="api-action-select">
-                <optgroup label="Library Data (GET)">
-                  <option value="get_songs">Fetch All Songs</option>
-                  <option value="get_artists">Fetch Artists</option>
-                  <option value="get_albums">Fetch Albums</option>
-                  <option value="get_genres">Fetch Genres</option>
-                  <option value="get_explore">Fetch Explore / Discovery Data</option>
-                  <option value="search&q=YOUR_QUERY">Search Music</option>
-                  <option value="get_song_data&id=SONG_ID">Get Song Metadata</option>
-                  <option value="get_playlist_songs&public_id=PLAYLIST_ID">Get Playlist Songs</option>
-                </optgroup>
-                <optgroup label="Media & Files (GET)">
-                  <option value="get_stream&id=SONG_ID">Stream Audio Data</option>
-                  <option value="get_image&id=SONG_ID">Get Cover Art Image</option>
-                  <option value="get_profile_picture&id=USER_ID">Get User Profile Picture</option>
-                  <option value="download_song&id=SONG_ID">Download MP3 File</option>
-                </optgroup>
-                <optgroup label="User Data (Auth Required - GET)">
-                  <option value="get_session">Get Current Logged-in User</option>
-                  <option value="get_favorites">Get User Favorites</option>
-                  <option value="get_history">Get Playback History</option>
-                  <option value="get_user_playlists">Get User Playlists</option>
-                  <option value="get_recommendations">Get Personalized Recommendations</option>
-                </optgroup>
-                <optgroup label="Interactions (Auth Required - POST)">
-                  <option value="toggle_favorite" data-method="POST" data-body='{"id": 123}'>Toggle Favorite</option>
-                  <option value="log_play" data-method="POST" data-body='{"id": 123}'>Log Song Play</option>
-                  <option value="create_playlist" data-method="POST" data-body='{"name": "My Playlist"}'>Create Playlist</option>
-                </optgroup>
-              </select>
+          <div class="modal-body p-4 text-center">
+            <i class="bi bi-cpu text-secondary mb-3" style="font-size: 3rem; display: block;"></i>
+            <h5 class="text-white mb-3">API Access is Locked</h5>
+            <p class="text-secondary small mb-4">Enter your master Admin Password to generate endpoints. Your key will be securely cached locally to prevent repetitive prompts.</p>
+            <div class="mb-4">
+              <input type="password" class="form-control bg-dark text-white border-secondary text-center fs-5" id="api-auth-input" placeholder="••••••••" style="letter-spacing: 2px;">
             </div>
-            
-            <div class="mb-3">
-              <label class="form-label text-white d-flex justify-content-between">
-                <span>Endpoint URL</span>
-                <span id="api-method-badge" class="badge bg-primary">GET</span>
-              </label>
-              <div class="input-group">
-                <input type="text" class="form-control" id="api-url-input" readonly>
-                <button class="btn btn-danger" type="button" id="copy-api-btn">Copy</button>
-              </div>
-            </div>
-            
-            <div class="bg-dark p-3 rounded border border-secondary mt-3 d-none" id="api-payload-container">
-              <h6 class="text-white mb-2" style="font-size: 0.85rem;">JSON Payload Required (Body)</h6>
-              <code class="text-warning" id="api-payload-code"></code>
-            </div>
-            
-            <!-- NEW IFRAME SECTION FOR RANDOM EXAMPLE DATA -->
-            <div class="mt-4">
-              <h6 class="text-white mb-2" style="font-size: 0.85rem;">Example Output (Random Data)</h6>
-              <iframe id="api-example-iframe" class="w-100 rounded border border-secondary" style="height: 180px; background-color: #000000; overflow: auto;" src="about:blank"></iframe>
-            </div>
-
+            <button class="btn btn-warning text-dark w-100 fw-bold py-2" id="api-auth-submit-btn">Verify & Unlock API</button>
           </div>
         </div>
       </div>
     </div>
+
+    <!-- MAIN COMPREHENSIVE API MODAL -->
+    <div class="modal fade" id="api-modal" tabindex="-1">
+      <div class="modal-dialog modal-fullscreen">
+        <div class="modal-content" style="background-color: var(--ytm-bg);">
+          
+          <div class="modal-header border-0 align-items-center px-4 py-3" style="border-bottom: 1px solid var(--ytm-surface-2) !important; background-color: var(--ytm-surface);">
+            <h4 class="modal-title text-white m-0 fw-bold"><i class="bi bi-code-slash text-danger me-2"></i> Developer API Documentation</h4>
+            <div class="d-flex gap-3 align-items-center">
+              <span class="badge bg-success border border-dark px-3 py-2 d-none d-md-inline-block fs-6"><i class="bi bi-check-circle-fill me-1"></i> Key Cached Active</span>
+              <button class="btn btn-outline-danger fw-bold" id="clear-api-key-btn" title="Clear API Key Cache"><i class="bi bi-eraser-fill"></i> <span class="d-none d-md-inline">Clear Auth Key</span></button>
+              <button type="button" class="btn-close btn-close-white ms-2 fs-5" data-bs-dismiss="modal"></button>
+            </div>
+          </div>
+
+          <div class="modal-body p-0 d-flex flex-column flex-lg-row h-100 overflow-hidden">
+            
+            <!-- DESKTOP LEFT SIDEBAR: API ENDPOINT NAVIGATOR -->
+            <div class="api-sidebar border-end border-secondary d-none d-lg-flex flex-column" style="width: 350px; background-color: var(--ytm-surface-2); overflow-y: auto; flex-shrink: 0;">
+              <div class="p-3 border-bottom border-secondary position-sticky top-0 bg-dark z-3 shadow-sm">
+                <h6 class="text-white m-0 text-uppercase fw-bold" style="letter-spacing: 1px; font-size: 0.85rem;"><i class="bi bi-list-nested me-2 text-danger"></i> Endpoint Index</h6>
+              </div>
+              <ul class="nav nav-pills flex-column p-3 gap-2" id="api-docs-scrollspy">
+                
+                <li class="nav-item mt-2"><span class="nav-link text-secondary fw-bold small text-uppercase disabled py-1" style="letter-spacing: 1px; border-bottom: 1px solid #444;">Library Data</span></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_songs"><i class="bi bi-music-note-list text-info me-2 fs-5"></i> Get All Songs</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_artists"><i class="bi bi-people-fill text-info me-2 fs-5"></i> Get Artists</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_albums"><i class="bi bi-disc-fill text-info me-2 fs-5"></i> Get Albums</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_genres"><i class="bi bi-tags-fill text-info me-2 fs-5"></i> Get Genres</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_years"><i class="bi bi-calendar-event-fill text-info me-2 fs-5"></i> Get Years</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-search"><i class="bi bi-search text-info me-2 fs-5"></i> Search Library</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_song_data"><i class="bi bi-info-circle-fill text-info me-2 fs-5"></i> Get Song Metadata</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_playlist_songs"><i class="bi bi-music-note-beamed text-info me-2 fs-5"></i> Get Playlist Songs</a></li>
+                
+                <li class="nav-item mt-4"><span class="nav-link text-secondary fw-bold small text-uppercase disabled py-1" style="letter-spacing: 1px; border-bottom: 1px solid #444;">Media & Streaming</span></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_stream"><i class="bi bi-play-circle-fill text-warning me-2 fs-5"></i> Stream Audio Data</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_image"><i class="bi bi-image text-warning me-2 fs-5"></i> Get Cover Art</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_profile_picture"><i class="bi bi-person-bounding-box text-warning me-2 fs-5"></i> Get User Avatar</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-download_song"><i class="bi bi-download text-warning me-2 fs-5"></i> Download MP3 File</a></li>
+                
+                <li class="nav-item mt-4"><span class="nav-link text-secondary fw-bold small text-uppercase disabled py-1" style="letter-spacing: 1px; border-bottom: 1px solid #444;">User & Discovery</span></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_explore"><i class="bi bi-compass-fill text-success me-2 fs-5"></i> Get Explore Hub</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_recommendations"><i class="bi bi-magic text-success me-2 fs-5"></i> Get For You AI</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_history"><i class="bi bi-clock-history text-success me-2 fs-5"></i> Get Play History</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_favorites"><i class="bi bi-heart-fill text-success me-2 fs-5"></i> Get Favorites</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_user_playlists"><i class="bi bi-collection-play-fill text-success me-2 fs-5"></i> Get User Playlists</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_collab_playlists"><i class="bi bi-people-fill text-success me-2 fs-5"></i> Get Shared Playlists</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-get_session"><i class="bi bi-shield-check text-success me-2 fs-5"></i> Get Session Config</a></li>
+
+                <li class="nav-item mt-4"><span class="nav-link text-secondary fw-bold small text-uppercase disabled py-1" style="letter-spacing: 1px; border-bottom: 1px solid #444;">State Mutations (POST)</span></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-toggle_favorite"><i class="bi bi-heart text-danger me-2 fs-5"></i> Toggle Favorite</a></li>
+                <li class="nav-item"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-log_play"><i class="bi bi-play-circle text-danger me-2 fs-5"></i> Log Play Count</a></li>
+                <li class="nav-item mb-5"><a class="nav-link text-white py-2 px-3 rounded" href="#doc-create_playlist"><i class="bi bi-plus-circle text-danger me-2 fs-5"></i> Create Playlist</a></li>
+              </ul>
+            </div>
+
+            <!-- RIGHT SIDEBAR: DOCUMENTATION & PLAYGROUND -->
+            <div class="api-content flex-grow-1 overflow-auto position-relative" data-bs-spy="scroll" data-bs-target="#api-docs-scrollspy" data-bs-smooth-scroll="true" tabindex="0" style="background-color: var(--ytm-bg);">
+              
+              <!-- MOBILE STICKY NAVIGATOR -->
+              <div class="d-block d-lg-none sticky-top bg-dark p-3 border-bottom border-secondary z-3 shadow-lg" style="top: 0;">
+                <label class="form-label text-white small fw-bold mb-1" style="letter-spacing: 1px;"><i class="bi bi-list-ul text-danger me-1"></i> JUMP TO ENDPOINT</label>
+                <select class="form-select form-select-lg bg-black text-white border-secondary fw-bold shadow-sm" id="mobile-api-nav-select" onchange="document.getElementById(this.value).scrollIntoView({behavior: 'smooth', block: 'start'});">
+                  <optgroup label="Library Data (GET)">
+                    <option value="doc-get_songs">1. Get All Songs</option>
+                    <option value="doc-get_artists">2. Get Artists</option>
+                    <option value="doc-get_albums">3. Get Albums</option>
+                    <option value="doc-get_genres">4. Get Genres</option>
+                    <option value="doc-get_years">5. Get Years</option>
+                    <option value="doc-search">6. Search Library</option>
+                    <option value="doc-get_song_data">7. Get Song Metadata</option>
+                    <option value="doc-get_playlist_songs">8. Get Playlist Songs</option>
+                  </optgroup>
+                  <optgroup label="Media & Streaming (GET)">
+                    <option value="doc-get_stream">9. Stream Audio Data</option>
+                    <option value="doc-get_image">10. Get Cover Art Image</option>
+                    <option value="doc-get_profile_picture">11. Get User Avatar</option>
+                    <option value="doc-download_song">12. Download MP3 File</option>
+                  </optgroup>
+                  <optgroup label="User & Discovery (GET)">
+                    <option value="doc-get_explore">13. Get Explore Hub</option>
+                    <option value="doc-get_recommendations">14. Get For You AI</option>
+                    <option value="doc-get_history">15. Get Play History</option>
+                    <option value="doc-get_favorites">16. Get User Favorites</option>
+                    <option value="doc-get_user_playlists">17. Get User Playlists</option>
+                    <option value="doc-get_collab_playlists">18. Get Shared Playlists</option>
+                    <option value="doc-get_session">19. Get Session Data</option>
+                  </optgroup>
+                  <optgroup label="State Mutations (POST)">
+                    <option value="doc-toggle_favorite">20. Toggle Favorite (POST)</option>
+                    <option value="doc-log_play">21. Log Song Play (POST)</option>
+                    <option value="doc-create_playlist">22. Create Playlist (POST)</option>
+                  </optgroup>
+                </select>
+              </div>
+
+              <!-- INTERACTIVE PLAYGROUND BOX -->
+              <div class="p-4 p-md-5" style="background-color: var(--ytm-surface); border-bottom: 2px solid var(--ytm-accent);">
+                <h4 class="text-white mb-3 fw-bold"><i class="bi bi-terminal-fill me-2 text-primary"></i> Live Request Playground</h4>
+                <p class="text-secondary fs-6 mb-4" style="max-width: 900px;">Select an endpoint below to immediately generate the secure URL string and test the live JSON response returned straight from your SQLite database. The iframe below executes the generated query using your locally cached Admin Key.</p>
+                
+                <div class="row g-4 align-items-end">
+                  <div class="col-lg-5">
+                    <label for="api-action-select" class="form-label text-white small fw-bold" style="letter-spacing: 1px;">ENDPOINT ACTION</label>
+                    <select class="form-select form-select-lg bg-dark text-white border-secondary shadow-sm" id="api-action-select">
+                      <optgroup label="Library Data (GET)">
+                        <option value="get_songs">Fetch All Songs</option>
+                        <option value="get_artists">Fetch Artists</option>
+                        <option value="get_albums">Fetch Albums</option>
+                        <option value="get_genres">Fetch Genres</option>
+                        <option value="get_explore">Fetch Explore / Discovery Data</option>
+                        <option value="search&q=YOUR_QUERY">Search Music</option>
+                        <option value="get_song_data&id=SONG_ID">Get Song Metadata</option>
+                        <option value="get_playlist_songs&public_id=PLAYLIST_ID">Get Playlist Songs</option>
+                      </optgroup>
+                      <optgroup label="Media & Files (GET)">
+                        <option value="get_stream&id=SONG_ID">Stream Audio Data</option>
+                        <option value="get_image&id=SONG_ID">Get Cover Art Image</option>
+                        <option value="get_profile_picture&id=USER_ID">Get User Profile Picture</option>
+                        <option value="download_song&id=SONG_ID">Download MP3 File</option>
+                      </optgroup>
+                      <optgroup label="User Data (GET)">
+                        <option value="get_session">Get Current Logged-in User</option>
+                        <option value="get_favorites">Get User Favorites</option>
+                        <option value="get_history">Get Playback History</option>
+                        <option value="get_user_playlists">Get User Playlists</option>
+                        <option value="get_recommendations">Get Personalized Recommendations</option>
+                      </optgroup>
+                      <optgroup label="Interactions (POST)">
+                        <option value="toggle_favorite" data-method="POST" data-body='{"id": 123}'>Toggle Favorite</option>
+                        <option value="log_play" data-method="POST" data-body='{"id": 123, "played_at": "2026-06-28T14:27:00.000Z"}'>Log Song Play</option>
+                        <option value="create_playlist" data-method="POST" data-body='{"name": "My API Playlist", "is_private": 0}'>Create Playlist</option>
+                      </optgroup>
+                    </select>
+                  </div>
+                  <div class="col-lg-7">
+                    <label class="form-label text-white d-flex justify-content-between small fw-bold" style="letter-spacing: 1px;">
+                      <span>GENERATED ENDPOINT URL</span>
+                      <span id="api-method-badge" class="badge bg-primary fs-6 shadow-sm">GET</span>
+                    </label>
+                    <div class="input-group input-group-lg shadow-sm">
+                      <input type="text" class="form-control bg-dark text-info border-secondary font-monospace fs-6" id="api-url-input" readonly>
+                      <button class="btn btn-danger fw-bold px-4" type="button" id="copy-api-btn"><i class="bi bi-clipboard"></i> Copy</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bg-black p-4 rounded border border-secondary mt-4 d-none shadow-sm" id="api-payload-container">
+                  <h6 class="text-white mb-2 text-uppercase fw-bold" style="font-size: 0.85rem; letter-spacing: 1px;"><i class="bi bi-filetype-json text-warning me-2"></i> Required JSON Body Payload</h6>
+                  <pre class="m-0"><code class="text-warning font-monospace fs-6" id="api-payload-code"></code></pre>
+                </div>
+                
+                <div class="mt-4 pt-2">
+                  <ul class="nav nav-tabs border-secondary mb-3" role="tablist">
+                    <li class="nav-item" role="presentation">
+                      <button class="nav-link active bg-dark text-white border-secondary border-bottom-0 fw-bold px-4 py-2" data-bs-toggle="tab" data-bs-target="#api-tab-json" type="button" role="tab"><i class="bi bi-filetype-json text-warning me-2"></i> Raw JSON Response</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                      <button class="nav-link bg-transparent text-secondary border-0 fw-bold px-4 py-2" data-bs-toggle="tab" data-bs-target="#api-tab-visual" type="button" role="tab"><i class="bi bi-play-circle-fill text-danger me-2"></i> Visual Client Tester</button>
+                    </li>
+                  </ul>
+                  <div class="tab-content">
+                    <div class="tab-pane fade show active" id="api-tab-json" role="tabpanel">
+                      <iframe id="api-example-iframe" class="w-100 rounded border border-secondary shadow-lg" style="height: 400px; background-color: #050505; overflow: auto; display: block;" src="about:blank"></iframe>
+                    </div>
+                    <div class="tab-pane fade" id="api-tab-visual" role="tabpanel">
+                      <iframe id="api-visual-iframe" class="w-100 rounded border border-secondary shadow-lg" style="height: 600px; background-color: #030303; overflow: hidden; display: block; border: none;" src="about:blank"></iframe>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- MASSIVE DOCUMENTATION START -->
+              <div class="p-4 p-md-5 text-light" style="max-width: 1100px; margin: 0 auto;">
+
+                <div class="text-center mb-5 pb-5 border-bottom border-secondary">
+                  <h1 class="fw-bold text-white mb-4" style="font-size: clamp(2.5rem, 5vw, 4rem);">PHP Music Core API</h1>
+                  <p class="text-secondary fs-5 mx-auto" style="line-height: 1.7;">Welcome to the comprehensive reference documentation. This manual details the endpoints for querying database entities, streaming byte ranges, extracting binary blobs, and manipulating state via the RESTful JSON interface. All endpoints are protected by CORS firewalls and require strict Master Key authentication to access externally.</p>
+                </div>
+
+                <!-- 1. GET SONGS -->
+                <section id="doc-get_songs" class="api-doc-section mb-5 pb-5 border-bottom border-secondary">
+                  <div class="d-flex align-items-center gap-3 mb-4">
+                    <span class="badge bg-primary fs-5 px-4 py-2 shadow-sm">GET</span>
+                    <h2 class="text-white fw-bold m-0" style="font-size: 2.2rem;">Retrieve All Songs</h2>
+                  </div>
+                  
+                  <div class="bg-black p-4 rounded border border-secondary mb-4 shadow-sm">
+                    <code class="text-success fw-bold fs-5">GET</code> <code class="text-light ms-2 fs-6">/?access=api&action=get_songs&api_key=YOUR_ADMIN_KEY</code>
+                  </div>
+
+                  <h5 class="text-white mt-4 fw-bold">Overview</h5>
+                  <p class="text-secondary" style="font-size: 1.05rem; line-height: 1.7;">This is the primary pipeline for fetching your music library. It retrieves a highly optimized, paginated array of song entities from the SQLite database. The backend automatically enforces strict privacy checks, entirely omitting tracks marked as <code>is_private=1</code> unless the <code>filter_user_id</code> specifically matches the track owner, or the global <code>api_key</code> bypass is initiated. Furthermore, it dynamically computes and attaches the <code>play_count</code> integer by executing a fast subquery against the <code>play_counts</code> relationship table.</p>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-danger ps-3">Query Parameters</h5>
+                  <div class="table-responsive bg-dark rounded border border-secondary mb-5 shadow-sm mt-3">
+                    <table class="table table-dark table-borderless table-striped m-0">
+                      <thead class="border-bottom border-secondary">
+                        <tr><th class="py-3 px-4">Parameter</th><th class="py-3 px-4">Type</th><th class="py-3 px-4">Required</th><th class="py-3 px-4">Description</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">access</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-success">Yes</span></td><td class="py-3 px-4 text-secondary">Must be exactly <code class="text-light">api</code> to bypass the HTML renderer and trigger the JSON header response.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">action</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-success">Yes</span></td><td class="py-3 px-4 text-secondary">Must be exactly <code class="text-light">get_songs</code>.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">api_key</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-success">Yes</span></td><td class="py-3 px-4 text-secondary">The master Admin Password established in <code>index.php</code>. Requests without this will drop a 401 Unauthorized block.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">page</code></td><td class="py-3 px-4 text-info">integer</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Pagination multiplier. Defaults to <code class="text-light">1</code>. Multiplies against the global <code>PAGE_SIZE</code> constant (25).</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">sort</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Determines the ORDER BY clause. Options: <code class="text-light">id_desc</code>, <code class="text-light">id_asc</code>, <code class="text-light">artist_asc</code>, <code class="text-light">title_asc</code>, <code class="text-light">album_asc</code>, <code class="text-light">year_desc</code>. Defaults to <code class="text-light">id_desc</code>.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">artist</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">URL Encoded artist name. Filters the database using the internal <code>match_artist()</code> custom SQLite function for precise collision detection.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">filter_user_id</code></td><td class="py-3 px-4 text-info">integer</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Limits results strictly to tracks uploaded by this specific integer User ID.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-success ps-3">Code Integration Examples</h5>
+                  <ul class="nav nav-tabs border-secondary mb-0 mt-3" role="tablist">
+                    <li class="nav-item" role="presentation"><button class="nav-link active bg-dark text-white border-secondary border-bottom-0 fw-bold px-4 py-3" data-bs-toggle="tab" data-bs-target="#js-1">Node.js / Fetch</button></li>
+                    <li class="nav-item" role="presentation"><button class="nav-link bg-transparent text-secondary border-0 fw-bold px-4 py-3" data-bs-toggle="tab" data-bs-target="#py-1">Python</button></li>
+                    <li class="nav-item" role="presentation"><button class="nav-link bg-transparent text-secondary border-0 fw-bold px-4 py-3" data-bs-toggle="tab" data-bs-target="#php-1">PHP cURL</button></li>
+                  </ul>
+                  <div class="tab-content mb-5">
+                    <div class="tab-pane fade show active" id="js-1">
+                      <pre class="bg-black p-4 rounded-bottom rounded-end border border-secondary text-light font-monospace m-0 shadow-sm" style="font-size: 0.9rem; overflow-x: auto;"><code>const fetchLibrary = async () => {
+  const endpoint = 'https://yourdomain.com/?access=api&action=get_songs&api_key=admin&page=1&sort=title_asc';
+  
+  try {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP Error: ${response.status}`);
+    }
+    
+    const songs = await response.json();
+    console.log(`Successfully fetched ${songs.length} tracks.`);
+    
+    // Map over the results
+    songs.forEach(song => {
+      console.log(`[${song.id}] ${song.title} - ${song.artist} (${song.duration}s)`);
+    });
+    
+  } catch (error) {
+    console.error('API Pipeline failed:', error);
+  }
+};
+
+fetchLibrary();</code></pre>
+                    </div>
+                    <div class="tab-pane fade" id="py-1">
+                      <pre class="bg-black p-4 rounded-bottom rounded-end border border-secondary text-light font-monospace m-0 shadow-sm" style="font-size: 0.9rem; overflow-x: auto;"><code>import requests
+import json
+
+def get_all_songs():
+    url = "https://yourdomain.com/"
+    
+    payload = {
+        "access": "api",
+        "action": "get_songs",
+        "api_key": "admin", # Replace with actual key
+        "page": 1,
+        "sort": "title_asc"
+    }
+    
+    try:
+        response = requests.get(url, params=payload, timeout=10)
+        response.raise_for_status() # Trigger exception for 4xx/5xx errors
+        
+        data = response.json()
+        print(f"Acquired {len(data)} music objects.")
+        print(json.dumps(data[0], indent=2)) # Print first object beautifully
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Fatal System Error: {e}")
+
+get_all_songs()</code></pre>
+                    </div>
+                    <div class="tab-pane fade" id="php-1">
+                      <pre class="bg-black p-4 rounded-bottom rounded-end border border-secondary text-light font-monospace m-0 shadow-sm" style="font-size: 0.9rem; overflow-x: auto;"><code>&lt;?php
+$url = "https://yourdomain.com/?access=api&action=get_songs&api_key=admin&page=1";
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_HTTPHEADER, array('Accept: application/json'));
+curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // Ignore if self-signed cert
+
+$response = curl_exec($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+if (curl_errno($ch)) {
+    echo "cURL Error: " . curl_error($ch);
+} elseif ($httpCode !== 200) {
+    echo "HTTP Blocked: " . $httpCode;
+} else {
+    $songs = json_decode($response, true);
+    print_r($songs);
+}
+curl_close($ch);
+?&gt;</code></pre>
+                    </div>
+                  </div>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-info ps-3">Expected JSON Response (HTTP 200 OK)</h5>
+                  <p class="text-secondary small mb-3">Returns an array of JSON objects. If the query yields no results, it strictly returns an empty array <code>[]</code>, never null.</p>
+                  <pre class="bg-black p-4 rounded border border-secondary text-info font-monospace mb-4 shadow-sm" style="font-size: 0.9rem; overflow-x: auto;"><code>[
+  {
+    "id": 1042,
+    "title": "Stairway to Heaven",
+    "artist": "Led Zeppelin",
+    "album": "Led Zeppelin IV",
+    "genre": "Classic Rock",
+    "duration": 482,
+    "user_id": 1,
+    "is_private": 0,
+    "last_modified": 1698765432,
+    "is_favorite": 1,
+    "play_count": 8750
+  },
+  {
+    "id": 1043,
+    "title": "Hotel California",
+    "artist": "Eagles",
+    "album": "Hotel California",
+    "genre": "Rock",
+    "duration": 390,
+    "user_id": 2,
+    "is_private": 0,
+    "last_modified": 1698765999,
+    "is_favorite": 0,
+    "play_count": 6420
+  }
+]</code></pre>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-warning ps-3">Error Responses & Troubleshooting</h5>
+                  <div class="p-4 rounded bg-dark border border-secondary mt-3">
+                    <p class="mb-2"><strong class="text-danger">HTTP 401 Unauthorized:</strong> Thrown if the <code>api_key</code> parameter is entirely missing, blank, or cryptographically invalid against the server's Master Password.</p>
+                    <pre class="bg-black p-3 rounded border border-danger text-danger font-monospace mb-3 small"><code>{
+  "status": "error",
+  "message": "API access denied. Valid api_key (Admin Password) required."
+}</code></pre>
+                    <p class="mb-2"><strong class="text-warning">HTTP 429 Too Many Requests:</strong> Thrown if your script requests the endpoint more than 150 times within a 60-second rolling window.</p>
+                    <p class="mb-0"><strong class="text-info">Pagination Empty:</strong> If you pass <code>page=9999</code> and it exceeds the database bounds, it safely returns <code>[]</code> without throwing a 404 exception.</p>
+                  </div>
+                </section>
+
+
+                <!-- 2. GET ARTISTS -->
+                <section id="doc-get_artists" class="api-doc-section mb-5 pb-5 border-bottom border-secondary">
+                  <div class="d-flex align-items-center gap-3 mb-4">
+                    <span class="badge bg-primary fs-5 px-4 py-2 shadow-sm">GET</span>
+                    <h2 class="text-white fw-bold m-0" style="font-size: 2.2rem;">Retrieve Artists Matrix</h2>
+                  </div>
+                  
+                  <div class="bg-black p-4 rounded border border-secondary mb-4 shadow-sm">
+                    <code class="text-success fw-bold fs-5">GET</code> <code class="text-light ms-2 fs-6">/?access=api&action=get_artists&api_key=YOUR_ADMIN_KEY</code>
+                  </div>
+
+                  <h5 class="text-white mt-4 fw-bold">Overview</h5>
+                  <p class="text-secondary" style="font-size: 1.05rem; line-height: 1.7;">An extremely advanced aggregation endpoint that crawls the entire SQLite database to extract unique artist strings from embedded ID3 tags. It intelligently executes regex delimiter parsing against strings containing formats like <code>"Daft Punk feat. Pharrell Williams"</code> or <code>"Justice & Kavinsky"</code> to dynamically split them into individual, distinct identities. It then returns a structurally mapped array providing a canonical <code>id</code> pointer, which is crucial for fetching the correct cover art image for that artist via the image endpoint.</p>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-danger ps-3">Query Parameters</h5>
+                  <div class="table-responsive bg-dark rounded border border-secondary mb-5 shadow-sm mt-3">
+                    <table class="table table-dark table-borderless table-striped m-0">
+                      <thead class="border-bottom border-secondary">
+                        <tr><th class="py-3 px-4">Parameter</th><th class="py-3 px-4">Type</th><th class="py-3 px-4">Required</th><th class="py-3 px-4">Description</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">action</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-success">Yes</span></td><td class="py-3 px-4 text-secondary">Must be <code class="text-light">get_artists</code>.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">page</code></td><td class="py-3 px-4 text-info">integer</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Array slice offset. Defaults to <code class="text-light">1</code> (25 items).</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">sort</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Options: <code class="text-light">name_asc</code>, <code class="text-light">name_desc</code>. Defaults to alphabetical <code class="text-light">name_asc</code>.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-success ps-3">cURL Request Example</h5>
+                  <pre class="bg-black p-4 rounded border border-secondary text-light font-monospace mb-4 shadow-sm" style="font-size: 0.9rem; overflow-x: auto;"><code>curl -X GET "https://yourdomain.com/?access=api&action=get_artists&api_key=admin&sort=name_asc" \
+  -H "Accept: application/json" \
+  -H "User-Agent: API-Client/1.0"</code></pre>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-info ps-3">Expected JSON Response</h5>
+                  <pre class="bg-black p-4 rounded border border-secondary text-info font-monospace mb-0 shadow-sm" style="font-size: 0.9rem; overflow-x: auto;"><code>[
+  {
+    "name": "Daft Punk",
+    "id": 84,
+    "has_img": 1
+  },
+  {
+    "name": "David Bowie",
+    "id": 92,
+    "has_img": 1
+  },
+  {
+    "name": "Dire Straits",
+    "id": 105,
+    "has_img": 0
+  }
+]</code></pre>
+                  <p class="text-secondary small mt-3 px-2"><strong>Architecture Note:</strong> The <code>id</code> field points to the absolute highest integer song ID uploaded by this artist that contains a valid <code>has_img=1</code> flag in the database. You must append this integer to the <code>get_image</code> endpoint to retrieve the visual artist avatar.</p>
+                </section>
+
+
+                <!-- 3. GET ALBUMS -->
+                <section id="doc-get_albums" class="api-doc-section mb-5 pb-5 border-bottom border-secondary">
+                  <div class="d-flex align-items-center gap-3 mb-4">
+                    <span class="badge bg-primary fs-5 px-4 py-2 shadow-sm">GET</span>
+                    <h2 class="text-white fw-bold m-0" style="font-size: 2.2rem;">Retrieve Albums Collection</h2>
+                  </div>
+                  
+                  <div class="bg-black p-4 rounded border border-secondary mb-4 shadow-sm">
+                    <code class="text-success fw-bold fs-5">GET</code> <code class="text-light ms-2 fs-6">/?access=api&action=get_albums&api_key=YOUR_ADMIN_KEY</code>
+                  </div>
+
+                  <h5 class="text-white mt-4 fw-bold">Overview</h5>
+                  <p class="text-secondary" style="font-size: 1.05rem; line-height: 1.7;">Aggregates all music records grouped strictly by the <code>album</code> database field. The server processor automatically scrubs and excludes blank variables or corrupted "Unknown Album" entries to maintain UI integrity. The backend natively computes the <code>song_count</code> length and executes a heavy join to output the <code>total_plays</code> property for the entire album.</p>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-danger ps-3">Query Parameters</h5>
+                  <div class="table-responsive bg-dark rounded border border-secondary mb-5 shadow-sm mt-3">
+                    <table class="table table-dark table-borderless table-striped m-0">
+                      <thead class="border-bottom border-secondary">
+                        <tr><th class="py-3 px-4">Parameter</th><th class="py-3 px-4">Type</th><th class="py-3 px-4">Required</th><th class="py-3 px-4">Description</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">action</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-success">Yes</span></td><td class="py-3 px-4 text-secondary">Must be <code class="text-light">get_albums</code>.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">sort</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Options: <code class="text-light">album_asc</code>, <code class="text-light">album_desc</code>, <code class="text-light">year_desc</code>, <code class="text-light">artist_asc</code>. Defaults to <code class="text-light">album_asc</code>.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-info ps-3">Expected JSON Response</h5>
+                  <pre class="bg-black p-4 rounded border border-secondary text-info font-monospace mb-0 shadow-sm" style="font-size: 0.9rem; overflow-x: auto;"><code>[
+  {
+    "album": "Dark Side of the Moon",
+    "artist": "Pink Floyd",
+    "user_id": 1,
+    "id": 340,
+    "year": 1973,
+    "song_count": 10,
+    "total_plays": 54200
+  },
+  {
+    "album": "Discovery",
+    "artist": "Daft Punk",
+    "user_id": 2,
+    "id": 412,
+    "year": 2001,
+    "song_count": 14,
+    "total_plays": 88030
+  }
+]</code></pre>
+                  <p class="text-secondary small mt-3 px-2"><strong>Tip:</strong> The <code>id</code> attribute returned here points to the absolute highest song ID associated with this album. Using this ID in the <code>get_image</code> route guarantees you receive the album's unified cover artwork.</p>
+                </section>
+
+
+                <!-- 4. GET GENRES & YEARS -->
+                <section id="doc-get_genres" class="api-doc-section mb-5 pb-5 border-bottom border-secondary">
+                  <div class="row g-5">
+                    <div class="col-lg-6">
+                      <div class="d-flex align-items-center gap-3 mb-4">
+                        <span class="badge bg-primary fs-6 px-3 py-2 shadow-sm">GET</span>
+                        <h2 class="text-white fw-bold m-0" style="font-size: 1.8rem;">Get Genres</h2>
+                      </div>
+                      <div class="bg-black p-3 rounded border border-secondary mb-3 shadow-sm">
+                        <code class="text-success fw-bold">GET</code> <code class="text-light ms-2">/?access=api&action=get_genres</code>
+                      </div>
+                      <p class="text-secondary" style="font-size: 1rem; line-height: 1.6;">Provides a clean, distinct array of all unique string properties recorded inside the <code>genre</code> column across the entire music library table. Highly optimized via <code>GROUP BY COLLATE NOCASE</code> algorithms.</p>
+                      <pre class="bg-black p-3 rounded border border-secondary text-info font-monospace shadow-sm" style="font-size: 0.85rem; overflow-x: auto;"><code>[
+  { "name": "Alternative Rock", "id": 55 },
+  { "name": "Electronic Dance", "id": 89 }
+]</code></pre>
+                    </div>
+                    
+                    <div class="col-lg-6" id="doc-get_years">
+                      <div class="d-flex align-items-center gap-3 mb-4">
+                        <span class="badge bg-primary fs-6 px-3 py-2 shadow-sm">GET</span>
+                        <h2 class="text-white fw-bold m-0" style="font-size: 1.8rem;">Get Years</h2>
+                      </div>
+                      <div class="bg-black p-3 rounded border border-secondary mb-3 shadow-sm">
+                        <code class="text-success fw-bold">GET</code> <code class="text-light ms-2">/?access=api&action=get_years</code>
+                      </div>
+                      <p class="text-secondary" style="font-size: 1rem; line-height: 1.6;">Groups the database entirely by the numeric <code>year</code> ID3 tag field. Automatically filters out <code>0</code> or <code>null</code> integer fallbacks and sorts chronologically descending.</p>
+                      <pre class="bg-black p-3 rounded border border-secondary text-info font-monospace shadow-sm" style="font-size: 0.85rem; overflow-x: auto;"><code>[
+  { "name": "2024", "id": 904 },
+  { "name": "2023", "id": 822 }
+]</code></pre>
+                    </div>
+                  </div>
+                </section>
+
+
+                <!-- 6. SEARCH -->
+                <section id="doc-search" class="api-doc-section mb-5 pb-5 border-bottom border-secondary">
+                  <div class="d-flex align-items-center gap-3 mb-4">
+                    <span class="badge bg-primary fs-5 px-4 py-2 shadow-sm">GET</span>
+                    <h2 class="text-white fw-bold m-0" style="font-size: 2.2rem;">Global Aggregated Search</h2>
+                  </div>
+                  
+                  <div class="bg-black p-4 rounded border border-secondary mb-4 shadow-sm">
+                    <code class="text-success fw-bold fs-5">GET</code> <code class="text-light ms-2 fs-6">/?access=api&action=search&q=QUERY&api_key=YOUR_KEY</code>
+                  </div>
+
+                  <h5 class="text-white mt-4 fw-bold">Overview</h5>
+                  <p class="text-secondary" style="font-size: 1.05rem; line-height: 1.7;">The core intelligence of the library discovery engine. It performs a massive, multi-table cross-referenced <code>LIKE</code> operation against Titles, Artists, Albums, Playlists, and internal Users. Instead of returning a flat array, it structures the response into beautifully nested UI "Shelves", allowing you to render categorical blocks identical to modern streaming platforms immediately upon receipt.</p>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-danger ps-3">Query Parameters</h5>
+                  <div class="table-responsive bg-dark rounded border border-secondary mb-4 shadow-sm mt-3">
+                    <table class="table table-dark table-borderless table-striped m-0">
+                      <thead class="border-bottom border-secondary">
+                        <tr><th class="py-3 px-4">Parameter</th><th class="py-3 px-4">Type</th><th class="py-3 px-4">Required</th><th class="py-3 px-4">Description</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">q</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-success">Yes</span></td><td class="py-3 px-4 text-secondary">The URL-encoded search keyword or phrase.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">f_date</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Time boundary limits. Options: <code class="text-light">today</code>, <code class="text-light">week</code>, <code class="text-light">month</code>, <code class="text-light">year</code>.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">f_dur</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Length limits. Options: <code class="text-light">short</code> (under 4 mins), <code class="text-light">long</code> (over 20 mins).</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">f_sort</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Advanced sorting matrix. Options: <code class="text-light">relevance</code>, <code class="text-light">date</code>, <code class="text-light">views</code>, <code class="text-light">likes</code>.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-info ps-3">Expected JSON Response</h5>
+                  <pre class="bg-black p-4 rounded border border-secondary text-info font-monospace mb-0 shadow-sm" style="font-size: 0.85rem; overflow-x: auto;"><code>{
+  "shelves": [
+    {
+      "title": "Top Result",
+      "type": "top_result",
+      "items": [
+        { "id": 401, "title": "Random Access Memories", "artist": "Daft Punk" }
+      ]
+    },
+    {
+      "title": "Artists",
+      "type": "artists",
+      "items": [
+        { "name": "Daft Punk", "id": 401, "is_user": false }
+      ]
+    },
+    {
+      "title": "Songs",
+      "type": "songs_list",
+      "items": [
+        { "id": 402, "title": "Get Lucky", "artist": "Daft Punk", "duration": 369 }
+      ]
+    }
+  ]
+}</code></pre>
+                </section>
+
+
+                <!-- 7. GET SONG DATA -->
+                <section id="doc-get_song_data" class="api-doc-section mb-5 pb-5 border-bottom border-secondary">
+                  <div class="d-flex align-items-center gap-3 mb-4">
+                    <span class="badge bg-primary fs-5 px-4 py-2 shadow-sm">GET</span>
+                    <h2 class="text-white fw-bold m-0" style="font-size: 2.2rem;">Retrieve Deep Song Metadata</h2>
+                  </div>
+                  
+                  <div class="bg-black p-4 rounded border border-secondary mb-4 shadow-sm">
+                    <code class="text-success fw-bold fs-5">GET</code> <code class="text-light ms-2 fs-6">/?access=api&action=get_song_data&id=SONG_ID&api_key=YOUR_ADMIN_KEY</code>
+                  </div>
+
+                  <h5 class="text-white mt-4 fw-bold">Overview</h5>
+                  <p class="text-secondary" style="font-size: 1.05rem; line-height: 1.7;">Provides absolute, hyper-detailed JSON structures regarding a singular specific audio track. It exposes system-level technical details including explicitly generated <code>stream_url</code> overrides, internally embedded raw <code>lyrics</code> text blocks (capable of feeding LRC synchronized UI elements), physical file bitrates, ReplayGain offsets, and critically, the per-user custom <code>eq_bands</code> matrix alterations tied to the <code>user_song_settings</code> relationship table.</p>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-info ps-3">Expected JSON Response</h5>
+                  <pre class="bg-black p-4 rounded border border-secondary text-info font-monospace mb-0 shadow-sm" style="font-size: 0.85rem; overflow-x: auto;"><code>{
+  "id": 1042,
+  "file": "/var/www/html/music/uploads/le/led_zeppelin/m_a4b9x.mp3",
+  "title": "Stairway to Heaven",
+  "artist": "Led Zeppelin",
+  "album": "Led Zeppelin IV",
+  "genre": "Classic Rock",
+  "year": 1971,
+  "duration": 482,
+  "bitrate": 320000,
+  "lyrics": "[00:15.30] There's a lady who's sure...\n[00:22.10] All that glitters is gold...",
+  "user_id": 1,
+  "is_private": 0,
+  "last_modified": 1698765432,
+  "replaygain": -4.2,
+  "is_favorite": 1,
+  "volume_multiplier": 1.2,
+  "eq_bands": [2, 0, -1, 3, 5],
+  "stream_url": "?action=get_stream&id=1042",
+  "image_url": "?action=get_image&id=1042&v=1698765432"
+}</code></pre>
+                </section>
+
+
+                <!-- 8. GET PLAYLIST SONGS -->
+                <section id="doc-get_playlist_songs" class="api-doc-section mb-5 pb-5 border-bottom border-secondary">
+                  <div class="d-flex align-items-center gap-3 mb-4">
+                    <span class="badge bg-primary fs-5 px-4 py-2 shadow-sm">GET</span>
+                    <h2 class="text-white fw-bold m-0" style="font-size: 2.2rem;">Retrieve Playlist Contents</h2>
+                  </div>
+                  
+                  <div class="bg-black p-4 rounded border border-secondary mb-4 shadow-sm">
+                    <code class="text-success fw-bold fs-5">GET</code> <code class="text-light ms-2 fs-6">/?access=api&action=get_playlist_songs&public_id=PLAYLIST_ID&api_key=YOUR_KEY</code>
+                  </div>
+
+                  <h5 class="text-white mt-4 fw-bold">Overview</h5>
+                  <p class="text-secondary" style="font-size: 1.05rem; line-height: 1.7;">Extracts all song objects associated via the <code>playlist_songs</code> junction table, pointing explicitly to a specific <code>public_id</code> cryptographic token. It enforces extremely tight architectural security rules, outright rejecting query attempts on <code>is_private=1</code> collections unless directly authenticated by the owner's session token or globally overridden via the <code>api_key</code>.</p>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-danger ps-3">Query Parameters</h5>
+                  <div class="table-responsive bg-dark rounded border border-secondary mb-4 shadow-sm mt-3">
+                    <table class="table table-dark table-borderless table-striped m-0">
+                      <thead class="border-bottom border-secondary">
+                        <tr><th class="py-3 px-4">Parameter</th><th class="py-3 px-4">Type</th><th class="py-3 px-4">Required</th><th class="py-3 px-4">Description</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">public_id</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-success">Yes</span></td><td class="py-3 px-4 text-secondary">The 16-character hexadecimal token assigned to the playlist entity.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">sort</code></td><td class="py-3 px-4 text-info">string</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Order definitions. Options: <code class="text-light">manual_order</code>, <code class="text-light">added_newest</code>, <code class="text-light">added_oldest</code>.</td></tr>
+                        <tr><td class="py-3 px-4"><code class="text-warning fs-6">all</code></td><td class="py-3 px-4 text-info">integer</td><td class="py-3 px-4"><span class="badge bg-secondary">No</span></td><td class="py-3 px-4 text-secondary">Boolean state <code class="text-light">1</code> or <code class="text-light">0</code>. If 1, it entirely bypasses the 25-item chunking constraints and dumps the entire list array simultaneously.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+
+                <!-- 9. MEDIA & STREAMING -->
+                <section id="doc-get_stream" class="api-doc-section mb-5 pb-5 border-bottom border-secondary">
+                  <div class="row g-5">
+                    <div class="col-12 col-xl-6">
+                      <div class="d-flex align-items-center gap-3 mb-4">
+                        <span class="badge bg-warning text-dark fs-6 px-3 py-2 shadow-sm">MEDIA</span>
+                        <h2 class="text-white fw-bold m-0" style="font-size: 1.8rem;">Stream Audio Data</h2>
+                      </div>
+                      <div class="bg-black p-3 rounded border border-secondary mb-3 shadow-sm">
+                        <code class="text-success fw-bold">GET</code> <code class="text-light ms-2">/?action=get_stream&id=SONG_ID</code>
+                      </div>
+                      <p class="text-secondary" style="font-size: 1rem; line-height: 1.6;">The highest priority internal API route. Operates completely outside the JSON formatter to return heavy binary payloads. Native support for <code>HTTP/1.1 206 Partial Content</code> allows HTML5 <code>&lt;audio&gt;</code> tags to seamlessly transmit <code>Range: bytes=</code> requests, enabling instant timeline scrubbing without transferring gigabytes of unneeded buffer chunks.</p>
+                      <div class="alert alert-dark border border-warning text-warning small mt-3">
+                        <i class="bi bi-shield-lock-fill"></i> <strong>Security Override:</strong> This route naturally bypasses CORS when instantiated natively via DOM media elements.
+                      </div>
+                    </div>
+                    
+                    <div class="col-12 col-xl-6" id="doc-get_image">
+                      <div class="d-flex align-items-center gap-3 mb-4">
+                        <span class="badge bg-warning text-dark fs-6 px-3 py-2 shadow-sm">MEDIA</span>
+                        <h2 class="text-white fw-bold m-0" style="font-size: 1.8rem;">Get Cover Art Image</h2>
+                      </div>
+                      <div class="bg-black p-3 rounded border border-secondary mb-3 shadow-sm">
+                        <code class="text-success fw-bold">GET</code> <code class="text-light ms-2">/?action=get_image&id=SONG_ID&v=TIMESTAMP</code>
+                      </div>
+                      <p class="text-secondary" style="font-size: 1rem; line-height: 1.6;">Transmits the ultra-compressed WebP base64 blob embedded in the SQLite music architecture. If no image physically exists in the database for the given ID, the server intercepts the null pointer and dynamically builds an immense SVG vector mathematical graphic bounded to the hexadecimal seed derived from the song's title string!</p>
+                      <div class="alert alert-dark border border-info text-info small mt-3">
+                        <i class="bi bi-lightning-fill"></i> <strong>Performance:</strong> The <code>&v=</code> param explicitly fractures strict HTTP caching laws to force UI updates.
+                      </div>
+                    </div>
+
+                    <div class="col-12 col-xl-6" id="doc-get_profile_picture">
+                      <div class="d-flex align-items-center gap-3 mb-4">
+                        <span class="badge bg-warning text-dark fs-6 px-3 py-2 shadow-sm">MEDIA</span>
+                        <h2 class="text-white fw-bold m-0" style="font-size: 1.8rem;">Get User Avatar</h2>
+                      </div>
+                      <div class="bg-black p-3 rounded border border-secondary mb-3 shadow-sm">
+                        <code class="text-success fw-bold">GET</code> <code class="text-light ms-2">/?action=get_profile_picture&id=USER_ID</code>
+                      </div>
+                      <p class="text-secondary" style="font-size: 1rem; line-height: 1.6;">Translates the user integer pointer into a <code>image/webp</code> output stream. If the account lacks a custom profile picture, it initiates a complex fallback algorithm: searching the DB for the newest <code>music</code> row uploaded by them that contains cover art, and if that fails, builds an SVG geometric shape.</p>
+                    </div>
+
+                    <div class="col-12 col-xl-6" id="doc-download_song">
+                      <div class="d-flex align-items-center gap-3 mb-4">
+                        <span class="badge bg-warning text-dark fs-6 px-3 py-2 shadow-sm">MEDIA</span>
+                        <h2 class="text-white fw-bold m-0" style="font-size: 1.8rem;">Download Raw MP3</h2>
+                      </div>
+                      <div class="bg-black p-3 rounded border border-secondary mb-3 shadow-sm">
+                        <code class="text-success fw-bold">GET</code> <code class="text-light ms-2">/?action=download_song&id=SONG_ID</code>
+                      </div>
+                      <p class="text-secondary" style="font-size: 1rem; line-height: 1.6;">Overrides normal streaming directives to enforce a hard physical system download operation. Injects <code>Content-Disposition: attachment</code> headers while intelligently formatting the filename to <code>"Title - Artist.mp3"</code> based securely on the database tags, ignoring the random alphanumeric disk hash.</p>
+                    </div>
+                  </div>
+                </section>
+
+
+                <!-- 10. GET EXPLORE -->
+                <section id="doc-get_explore" class="api-doc-section mb-5 pb-5 border-bottom border-secondary">
+                  <div class="d-flex align-items-center gap-3 mb-4">
+                    <span class="badge bg-success fs-5 px-4 py-2 shadow-sm">DATA</span>
+                    <h2 class="text-white fw-bold m-0" style="font-size: 2.2rem;">Get Explore / Discovery Hub</h2>
+                  </div>
+                  
+                  <div class="bg-black p-4 rounded border border-secondary mb-4 shadow-sm">
+                    <code class="text-success fw-bold fs-5">GET</code> <code class="text-light ms-2 fs-6">/?access=api&action=get_explore&api_key=YOUR_ADMIN_KEY</code>
+                  </div>
+
+                  <h5 class="text-white mt-4 fw-bold">Overview</h5>
+                  <p class="text-secondary" style="font-size: 1.05rem; line-height: 1.7;">A tremendously heavy computational endpoint containing massive multi-table <code>JOIN</code> subqueries designed to construct randomized algorithm-driven "Shelves" for the Explore tab. It pulls deep track recommendations, aggregates distinct album groupings randomly, parses global play statistics to surface trending records, and identifies prolific artists across the server. Due to execution load, this endpoint automatically serializes its output to a hardware <code>sys_get_temp_dir()</code> cache file governed by a strict 5-minute invalidation clock.</p>
+
+                  <h5 class="text-white mt-5 fw-bold border-start border-4 border-info ps-3">Expected JSON Response</h5>
+                  <pre class="bg-black p-4 rounded border border-secondary text-info font-monospace mb-0 shadow-sm" style="font-size: 0.85rem; overflow-x: auto;"><code>{
+  "shelves": [
+    {
+      "title": "Discover Songs",
+      "type": "songs",
+      "items": [
+        { "id": 401, "title": "Random Access Memories", "artist": "Daft Punk" }, ...
+      ]
+    },
+    {
+      "title": "Discover Albums",
+      "type": "albums",
+      "items": [
+        { "album": "Discovery", "artist": "Daft Punk", "id": 84, "song_count": 14 }
+      ]
+    }
+  ]
+}</code></pre>
+                </section>
+
+                <!-- 11. GET RECOMMENDATIONS & HISTORY -->
+                <section id="doc-get_recommendations" class="api-doc-section mb-5 pb-5 border-bottom border-secondary">
+                  <div class="row g-5">
+                    <div class="col-lg-6">
+                      <div class="d-flex align-items-center gap-3 mb-4">
+                        <span class="badge bg-success fs-6 px-3 py-2 shadow-sm">DATA</span>
+                        <h2 class="text-white fw-bold m-0" style="font-size: 1.8rem;">Get For You AI</h2>
+                      </div>
+                      <div class="bg-black p-3 rounded border border-secondary mb-3 shadow-sm">
+                        <code class="text-success fw-bold">GET</code> <code class="text-light ms-2">/?access=api&action=get_recommendations</code>
+                      </div>
+                      <p class="text-secondary" style="font-size: 1rem; line-height: 1.6;">Identical to the Explore layout engine but intensely localized against the authenticated API Session parameters. Re-calculates mathematical boundaries based exclusively on user history logs, followed relationships, and favorite flags. Requires severe backend processing load.</p>
+                    </div>
+                    
+                    <div class="col-lg-6" id="doc-get_history">
+                      <div class="d-flex align-items-center gap-3 mb-4">
+                        <span class="badge bg-success fs-6 px-3 py-2 shadow-sm">DATA</span>
+                        <h2 class="text-white fw-bold m-0" style="font-size: 1.8rem;">Get Play History</h2>
+                      </div>
+                      <div class="bg-black p-3 rounded border border-secondary mb-3 shadow-sm">
+                        <code class="text-success fw-bold">GET</code> <code class="text-light ms-2">/?access=api&action=get_history</code>
+                      </div>
+                      <p class="text-secondary" style="font-size: 1rem; line-height: 1.6;">Targets the <code>history</code> database mapping. Executes a complex grouping schema to safely collapse tracks played multiple times into a singular row driven by a <code>MAX(played_at)</code> ISO string resolver. Appends fully functional UI objects to build timeline interfaces.</p>
+                    </div>
+
+                    <div class="col-lg-6" id="doc-get_favorites">
+                      <div class="d-flex align-items-center gap-3 mb-4">
+                        <span class="badge bg-success fs-6 px-3 py-2 shadow-sm">DATA</span>
+                        <h2 class="text-white fw-bold m-0" style="font-size: 1.8rem;">Get User Favorites</h2>
+                      </div>
+                      <div class="bg-black p-3 rounded border border-secondary mb-3 shadow-sm">
+                        <code class="text-success fw-bold">GET</code> <code class="text-light ms-2">/?access=api&action=get_favorites</code>
+                      </div>
+                      <p class="text-secondary" style="font-size: 1rem; line-height: 1.6;">Outputs the array of tracks securely bound to the user's <code>favorites</code> cross-reference table. Enforces a <code>sort_order</code> directional flag to allow for drag-and-drop structural preservation. Core foundation for the internal offline-caching loop capabilities.</p>
+                    </div>
+
+                    <div class="col-lg-6" id="doc-get_user_playlists">
+                      <div class="d-flex align-items-center gap-3 mb-4">
+                        <span class="badge bg-success fs-6 px-3 py-2 shadow-sm">DATA</span>
+                        <h2 class="text-white fw-bold m-0" style="font-size: 1.8rem;">Get Playlists Collections</h2>
+                      </div>
+                      <div class="bg-black p-3 rounded border border-secondary mb-3 shadow-sm">
+                        <code class="text-success fw-bold">GET</code> <code class="text-light ms-2">/?access=api&action=get_user_playlists</code>
+                      </div>
+                      <p class="text-secondary" style="font-size: 1rem; line-height: 1.6;">Aggregates the total array of <code>playlist</code> constructs exclusively tied to the master authentication identifier. Employs heavy aggregation logic to dynamically formulate the internal <code>song_count</code> and the highly complex <code>image_id</code> thumbnail pointing parameter.</p>
+                    </div>
+                  </div>
+                </section>
+
+
+                <!-- 12. POST ACTIONS OVERVIEW -->
+                <section id="doc-toggle_favorite" class="api-doc-section pb-3">
+                  <div class="d-flex align-items-center gap-3 mb-4">
+                    <span class="badge bg-warning text-dark fs-5 px-4 py-2 shadow-sm">POST</span>
+                    <h2 class="text-white fw-bold m-0" style="font-size: 2.2rem;">Database Mutations (POST Hooks)</h2>
+                  </div>
+                  <p class="text-secondary mb-4" style="font-size: 1.05rem; line-height: 1.7;">These specialized endpoints are explicitly designed to mutate database states securely. They completely ignore URL parameters for data manipulation, strictly demanding rigorous JSON payloads deployed within the body stream. All requests mandate <code>Content-Type: application/json</code>.</p>
+                  
+                  <div class="row g-4 mt-2">
+                    <!-- Toggle Favorite -->
+                    <div class="col-lg-12">
+                      <div class="card bg-dark border-secondary shadow-sm">
+                        <div class="card-header border-bottom border-secondary bg-black py-3 d-flex align-items-center gap-3">
+                          <code class="text-danger fw-bold fs-5">POST</code> <code class="text-light fs-6">/?access=api&action=toggle_favorite</code>
+                        </div>
+                        <div class="card-body p-4">
+                          <h6 class="text-white fw-bold mb-2">JSON Body Schema:</h6>
+                          <pre class="bg-black p-3 rounded border border-secondary text-warning font-monospace small mb-3"><code>{
+  "id": 1042 // The integer ID of the target song
+}</code></pre>
+                          <p class="text-secondary small mb-0"><strong>Functionality:</strong> Scans the <code>favorites</code> binding logic. If the integer ID already exists in the matrix, it physically destroys the row. If absent, it injects a new row calculating the <code>MAX(sort_order) + 1</code>. Responds with the new calculated boolean state <code>{"status":"added", "is_favorite":true}</code>.</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Log Play -->
+                    <div class="col-lg-12" id="doc-log_play">
+                      <div class="card bg-dark border-secondary shadow-sm">
+                        <div class="card-header border-bottom border-secondary bg-black py-3 d-flex align-items-center gap-3">
+                          <code class="text-danger fw-bold fs-5">POST</code> <code class="text-light fs-6">/?access=api&action=log_play</code>
+                        </div>
+                        <div class="card-body p-4">
+                          <h6 class="text-white fw-bold mb-2">JSON Body Schema:</h6>
+                          <pre class="bg-black p-3 rounded border border-secondary text-warning font-monospace small mb-3"><code>{
+  "id": 1042, 
+  "played_at": "2026-06-28T14:27:00.000Z" // Standard ISO string
+}</code></pre>
+                          <p class="text-secondary small mb-0"><strong>Functionality:</strong> Highly volatile transaction handler. Executes a deep <code>ON CONFLICT DO UPDATE</code> SQL sequence against both the <code>history</code> mapping (to update the chronological timeline) and the <code>play_counts</code> mapping (incrementing the algorithm scalar). It is intensely protected by a looping Retry matrix to mitigate localized SQLite busy-lock scenarios under massive concurrent traffic.</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Create Playlist -->
+                    <div class="col-lg-12" id="doc-create_playlist">
+                      <div class="card bg-dark border-secondary shadow-sm">
+                        <div class="card-header border-bottom border-secondary bg-black py-3 d-flex align-items-center gap-3">
+                          <code class="text-danger fw-bold fs-5">POST</code> <code class="text-light fs-6">/?access=api&action=create_playlist</code>
+                        </div>
+                        <div class="card-body p-4">
+                          <h6 class="text-white fw-bold mb-2">JSON Body Schema:</h6>
+                          <pre class="bg-black p-3 rounded border border-secondary text-warning font-monospace small mb-3"><code>{
+  "name": "Midnight Drive Array", 
+  "is_private": 0 // Integer boolean (0 = Public, 1 = Private)
+}</code></pre>
+                          <p class="text-secondary small mb-0"><strong>Functionality:</strong> Dynamically validates and executes the generation of a new global playlist construct. Generates an exceptionally secure, random 16-character hexadecimal token bound to the <code>public_id</code> column to bypass easily-guessable standard integer indexing methodologies.</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+              </div>
+              <!-- MASSIVE DOCUMENTATION END -->
+
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PLAY.HTML VISUAL CLIENT TEMPLATE (Injected into iframe) -->
+    <template id="play-client-template">
+      <!DOCTYPE html>
+      <html lang="en" data-bs-theme="dark">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>PHPMusic Client</title>
+          <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,%3Csvg%20width=%22800px%22%20height=%22800px%22%20viewBox=%220%200%2024%2024%22%20fill=%22none%22%20xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cpath%20d=%22M4%2010V13%22%20stroke=%22%23ffffff%22%20stroke-width=%221.7%22%20stroke-linecap=%22round%22/%3E%3Cpath%20d=%22M16%2010V13%22%20stroke=%22%23ffffff%22%20stroke-width=%221.7%22%20stroke-linecap=%22round%22/%3E%3Cpath%20d=%22M7%207L7%2016%22%20stroke=%22%23DF1463%22%20stroke-width=%221.7%22%20stroke-linecap=%22round%22/%3E%3Cpath%20d=%22M13%207L13%2016%22%20stroke=%22%23ffffff%22%20stroke-width=%221.7%22%20stroke-linecap=%22round%22/%3E%3Cpath%20d=%22M19%207L19%2016%22%20stroke=%22%23ffffff%22%20stroke-width=%221.7%22%20stroke-linecap=%22round%22/%3E%3Cpath%20d=%22M10%204L10%2019%22%20stroke=%22%23ffffff%22%20stroke-width=%221.7%22%20stroke-linecap=%22round%22/%3E%3C/svg%3E">
+          <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+          <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+          <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+          <style>
+            :root { --ytm-bg: #030303; --ytm-surface: #0f0f0f; --ytm-surface-hover: #1f1f1f; --ytm-border: #272727; --ytm-primary-text: #ffffff; --ytm-secondary-text: #aaaaaa; --ytm-accent: #ff0000; --sidebar-width: 240px; }
+            body { font-family: 'Roboto', sans-serif; background-color: var(--ytm-bg); color: var(--ytm-primary-text); margin: 0; overflow-x: hidden; padding-top: 0; padding-bottom: 96px; }
+            @media (max-width: 768px) { body { padding-top: 72px; } }
+            ::-webkit-scrollbar { width: 8px; }
+            ::-webkit-scrollbar-track { background: var(--ytm-bg); }
+            ::-webkit-scrollbar-thumb { background: #3e3e3e; border-radius: 4px; }
+            ::-webkit-scrollbar-thumb:hover { background: #5e5e5e; }
+            .ytm-header { position: fixed; top: 0; left: 0; right: 0; height: 72px; background-color: var(--ytm-surface); border-bottom: 1px solid var(--ytm-border); z-index: 1100; }
+            @media (min-width: 769px) { .ytm-header { display: none !important; } }
+            .app-container { display: flex; min-height: calc(100dvh - 72px); }
+            .sidebar { width: var(--sidebar-width); background-color: var(--ytm-surface); border-right: 1px solid var(--ytm-border); position: fixed; top: 0; bottom: 0; left: 0; height: 100dvh; padding: 1.25rem 1rem; display: flex; flex-direction: column; z-index: 1200; transition: transform 0.3s ease, padding 0.3s ease; }
+            .form-control, .form-select { background-color: #212121; border: 1px solid var(--ytm-border); color: var(--ytm-primary-text); border-radius: 8px; }
+            .form-control:focus, .form-select:focus { background-color: #212121; border-color: #555; color: var(--ytm-primary-text); box-shadow: none; }
+            .songs-header { display: grid; grid-template-columns: 48px 4fr 3fr 80px; gap: 1rem; padding: 0.75rem 1rem; color: var(--ytm-secondary-text); font-size: 0.85rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+            .song-item { display: grid; grid-template-columns: 48px 4fr 3fr 80px; gap: 1rem; align-items: center; padding: 0.75rem 1rem; border-radius: 8px; cursor: pointer; transition: background-color 0.15s; border-bottom: 1px solid rgba(255, 255, 255, 0.03); }
+            .song-item:hover { background-color: var(--ytm-surface-hover); }
+            .song-item.active { background-color: rgba(255, 255, 255, 0.08); }
+            .song-item.active .song-title { color: var(--ytm-accent); }
+            .song-thumb { width: 48px; height: 48px; border-radius: 4px; object-fit: cover; }
+            .song-title { font-weight: 500; color: var(--ytm-primary-text); margin-bottom: 2px; }
+            .song-artist { font-size: 0.9rem; color: var(--ytm-secondary-text); }
+            .song-album { color: var(--ytm-secondary-text); font-size: 0.9rem; }
+            .song-duration { font-size: 0.9rem; color: var(--ytm-secondary-text); text-align: right; }
+            .player-bar { position: fixed; bottom: 0; left: 0; right: 0; height: 96px; background-color: var(--ytm-surface); border-top: 1px solid var(--ytm-border); display: grid; grid-template-columns: 1fr 2fr 1fr; align-items: center; padding: 0 2rem; z-index: 1050; transform: translateY(100%); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+            .player-bar.visible { transform: translateY(0); }
+            .pb-left { display: flex; align-items: center; gap: 1rem; min-width: 0; }
+            .pb-art-container { position: relative; width: 56px; height: 56px; border-radius: 4px; overflow: hidden; cursor: pointer; flex-shrink: 0; }
+            .pb-art { width: 100%; height: 100%; object-fit: cover; }
+            .pb-art-hover { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.2s; }
+            .pb-art-container:hover .pb-art-hover { opacity: 1; }
+            .pb-metadata { overflow: hidden; min-width: 0; }
+            .pb-title { font-weight: 500; margin-bottom: 2px; }
+            .pb-artist { font-size: 0.85rem; color: var(--ytm-secondary-text); }
+            .pb-center { display: flex; flex-direction: column; align-items: center; width: 100%; max-width: 600px; margin: 0 auto; }
+            .pb-buttons { display: flex; align-items: center; gap: 1.5rem; margin-bottom: 4px; }
+            .pb-btn { background: none; border: none; color: var(--ytm-secondary-text); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: color 0.2s; padding: 4px; }
+            .pb-btn:hover { color: var(--ytm-primary-text); }
+            .pb-btn.active { color: var(--ytm-accent) !important; }
+            .pb-btn .bi { font-size: 1.3rem; }
+            .pb-btn-large .bi { font-size: 1.8rem; }
+            .pb-play-circle { width: 42px; height: 42px; border-radius: 50%; background-color: var(--ytm-primary-text); color: var(--ytm-bg) !important; transition: transform 0.15s; }
+            .pb-play-circle:hover { transform: scale(1.08); }
+            .pb-play-circle .bi { font-size: 1.8rem; }
+            .pb-timeline { width: 100%; display: flex; align-items: center; gap: 0.75rem; }
+            .pb-time { font-size: 0.75rem; color: var(--ytm-secondary-text); width: 35px; text-align: center; }
+            .timeline-container { flex: 1; height: 24px; position: relative; cursor: pointer; display: flex; align-items: center; }
+            .timeline-bg { position: absolute; left: 0; right: 0; height: 4px; background-color: #555555; border-radius: 2px; pointer-events: none; }
+            .timeline-filled { height: 4px; background-color: var(--ytm-accent); width: 0%; position: absolute; left: 0; pointer-events: none; border-radius: 2px; z-index: 2; }
+            .timeline-container:hover .timeline-filled::after { content: ''; position: absolute; right: -6px; top: -4px; width: 12px; height: 12px; border-radius: 50%; background-color: var(--ytm-accent); }
+            .pb-right { display: flex; align-items: center; justify-content: flex-end; gap: 1rem; color: var(--ytm-secondary-text); }
+            .volume-bar { width: 100px; height: 24px; position: relative; cursor: pointer; display: flex; align-items: center; }
+            .volume-bg { position: absolute; left: 0; right: 0; height: 4px; background-color: #555555; border-radius: 2px; pointer-events: none; }
+            .volume-filled { height: 4px; background-color: var(--ytm-primary-text); width: 100%; position: absolute; left: 0; border-radius: 2px; pointer-events: none; z-index: 2; }
+            #infinite-scroll-sentinel { height: 50px; display: flex; align-items: center; justify-content: center; margin-top: 1rem; }
+            .content-wrapper { flex: 1; margin-left: var(--sidebar-width); padding: 2rem; max-width: 1200px; }
+            .ytm-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: #070707; z-index: 2000; transform: translateY(100%); transition: transform 0.4s cubic-bezier(0.1, 0.76, 0.55, 0.94); display: flex; flex-direction: column; }
+            .ytm-modal.open { transform: translateY(0); }
+            .ytm-modal-header { height: 64px; padding: 0 1.5rem; display: flex; align-items: center; }
+            .ytm-modal-body { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem; padding-top: 0; overflow-y: auto; }
+            .ytm-modal-content { width: 100%; max-width: 380px; display: flex; flex-direction: column; align-items: center; }
+            .ytm-modal-art-box { width: 100%; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; box-shadow: 0 12px 36px rgba(0,0,0,0.6); margin-bottom: 2rem; }
+            .ytm-modal-art-box img { width: 100%; height: 100%; object-fit: cover; }
+            .ytm-modal-details { width: 100%; display: flex; justify-content: center; align-items: center; text-align: center; min-width: 0; }
+            .btn-modal-lg { font-size: 1.5rem; }
+            .btn-modal-xl { font-size: 2.2rem; }
+            .pb-modal-play-circle { width: 76px; height: 76px; min-width: 76px; border-radius: 50%; background-color: var(--ytm-primary-text); color: var(--ytm-bg) !important; transition: transform 0.15s; }
+            .pb-modal-play-circle:hover { transform: scale(1.08); }
+            .pb-modal-play-circle .bi { font-size: 2.8rem; }
+            @media (min-width: 769px) { .player-bar.visible { z-index: 1250; } body:has(.player-bar.visible) .sidebar { padding-bottom: calc(96px + 1.25rem); } }
+            @media (max-width: 768px) {
+              .sidebar { transform: translateX(-100%); bottom: 0 !important; height: 100dvh !important; top: 0 !important; box-shadow: 5px 0 15px rgba(0,0,0,0.5); }
+              .sidebar.show { transform: translateX(0); }
+              .content-wrapper { margin-left: 0 !important; padding: 1rem !important; }
+              .songs-header { display: none !important; }
+              .song-item { grid-template-columns: 48px 1fr 50px !important; gap: 0.75rem !important; }
+              .song-album { display: none !important; }
+              .player-bar { grid-template-columns: 1.5fr 1fr; padding: 0 1rem; height: 80px; }
+              .player-bar .pb-center { display: none; }
+              .player-bar .pb-right { justify-content: flex-end; }
+              .player-bar .volume-bar { display: none; }
+            }
+          </style>
+        </head>
+        <body>
+          <audio id="audio-player" preload="metadata"></audio>
+          <header class="ytm-header">
+            <div class="container-fluid d-flex align-items-center justify-content-between h-100 px-4">
+              <div class="d-flex align-items-center gap-2 d-md-none">
+                <h4 class="m-0 fw-bold">PHP<span class="fw-light">Music Client</span></h4>
+              </div>
+              <button class="btn btn-link text-white d-md-none p-2 ms-auto" type="button" id="sidebar-toggle-btn">
+                <i class="bi bi-sliders fs-5"></i>
+              </button>
+            </div>
+          </header>
+
+          <div class="app-container">
+            <aside class="sidebar">
+              <div class="d-none d-md-flex align-items-center gap-2 mb-4" style="height: 72px; margin-top: -1.25rem; margin-left: -1rem; margin-right: -1rem; padding: 0 1.25rem; border-bottom: 1px solid var(--ytm-border);">
+                <h4 class="m-0 fw-bold">PHP<span class="fw-light">Music Client</span></h4>
+              </div>
+
+              <div class="mb-4">
+                <h6 class="text-uppercase text-secondary fw-bold mb-3 d-flex align-items-center gap-2" style="font-size: 0.75rem; letter-spacing: 1px;">
+                  <i class="bi bi-sliders"></i> API Configuration
+                </h6>
+                <form id="api-form" class="w-100">
+                  <div class="mb-3">
+                    <label for="source-type" class="form-label small text-secondary mb-1">Source Type</label>
+                    <select class="form-select form-select-sm" id="source-type">
+                      <option value="all">All Tracks</option>
+                      <option value="playlist">Playlist Feed</option>
+                      <option value="artist">Artist Feed</option>
+                    </select>
+                  </div>
+                  <div class="mb-3 d-none" id="playlist-id-container">
+                    <label for="playlist-id" class="form-label small text-secondary mb-1">Playlist ID</label>
+                    <input type="text" class="form-control form-control-sm" id="playlist-id" placeholder="Playlist ID">
+                  </div>
+                  <div class="mb-3 d-none" id="artist-id-container">
+                    <label for="artist-id" class="form-label small text-secondary mb-1">Artist ID / Name</label>
+                    <input type="text" class="form-control form-control-sm" id="artist-id" placeholder="Artist ID or Name">
+                  </div>
+                  <div class="mb-3">
+                    <label for="api-url" class="form-label small text-secondary mb-1">Backend URL</label>
+                    <input type="url" class="form-control form-control-sm" id="api-url" placeholder="https://your-api.com" required>
+                  </div>
+                  <button type="submit" class="btn btn-light btn-sm w-100 fw-bold py-2">Connect</button>
+                  <button type="button" id="btn-change-key" class="btn btn-outline-warning btn-sm w-100 mt-2 py-2">Change API Key</button>
+                  <button type="button" id="btn-share" class="btn btn-outline-light btn-sm w-100 mt-2 py-2">
+                    <i class="bi bi-share"></i> Share Page
+                  </button>
+                </form>
+              </div>
+              <div class="mt-auto p-2" style="border-top: 1px solid var(--ytm-border);">
+                <div class="small text-secondary" id="sidebar-status">
+                  <i class="bi bi-dot text-danger animate-pulse"></i> Client Idle
+                </div>
+              </div>
+            </aside>
+
+            <main class="content-wrapper">
+              <div class="d-flex align-items-center justify-content-between mb-4">
+                <h3 class="fw-bold m-0 text-truncate">Library Tracks</h3>
+                <span class="text-secondary small flex-shrink-0" id="total-tracks-count">0 tracks listed</span>
+              </div>
+              <div class="songs-table">
+                <div class="songs-header">
+                  <div>Cover</div>
+                  <div>Title</div>
+                  <div>Album</div>
+                  <div class="text-end"><i class="bi bi-clock"></i></div>
+                </div>
+                <div id="songs-container">
+                  <div class="text-center text-secondary py-5">
+                    <i class="bi bi-music-note-beamed text-secondary" style="font-size: 3rem; opacity: 0.3;"></i>
+                    <p class="mt-3">Configure and connect to your PHP Music API in the sidebar.</p>
+                  </div>
+                </div>
+              </div>
+              <div id="infinite-scroll-sentinel">
+                <div class="spinner-border spinner-border-sm text-secondary d-none" id="scroll-spinner" role="status"></div>
+              </div>
+            </main>
+          </div>
+
+          <div class="player-bar" id="player-bar">
+            <div class="pb-left">
+              <div class="pb-art-container" id="pb-art-trigger">
+                <img id="pb-art" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjMjIyIi8+PC9zdmc+" class="pb-art" alt="Art">
+                <div class="pb-art-hover">
+                  <i class="bi bi-arrows-angle-expand text-white"></i>
+                </div>
+              </div>
+              <div class="pb-metadata">
+                <div class="pb-title text-truncate" id="pb-title">Track Title</div>
+                <div class="pb-artist text-truncate" id="pb-artist">Artist</div>
+              </div>
+            </div>
+
+            <div class="pb-center">
+              <div class="pb-buttons">
+                <button class="pb-btn" id="btn-shuffle" title="Shuffle"><i class="bi bi-shuffle"></i></button>
+                <button class="pb-btn" id="btn-prev"><i class="bi bi-skip-start-fill"></i></button>
+                <button class="pb-btn pb-play-circle" id="btn-play-pause"><i class="bi bi-play-fill" id="play-icon"></i></button>
+                <button class="pb-btn" id="btn-next"><i class="bi bi-skip-end-fill"></i></button>
+                <button class="pb-btn" id="btn-repeat" title="Repeat"><i class="bi bi-repeat"></i></button>
+              </div>
+              <div class="pb-timeline">
+                <span class="pb-time" id="time-current">0:00</span>
+                <div class="timeline-container" id="timeline-container">
+                  <div class="timeline-bg"></div>
+                  <div class="timeline-filled" id="timeline-bar"></div>
+                </div>
+                <span class="pb-time" id="time-total">0:00</span>
+              </div>
+            </div>
+
+            <div class="pb-right">
+              <button class="pb-btn d-md-none" id="pb-modal-mobile-trigger" title="Open Player"><i class="bi bi-chevron-up fs-4"></i></button>
+              <button class="pb-btn d-none d-md-flex" id="btn-mute" title="Volume"><i class="bi bi-volume-up" id="volume-icon"></i></button>
+              <div class="volume-bar" id="volume-container">
+                <div class="volume-bg"></div>
+                <div class="volume-filled" id="volume-filled"></div>
+              </div>
+              <button class="pb-btn d-none d-md-flex" id="btn-open-panel" title="Now Playing"><i class="bi bi-music-note-list"></i></button>
+            </div>
+          </div>
+
+          <div class="ytm-modal" id="ytm-modal">
+            <div class="ytm-modal-header">
+              <button class="btn btn-link text-white p-1" id="btn-close-modal" style="text-decoration: none;">
+                <i class="bi bi-chevron-down fs-4"></i>
+              </button>
+            </div>
+            <div class="ytm-modal-body">
+              <div class="ytm-modal-content">
+                <div class="ytm-modal-art-box">
+                  <img id="modal-art" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjMjIyIi8+PC9zdmc+" alt="Cover">
+                </div>
+                <div class="ytm-modal-details">
+                  <div class="text-truncate w-100">
+                    <h4 class="fw-bold m-0 text-truncate" id="modal-title">Track Title</h4>
+                    <span class="text-secondary text-truncate d-block mt-2" id="modal-artist">Artist Name</span>
+                  </div>
+                </div>
+                <div class="w-100 mt-4">
+                  <div class="pb-timeline mb-3">
+                    <span class="pb-time" id="modal-time-current">0:00</span>
+                    <div class="timeline-container" id="modal-timeline-container">
+                      <div class="timeline-bg"></div>
+                      <div class="timeline-filled" id="modal-timeline-bar"></div>
+                    </div>
+                    <span class="pb-time" id="modal-time-total">0:00</span>
+                  </div>
+                  <div class="d-flex align-items-center justify-content-between w-100">
+                    <button class="pb-btn btn-modal-shuffle btn-modal-lg" id="modal-btn-shuffle" title="Shuffle"><i class="bi bi-shuffle"></i></button>
+                    <button class="pb-btn btn-modal-xl" id="modal-btn-prev" title="Previous"><i class="bi bi-skip-start-fill"></i></button>
+                    <button class="pb-btn pb-modal-play-circle d-flex align-items-center justify-content-center" id="modal-btn-play-pause" title="Play/Pause">
+                      <i class="bi bi-play-fill" id="modal-play-icon"></i>
+                    </button>
+                    <button class="pb-btn btn-modal-xl" id="modal-btn-next" title="Next"><i class="bi bi-skip-end-fill"></i></button>
+                    <button class="pb-btn btn-modal-repeat btn-modal-lg" id="modal-btn-repeat" title="Repeat"><i class="bi bi-repeat"></i></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+          <script>
+            const apiForm = document.getElementById('api-form');
+            const apiUrlInput = document.getElementById('api-url');
+            const btnShare = document.getElementById('btn-share');
+            const btnChangeKey = document.getElementById('btn-change-key');
+            const sourceTypeSelect = document.getElementById('source-type');
+            const playlistIdInput = document.getElementById('playlist-id');
+            const playlistIdContainer = document.getElementById('playlist-id-container');
+            const artistIdInput = document.getElementById('artist-id');
+            const artistIdContainer = document.getElementById('artist-id-container');
+            const sidebarStatus = document.getElementById('sidebar-status');
+            const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+            const sidebar = document.querySelector('.sidebar');
+            const totalTracksCount = document.getElementById('total-tracks-count');
+            const songsContainer = document.getElementById('songs-container');
+            const scrollSpinner = document.getElementById('scroll-spinner');
+            const sentinel = document.getElementById('infinite-scroll-sentinel');
+            const audioPlayer = document.getElementById('audio-player');
+            const playerBar = document.getElementById('player-bar');
+            const pbArt = document.getElementById('pb-art');
+            const pbTitle = document.getElementById('pb-title');
+            const pbArtist = document.getElementById('pb-artist');
+            const btnPlayPause = document.getElementById('btn-play-pause');
+            const playIcon = document.getElementById('play-icon');
+            const btnPrev = document.getElementById('btn-prev');
+            const btnNext = document.getElementById('btn-next');
+            const btnShuffle = document.getElementById('btn-shuffle');
+            const btnRepeat = document.getElementById('btn-repeat');
+            const timeCurrent = document.getElementById('time-current');
+            const timeTotal = document.getElementById('time-total');
+            const timelineContainer = document.getElementById('timeline-container');
+            const timelineBar = document.getElementById('timeline-bar');
+            const btnMute = document.getElementById('btn-mute');
+            const volumeIcon = document.getElementById('volume-icon');
+            const volumeContainer = document.getElementById('volume-container');
+            const volumeFilled = document.getElementById('volume-filled');
+            const pbArtTrigger = document.getElementById('pb-art-trigger');
+            const pbModalMobileTrigger = document.getElementById('pb-modal-mobile-trigger');
+            const btnOpenPanel = document.getElementById('btn-open-panel');
+            const ytmModal = document.getElementById('ytm-modal');
+            const btnCloseModal = document.getElementById('btn-close-modal');
+            const modalArt = document.getElementById('modal-art');
+            const modalTitle = document.getElementById('modal-title');
+            const modalArtist = document.getElementById('modal-artist');
+            const modalTimeCurrent = document.getElementById('modal-time-current');
+            const modalTimeTotal = document.getElementById('modal-time-total');
+            const modalTimelineContainer = document.getElementById('modal-timeline-container');
+            const modalTimelineBar = document.getElementById('modal-timeline-bar');
+            const modalBtnShuffle = document.getElementById('modal-btn-shuffle');
+            const modalBtnPrev = document.getElementById('modal-btn-prev');
+            const modalBtnPlayPause = document.getElementById('modal-btn-play-pause');
+            const modalPlayIcon = document.getElementById('modal-play-icon');
+            const modalBtnNext = document.getElementById('modal-btn-next');
+            const modalBtnRepeat = document.getElementById('modal-btn-repeat');
+
+            let currentBaseUrl = '';
+            let songQueue = [];
+            let originalQueue = []; 
+            let currentIndex = -1;
+            let currentPage = 1;
+            let isFetching = false;
+            let hasMoreSongs = true;
+            let lastVolume = 1.0;
+            let isShuffle = false;
+            let repeatState = 'off'; 
+            let lastSavedTime = 0;
+            let isRestoringTime = false;
+            
+            // MODIFIED: Automatically grab Admin Key from Parent Frame Cache if available
+            let apiKey = (window.parent && window.parent.adminApiKey) ? window.parent.adminApiKey : (localStorage.getItem('ytm_apiKey') || '');
+
+            audioPlayer.volume = lastVolume;
+
+            const checkApiKey = () => {
+              if (!apiKey) {
+                const keyInput = prompt("Please enter your API Key (Admin Password):");
+                if (keyInput !== null) {
+                  apiKey = keyInput.trim();
+                  localStorage.setItem('ytm_apiKey', apiKey);
+                }
+              }
+            };
+
+            const getSvgPlaceholder = (title) => {
+              let hash = 0;
+              for (let i = 0; i < title.length; i++) {
+                hash = title.charCodeAt(i) + ((hash << 5) - hash);
+              }
+              const h = Math.abs(hash % 360);
+              const bgColor = `hsl(${h},45%,28%)`;
+              const initial = title ? title.trim().charAt(0).toUpperCase() : '?';
+              const svgString = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="${bgColor}"/><text x="50" y="55" font-family="'Roboto', sans-serif" font-weight="700" font-size="40" fill="#ffffff" dominant-baseline="middle" text-anchor="middle">${initial}</text></svg>`;
+              return `data:image/svg+xml;utf8,${encodeURIComponent(svgString)}`;
+            };
+
+            sourceTypeSelect.addEventListener('change', (e) => {
+              if (e.target.value === 'playlist') {
+                playlistIdContainer.classList.remove('d-none');
+                playlistIdInput.required = true;
+                artistIdContainer.classList.add('d-none');
+                artistIdInput.required = false;
+                artistIdInput.value = '';
+              } else if (e.target.value === 'artist') {
+                artistIdContainer.classList.remove('d-none');
+                artistIdInput.required = true;
+                playlistIdContainer.classList.add('d-none');
+                playlistIdInput.required = false;
+                playlistIdInput.value = '';
+              } else {
+                playlistIdContainer.classList.add('d-none');
+                playlistIdInput.required = false;
+                playlistIdInput.value = '';
+                artistIdContainer.classList.add('d-none');
+                artistIdInput.required = false;
+                artistIdInput.value = '';
+              }
+            });
+
+            const formatTime = (seconds) => {
+              if (isNaN(seconds) || seconds < 0) return '0:00';
+              const m = Math.floor(seconds / 60);
+              const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+              return `${m}:${s}`;
+            };
+
+            const getApiUrl = (page) => {
+              let joiner = currentBaseUrl.includes('?') ? '&' : '/?';
+              let url = `${currentBaseUrl}${joiner}action=`;
+              const apiKeyStr = `&api_key=${encodeURIComponent(apiKey)}`;
+              
+              if (sourceTypeSelect.value === 'playlist') {
+                const pId = encodeURIComponent(playlistIdInput.value.trim());
+                url += `get_playlist_songs&public_id=${pId}&sort=manual_order&page=${page}${apiKeyStr}`;
+              } else if (sourceTypeSelect.value === 'artist') {
+                const val = artistIdInput.value.trim();
+                if (/^\d+$/.test(val)) {
+                  const encodedVal = encodeURIComponent(val);
+                  url += `get_songs&filter_user_id=${encodedVal}&share_type=artist&id=${encodedVal}&page=${page}${apiKeyStr}`;
+                } else {
+                  url += `get_songs&artist=${encodeURIComponent(val)}&page=${page}${apiKeyStr}`;
+                }
+              } else {
+                url += `get_songs&sort=id_desc&page=${page}${apiKeyStr}`;
+              }
+              return url;
+            };
+
+            const fetchContent = async (isLoadMore = false) => {
+              if (isFetching || !hasMoreSongs) return;
+              isFetching = true;
+
+              if (!isLoadMore) {
+                sidebarStatus.innerHTML = `<span class="spinner-border spinner-border-sm text-danger me-1"></span> Fetching...`;
+                songsContainer.innerHTML = '';
+                songQueue = [];
+                originalQueue = [];
+                currentPage = 1;
+                scrollSpinner.classList.remove('d-none');
+              } else {
+                scrollSpinner.classList.remove('d-none');
+              }
+
+              try {
+                const response = await fetch(getApiUrl(currentPage));
+                
+                if (response.status === 401) {
+                  localStorage.removeItem('ytm_apiKey');
+                  apiKey = '';
+                  sidebarStatus.innerHTML = `<i class="bi bi-x-circle-fill text-danger me-1"></i> Invalid API Key`;
+                  alert("API Key was rejected (401 Unauthorized). Please check your password and enter it again.");
+                  checkApiKey();
+                  isFetching = false;
+                  scrollSpinner.classList.add('d-none');
+                  return;
+                }
+
+                if (!response.ok) throw new Error("Connection failed");
+                
+                const newSongs = await response.json();
+                
+                if (newSongs && newSongs.length > 0) {
+                  sidebarStatus.innerHTML = `<i class="bi bi-check-circle-fill text-success me-1"></i> Connected`;
+                  appendSongs(newSongs);
+                  totalTracksCount.textContent = `${songQueue.length} tracks listed`;
+
+                  if (newSongs.length < 25) {
+                    hasMoreSongs = false;
+                  }
+                } else {
+                  hasMoreSongs = false;
+                  if (!isLoadMore) {
+                    songsContainer.innerHTML = `
+                      <div class="text-center text-secondary py-5">
+                        <i class="bi bi-exclamation-circle-fill" style="font-size: 3rem;"></i>
+                        <p class="mt-2">No tracks returned from this query.</p>
+                      </div>`;
+                    totalTracksCount.textContent = `0 tracks listed`;
+                  }
+                }
+              } catch (error) {
+                sidebarStatus.innerHTML = `<i class="bi bi-x-circle-fill text-danger me-1"></i> Error API Connection`;
+                console.error(error);
+                hasMoreSongs = false;
+                if (!isLoadMore) {
+                  songsContainer.innerHTML = `
+                    <div class="text-center text-danger py-5">
+                      <i class="bi bi-exclamation-triangle-fill" style="font-size: 3rem;"></i>
+                      <p class="mt-2">Failed to connect to backend endpoint.</p>
+                    </div>`;
+                }
+              }
+
+              isFetching = false;
+              scrollSpinner.classList.add('d-none');
+            };
+
+            apiForm.addEventListener('submit', (e) => {
+              e.preventDefault();
+              checkApiKey();
+              if (!apiKey) {
+                alert("An API Key is required to establish a connection.");
+                return;
+              }
+
+              let rawUrl = apiUrlInput.value.trim().replace(/\/$/, '');
+              if (!rawUrl) return;
+              
+              if (!rawUrl.includes('access=api')) {
+                rawUrl += (rawUrl.includes('?') ? '&' : '/?') + 'access=api';
+              }
+              
+              currentBaseUrl = rawUrl;
+              apiUrlInput.value = currentBaseUrl;
+              
+              localStorage.setItem('ytm_apiUrl', currentBaseUrl);
+              localStorage.setItem('ytm_sourceType', sourceTypeSelect.value);
+              localStorage.setItem('ytm_playlistId', playlistIdInput.value.trim());
+              localStorage.setItem('ytm_artistId', artistIdInput.value.trim());
+
+              hasMoreSongs = true;
+              fetchContent(false);
+
+              if (window.innerWidth <= 768 && sidebar) {
+                sidebar.classList.remove('show');
+              }
+            });
+
+            if (btnChangeKey) {
+              btnChangeKey.addEventListener('click', () => {
+                const newKey = prompt("Enter your new API Key (Admin Password):", apiKey);
+                if (newKey !== null) {
+                  apiKey = newKey.trim();
+                  localStorage.setItem('ytm_apiKey', apiKey);
+                  sidebarStatus.innerHTML = `<i class="bi bi-check-circle-fill text-success me-1"></i> Key Updated`;
+                  if (currentBaseUrl) {
+                    hasMoreSongs = true;
+                    fetchContent(false);
+                  }
+                }
+              });
+            }
+
+            const observer = new IntersectionObserver((entries) => {
+              if (entries[0].isIntersecting && !isFetching && hasMoreSongs && currentBaseUrl !== '') {
+                currentPage++;
+                fetchContent(true);
+              }
+            }, {
+              rootMargin: '100px'
+            });
+            observer.observe(sentinel);
+
+            function appendSongs(newSongs) {
+              const startIndex = songQueue.length;
+              
+              if (isShuffle) {
+                originalQueue = originalQueue.concat(newSongs);
+                songQueue = songQueue.concat(newSongs);
+              } else {
+                songQueue = songQueue.concat(newSongs);
+                originalQueue = [...songQueue];
+              }
+
+              let html = '';
+              newSongs.forEach((song, i) => {
+                const globalIndex = startIndex + i;
+                const isActive = (currentIndex !== -1 && songQueue[currentIndex] && String(songQueue[currentIndex].id) === String(song.id)) ? 'active' : '';
+                const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
+                
+                html += `
+                  <div class="song-item ${isActive}" data-song-id="${song.id}" data-index="${globalIndex}">
+                    <img src="${coverSvg}" class="song-thumb" alt="Cover">
+                    <div style="min-width: 0;" class="text-truncate">
+                      <div class="song-title text-truncate">${song.title || 'Unknown Title'}</div>
+                      <div class="song-artist text-truncate">${song.artist || 'Unknown Artist'}</div>
+                    </div>
+                    <div class="song-album text-truncate">${song.album || 'Unknown Album'}</div>
+                    <div class="song-duration">${formatTime(song.duration)}</div>
+                  </div>
+                `;
+              });
+              
+              if (startIndex === 0) {
+                songsContainer.innerHTML = html;
+              } else {
+                songsContainer.insertAdjacentHTML('beforeend', html);
+              }
+            }
+
+            songsContainer.addEventListener('click', (e) => {
+              const item = e.target.closest('.song-item');
+              if (item && !e.target.closest('button')) {
+                const songId = item.getAttribute('data-song-id');
+                const targetIndex = songQueue.findIndex(s => String(s.id) === songId);
+                if (targetIndex !== -1) {
+                  playSong(targetIndex);
+                }
+              }
+            });
+
+            function playSong(index) {
+              if (index < 0 || index >= songQueue.length) return;
+              
+              currentIndex = index;
+              const song = songQueue[currentIndex];
+
+              document.querySelectorAll('.song-item.active').forEach(el => el.classList.remove('active'));
+              const activeRow = document.querySelector(`.song-item[data-song-id="${song.id}"]`);
+              if (activeRow) activeRow.classList.add('active');
+
+              playerBar.classList.add('visible');
+
+              const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
+
+              pbTitle.textContent = song.title || 'Unknown';
+              pbArtist.textContent = song.artist || 'Unknown';
+              modalTitle.textContent = song.title || 'Unknown';
+              modalArtist.textContent = song.artist || 'Unknown';
+              
+              pbArt.src = coverSvg;
+              modalArt.src = coverSvg;
+              
+              lastSavedTime = 0;
+              isRestoringTime = false;
+              let joiner = currentBaseUrl.includes('?') ? '&' : '/?';
+              audioPlayer.src = `${currentBaseUrl}${joiner}action=get_stream&id=${song.id}&api_key=${encodeURIComponent(apiKey)}`;
+              audioPlayer.play().catch(err => console.error("Playback restriction: ", err));
+
+              if ('mediaSession' in navigator) {
+                navigator.mediaSession.metadata = new MediaMetadata({
+                  title: song.title || 'Unknown Title',
+                  artist: song.artist || 'Unknown Artist',
+                  album: song.album || 'Unknown Album',
+                  artwork: [
+                    { src: coverSvg, sizes: '512x512', type: 'image/svg+xml' }
+                  ]
+                });
+              }
+            }
+
+            audioPlayer.addEventListener('loadedmetadata', () => {
+              if (isRestoringTime) {
+                audioPlayer.currentTime = lastSavedTime;
+                isRestoringTime = false;
+              }
+            });
+
+            function togglePlayPause() {
+              if (audioPlayer.paused) {
+                if (!audioPlayer.src || audioPlayer.src === window.location.href || audioPlayer.src.endsWith('/')) {
+                  const song = songQueue[currentIndex];
+                  isRestoringTime = true;
+                  let joiner = currentBaseUrl.includes('?') ? '&' : '/?';
+                  audioPlayer.src = `${currentBaseUrl}${joiner}action=get_stream&id=${song.id}&api_key=${encodeURIComponent(apiKey)}`;
+                }
+                audioPlayer.play();
+              } else {
+                audioPlayer.pause();
+                lastSavedTime = audioPlayer.currentTime;
+                audioPlayer.removeAttribute('src'); 
+                audioPlayer.load();
+                playIcon.className = 'bi bi-play-fill';
+                modalPlayIcon.className = 'bi bi-play-fill';
+              }
+            }
+            btnPlayPause.addEventListener('click', togglePlayPause);
+            modalBtnPlayPause.addEventListener('click', togglePlayPause);
+
+            function playNext() {
+              if (repeatState === 'one') {
+                audioPlayer.currentTime = 0;
+                audioPlayer.play();
+                return;
+              }
+
+              if (currentIndex + 1 < songQueue.length) {
+                playSong(currentIndex + 1);
+              } else {
+                if (repeatState === 'all') {
+                  playSong(0);
+                }
+              }
+            }
+            btnNext.addEventListener('click', playNext);
+            modalBtnNext.addEventListener('click', playNext);
+
+            function playPrev() {
+              if (audioPlayer.currentTime > 3) {
+                audioPlayer.currentTime = 0;
+              } else if (currentIndex - 1 >= 0) {
+                playSong(currentIndex - 1);
+              } else {
+                if (repeatState === 'all') {
+                  playSong(songQueue.length - 1);
+                }
+              }
+            }
+            btnPrev.addEventListener('click', playPrev);
+            modalBtnPrev.addEventListener('click', playPrev);
+
+            audioPlayer.addEventListener('play', () => {
+              playIcon.className = 'bi bi-pause-fill';
+              modalPlayIcon.className = 'bi bi-pause-fill';
+              if ('mediaSession' in navigator) {
+                navigator.mediaSession.playbackState = 'playing';
+              }
+            });
+            audioPlayer.addEventListener('pause', () => {
+              playIcon.className = 'bi bi-play-fill';
+              modalPlayIcon.className = 'bi bi-play-fill';
+              if ('mediaSession' in navigator) {
+                navigator.mediaSession.playbackState = 'paused';
+              }
+            });
+            audioPlayer.addEventListener('emptied', () => {
+              playIcon.className = 'bi bi-play-fill';
+              modalPlayIcon.className = 'bi bi-play-fill';
+              if ('mediaSession' in navigator) {
+                navigator.mediaSession.playbackState = 'none';
+              }
+            });
+            audioPlayer.addEventListener('ended', playNext);
+
+            audioPlayer.addEventListener('timeupdate', () => {
+              const current = audioPlayer.currentTime;
+              const duration = audioPlayer.duration;
+              
+              if (isFinite(duration)) {
+                const percent = (current / duration) * 100;
+                
+                timeCurrent.textContent = formatTime(current);
+                timeTotal.textContent = formatTime(duration);
+                timelineBar.style.width = `${percent}%`;
+
+                modalTimeCurrent.textContent = formatTime(current);
+                modalTimeTotal.textContent = formatTime(duration);
+                modalTimelineBar.style.width = `${percent}%`;
+              }
+            });
+
+            function seekTo(e, element) {
+              if (!isFinite(audioPlayer.duration)) return;
+              const rect = element.getBoundingClientRect();
+              const pos = (e.clientX - rect.left) / rect.width;
+              audioPlayer.currentTime = pos * audioPlayer.duration;
+            }
+            timelineContainer.addEventListener('click', (e) => seekTo(e, timelineContainer));
+            modalTimelineContainer.addEventListener('click', (e) => seekTo(e, modalTimelineContainer));
+
+            function setVolume(e) {
+              const rect = volumeContainer.getBoundingClientRect();
+              let pos = (e.clientX - rect.left) / rect.width;
+              pos = Math.max(0, Math.min(1, pos)); 
+              audioPlayer.volume = pos;
+              lastVolume = pos;
+              volumeFilled.style.width = `${pos * 100}%`;
+              updateVolumeIcon(pos);
+            }
+            volumeContainer.addEventListener('click', setVolume);
+
+            function updateVolumeIcon(vol) {
+              if (vol === 0) {
+                volumeIcon.className = 'bi bi-volume-mute';
+              } else if (vol < 0.5) {
+                volumeIcon.className = 'bi bi-volume-down';
+              } else {
+                volumeIcon.className = 'bi bi-volume-up';
+              }
+            }
+
+            btnMute.addEventListener('click', () => {
+              if (audioPlayer.volume > 0) {
+                audioPlayer.volume = 0;
+                volumeFilled.style.width = '0%';
+                volumeIcon.className = 'bi bi-volume-mute';
+              } else {
+                audioPlayer.volume = lastVolume;
+                volumeFilled.style.width = `${lastVolume * 100}%`;
+                updateVolumeIcon(lastVolume);
+              }
+            });
+
+            function toggleShuffle() {
+              isShuffle = !isShuffle;
+              if (isShuffle) {
+                btnShuffle.classList.add('active');
+                modalBtnShuffle.classList.add('active');
+                
+                if (songQueue.length > 0) {
+                  const currentSong = songQueue[currentIndex];
+                  let tempArray = [...originalQueue];
+                  for (let i = tempArray.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [tempArray[i], tempArray[j]] = [tempArray[j], tempArray[i]];
+                  }
+                  
+                  if (currentSong) {
+                    tempArray = tempArray.filter(s => s.id !== currentSong.id);
+                    tempArray.unshift(currentSong);
+                  }
+                  
+                  songQueue = tempArray;
+                  currentIndex = currentSong ? 0 : -1;
+                }
+              } else {
+                btnShuffle.classList.remove('active');
+                modalBtnShuffle.classList.remove('active');
+                
+                if (songQueue.length > 0) {
+                  const currentSong = songQueue[currentIndex];
+                  songQueue = [...originalQueue];
+                  currentIndex = songQueue.findIndex(s => s.id === currentSong.id);
+                }
+              }
+            }
+            btnShuffle.addEventListener('click', toggleShuffle);
+            modalBtnShuffle.addEventListener('click', toggleShuffle);
+
+            function cycleRepeat() {
+              if (repeatState === 'off') {
+                repeatState = 'all';
+                btnRepeat.classList.add('active');
+                btnRepeat.innerHTML = `<i class="bi bi-repeat"></i>`;
+                modalBtnRepeat.classList.add('active');
+                modalBtnRepeat.innerHTML = `<i class="bi bi-repeat"></i>`;
+              } else if (repeatState === 'all') {
+                repeatState = 'one';
+                btnRepeat.classList.add('active');
+                btnRepeat.innerHTML = `<i class="bi bi-repeat-1"></i>`;
+                modalBtnRepeat.classList.add('active');
+                modalBtnRepeat.innerHTML = `<i class="bi bi-repeat-1"></i>`;
+              } else {
+                repeatState = 'off';
+                btnRepeat.classList.remove('active');
+                btnRepeat.innerHTML = `<i class="bi bi-repeat"></i>`;
+                modalBtnRepeat.classList.remove('active');
+                modalBtnRepeat.innerHTML = `<i class="bi bi-repeat"></i>`;
+              }
+            }
+            btnRepeat.addEventListener('click', cycleRepeat);
+            modalBtnRepeat.addEventListener('click', cycleRepeat);
+
+            function openPlayerModal() {
+              ytmModal.classList.add('open');
+              document.body.style.overflow = 'hidden'; 
+            }
+            
+            function closePlayerModal() {
+              ytmModal.classList.remove('open');
+              document.body.style.overflow = ''; 
+            }
+            
+            pbArtTrigger.addEventListener('click', openPlayerModal);
+            pbModalMobileTrigger.addEventListener('click', openPlayerModal);
+            btnOpenPanel.addEventListener('click', openPlayerModal);
+            btnCloseModal.addEventListener('click', closePlayerModal);
+
+            if (sidebarToggleBtn && sidebar) {
+              sidebarToggleBtn.addEventListener('click', () => {
+                sidebar.classList.toggle('show');
+              });
+            }
+
+            // MODIFIED: Inject URL securely from Parent frame to avoid domain typing
+            const savedApiUrl = (window.parent && window.parent.location) ? (window.parent.location.origin + window.parent.location.pathname) : localStorage.getItem('ytm_apiUrl');
+            const savedSourceType = localStorage.getItem('ytm_sourceType');
+            const savedPlaylistId = localStorage.getItem('ytm_playlistId');
+            const savedArtistId = localStorage.getItem('ytm_artistId');
+
+            if (savedApiUrl) {
+              apiUrlInput.value = savedApiUrl;
+              currentBaseUrl = savedApiUrl;
+            }
+            if (savedSourceType) {
+              sourceTypeSelect.value = savedSourceType;
+              sourceTypeSelect.dispatchEvent(new Event('change'));
+            }
+            if (savedPlaylistId) {
+              playlistIdInput.value = savedPlaylistId;
+            }
+            if (savedArtistId) {
+              artistIdInput.value = savedArtistId;
+            }
+
+            const parseHashParams = () => {
+              const hash = window.location.hash.substring(1);
+              if (!hash) return null;
+              const params = {};
+              const pairs = hash.split('&');
+              for (let pair of pairs) {
+                const [key, val] = pair.split('=');
+                if (key && val) {
+                  params[decodeURIComponent(key)] = decodeURIComponent(val);
+                }
+              }
+              return params;
+            };
+
+            const hashParams = parseHashParams();
+            if (hashParams) {
+              const hashBackendUrl = hashParams['backendurl'];
+              const hashSourceType = hashParams['sourcetype'];
+              const hashIdName = hashParams['id/name'] || hashParams['id'] || hashParams['name'];
+
+              if (hashBackendUrl) {
+                let rawUrl = hashBackendUrl.replace(/\/$/, '');
+                if (!rawUrl.includes('access=api')) {
+                  rawUrl += (rawUrl.includes('?') ? '&' : '/?') + 'access=api';
+                }
+                apiUrlInput.value = rawUrl;
+                currentBaseUrl = rawUrl;
+                localStorage.setItem('ytm_apiUrl', rawUrl);
+              }
+              if (hashSourceType) {
+                sourceTypeSelect.value = hashSourceType;
+                sourceTypeSelect.dispatchEvent(new Event('change'));
+                localStorage.setItem('ytm_sourceType', hashSourceType);
+              }
+              if (hashIdName) {
+                if (hashSourceType === 'playlist') {
+                  playlistIdInput.value = hashIdName;
+                  localStorage.setItem('ytm_playlistId', hashIdName);
+                } else if (hashSourceType === 'artist') {
+                  artistIdInput.value = hashIdName;
+                  localStorage.setItem('ytm_artistId', hashIdName);
+                }
+              }
+            }
+
+            checkApiKey();
+
+            if (currentBaseUrl && apiKey) {
+              hasMoreSongs = true;
+              fetchContent(false);
+            }
+
+            if (btnShare) {
+              btnShare.addEventListener('click', () => {
+                const backendUrl = apiUrlInput.value.trim();
+                const sourceType = sourceTypeSelect.value;
+                let idName = '';
+                if (sourceType === 'playlist') {
+                  idName = playlistIdInput.value.trim();
+                } else if (sourceType === 'artist') {
+                  idName = artistIdInput.value.trim();
+                }
+
+                const baseUrl = window.location.origin + window.location.pathname;
+                const hashParts = [];
+                if (sourceType) hashParts.push(`sourcetype=${encodeURIComponent(sourceType)}`);
+                if (idName) hashParts.push(`id/name=${encodeURIComponent(idName)}`);
+                if (backendUrl) hashParts.push(`backendurl=${encodeURIComponent(backendUrl)}`);
+
+                const shareUrl = `${baseUrl}#${hashParts.join('&')}`;
+
+                navigator.clipboard.writeText(shareUrl).then(() => {
+                  const originalText = btnShare.innerHTML;
+                  btnShare.innerHTML = `<i class="bi bi-check-circle-fill"></i> Copied!`;
+                  setTimeout(() => {
+                    btnShare.innerHTML = originalText;
+                  }, 2000);
+                }).catch((err) => {
+                  console.error('Failed to copy share link: ', err);
+                });
+              });
+            }
+
+            if ('mediaSession' in navigator) {
+              navigator.mediaSession.setActionHandler('play', () => {
+                togglePlayPause();
+              });
+              navigator.mediaSession.setActionHandler('pause', () => {
+                togglePlayPause();
+              });
+              navigator.mediaSession.setActionHandler('previoustrack', () => {
+                playPrev();
+              });
+              navigator.mediaSession.setActionHandler('nexttrack', () => {
+                playNext();
+              });
+            }
+          </script>
+        </body>
+      </html>
+    </template>
 
     <div class="modal fade" id="license-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
@@ -8802,6 +11211,7 @@ SOFTWARE.</div>
         const updateModalBody = document.getElementById('update-modal-body');
 
         const pipBtnDesktop = document.getElementById('pip-btn-desktop');
+        const pipBtnMobile = document.getElementById('pip-btn-mobile');
         
         const pipCanvas = document.createElement('canvas');
         pipCanvas.width = 500;
@@ -8815,12 +11225,17 @@ SOFTWARE.</div>
         // Chromium treats captureStream() as a pending network resource if attached too early.
         window.addEventListener('load', () => {
           try {
-            if (pipCanvas.captureStream) {
+            const supportsPiP = ('documentPictureInPicture' in window) || document.pictureInPictureEnabled || (pipVideo.webkitSupportsPresentationMode && typeof pipVideo.webkitSetPresentationMode === 'function');
+            if (pipCanvas.captureStream && supportsPiP) {
               pipVideo.srcObject = pipCanvas.captureStream(1);
-            } else if (pipBtnDesktop) {
-              pipBtnDesktop.style.display = 'none';
+            } else {
+              if (pipBtnDesktop) pipBtnDesktop.style.display = 'none';
+              if (pipBtnMobile) pipBtnMobile.style.display = 'none';
             }
-          } catch(e) {}
+          } catch(e) {
+            if (pipBtnDesktop) pipBtnDesktop.style.display = 'none';
+            if (pipBtnMobile) pipBtnMobile.style.display = 'none';
+          }
         });
         
         const clearCacheBtn = document.getElementById('clear-cache-btn');
@@ -9324,18 +11739,15 @@ SOFTWARE.</div>
           const selectedOption = apiActionSelect.options[apiActionSelect.selectedIndex];
           const actionVal = selectedOption.value;
           
-          // Generate the full URL for the Dedicated Public API
           let url = window.location.origin + window.location.pathname + '?access=api&action=' + actionVal;
           apiUrlInput.value = url;
           
-          // Update the GET/POST badge
           const method = selectedOption.getAttribute('data-method') || 'GET';
           if(apiMethodBadge) {
             apiMethodBadge.textContent = method;
             apiMethodBadge.className = method === 'POST' ? 'badge bg-warning text-dark' : 'badge bg-primary';
           }
 
-          // Show or hide the JSON payload requirement example
           const payload = selectedOption.getAttribute('data-body');
           if (payload && apiPayloadContainer && apiPayloadCode) {
             apiPayloadCode.textContent = payload;
@@ -9344,12 +11756,41 @@ SOFTWARE.</div>
             apiPayloadContainer.classList.add('d-none');
           }
 
-          // NEW: Fetch Real Data from Database, Fallback to Fake Random Data
+          // VISUAL CLIENT TESTER INJECTION (Iframe 2)
+          const visualIframe = document.getElementById('api-visual-iframe');
+          const templateEl = document.getElementById('play-client-template');
+          if (visualIframe && templateEl && !visualIframe.srcdoc) {
+             visualIframe.srcdoc = templateEl.innerHTML;
+          }
+          
+          if (visualIframe) {
+            let sourceType = 'all';
+            let idName = '';
+            if (actionVal.includes('playlist')) {
+              sourceType = 'playlist';
+              idName = '1';
+            } else if (actionVal.includes('artist')) {
+              sourceType = 'artist';
+              idName = '1';
+            }
+            const bUrl = window.location.origin + window.location.pathname;
+            const hash = `#sourcetype=${sourceType}&id/name=${idName}&backendurl=${encodeURIComponent(bUrl)}`;
+            
+            // Set hash dynamically if iframe is already loaded, else wait for onload
+            if (visualIframe.contentWindow && visualIframe.contentWindow.location && visualIframe.contentWindow.document.readyState === 'complete') {
+               visualIframe.contentWindow.location.hash = hash;
+            } else {
+               visualIframe.onload = () => {
+                  visualIframe.contentWindow.location.hash = hash;
+               };
+            }
+          }
+
+          // RAW JSON VIEWER LOGIC (Iframe 1)
           const apiExampleIframe = document.getElementById('api-example-iframe');
           if (apiExampleIframe) {
             
-            // Show loading state while fetching from SQLite
-            apiExampleIframe.srcdoc = `<html><body style="background-color: #000000; color: #aaaaaa; font-family: monospace; font-size: 13px; margin: 0; padding: 12px;">Fetching real database data...</body></html>`;
+            apiExampleIframe.srcdoc = `<html><body style="background-color: #000000; color: #aaaaaa; font-family: monospace; font-size: 13px; margin: 0; padding: 12px;">Querying database for real data...</body></html>`;
             
             const injectIframe = (dataObj, color) => {
               const jsonString = JSON.stringify(dataObj, null, 2);
@@ -9372,27 +11813,41 @@ SOFTWARE.</div>
             };
 
             if (method === 'GET') {
-              // Replace UI placeholders with generic '1' or 'a' so the database actually returns valid matches
-              let testUrl = apiUrlInput.value.replace('SONG_ID', '1').replace('USER_ID', '1').replace('PLAYLIST_ID', '1').replace('YOUR_QUERY', 'a');
+              let testUrl = apiUrlInput.value;
               if (window.adminApiKey) {
                 testUrl += '&api_key=' + encodeURIComponent(window.adminApiKey);
               }
               
-              fetch(testUrl)
-                .then(res => res.json())
-                .then(data => {
-                  // If db is empty [] or throws an error, trigger the fallback to fake data
+              // ADVANCED: Safely request an actual database entity to populate variables so you don't query empty/invalid IDs
+              const fetchRealExample = async () => {
+                try {
+                  if (testUrl.includes('SONG_ID') || testUrl.includes('USER_ID') || testUrl.includes('PLAYLIST_ID')) {
+                    const realSongs = await fetch('?access=api&action=get_songs&limit=1&api_key=' + window.adminApiKey).then(r=>r.json());
+                    const realPlaylists = await fetch('?access=api&action=get_user_playlists&api_key=' + window.adminApiKey).then(r=>r.json());
+                    
+                    const sId = (realSongs && realSongs.length > 0) ? realSongs[0].id : '1';
+                    const uId = (realSongs && realSongs.length > 0) ? realSongs[0].user_id : '1';
+                    const pId = (realPlaylists && realPlaylists.length > 0) ? realPlaylists[0].public_id : '1';
+                    
+                    testUrl = testUrl.replace('SONG_ID', sId).replace('USER_ID', uId).replace('PLAYLIST_ID', pId).replace('YOUR_QUERY', 'a');
+                  }
+
+                  const res = await fetch(testUrl);
+                  const data = await res.json();
+                  
                   if (!data || data.status === 'error' || (Array.isArray(data) && data.length === 0)) {
                     fallbackToFakeData();
                   } else {
-                    // Limit output size to 3 items so the iframe doesn't freeze the browser
                     let displayData = Array.isArray(data) ? data.slice(0, 3) : data;
                     injectIframe(displayData, '#60a5fa'); // Blue text means REAL database data
                   }
-                })
-                .catch(() => fallbackToFakeData());
+                } catch (e) {
+                  fallbackToFakeData();
+                }
+              };
+              
+              fetchRealExample();
             } else {
-              // Always use fake data for POST requests to avoid accidentally creating playlists or deleting things!
               fallbackToFakeData(); 
             }
           }
@@ -9437,6 +11892,88 @@ SOFTWARE.</div>
                 onError();
               }
               document.body.removeChild(textArea);
+            }
+          });
+        }
+
+        let apiDebounceTimer;
+        const getApiBtn = document.getElementById('get-api-btn');
+        if (getApiBtn) {
+          getApiBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            hideMobileSidebar();
+            
+            clearTimeout(apiDebounceTimer);
+            apiDebounceTimer = setTimeout(() => {
+              // Caching Core Logic: Read from LocalStorage directly!
+              const cachedKey = localStorage.getItem('admin_api_key');
+              if (cachedKey) {
+                window.adminApiKey = cachedKey;
+                bootstrap.Modal.getOrCreateInstance(document.getElementById('api-modal')).show();
+              } else {
+                bootstrap.Modal.getOrCreateInstance(document.getElementById('api-auth-modal')).show();
+              }
+            }, 300);
+          });
+        }
+
+        const apiAuthSubmitBtn = document.getElementById('api-auth-submit-btn');
+        if (apiAuthSubmitBtn) {
+          apiAuthSubmitBtn.addEventListener('click', () => {
+            const pwd = document.getElementById('api-auth-input').value;
+            const submitBtn = document.getElementById('api-auth-submit-btn');
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Verifying Keys...';
+            
+            // Validate key explicitly against live API route
+            fetch('?access=api&action=get_songs&limit=1&api_key=' + encodeURIComponent(pwd))
+              .then(res => res.json())
+              .then(data => {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Verify & Unlock API';
+                if (data.status === 'error' && data.message && data.message.includes('denied')) {
+                  showToast("Access Denied: Incorrect admin password.", "error");
+                } else {
+                  localStorage.setItem('admin_api_key', pwd);
+                  window.adminApiKey = pwd;
+                  bootstrap.Modal.getInstance(document.getElementById('api-auth-modal')).hide();
+                  document.getElementById('api-auth-input').value = '';
+                  showToast("API Access Granted. Credential safely cached.", "success");
+                  bootstrap.Modal.getOrCreateInstance(document.getElementById('api-modal')).show();
+                }
+              }).catch(() => {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Verify & Unlock API';
+                showToast("Network protocol error while validating key.", "error");
+              });
+          });
+        }
+
+        const clearApiKeyBtn = document.getElementById('clear-api-key-btn');
+        if (clearApiKeyBtn) {
+          clearApiKeyBtn.addEventListener('click', () => {
+            localStorage.removeItem('admin_api_key');
+            window.adminApiKey = null;
+            bootstrap.Modal.getInstance(document.getElementById('api-modal')).hide();
+            showToast("API Master Key successfully scrubbed from cache memory.", "info");
+          });
+        }
+        
+        // Connect the Mobile API Jump Menu to the Scrollable Container
+        const mobileApiNavSelect = document.getElementById('mobile-api-nav-select');
+        if (mobileApiNavSelect) {
+          mobileApiNavSelect.addEventListener('change', function() {
+            const targetId = this.value;
+            const targetElement = document.getElementById(targetId);
+            const scrollContainer = document.querySelector('.api-content'); // The scrollable right column
+            
+            if (targetElement && scrollContainer) {
+              // Calculate relative scroll position
+              const topPos = targetElement.offsetTop;
+              scrollContainer.scrollTo({
+                top: topPos - 20, // Add slight padding so it's perfectly visible below the sticky header
+                behavior: 'smooth'
+              });
             }
           });
         }
@@ -9546,8 +12083,8 @@ SOFTWARE.</div>
                   <i class="bi bi-soundwave playing-icon"></i>
                 </div>
                 <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
-                <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
-                  <div class="text-truncate">${song.artist}</div>
+                <div class="song-artist text-truncate" data-userid="${song.user_id}">
+                  <div class="text-truncate">${formatArtistsHTML(song.artist, song.user_id)}</div>
                   <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
                 </div>
                 <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
@@ -9556,7 +12093,7 @@ SOFTWARE.</div>
                 <div class="song-more"><button class="more-btn" data-song-id="${song.id}"><i class="bi bi-three-dots-vertical"></i></button></div>
                 <div class="song-artist-mobile w-100 flex-column align-items-start">
                   <div class="d-flex justify-content-between align-items-center w-100">
-                     <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
+                     <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${formatArtistsHTML(song.artist, song.user_id)}</span>
                      <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
                   </div>
                   <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
@@ -9634,15 +12171,33 @@ SOFTWARE.</div>
                 return;
               }
               
-              const songArtistEl = e.target.closest('.song-artist, .song-artist-name');
+              const songArtistEl = e.target.closest('.artist-link, .song-artist, .song-artist-name');
               if (songArtistEl) {
-                 e.stopPropagation();
-                 if (desktopPlayerModal) desktopPlayerModal.hide();
-                 if (playerModal) playerModal.hide();
-                 const artistRaw = songArtistEl.dataset.artist ? decodeURIComponent(songArtistEl.dataset.artist) : songArtistEl.textContent.trim();
-                 const userId = songArtistEl.dataset.userid || '';
-                 loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId });
-                 return;
+                e.stopPropagation();
+                 
+                const songItem = e.target.closest('.song-item');
+                const artistRaw = songItem ? songItem.getAttribute('data-song-artist') : (songArtistEl.dataset.artist ? decodeURIComponent(songArtistEl.dataset.artist) : songArtistEl.textContent.trim());
+                const userId = songArtistEl.dataset.userid || (songItem ? songItem.getAttribute('data-song-user-id') : '') || '';
+                 
+                const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+                if (artistsList.length > 1) {
+                  // Keep the player modal open, simply display the choices popup on top
+                  if (artistsModalBody) {
+                    const modalTitle = artistsModalEl.querySelector('.modal-title');
+                    if (modalTitle) modalTitle.textContent = 'Artists';
+                    artistsModalBody.innerHTML = `
+                      <div class="list-group list-group-flush rounded">
+                        ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}">${a}</button>`).join('')}
+                      </div>
+                    `;
+                    if (artistsModal) artistsModal.show();
+                  }
+                } else {
+                  // Only one artist exists: Close the player modals and navigate directly
+                  closeOpenModals();
+                  loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId });
+                }
+                return;
               }
 
               const songAlbumEl = e.target.closest('.song-album');
@@ -10795,6 +13350,12 @@ SOFTWARE.</div>
           }
         };
 
+        const formatArtistsHTML = (artistString, userId) => {
+          if (!artistString) return escapeHTML('Unknown Artist');
+          const artistsList = artistString.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+          return artistsList.map(a => `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(a)}" data-userid="${userId || ''}">${escapeHTML(a)}</span>`).join(', ');
+        };
+
         const renderSongs = (songs, append = false) => {
           if (!append) {
             if (sortable) {
@@ -10861,8 +13422,8 @@ SOFTWARE.</div>
                 <i class="bi bi-soundwave playing-icon"></i>
               </div>
               <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${escapeHTML(song.title)}</div></div>
-              <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
-                <div class="text-truncate">${escapeHTML(song.artist)}</div>
+              <div class="song-artist text-truncate" data-userid="${song.user_id}">
+                <div class="text-truncate">${formatArtistsHTML(song.artist, song.user_id)}</div>
                 <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
                 ${song.added_by_name ? `<div style="font-size: 0.7rem; color: var(--ytm-secondary-text); margin-top: 2px;">Added by: ${escapeHTML(song.added_by_name)}</div>` : ''}
               </div>
@@ -10877,7 +13438,7 @@ SOFTWARE.</div>
               </div>
               <div class="song-artist-mobile w-100 flex-column align-items-start">
                 <div class="d-flex justify-content-between align-items-center w-100">
-                   <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${escapeHTML(song.artist)}</span>
+                   <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${formatArtistsHTML(song.artist, song.user_id)}</span>
                    ${isHistory ? playedAtHTML : ''}
                    <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
                 </div>
@@ -11633,6 +14194,7 @@ SOFTWARE.</div>
         const updateActiveNavLink = (viewType) => {
           allNavLinks.forEach(l => l.classList.remove('active'));
           document.querySelectorAll('.note-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
+          document.querySelectorAll('.task-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
           let activeLink;
           switch (viewType) {
             case 'artist_songs': activeLink = document.querySelector('.nav-link[data-view="get_artists"]'); break;
@@ -11652,6 +14214,19 @@ SOFTWARE.</div>
                 }
               }
               activeLink = document.querySelector('a[href="#notesSubmenu"]');
+              break;
+            case 'get_tasks': 
+              const taskFilter = currentView.filter || 'all';
+              const tFilterLink = document.querySelector(`.task-filter-link[data-view="${viewType}"][data-filter="${taskFilter}"]`) 
+                              || document.querySelector(`.task-filter-link[data-filter="${taskFilter}"]`);
+              if (tFilterLink) {
+                tFilterLink.classList.add('active', 'text-white');
+                const collapseParent = tFilterLink.closest('.collapse');
+                if (collapseParent && !collapseParent.classList.contains('show')) {
+                   bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              }
+              activeLink = document.querySelector('a[href="#tasksSubmenu"]');
               break;
             default: activeLink = document.querySelector(`.nav-link[data-view="${viewType}"]`);
           }
@@ -12483,7 +15058,7 @@ SOFTWARE.</div>
           // Append timestamp to bypass stubborn browser caches that prevent onload triggering
           themeImg.src = imageUrl + '&t=' + new Date().getTime();
           playerElements.title.forEach(el => el.textContent = currentSong.title);
-          playerElements.artist.forEach(el => el.textContent = currentSong.artist);
+          playerElements.artist.forEach(el => el.innerHTML = formatArtistsHTML(currentSong.artist, currentSong.user_id));
           document.title = `${currentSong.title} • ${currentSong.artist}`;
           
           if (docPipWindow) {
@@ -13300,7 +15875,7 @@ SOFTWARE.</div>
         };
         
         allNavLinks.forEach(link => {
-          if (link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn'].includes(link.id)) return;
+          if (link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
@@ -13540,6 +16115,14 @@ SOFTWARE.</div>
           });
         };
 
+        const closeChoiceModals = () => {
+          [genresModalEl, artistsModalEl].forEach(el => {
+            if (!el) return;
+            const instance = bootstrap.Modal.getInstance(el);
+            if (instance && instance._isShown) instance.hide();
+          });
+        };
+
         playerElements.artist.forEach(el => {
           el.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -13553,13 +16136,14 @@ SOFTWARE.</div>
                 if (modalTitle) modalTitle.textContent = 'Artists';
                 artistsModalBody.innerHTML = `
                   <div class="list-group list-group-flush rounded">
-                    ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userId}">${a}</button>`).join('')}
+                    ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}">${a}</button>`).join('')}
                   </div>
                 `;
                 if (artistsModal) artistsModal.show();
               }
             } else {
-              closeOpenModals();
+              // FIX: Only close choice popups, letting player modal stay open in background
+              closeChoiceModals();
               loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId });
             }
           });
@@ -13573,6 +16157,7 @@ SOFTWARE.</div>
             if (artistBtn) {
               const artistName = decodeURIComponent(artistBtn.dataset.artist);
               const userId = artistBtn.dataset.userid;
+              // Automatically close all modals (including the player modal) when an artist option is selected
               closeOpenModals();
               setTimeout(() => {
                 loadView({ type: 'artist_songs', param: artistName, sort: 'album_asc', filter_user_id: userId, artist_name: '' });
@@ -13583,6 +16168,7 @@ SOFTWARE.</div>
               const artistName = decodeURIComponent(albumBtn.dataset.artist);
               let validUserId = parseInt(albumBtn.dataset.userid, 10);
               let safeUserId = (isNaN(validUserId) || validUserId <= 0) ? '' : validUserId;
+              // Automatically close all modals (including the player modal) when an album option is selected
               closeOpenModals();
               setTimeout(() => {
                 loadView({ type: 'album_songs', param: albumName, sort: 'title_asc', filter_user_id: safeUserId, artist_name: artistName });
@@ -13933,6 +16519,16 @@ SOFTWARE.</div>
               filterLink.classList.add('active', 'text-white');
               loadView({ type: 'get_notes', param: '', sort: 'newest', filter: filter });
             }
+            
+            const taskFilterLink = e.target.closest('.task-filter-link');
+            if (taskFilterLink) {
+              e.preventDefault();
+              e.stopPropagation();
+              const filter = taskFilterLink.dataset.filter;
+              document.querySelectorAll('.task-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
+              taskFilterLink.classList.add('active', 'text-white');
+              loadView({ type: 'get_tasks', param: '', sort: 'newest', filter: filter });
+            }
           });
           
           document.getElementById('import-txt-btn-menu')?.addEventListener('click', (e) => { e.preventDefault(); document.getElementById('fileImportTxt').click(); });
@@ -14267,25 +16863,30 @@ SOFTWARE.</div>
             importPlaylistModal.show();
             return;
           }
-          const songArtistEl = target.closest('.song-artist, .song-artist-name, .item-subtitle[data-artist]');
+          const songArtistEl = target.closest('.artist-link, .song-artist, .song-artist-name, .item-subtitle[data-artist]');
           if (songArtistEl) {
             e.stopPropagation();
-            const artistRaw = songArtistEl.dataset.artist ? decodeURIComponent(songArtistEl.dataset.artist) : songArtistEl.textContent.trim();
-            const userId = ''; // Force empty to prevent breaking queries by looking up uploader IDs
-            const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
             
+            const songItem = target.closest('.song-item');
+            const artistRaw = songItem ? songItem.getAttribute('data-song-artist') : (songArtistEl.dataset.artist ? decodeURIComponent(songArtistEl.dataset.artist) : songArtistEl.textContent.trim());
+            const userId = ''; // Force empty to prevent breaking queries by looking up uploader IDs
+            
+            const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
             if (artistsList.length > 1) {
+              // Keep the player modal open, simply display the choices popup on top
               if (artistsModalBody) {
                 const modalTitle = artistsModalEl.querySelector('.modal-title');
                 if (modalTitle) modalTitle.textContent = 'Artists';
                 artistsModalBody.innerHTML = `
                   <div class="list-group list-group-flush rounded">
-                    ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userId}">${a}</button>`).join('')}
+                    ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}">${a}</button>`).join('')}
                   </div>
                 `;
                 if (artistsModal) artistsModal.show();
               }
             } else {
+              // Only one artist exists: Close the player modals and navigate directly
+              closeOpenModals();
               loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId, artist_name: '' });
             }
             return;
@@ -14525,27 +17126,29 @@ SOFTWARE.</div>
               showShareModal('song', id, name);
               break;
             case 'go_artist':
-              closeOpenModals();
               const artistRaw = decodeURIComponent(name);
               const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
               if (artistsList.length > 1) {
+                // Keep the player modal open, simply display the choices popup on top
                 if (artistsModalBody) {
                   const modalTitle = artistsModalEl.querySelector('.modal-title');
                   if (modalTitle) modalTitle.textContent = 'Artists';
                   artistsModalBody.innerHTML = `
                     <div class="list-group list-group-flush rounded">
-                      ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userid}">${a}</button>`).join('')}
+                      ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}">${a}</button>`).join('')}
                     </div>
                   `;
                   if (artistsModal) artistsModal.show();
                 }
               } else {
+                // FIX: Close the choice popup AND dismiss player modal if there is only 1 artist
+                closeOpenModals();
                 loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userid || '', artist_name: '' });
                 hideMobileSidebar();
               }
               break;
             case 'go_album':
-              closeOpenModals();
+              closeChoiceModals();
               const albumRaw = decodeURIComponent(name);
               const songArtistRaw = decodeURIComponent(item.dataset.artistname || '');
               const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
@@ -14559,12 +17162,14 @@ SOFTWARE.</div>
                   if (modalTitle) modalTitle.textContent = 'Select Album Artist';
                   artistsModalBody.innerHTML = `
                     <div class="list-group list-group-flush rounded">
-                      ${songArtistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary album-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${safeMenuUserId}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join('')}
+                      ${songArtistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${safeMenuUserId}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join('')}
                     </div>
                   `;
                   if (artistsModal) artistsModal.show();
                 }
               } else {
+                // FIX: Only close choice popups, letting player modal stay open in background
+                closeChoiceModals();
                 loadView({ type: 'album_songs', param: albumRaw, sort: 'title_asc', filter_user_id: safeMenuUserId, artist_name: songArtistRaw });
                 hideMobileSidebar();
               }
@@ -15105,7 +17710,7 @@ SOFTWARE.</div>
             if (!target) return;
             
             const genreName = target.dataset.genre;
-            closeOpenModals();
+            closeChoiceModals();
             
             setTimeout(() => {
               loadView({ type: 'genre_songs', param: genreName, sort: 'artist_asc', filter_user_id: '' });
@@ -15344,9 +17949,9 @@ SOFTWARE.</div>
 
         let docPipWindow = null;
 
-        if (pipBtnDesktop) {
-          pipBtnDesktop.addEventListener('click', async () => {
-            if ('documentPictureInPicture' in window) {
+        const handlePipAction = async () => {
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || window.innerWidth < 768;
+            if ('documentPictureInPicture' in window && !isMobile) {
               if (docPipWindow) {
                 docPipWindow.close();
                 return;
@@ -15635,7 +18240,8 @@ SOFTWARE.</div>
                 };
                 audio.addEventListener('timeupdate', updateSliderPip);
 
-                pipBtnDesktop.classList.add('active');
+                if (pipBtnDesktop) pipBtnDesktop.classList.add('active');
+                if (pipBtnMobile) pipBtnMobile.classList.add('active');
 
                 docPipWindow.addEventListener('pagehide', () => {
                   audio.removeEventListener('timeupdate', updateSliderPip);
@@ -15653,7 +18259,8 @@ SOFTWARE.</div>
                   playerElements.repeatBtn = playerElements.repeatBtn.filter(el => el !== pipEls.repeatBtn);
                   
                   docPipWindow = null;
-                  pipBtnDesktop.classList.remove('active');
+                  if (pipBtnDesktop) pipBtnDesktop.classList.remove('active');
+                  if (pipBtnMobile) pipBtnMobile.classList.remove('active');
                 });
 
                 pipEls.prevBtn.innerHTML = ICONS.prev;
@@ -15672,7 +18279,10 @@ SOFTWARE.</div>
             } else {
               fallbackVideoPip();
             }
-          });
+          };
+
+          if (pipBtnDesktop) pipBtnDesktop.addEventListener('click', handlePipAction);
+          if (pipBtnMobile) pipBtnMobile.addEventListener('click', handlePipAction);
 
           function fallbackVideoPip() {
             if (document.pictureInPictureElement) {
@@ -15681,17 +18291,22 @@ SOFTWARE.</div>
               pipVideo.play().then(() => {
                 pipVideo.requestPictureInPicture().catch((err) => {
                   console.error("PiP failed", err);
-                  showToast("Picture-in-Picture is not supported by your browser or was blocked.", "error");
+                  showToast("Picture-in-Picture is not supported by your browser.", "error");
                 });
               }).catch(console.error);
             }
           }
           
-          pipVideo.addEventListener('enterpictureinpicture', () => pipBtnDesktop.classList.add('active'));
-          pipVideo.addEventListener('leavepictureinpicture', () => {
-             if(!docPipWindow) pipBtnDesktop.classList.remove('active');
+          pipVideo.addEventListener('enterpictureinpicture', () => {
+            if (pipBtnDesktop) pipBtnDesktop.classList.add('active');
+            if (pipBtnMobile) pipBtnMobile.classList.add('active');
           });
-        }
+          pipVideo.addEventListener('leavepictureinpicture', () => {
+            if(!docPipWindow) {
+              if (pipBtnDesktop) pipBtnDesktop.classList.remove('active');
+              if (pipBtnMobile) pipBtnMobile.classList.remove('active');
+            }
+          });
 
         clearCacheBtn.addEventListener('click', async (e) => {
           e.preventDefault();
@@ -15726,27 +18341,6 @@ SOFTWARE.</div>
           }
         });
         
-        let apiDebounceTimer;
-        const getApiBtn = document.getElementById('get-api-btn');
-        if (getApiBtn) {
-          getApiBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            hideMobileSidebar();
-            
-            // Debounce click to prevent prompt spam
-            clearTimeout(apiDebounceTimer);
-            apiDebounceTimer = setTimeout(() => {
-              const pwd = prompt("API Access is locked.\n\nEnter Admin Password to generate endpoints for other sites:");
-              if (pwd === 'admin') { // Automatically matches backend ADMIN_PASSWORD
-                window.adminApiKey = pwd;
-                bootstrap.Modal.getOrCreateInstance(document.getElementById('api-modal')).show();
-              } else if (pwd !== null) {
-                showToast("Incorrect admin password.", "error");
-              }
-            }, 300);
-          });
-        }
-
         const navUploadBtn = document.getElementById('nav-upload-btn');
         if (navUploadBtn) {
           navUploadBtn.addEventListener('click', (e) => {
@@ -16520,7 +19114,385 @@ SOFTWARE.</div>
               showToast('Upload failed', 'error');
             }
             submitBtn.disabled = false;
-            submitBtn.textContent = 'Save Background';
+            submitBtn.textContent = 'Save Uploaded Background';
+          });
+        }
+
+        // --- BACKGROUND GENERATOR LOGIC ---
+        const bgCanvas = document.getElementById('bg-gen-canvas');
+        if (bgCanvas) {
+          const bgCtx = bgCanvas.getContext('2d');
+          const bgState = { pattern: 'blobs', hue: Math.floor(Math.random()*360), saturation: 70, complexity: 5, scale: 100, angle: 0, drawStyle: 'fill', seed: Math.random() };
+          let bgRng = null;
+
+          function bgMulberry32(a) {
+            return function() {
+              var t = a += 0x6D2B79F5; t = Math.imul(t ^ t >>> 15, t | 1);
+              t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296;
+            }
+          }
+          function bgGetHsl(h, s, l, a = 1) { return `hsla(${h}, ${s}%, ${l}%, ${a})`; }
+          function bgGetPalette() {
+            const h = bgState.hue; const s = bgState.saturation;
+            return [
+                bgGetHsl(h, s, 40), bgGetHsl(h, s*0.6, 30), bgGetHsl((h + 40) % 360, s*0.8, 40), 
+                bgGetHsl((h - 40 + 360) % 360, s*0.8, 40), bgGetHsl(h, s, 80, 0.7)
+            ];
+          }
+          function bgApplyStyle(color) {
+            bgCtx.fillStyle = color; bgCtx.strokeStyle = color;
+            bgCtx.lineWidth = Math.max(1, (bgState.scale / 100) * 15 / (bgState.complexity * 0.5));
+            bgCtx.lineCap = 'round'; bgCtx.lineJoin = 'round';
+          }
+          function bgDrawPath() {
+            if (bgState.drawStyle === 'fill') bgCtx.fill();
+            else if (bgState.drawStyle === 'stroke') bgCtx.stroke();
+            else { if (bgRng() > 0.5) bgCtx.fill(); else bgCtx.stroke(); }
+          }
+
+          const bgDrawFns = {
+            blobs: (b, pal) => {
+              const count = bgState.complexity * 3; const baseSize = (b.w * (bgState.scale / 100)) / 4;
+              for (let i = 0; i < count; i++) {
+                const cx = b.x + bgRng() * b.w; const cy = b.y + bgRng() * b.h; const size = baseSize * (0.5 + bgRng());
+                bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]);
+                bgCtx.beginPath(); const points = 5 + Math.floor(bgRng() * 3); let angle = 0;
+                for(let j=0; j<=points; j++) {
+                  const r = size * (0.6 + bgRng() * 0.4); const x = cx + Math.cos(angle) * r; const y = cy + Math.sin(angle) * r;
+                  if(j === 0) bgCtx.moveTo(x, y); else {
+                      const cp1x = cx + Math.cos(angle - Math.PI/points) * size; const cp1y = cy + Math.sin(angle - Math.PI/points) * size;
+                      bgCtx.quadraticCurveTo(cp1x, cp1y, x, y);
+                  }
+                  angle += (Math.PI * 2) / points;
+                }
+                bgDrawPath();
+              }
+            },
+            geometric: (b, pal) => {
+              const count = bgState.complexity * 5; const baseSize = (b.w * (bgState.scale / 100)) / 6;
+              for (let i = 0; i < count; i++) {
+                  const x = b.x + bgRng() * b.w; const y = b.y + bgRng() * b.h; const size = baseSize * (0.2 + bgRng());
+                  bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]);
+                  const type = Math.floor(bgRng() * 3);
+                  bgCtx.save(); bgCtx.translate(x, y); bgCtx.rotate(bgRng() * Math.PI * 2); bgCtx.beginPath();
+                  if (type === 0) bgCtx.arc(0, 0, size, 0, Math.PI * 2); else if (type === 1) bgCtx.arc(0, 0, size, 0, Math.PI);
+                  else { const rw = size * 2; const rh = size * 0.5; bgCtx.roundRect(-rw/2, -rh/2, rw, rh, rh/2); }
+                  bgDrawPath(); bgCtx.restore();
+              }
+            },
+            mesh: (b, pal) => {
+              const count = bgState.complexity * 2; const baseSize = b.w * (bgState.scale / 100) * 0.8;
+              for (let i = 0; i < count; i++) {
+                  const cx = b.x + bgRng() * b.w; const cy = b.y + bgRng() * b.h; const size = baseSize * (0.5 + bgRng());
+                  const cBase = pal[Math.floor(bgRng() * pal.length)];
+                  const grad = bgCtx.createRadialGradient(cx, cy, 0, cx, cy, size);
+                  grad.addColorStop(0, cBase.replace(/[\d\.]+\)$/, '1)')); grad.addColorStop(1, cBase.replace(/[\d\.]+\)$/, '0)'));
+                  bgCtx.fillStyle = grad; bgCtx.globalCompositeOperation = 'screen';
+                  bgCtx.fillRect(cx - size, cy - size, size * 2, size * 2); bgCtx.globalCompositeOperation = 'source-over';
+              }
+            },
+            waves: (b, pal) => {
+              const count = bgState.complexity * 3; const sp = b.h / count; const amp = (bgState.scale / 100) * 200;
+              for (let i = 0; i <= count; i++) {
+                  bgApplyStyle(pal[i % pal.length]); bgCtx.beginPath(); bgCtx.moveTo(b.x, b.y + b.h); bgCtx.lineTo(b.x, b.y + i * sp + (bgRng() * 50));
+                  const pts = 5; const step = b.w / pts; let cx = b.x; let cy = b.y + i * sp;
+                  for(let j=0; j<pts; j++) {
+                      const nX = cx + step; const nY = cy + (bgRng() > 0.5 ? 1 : -1) * amp * bgRng();
+                      bgCtx.bezierCurveTo(cx + step/2, cy, nX - step/2, nY, nX, nY); cx = nX; cy = nY;
+                  }
+                  bgCtx.lineTo(b.x + b.w, b.y + b.h); bgDrawPath();
+              }
+            },
+            stripes: (b, pal) => {
+              const w = (bgState.scale / 100) * 100; const gap = w * (10 / bgState.complexity);
+              for(let x = b.x; x < b.x + b.w * 2; x += (w + gap)) { bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); bgCtx.rect(x - b.w, b.y, w, b.h); bgDrawPath(); }
+            },
+            dots: (b, pal) => {
+              const sp = (bgState.scale / 100) * 100 + 20; const rad = sp * (bgState.complexity / 20);
+              for(let y = b.y; y < b.y + b.h; y += sp) { for(let x = b.x; x < b.x + b.w; x += sp) { bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); bgCtx.arc(x + (bgRng()*sp*0.2), y + (bgRng()*sp*0.2), rad * (0.5+bgRng()), 0, Math.PI*2); bgDrawPath(); } }
+            },
+            particles: (b, pal) => {
+              const count = bgState.complexity * 10; const pts = []; for(let i=0; i<count; i++) pts.push({ x: b.x + bgRng()*b.w, y: b.y + bgRng()*b.h, c: pal[Math.floor(bgRng()*pal.length)] });
+              const cDist = (bgState.scale / 100) * 300; bgCtx.lineWidth = 2;
+              for(let i=0; i<pts.length; i++) {
+                  for(let j=i+1; j<pts.length; j++) {
+                      const d = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
+                      if(d < cDist) { bgCtx.strokeStyle = pts[i].c; bgCtx.globalAlpha = 1 - (d/cDist); bgCtx.beginPath(); bgCtx.moveTo(pts[i].x, pts[i].y); bgCtx.lineTo(pts[j].x, pts[j].y); bgCtx.stroke(); bgCtx.globalAlpha = 1; }
+                  }
+                  bgApplyStyle(pts[i].c); bgCtx.beginPath(); bgCtx.arc(pts[i].x, pts[i].y, 5 + bgRng()*10, 0, Math.PI*2); bgDrawPath();
+              }
+            },
+            triangles: (b, pal) => {
+              const step = (bgState.scale / 100) * 150 + 20;
+              for(let y = b.y; y < b.y + b.h; y += step) { for(let x = b.x; x < b.x + b.w; x += step) { if(bgRng() > bgState.complexity/10) continue; bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); bgCtx.moveTo(x + bgRng()*step, y + bgRng()*step); bgCtx.lineTo(x + step + bgRng()*step, y + bgRng()*step); bgCtx.lineTo(x + bgRng()*step, y + step + bgRng()*step); bgCtx.closePath(); bgDrawPath(); } }
+            },
+            rays: (b, pal) => {
+              const count = bgState.complexity * 8; const rad = b.w; 
+              for(let i=0; i<count; i++) { bgApplyStyle(pal[i % pal.length]); const a1 = (i / count) * Math.PI * 2; const a2 = ((i + (bgRng()*0.5 + 0.5)) / count) * Math.PI * 2; bgCtx.beginPath(); bgCtx.moveTo(0, 0); bgCtx.lineTo(Math.cos(a1) * rad, Math.sin(a1) * rad); bgCtx.lineTo(Math.cos(a2) * rad, Math.sin(a2) * rad); bgCtx.closePath(); bgDrawPath(); }
+            },
+            squares: (b, pal) => {
+              const count = bgState.complexity * 5; for (let i = 0; i < count; i++) { const s = (bgState.scale / 100) * 200 * (0.2 + bgRng()); const x = b.x + bgRng() * b.w; const y = b.y + bgRng() * b.h; bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); bgCtx.rect(x-s/2, y-s/2, s, s); bgDrawPath(); }
+            },
+            hexagons: (b, pal) => {
+              const r = (bgState.scale / 100) * 50 + 10; const dx = r * Math.sqrt(3); const dy = r * 1.5; let row = 0;
+              for(let y = b.y; y < b.y + b.h + r; y += dy) { let offset = (row % 2 === 0) ? 0 : dx / 2; for(let x = b.x; x < b.x + b.w + r; x += dx) { if(bgRng() > (bgState.complexity / 10)) continue; bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); for (let i = 0; i < 6; i++) { const angle = i * Math.PI / 3 + Math.PI/6; const px = x + offset + r * Math.cos(angle); const py = y + r * Math.sin(angle); if (i === 0) bgCtx.moveTo(px, py); else bgCtx.lineTo(px, py); } bgCtx.closePath(); bgDrawPath(); } row++; }
+            },
+            concentric: (b, pal) => {
+              const count = bgState.complexity * 2; const maxR = (bgState.scale / 100) * 300;
+              for(let i=0; i<count; i++) { const cx = b.x + bgRng() * b.w; const cy = b.y + bgRng() * b.h; const rings = 3 + Math.floor(bgRng()*5); for(let r=rings; r>0; r--) { bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); bgCtx.arc(cx, cy, (r/rings)*maxR, 0, Math.PI*2); bgDrawPath(); } }
+            },
+            noise: (b, pal) => {
+              const size = Math.max(5, (bgState.scale / 100) * 30); const den = bgState.complexity * 0.08; 
+              for(let y = b.y; y < b.y + b.h; y += size) { for(let x = b.x; x < b.x + b.w; x += size) { if(bgRng() < den) { bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); bgCtx.rect(x, y, size, size); bgDrawPath(); } } }
+            },
+            scribble: (b, pal) => {
+              const count = bgState.complexity * 3; for(let i=0; i<count; i++) { bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); let cx = b.x + bgRng() * b.w; let cy = b.y + bgRng() * b.h; bgCtx.moveTo(cx, cy); const segs = 20 + bgRng() * 50; const jump = (bgState.scale / 100) * 100; for(let j=0; j<segs; j++) { cx += (bgRng() - 0.5) * jump; cy += (bgRng() - 0.5) * jump; bgCtx.lineTo(cx, cy); } bgCtx.stroke(); }
+            },
+            diamonds: (b, pal) => {
+              const size = (bgState.scale / 100) * 60 + 10; for(let y = b.y; y < b.y + b.h; y += size) { for(let x = b.x; x < b.x + b.w; x += size) { if(bgRng() > (bgState.complexity / 10)) continue; bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save(); bgCtx.translate(x, y); bgCtx.rotate(Math.PI/4); bgCtx.beginPath(); bgCtx.rect(-size/2, -size/2, size, size); bgDrawPath(); bgCtx.restore(); } }
+            },
+            checkers: (b, pal) => {
+              const size = (bgState.scale / 100) * 60 + 10; for(let y = b.y; y < b.y + b.h; y += size) { for(let x = b.x; x < b.x + b.w; x += size) { if(bgRng() > (bgState.complexity / 10)) continue; bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); bgCtx.rect(x, y, size, size); bgDrawPath(); } }
+            },
+            maze: (b, pal) => {
+              const step = (bgState.scale / 100) * 40 + 10; bgCtx.lineWidth = step * (bgState.complexity / 20) + 2; bgCtx.lineCap = 'round';
+              for(let y = b.y; y < b.y + b.h; y += step) { for(let x = b.x; x < b.x + b.w; x += step) { bgCtx.strokeStyle = pal[Math.floor(bgRng() * pal.length)]; bgCtx.beginPath(); if(bgRng() > 0.5) { bgCtx.moveTo(x, y); bgCtx.lineTo(x + step, y + step); } else { bgCtx.moveTo(x + step, y); bgCtx.lineTo(x, y + step); } bgCtx.stroke(); } }
+            },
+            lines: (b, pal) => {
+              const count = bgState.complexity * 10; const len = (bgState.scale / 100) * 300; for(let i=0; i<count; i++) { bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); const x = b.x + bgRng() * b.w; const y = b.y + bgRng() * b.h; bgCtx.moveTo(x, y); if(bgRng() > 0.5) bgCtx.lineTo(x + len * (bgRng()>0.5?1:-1), y); else bgCtx.lineTo(x, y + len * (bgRng()>0.5?1:-1)); bgCtx.stroke(); }
+            },
+            crosses: (b, pal) => {
+              const step = (bgState.scale / 100) * 80 + 20; const size = step * (bgState.complexity / 15); bgCtx.lineWidth = size * 0.3;
+              for(let y = b.y; y < b.y + b.h; y += step) { for(let x = b.x; x < b.x + b.w; x += step) { if(bgRng() > 0.8) continue; bgCtx.strokeStyle = pal[Math.floor(bgRng() * pal.length)]; bgCtx.beginPath(); bgCtx.moveTo(x - size/2, y); bgCtx.lineTo(x + size/2, y); bgCtx.moveTo(x, y - size/2); bgCtx.lineTo(x, y + size/2); bgCtx.stroke(); } }
+            },
+            spirals: (b, pal) => {
+              const count = bgState.complexity * 2; const maxR = (bgState.scale / 100) * 150; for(let i=0; i<count; i++) { const cx = b.x + bgRng() * b.w; const cy = b.y + bgRng() * b.h; bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.beginPath(); let loops = 2 + bgRng() * 4; for(let a=0; a<Math.PI * 2 * loops; a+=0.1) { const r = (a / (Math.PI*2)) * (maxR / loops); const x = cx + Math.cos(a) * r; const y = cy + Math.sin(a) * r; if(a===0) bgCtx.moveTo(x,y); else bgCtx.lineTo(x,y); } bgDrawPath(); }
+            }
+          };
+
+          const bgShapes = {
+            circle: (s) => { bgCtx.arc(0, 0, s, 0, Math.PI*2); },
+            square: (s) => { bgCtx.rect(-s/2, -s/2, s, s); },
+            diamond: (s) => { bgCtx.moveTo(0, -s); bgCtx.lineTo(s, 0); bgCtx.lineTo(0, s); bgCtx.lineTo(-s, 0); bgCtx.closePath(); },
+            triangle: (s) => { bgCtx.moveTo(0, -s*0.8); bgCtx.lineTo(s*0.866, s*0.6); bgCtx.lineTo(-s*0.866, s*0.6); bgCtx.closePath(); },
+            star: (s) => { for(let i=0;i<10;i++){ const r = i%2===0?s:s/2; const a = i*Math.PI/5 - Math.PI/2; if(i===0)bgCtx.moveTo(Math.cos(a)*r,Math.sin(a)*r); else bgCtx.lineTo(Math.cos(a)*r,Math.sin(a)*r); } bgCtx.closePath(); },
+            cross: (s) => { const q=s/3; bgCtx.moveTo(-s,-q); bgCtx.lineTo(-q,-q); bgCtx.lineTo(-q,-s); bgCtx.lineTo(q,-s); bgCtx.lineTo(q,-q); bgCtx.lineTo(s,-q); bgCtx.lineTo(s,q); bgCtx.lineTo(q,q); bgCtx.lineTo(q,s); bgCtx.lineTo(-q,s); bgCtx.lineTo(-q,q); bgCtx.lineTo(-s,q); bgCtx.closePath(); },
+            hexagon: (s) => { for(let i=0;i<6;i++){ const a = i*Math.PI/3; if(i===0)bgCtx.moveTo(s*Math.cos(a),s*Math.sin(a)); else bgCtx.lineTo(s*Math.cos(a),s*Math.sin(a)); } bgCtx.closePath(); },
+            pentagon: (s) => { for(let i=0;i<5;i++){ const a = i*Math.PI*2/5 - Math.PI/2; if(i===0)bgCtx.moveTo(s*Math.cos(a),s*Math.sin(a)); else bgCtx.lineTo(s*Math.cos(a),s*Math.sin(a)); } bgCtx.closePath(); },
+            octagon: (s) => { for(let i=0;i<8;i++){ const a = i*Math.PI/4 - Math.PI/8; if(i===0)bgCtx.moveTo(s*Math.cos(a),s*Math.sin(a)); else bgCtx.lineTo(s*Math.cos(a),s*Math.sin(a)); } bgCtx.closePath(); },
+            ring: (s) => { bgCtx.arc(0, 0, s, 0, Math.PI*2); bgCtx.moveTo(s*0.7,0); bgCtx.arc(0, 0, s*0.7, 0, Math.PI*2, true); },
+            heart: (s) => { const x=0, y=0; bgCtx.moveTo(x, y+s/3); bgCtx.bezierCurveTo(x, y-s/2, x-s, y-s/2, x-s, y); bgCtx.bezierCurveTo(x-s, y+s/2, x, y+s*0.8, x, y+s); bgCtx.bezierCurveTo(x, y+s*0.8, x+s, y+s/2, x+s, y); bgCtx.bezierCurveTo(x+s, y-s/2, x, y-s/2, x, y+s/3); },
+            moon: (s) => { bgCtx.arc(0, 0, s, 0, Math.PI*2); bgCtx.arc(s*0.3, -s*0.3, s*0.8, 0, Math.PI*2, true); },
+            spade: (s) => { bgCtx.moveTo(0, s*0.2); bgCtx.bezierCurveTo(s, s*0.2, s, -s, 0, -s); bgCtx.bezierCurveTo(-s, -s, -s, s*0.2, 0, s*0.2); bgCtx.moveTo(0, 0); bgCtx.lineTo(-s*0.3, s); bgCtx.lineTo(s*0.3, s); bgCtx.closePath(); },
+            club: (s) => { bgCtx.arc(0, -s*0.5, s*0.4, 0, Math.PI*2); bgCtx.arc(-s*0.4, s*0.2, s*0.4, 0, Math.PI*2); bgCtx.arc(s*0.4, s*0.2, s*0.4, 0, Math.PI*2); bgCtx.moveTo(0, 0); bgCtx.lineTo(-s*0.2, s); bgCtx.lineTo(s*0.2, s); bgCtx.closePath(); },
+            leaf: (s) => { bgCtx.moveTo(0, -s); bgCtx.quadraticCurveTo(s, 0, 0, s); bgCtx.quadraticCurveTo(-s, 0, 0, -s); },
+            shield: (s) => { bgCtx.moveTo(-s, -s*0.8); bgCtx.lineTo(s, -s*0.8); bgCtx.quadraticCurveTo(s, s*0.5, 0, s); bgCtx.quadraticCurveTo(-s, s*0.5, -s, -s*0.8); },
+            gem: (s) => { bgCtx.moveTo(-s*0.6, -s); bgCtx.lineTo(s*0.6, -s); bgCtx.lineTo(s, -s*0.2); bgCtx.lineTo(0, s); bgCtx.lineTo(-s, -s*0.2); bgCtx.closePath(); },
+            droplet: (s) => { bgCtx.moveTo(0, -s); bgCtx.quadraticCurveTo(s, 0, s, s*0.4); bgCtx.arc(0, s*0.4, s, 0, Math.PI); bgCtx.quadraticCurveTo(-s, 0, 0, -s); },
+            burst: (s) => { for(let i=0;i<16;i++){ const r = i%2===0?s:s*0.3; const a = i*Math.PI/8; if(i===0)bgCtx.moveTo(Math.cos(a)*r,Math.sin(a)*r); else bgCtx.lineTo(Math.cos(a)*r,Math.sin(a)*r); } bgCtx.closePath(); },
+            sparkle: (s) => { for(let i=0;i<8;i++){ const r = i%2===0?s:s*0.1; const a = i*Math.PI/4; if(i===0)bgCtx.moveTo(Math.cos(a)*r,Math.sin(a)*r); else bgCtx.lineTo(Math.cos(a)*r,Math.sin(a)*r); } bgCtx.closePath(); },
+            clover: (s) => { for(let i=0; i<4; i++){ const a=i*Math.PI/2; bgCtx.arc(Math.cos(a)*s*0.5, Math.sin(a)*s*0.5, s*0.5, 0, Math.PI*2); } },
+            flower: (s) => { for(let i=0; i<6; i++){ const a=i*Math.PI/3; bgCtx.arc(Math.cos(a)*s*0.6, Math.sin(a)*s*0.6, s*0.4, 0, Math.PI*2); } bgCtx.arc(0,0,s*0.3,0,Math.PI*2); }
+          };
+
+          const bgLayouts = {
+            scatter: (b, pal, shapeFn) => {
+              const count = bgState.complexity * 12; const baseSize = (b.w * (bgState.scale / 100)) / 15;
+              for(let i=0;i<count;i++){ 
+                bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                bgCtx.translate(b.x+bgRng()*b.w, b.y+bgRng()*b.h); bgCtx.rotate(bgRng()*Math.PI*2);
+                bgCtx.beginPath(); shapeFn(baseSize * (0.3+bgRng())); bgDrawPath(); bgCtx.restore();
+              }
+            },
+            grid: (b, pal, shapeFn) => {
+              const step = (bgState.scale / 100) * 80 + 20; const size = step * (bgState.complexity / 20);
+              for(let y=b.y; y<b.y+b.h; y+=step) { for(let x=b.x; x<b.x+b.w; x+=step) {
+                if(bgRng() > 0.9) continue;
+                bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                bgCtx.translate(x, y); bgCtx.beginPath(); shapeFn(size); bgDrawPath(); bgCtx.restore();
+              }}
+            },
+            isometric: (b, pal, shapeFn) => {
+              const step = (bgState.scale / 100) * 80 + 20; const size = step * (bgState.complexity / 20); let row=0;
+              for(let y=b.y; y<b.y+b.h; y+=step*0.866) { let off=(row%2===0)?0:step/2; for(let x=b.x; x<b.x+b.w; x+=step) {
+                if(bgRng() > 0.9) continue;
+                bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                bgCtx.translate(x+off, y); bgCtx.beginPath(); shapeFn(size); bgDrawPath(); bgCtx.restore();
+              } row++;}
+            },
+            concentric: (b, pal, shapeFn) => {
+              const count = bgState.complexity * 3; const maxR = (bgState.scale / 100) * 150;
+              for(let i=0;i<count;i++){ 
+                const cx=b.x+bgRng()*b.w; const cy=b.y+bgRng()*b.h; const rings=3+Math.floor(bgRng()*5);
+                for(let r=rings; r>0; r--) {
+                  bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                  bgCtx.translate(cx, cy); bgCtx.beginPath(); shapeFn(maxR*(r/rings)); bgDrawPath(); bgCtx.restore();
+                }
+              }
+            },
+            radial: (b, pal, shapeFn) => {
+              const count = bgState.complexity * 12; const maxR = b.w; const cx=0, cy=0;
+              for(let i=0;i<count;i++){ 
+                const a = (i/count)*Math.PI*2; const r = bgRng()*maxR;
+                bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                bgCtx.translate(cx+Math.cos(a)*r, cy+Math.sin(a)*r); bgCtx.rotate(a + Math.PI/2);
+                bgCtx.beginPath(); shapeFn((bgState.scale/100)*40 * (0.5+bgRng())); bgDrawPath(); bgCtx.restore();
+              }
+            },
+            spiral: (b, pal, shapeFn) => {
+              const count = bgState.complexity * 15; const maxR = b.w; const cx = b.x + b.w/2; const cy = b.y + b.h/2;
+              for(let i=0; i<count; i++) {
+                const a = i * 0.5; const r = (i/count) * maxR;
+                bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                bgCtx.translate(cx + Math.cos(a)*r, cy + Math.sin(a)*r); bgCtx.rotate(a);
+                bgCtx.beginPath(); shapeFn((bgState.scale/100) * 20 * (1 + bgRng())); bgDrawPath(); bgCtx.restore();
+              }
+            },
+            waveGrid: (b, pal, shapeFn) => {
+              const step = (bgState.scale / 100) * 60 + 20; const size = step * (bgState.complexity / 20);
+              for(let x=b.x; x<b.x+b.w; x+=step) {
+                let yOffset = Math.sin(x * 0.05) * 100;
+                for(let y=b.y; y<b.y+b.h; y+=step) {
+                  bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                  bgCtx.translate(x, y + yOffset); bgCtx.beginPath(); shapeFn(size); bgDrawPath(); bgCtx.restore();
+                }
+              }
+            },
+            zigzag: (b, pal, shapeFn) => {
+              const step = (bgState.scale / 100) * 60 + 20; const size = step * (bgState.complexity / 20);
+              let flip = false;
+              for(let y=b.y; y<b.y+b.h; y+=step) {
+                flip = !flip;
+                for(let x=b.x; x<b.x+b.w; x+=step) {
+                  let px = x + (flip ? step/2 : 0);
+                  bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                  bgCtx.translate(px, y); bgCtx.beginPath(); shapeFn(size); bgDrawPath(); bgCtx.restore();
+                }
+              }
+            },
+            orbit: (b, pal, shapeFn) => {
+              const cx = b.x + b.w/2; const cy = b.y + b.h/2; const rings = bgState.complexity; const maxR = b.w;
+              for(let r=1; r<=rings; r++) {
+                const rad = (r/rings) * maxR; const items = r * 6;
+                for(let i=0; i<items; i++) {
+                  const a = (i/items) * Math.PI * 2 + (bgRng()*0.5);
+                  bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                  bgCtx.translate(cx + Math.cos(a)*rad, cy + Math.sin(a)*rad); bgCtx.rotate(a);
+                  bgCtx.beginPath(); shapeFn((bgState.scale/100) * 30); bgDrawPath(); bgCtx.restore();
+                }
+              }
+            },
+            pyramid: (b, pal, shapeFn) => {
+              const step = (bgState.scale / 100) * 60 + 20; const size = step * (bgState.complexity / 20);
+              const rows = Math.floor(b.h / step);
+              for(let r=0; r<rows; r++) {
+                const cols = r + 1; const startX = (b.x + b.w/2) - (cols * step)/2;
+                const y = b.y + r * step;
+                for(let c=0; c<cols; c++) {
+                  bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                  bgCtx.translate(startX + c * step, y); bgCtx.beginPath(); shapeFn(size); bgDrawPath(); bgCtx.restore();
+                }
+              }
+            },
+            waterfall: (b, pal, shapeFn) => {
+              const cols = bgState.complexity * 5; const stepX = b.w / cols;
+              for(let c=0; c<cols; c++) {
+                const x = b.x + c * stepX;
+                const offset = bgRng() * 1000;
+                for(let y=b.y; y<b.y+b.h; y+= (bgState.scale/100)*40) {
+                  const px = x + Math.sin((y+offset)*0.02) * 30;
+                  bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                  bgCtx.translate(px, y); bgCtx.beginPath(); shapeFn((bgState.scale/100) * 15); bgDrawPath(); bgCtx.restore();
+                }
+              }
+            },
+            vortex: (b, pal, shapeFn) => {
+              const count = bgState.complexity * 12; const maxR = b.w; const cx = b.x + b.w/2; const cy = b.y + b.h/2;
+              for(let i=count; i>0; i--) {
+                const a = Math.pow(i, 1.1) * 0.2; const r = (i/count) * maxR;
+                bgApplyStyle(pal[Math.floor(bgRng() * pal.length)]); bgCtx.save();
+                bgCtx.translate(cx + Math.cos(a)*r, cy + Math.sin(a)*r); bgCtx.rotate(a + Math.PI/4);
+                bgCtx.beginPath(); shapeFn((bgState.scale/100) * 40 * (i/count)); bgDrawPath(); bgCtx.restore();
+              }
+            }
+          };
+
+          // Compile all combinatoric variants and merge them into the master drawing function map
+          Object.keys(bgLayouts).forEach(layout => {
+            Object.keys(bgShapes).forEach(shape => {
+              bgDrawFns[`${layout}_${shape}`] = (b, pal) => bgLayouts[layout](b, pal, bgShapes[shape]);
+            });
+          });
+
+          const drawWallpaper = () => {
+            bgRng = bgMulberry32(Math.floor(bgState.seed * 100000));
+            const w = 1200; const h = 400;
+            bgCanvas.width = w; bgCanvas.height = h;
+
+            bgCtx.fillStyle = bgGetHsl(bgState.hue, bgState.saturation * 0.3, 10);
+            bgCtx.fillRect(0, 0, w, h);
+
+            bgCtx.save();
+            bgCtx.translate(w/2, h/2);
+            bgCtx.rotate(bgState.angle * Math.PI / 180);
+            
+            const diag = Math.sqrt(w*w + h*h);
+            const b = { x: -diag/2, y: -diag/2, w: diag, h: diag };
+
+            if(bgDrawFns[bgState.pattern]) bgDrawFns[bgState.pattern](b, bgGetPalette());
+            bgCtx.restore();
+          };
+
+          const settingsModalEl = document.getElementById('settings-modal');
+          if (settingsModalEl) {
+            settingsModalEl.addEventListener('show.bs.modal', () => {
+              document.getElementById('bg-gen-hue').value = bgState.hue;
+              drawWallpaper();
+            });
+          }
+
+          document.getElementById('bg-gen-pattern').addEventListener('change', e => { bgState.pattern = e.target.value; drawWallpaper(); });
+          document.getElementById('bg-gen-style').addEventListener('change', e => { bgState.drawStyle = e.target.value; drawWallpaper(); });
+          document.getElementById('bg-gen-hue').addEventListener('input', e => { bgState.hue = parseInt(e.target.value); drawWallpaper(); });
+          
+          document.getElementById('bg-gen-random-btn').addEventListener('click', () => {
+            bgState.seed = Math.random();
+            bgState.hue = Math.floor(Math.random() * 360);
+            document.getElementById('bg-gen-hue').value = bgState.hue;
+            
+            const patterns = Object.keys(bgDrawFns);
+            bgState.pattern = patterns[Math.floor(Math.random() * patterns.length)];
+            document.getElementById('bg-gen-pattern').value = bgState.pattern;
+            
+            const styles = ['fill', 'stroke', 'mixed'];
+            bgState.drawStyle = styles[Math.floor(Math.random() * styles.length)];
+            document.getElementById('bg-gen-style').value = bgState.drawStyle;
+
+            drawWallpaper();
+          });
+
+          document.getElementById('bg-gen-save-btn').addEventListener('click', () => {
+            bgCanvas.toBlob(async (blob) => {
+              const submitBtn = document.getElementById('bg-gen-save-btn');
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
+              const formData = new FormData();
+              formData.append('profile_background', blob, 'generated_bg.jpg');
+              
+              try {
+                const res = await fetch('?action=upload_profile_background', { method: 'POST', body: formData });
+                const result = await res.json();
+                showToast(result.message, result.status);
+                if (result.status === 'success') {
+                   await checkSession();
+                   if (currentView.type === 'user_profile') loadView(currentView);
+                }
+              } catch (err) {
+                showToast('Upload failed', 'error');
+              }
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = 'Set Background';
+            }, 'image/jpeg', 0.9);
           });
         }
 
@@ -16570,6 +19542,56 @@ SOFTWARE.</div>
         let profileCropper = null;
         const profilePicInput = document.getElementById('profile-picture-input');
         const profilePicPreview = document.getElementById('profile-picture-preview');
+        const presetContainer = document.getElementById('preset-avatar-container');
+        const refreshPresetsBtn = document.getElementById('refresh-presets-btn');
+
+        const loadPresets = () => {
+          if (!presetContainer || typeof multiavatar === 'undefined') return;
+          presetContainer.innerHTML = '';
+          for (let i = 0; i < 6; i++) {
+            const seed = Math.random().toString(36).substring(2, 8);
+            const svgCode = multiavatar(seed);
+            const blob = new Blob([svgCode], {type: 'image/svg+xml'});
+            const url = URL.createObjectURL(blob);
+            
+            const img = document.createElement('img');
+            img.src = url;
+            img.className = 'rounded-circle shadow-sm';
+            img.style.width = '55px';
+            img.style.height = '55px';
+            img.style.cursor = 'pointer';
+            img.style.border = '2px solid transparent';
+            img.style.transition = 'transform 0.2s, border-color 0.2s';
+            img.style.flexShrink = '0';
+            
+            img.addEventListener('mouseover', () => img.style.transform = 'scale(1.1)');
+            img.addEventListener('mouseout', () => img.style.transform = 'scale(1)');
+            
+            img.addEventListener('click', () => {
+              profilePicPreview.src = url;
+              if (profileCropper) profileCropper.destroy();
+              profileCropper = new Cropper(profilePicPreview, {
+                aspectRatio: 1,
+                viewMode: 1,
+                autoCropArea: 1,
+                dragMode: 'move',
+                background: false
+              });
+              if (profilePicInput) profilePicInput.value = '';
+            });
+            
+            presetContainer.appendChild(img);
+          }
+        };
+
+        if (refreshPresetsBtn) {
+          refreshPresetsBtn.addEventListener('click', loadPresets);
+        }
+
+        const settingsModalEl = document.getElementById('settings-modal');
+        if (settingsModalEl) {
+          settingsModalEl.addEventListener('show.bs.modal', loadPresets);
+        }
         
         if (profilePicInput) {
           profilePicInput.addEventListener('change', function(e) {
@@ -17151,6 +20173,11 @@ SOFTWARE.</div>
             profilePictureHeaderDesktop.src = picUrl;
             profilePictureHeaderMobile.src = picUrl;
             profilePicturePreview.src = picUrl;
+            
+            document.querySelectorAll('.phpmusic-profile-img-placeholder').forEach(img => img.src = picUrl);
+            document.querySelectorAll('.phpmusic-profile-name').forEach(el => el.textContent = currentUser.artist);
+            document.querySelectorAll('.phpmusic-profile-subtext').forEach(el => el.textContent = currentUser.email || 'Verified Artist');
+
             const scanAllBtn = document.getElementById('nav-scan-all');
             if (scanAllBtn) {
               if (currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com') {
@@ -18371,8 +21398,8 @@ SOFTWARE.</div>
         const showArtistTooltip = async (target, artistRaw, userId) => {
           if (window.innerWidth < 992) return;
           
-          const artistName = decodeURIComponent(artistRaw).split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i)[0].trim();
-          const cacheKey = (userId ? userId + '_' : '') + artistName.toLowerCase();
+          const artistsList = decodeURIComponent(artistRaw).split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+          if (artistsList.length === 0) return;
           
           const rect = target.getBoundingClientRect();
           artistTooltip.style.display = 'block';
@@ -18381,49 +21408,61 @@ SOFTWARE.</div>
           let left = rect.left + window.scrollX;
           
           if (left + 320 > window.innerWidth) left = window.innerWidth - 340;
-          if (top + 200 > window.scrollY + window.innerHeight) top = rect.top + window.scrollY - 210;
+          // Dynamically adjust height constraint to handle multiple artists
+          const estimatedHeight = artistsList.length * 100 + 40;
+          if (top + estimatedHeight > window.scrollY + window.innerHeight) top = rect.top + window.scrollY - estimatedHeight - 10;
+          if (top < window.scrollY) top = window.scrollY + 10;
           
           artistTooltip.style.top = top + 'px';
           artistTooltip.style.left = left + 'px';
 
-          let data = artistHoverCache[cacheKey];
-
-          if (!data) {
-             artistTooltip.innerHTML = '<div class="text-center p-3"><div class="spinner-border spinner-border-sm text-secondary"></div></div>';
-             artistTooltip.style.opacity = '1';
-             const res = await fetchData(`?action=get_view_data&type=artist&name=${encodeURIComponent(artistName)}&filter_user_id=${userId || ''}`);
-             if (res && res.details) {
-                data = res.details;
-                artistHoverCache[cacheKey] = data;
-             } else {
-                artistTooltip.innerHTML = '<div class="text-secondary small text-center p-3">Artist details not found</div>';
-                return;
-             }
-          }
-
-          let followBtn = '';
-          if (data.is_user && currentUser && currentUser.id != data.user_id) {
-             const btnClass = data.is_following ? 'btn-outline-light' : 'btn-danger';
-             const btnText = data.is_following ? 'Unfollow' : 'Follow';
-             followBtn = `<button class="btn btn-sm ${btnClass} w-100 mt-3 tooltip-follow-btn fw-bold" data-user-id="${data.user_id}">${btnText}</button>`;
-          }
-
-          artistTooltip.innerHTML = `
-            <div class="d-flex align-items-center gap-3" style="cursor: pointer;">
-              <img src="${data.image_url}" style="width: 70px; height: 70px; object-fit: cover; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
-              <div style="min-width: 0;">
-                 <h6 class="text-white text-truncate mb-1 fw-bold artist-tt-name" style="font-size: 1.1rem;">${escapeHTML(data.name)}</h6>
-                 <div class="text-secondary" style="font-size: 0.85rem;">${formatSongCount(data.song_count || 0)} tracks • ${formatTime(data.total_duration || 0)}</div>
-                 ${data.followers_count !== undefined ? `<div class="text-info mt-1" style="font-size: 0.8rem;"><i class="bi bi-people-fill"></i> ${formatSongCount(data.followers_count)} followers</div>` : `<div class="text-secondary mt-1" style="font-size: 0.8rem;"><i class="bi bi-eye"></i> ${formatSongCount(data.play_count || 0)} plays</div>`}
-              </div>
-            </div>
-            ${followBtn}
-          `;
+          artistTooltip.innerHTML = '<div class="text-center p-3"><div class="spinner-border spinner-border-sm text-secondary"></div></div>';
           artistTooltip.style.opacity = '1';
+
+          let html = '';
+          for (let i = 0; i < artistsList.length; i++) {
+            const artistName = artistsList[i];
+            const cacheKey = (userId ? userId + '_' : '') + artistName.toLowerCase();
+            let data = artistHoverCache[cacheKey];
+
+            if (!data) {
+               const res = await fetchData(`?action=get_view_data&type=artist&name=${encodeURIComponent(artistName)}&filter_user_id=${userId || ''}`);
+               if (res && res.details) {
+                  data = res.details;
+                  artistHoverCache[cacheKey] = data;
+               }
+            }
+
+            if (data) {
+              let followBtn = '';
+              if (data.is_user && currentUser && currentUser.id != data.user_id) {
+                 const btnClass = data.is_following ? 'btn-outline-light' : 'btn-danger';
+                 const btnText = data.is_following ? 'Unfollow' : 'Follow';
+                 followBtn = `<button class="btn btn-sm ${btnClass} w-100 mt-2 tooltip-follow-btn fw-bold" data-user-id="${data.user_id}">${btnText}</button>`;
+              }
+
+              html += `
+                <div class="artist-tooltip-card ${i < artistsList.length - 1 ? 'border-bottom border-secondary pb-3 mb-3' : ''}">
+                  <div class="d-flex align-items-center gap-3 artist-tt-click" data-artist="${encodeURIComponent(data.name)}" style="cursor: pointer;">
+                    <img src="${data.image_url}" style="width: 60px; height: 60px; object-fit: cover; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+                    <div style="min-width: 0;">
+                       <h6 class="text-white text-truncate mb-1 fw-bold artist-tt-name" style="font-size: 1.05rem;">${escapeHTML(data.name)}</h6>
+                       <div class="text-secondary" style="font-size: 0.8rem;">${formatSongCount(data.song_count || 0)} tracks • ${formatTime(data.total_duration || 0)}</div>
+                       ${data.followers_count !== undefined ? `<div class="text-info mt-1" style="font-size: 0.75rem;"><i class="bi bi-people-fill"></i> ${formatSongCount(data.followers_count)} followers</div>` : `<div class="text-secondary mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(data.play_count || 0)} plays</div>`}
+                    </div>
+                  </div>
+                  ${followBtn}
+                </div>
+              `;
+            } else {
+              html += `<div class="text-secondary small text-center p-2 ${i < artistsList.length - 1 ? 'border-bottom border-secondary pb-3 mb-3' : ''}">${escapeHTML(artistName)}: Details not found</div>`;
+            }
+          }
+          artistTooltip.innerHTML = html;
         };
 
         document.addEventListener('mouseover', e => {
-          const artistEl = e.target.closest('.song-artist, .song-artist-name, .item-subtitle[data-artist], .mention-link, .user-profile-link');
+          const artistEl = e.target.closest('.artist-link, .song-artist, .song-artist-name, .item-subtitle[data-artist], .mention-link, .user-profile-link');
           if (artistEl) {
             clearTimeout(artistHideTimeout);
             if (artistTooltip.contains(e.relatedTarget)) return; 
@@ -18443,7 +21482,7 @@ SOFTWARE.</div>
         });
 
         document.addEventListener('mouseout', e => {
-          const artistEl = e.target.closest('.song-artist, .song-artist-name, .item-subtitle[data-artist], .mention-link, .user-profile-link');
+          const artistEl = e.target.closest('.artist-link, .song-artist, .song-artist-name, .item-subtitle[data-artist], .mention-link, .user-profile-link');
           if (artistEl || e.target.closest('#artist-hover-tooltip')) {
             clearTimeout(artistHoverTimeout);
             artistHideTimeout = setTimeout(() => {
@@ -18464,15 +21503,20 @@ SOFTWARE.</div>
             if (res && (res.status === 'followed' || res.status === 'unfollowed')) {
               const isFollowing = res.status === 'followed';
               followBtn.textContent = isFollowing ? 'Unfollow' : 'Follow';
-              followBtn.className = `btn btn-sm w-100 mt-3 tooltip-follow-btn fw-bold ${isFollowing ? 'btn-outline-light' : 'btn-danger'}`;
+              followBtn.className = `btn btn-sm w-100 mt-2 tooltip-follow-btn fw-bold ${isFollowing ? 'btn-outline-light' : 'btn-danger'}`;
                 
               for (let key in artistHoverCache) {
                 if (artistHoverCache[key].user_id == userId) {
                   artistHoverCache[key].is_following = isFollowing;
                   artistHoverCache[key].followers_count += isFollowing ? 1 : -1;
-                  const followersText = artistTooltip.querySelector('.text-info');
-                  if (followersText) {
-                    followersText.innerHTML = `<i class="bi bi-people-fill"></i> ${formatSongCount(artistHoverCache[key].followers_count)} followers`;
+                  
+                  // Target the specific tooltip card that contains this follow button
+                  const card = followBtn.closest('.artist-tooltip-card');
+                  if (card) {
+                    const followersText = card.querySelector('.text-info');
+                    if (followersText) {
+                      followersText.innerHTML = `<i class="bi bi-people-fill"></i> ${formatSongCount(artistHoverCache[key].followers_count)} followers`;
+                    }
                   }
                 }
               }
@@ -18481,11 +21525,11 @@ SOFTWARE.</div>
               }
             }
           } else {
-            const nameEl = artistTooltip.querySelector('.artist-tt-name');
-            if (nameEl) {
+            const clickArea = e.target.closest('.artist-tt-click');
+            if (clickArea) {
               artistTooltip.style.opacity = '0';
               artistTooltip.style.display = 'none';
-              loadView({ type: 'artist_songs', param: nameEl.textContent, sort: 'album_asc', filter_user_id: '', artist_name: '' });
+              loadView({ type: 'artist_songs', param: decodeURIComponent(clickArea.dataset.artist), sort: 'album_asc', filter_user_id: '', artist_name: '' });
             }
           }
         });
