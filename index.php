@@ -277,7 +277,13 @@ self.addEventListener('fetch', event => {
         }
         return response;
       }).catch(() => {
-        return caches.match(event.request, { ignoreSearch: false, ignoreVary: true });
+        if (event.request.method === 'GET') {
+          return caches.match(event.request, { ignoreSearch: false, ignoreVary: true });
+        }
+        return new Response('{"status":"error", "message":"Network error"}', {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' }
+        });
       })
     );
     return;
@@ -315,6 +321,18 @@ self.addEventListener('fetch', event => {
     })
   );
 });
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(windowClients => {
+      for (let client of windowClients) {
+        if (client.url && 'focus' in client) return client.focus();
+      }
+      if (clients.openWindow) return clients.openWindow('/');
+    })
+  );
+});
 SW;
     exit;
   }
@@ -345,7 +363,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '4.3');
+define('APP_VERSION', '4.4');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', 'admin');
@@ -1083,6 +1101,14 @@ function init_db($db) {
   $db->exec("CREATE INDEX IF NOT EXISTS mix_songs_mix_id_idx ON mix_songs(mix_id);");
   $db->exec("CREATE INDEX IF NOT EXISTS history_user_id_idx ON history(user_id);");
   $db->exec("CREATE INDEX IF NOT EXISTS play_counts_user_id_idx ON play_counts(user_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS notes_user_id_idx ON personal_notes(user_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS notes_updated_at_idx ON personal_notes(updated_at);");
+  $db->exec("CREATE INDEX IF NOT EXISTS tasks_user_id_idx ON tasks(user_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS tasks_updated_at_idx ON tasks(updated_at);");
+  
+  $db->exec("CREATE INDEX IF NOT EXISTS msg_sender_idx ON messages(sender_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS msg_receiver_idx ON messages(receiver_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS msg_group_idx ON messages(group_id);");
 
   $db->exec("
     CREATE TABLE IF NOT EXISTS listen_later (
@@ -1094,7 +1120,11 @@ function init_db($db) {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS note_categories (
-      id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL, 
+      id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS task_categories (
+      id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS tasks (
@@ -1130,6 +1160,12 @@ function init_db($db) {
       FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
     );
   ");
+
+  // Force column checks to prevent Chat SQL crashes
+  $msg_cols = $db->query("PRAGMA table_info(messages);")->fetchAll(PDO::FETCH_COLUMN, 1);
+  if (!in_array('is_edited', $msg_cols)) { $db->exec("ALTER TABLE messages ADD COLUMN is_edited INTEGER DEFAULT 0;"); }
+  if (!in_array('group_id', $msg_cols)) { $db->exec("ALTER TABLE messages ADD COLUMN group_id INTEGER DEFAULT NULL;"); }
+  if (!in_array('reply_to_id', $msg_cols)) { $db->exec("ALTER TABLE messages ADD COLUMN reply_to_id INTEGER DEFAULT NULL;"); }
 
   try { $db->exec("ALTER TABLE personal_notes ADD COLUMN category TEXT DEFAULT 'all';"); } catch(Exception $e) {}
   try { $db->exec("ALTER TABLE personal_notes ADD COLUMN starred INTEGER DEFAULT 0;"); } catch(Exception $e) {}
@@ -1351,7 +1387,32 @@ if (isset($_GET['action'])) {
 
     try { $db->exec("ALTER TABLE playlist_songs ADD COLUMN added_by INTEGER;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE messages ADD COLUMN is_edited INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE messages ADD COLUMN group_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE messages ADD COLUMN reply_to_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE community_posts ADD COLUMN parent_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE messages ADD COLUMN media_type TEXT DEFAULT 'image/webp';"); } catch(Exception $e) {}
+    
+    try {
+      $db->exec("
+        CREATE TABLE IF NOT EXISTS chat_groups (
+          id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT, owner_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, image BLOB,
+          FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS chat_group_members (
+          group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT DEFAULT 'member', joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (group_id, user_id), FOREIGN KEY (group_id) REFERENCES chat_groups(id) ON DELETE CASCADE, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS chat_group_invites (
+          token TEXT PRIMARY KEY, group_id INTEGER NOT NULL, expires_at DATETIME,
+          FOREIGN KEY (group_id) REFERENCES chat_groups(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS message_reactions (
+          user_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reaction TEXT NOT NULL,
+          PRIMARY KEY (user_id, message_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+      ");
+    } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE chat_groups ADD COLUMN image BLOB;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE playlists ADD COLUMN play_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
@@ -2660,7 +2721,12 @@ if (isset($_GET['action'])) {
 
     case 'get_note_categories':
       if (!$user_id) { send_json([]); }
-      $stmt = $db->prepare("SELECT id, name FROM note_categories WHERE user_id = ?");
+      $type = $_GET['filter'] ?? $_GET['type'] ?? 'note';
+      if ($type === 'task') {
+        $stmt = $db->prepare("SELECT id, name FROM task_categories WHERE user_id = ?");
+      } else {
+        $stmt = $db->prepare("SELECT id, name FROM note_categories WHERE user_id = ?");
+      }
       $stmt->execute([$user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -2670,13 +2736,15 @@ if (isset($_GET['action'])) {
       $data = json_decode(file_get_contents('php://input'), true);
       $cat_id = $data['id'] ?? null;
       $name = trim(htmlspecialchars($data['name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $type = $data['type'] ?? 'note';
+      $table = $type === 'task' ? 'task_categories' : 'note_categories';
       if ($cat_id) {
-        $stmt = $db->prepare("SELECT id FROM note_categories WHERE id = ? AND user_id = ?");
+        $stmt = $db->prepare("SELECT id FROM $table WHERE id = ? AND user_id = ?");
         $stmt->execute([$cat_id, $user_id]);
         if ($stmt->fetch()) {
-          $db->prepare("UPDATE note_categories SET name = ? WHERE id = ?")->execute([$name, $cat_id]);
+          $db->prepare("UPDATE $table SET name = ? WHERE id = ?")->execute([$name, $cat_id]);
         } else {
-          $db->prepare("INSERT INTO note_categories (id, user_id, name) VALUES (?, ?, ?)")->execute([$cat_id, $user_id, $name]);
+          $db->prepare("INSERT INTO $table (id, user_id, name) VALUES (?, ?, ?)")->execute([$cat_id, $user_id, $name]);
         }
       }
       send_json(['status' => 'success']);
@@ -2686,9 +2754,15 @@ if (isset($_GET['action'])) {
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
       $cat_id = $data['id'] ?? null;
+      $type = $data['type'] ?? 'note';
+      $table = $type === 'task' ? 'task_categories' : 'note_categories';
       if ($cat_id) {
-        $db->prepare("DELETE FROM note_categories WHERE id = ? AND user_id = ?")->execute([$cat_id, $user_id]);
-        $db->prepare("UPDATE personal_notes SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
+        $db->prepare("DELETE FROM $table WHERE id = ? AND user_id = ?")->execute([$cat_id, $user_id]);
+        if ($type === 'task') {
+            $db->prepare("UPDATE tasks SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
+        } else {
+            $db->prepare("UPDATE personal_notes SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
+        }
       }
       send_json(['status' => 'success']);
       break;
@@ -3038,32 +3112,210 @@ if (isset($_GET['action'])) {
 
     case 'get_inbox':
       if (!$user_id) { send_json([]); }
-      $stmt = $db->prepare("
-        SELECT m.id, m.content, CASE WHEN m.image IS NOT NULL THEN 1 ELSE 0 END as has_image, m.created_at, m.is_read, m.sender_id, m.receiver_id, u.artist as other_name, u.id as other_id, u.last_active
-        FROM messages m JOIN users u ON u.id = CASE WHEN m.sender_id = ? THEN m.receiver_id ELSE m.sender_id END
+      
+      try { $db->query("SELECT media_type FROM messages LIMIT 1"); } catch (Exception $e) { try { $db->exec("ALTER TABLE messages ADD COLUMN media_type TEXT DEFAULT 'image/webp'"); } catch(Exception $ex) {} }
+      
+      $inbox = [];
+      
+      // 1. Direct Messages (Optimized O(1) Aggregation)
+      $stmt_dms = $db->prepare("
+        SELECT 
+          m.id, m.content, m.image, m.created_at, m.is_read, m.sender_id, m.receiver_id, m.media_type,
+          u.artist as name, u.id as target_id, u.last_active,
+          (SELECT COUNT(*) FROM messages unread WHERE unread.group_id IS NULL AND unread.sender_id = u.id AND unread.receiver_id = ? AND unread.is_read = 0) as unread_count
+        FROM messages m
+        JOIN users u ON u.id = CASE WHEN m.sender_id = ? THEN m.receiver_id ELSE m.sender_id END
         WHERE m.id IN (
-          SELECT MAX(id) FROM messages WHERE sender_id = ? OR receiver_id = ? GROUP BY CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END
+          SELECT MAX(id) 
+          FROM messages 
+          WHERE group_id IS NULL AND (sender_id = ? OR receiver_id = ?) 
+          GROUP BY CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END
         )
-        ORDER BY m.created_at DESC
       ");
-      $stmt->execute([$user_id, $user_id, $user_id, $user_id]);
-      $inbox = $stmt->fetchAll();
-      // Add unread count
-      foreach($inbox as &$msg) {
-        $ur_stmt = $db->prepare("SELECT COUNT(*) FROM messages WHERE sender_id = ? AND receiver_id = ? AND is_read = 0");
-        $ur_stmt->execute([$msg['other_id'], $user_id]);
-        $msg['unread_count'] = $ur_stmt->fetchColumn();
+      $stmt_dms->execute([$user_id, $user_id, $user_id, $user_id, $user_id]);
+      
+      while ($msg = $stmt_dms->fetch()) {
+        $inbox[] = [
+          'id' => $msg['id'],
+          'content' => $msg['content'],
+          'has_image' => !empty($msg['image']) ? 1 : 0,
+          'media_type' => $msg['media_type'] ?? 'image/webp',
+          'created_at' => $msg['created_at'],
+          'is_read' => $msg['is_read'],
+          'sender_id' => $msg['sender_id'],
+          'receiver_id' => $msg['receiver_id'],
+          'name' => $msg['name'] ?: 'Unknown',
+          'target_id' => $msg['target_id'],
+          'last_active' => $msg['last_active'],
+          'chat_type' => 'dm',
+          'unread_count' => $msg['unread_count'],
+          'sender_name' => '',
+          'member_count' => 0
+        ];
       }
+      
+      // 2. Group Chats (Optimized O(1) Join with Member Count)
+      $stmt_groups = $db->prepare("
+        SELECT 
+          cg.id as target_id, cg.name,
+          m.id, m.content, m.image, m.created_at, m.sender_id, m.media_type,
+          u.artist as sender_name,
+          (SELECT COUNT(*) FROM chat_group_members WHERE group_id = cg.id) as member_count
+        FROM chat_groups cg
+        JOIN chat_group_members cgm ON cg.id = cgm.group_id
+        LEFT JOIN messages m ON m.id = (SELECT MAX(id) FROM messages WHERE group_id = cg.id)
+        LEFT JOIN users u ON m.sender_id = u.id
+        WHERE cgm.user_id = ?
+      ");
+      $stmt_groups->execute([$user_id]);
+      
+      while ($gmsg = $stmt_groups->fetch()) {
+        $inbox[] = [
+          'id' => $gmsg['id'] ?: 0,
+          'content' => $gmsg['content'],
+          'has_image' => !empty($gmsg['image']) ? 1 : 0,
+          'media_type' => $gmsg['media_type'] ?? 'image/webp',
+          'created_at' => $gmsg['created_at'],
+          'is_read' => 1,
+          'sender_id' => $gmsg['sender_id'] ?: 0,
+          'receiver_id' => 0,
+          'name' => $gmsg['name'],
+          'target_id' => $gmsg['target_id'],
+          'last_active' => null,
+          'chat_type' => 'group',
+          'unread_count' => 0,
+          'sender_name' => $gmsg['sender_name'] ?: '',
+          'member_count' => $gmsg['member_count']
+        ];
+      }
+      
+      usort($inbox, function($a, $b) {
+        $timeA = !empty($a['created_at']) ? strtotime($a['created_at']) : 0;
+        $timeB = !empty($b['created_at']) ? strtotime($b['created_at']) : 0;
+        return $timeB - $timeA;
+      });
+      
       send_json($inbox);
       break;
 
     case 'get_chat':
       if (!$user_id) { send_json([]); }
       $target_id = intval($_GET['target_id'] ?? 0);
-      $db->prepare("UPDATE messages SET is_read = 1 WHERE sender_id = ? AND receiver_id = ?")->execute([$target_id, $user_id]);
-      $stmt = $db->prepare("SELECT id, sender_id, content, CASE WHEN image IS NOT NULL THEN 1 ELSE 0 END as has_image, created_at, is_edited FROM messages WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?) ORDER BY created_at ASC");
-      $stmt->execute([$user_id, $target_id, $target_id, $user_id]);
-      send_json($stmt->fetchAll());
+      $type = $_GET['chat_type'] ?? 'dm';
+      
+      try { $db->query("SELECT media_type FROM messages LIMIT 1"); } catch (Exception $e) { try { $db->exec("ALTER TABLE messages ADD COLUMN media_type TEXT DEFAULT 'image/webp'"); } catch(Exception $ex) {} }
+      
+      $messages = [];
+      if ($type === 'group') {
+        $stmt_mem = $db->prepare("SELECT 1 FROM chat_group_members WHERE group_id = ? AND user_id = ?");
+        $stmt_mem->execute([$target_id, $user_id]);
+        if (!$stmt_mem->fetch() && !$is_super_admin) { http_response_code(403); send_json(['status' => 'error', 'message' => 'Not a member.']); }
+
+        $stmt = $db->prepare("
+          SELECT m.id, m.sender_id, u.artist as sender_name, m.content, m.image, m.created_at, m.is_edited, m.reply_to_id, m.media_type
+          FROM messages m 
+          LEFT JOIN users u ON m.sender_id = u.id 
+          WHERE m.group_id = ? 
+          ORDER BY m.created_at ASC
+        ");
+        $stmt->execute([$target_id]);
+        $messages = $stmt->fetchAll();
+      } else {
+        $db->prepare("UPDATE messages SET is_read = 1 WHERE sender_id = ? AND receiver_id = ?")->execute([$target_id, $user_id]);
+        $stmt = $db->prepare("
+          SELECT m.id, m.sender_id, u.artist as sender_name, m.content, m.image, m.created_at, m.is_edited, m.reply_to_id, m.media_type
+          FROM messages m 
+          LEFT JOIN users u ON m.sender_id = u.id 
+          WHERE m.group_id IS NULL AND ((m.sender_id = ? AND m.receiver_id = ?) OR (m.sender_id = ? AND m.receiver_id = ?)) 
+          ORDER BY m.created_at ASC
+        ");
+        $stmt->execute([$user_id, $target_id, $target_id, $user_id]);
+        $messages = $stmt->fetchAll();
+      }
+      
+      if (!empty($messages)) {
+        $stmt_reply = $db->prepare("SELECT m.content, u.artist as sender_name FROM messages m LEFT JOIN users u ON m.sender_id = u.id WHERE m.id = ?");
+        $stmt_react = $db->prepare("SELECT reaction, user_id FROM message_reactions WHERE message_id = ?");
+
+        foreach ($messages as &$msg) {
+          $msg['has_image'] = !empty($msg['image']) ? 1 : 0;
+          $msg['media_type'] = $msg['media_type'] ?? 'image/webp';
+          unset($msg['image']);
+
+          if (!empty($msg['reply_to_id'])) {
+            $stmt_reply->execute([$msg['reply_to_id']]);
+            $rep = $stmt_reply->fetch();
+            $msg['reply_content'] = $rep ? $rep['content'] : null;
+            $msg['reply_sender'] = $rep ? $rep['sender_name'] : null;
+          } else {
+            $msg['reply_content'] = null;
+            $msg['reply_sender'] = null;
+          }
+
+          $stmt_react->execute([$msg['id']]);
+          $msg['reactions'] = $stmt_react->fetchAll();
+        }
+        unset($msg);
+      }
+      
+      send_json($messages);
+      break;
+
+    case 'send_message':
+      if (!$user_id) { http_response_code(403); exit; }
+      $target_id = intval($_POST['target_id'] ?? 0);
+      $chat_type = $_POST['chat_type'] ?? 'dm';
+      $reply_to_id = !empty($_POST['reply_to_id']) ? intval($_POST['reply_to_id']) : null;
+      $content = trim(htmlspecialchars($_POST['content'] ?? '', ENT_QUOTES, 'UTF-8'));
+      
+      if (mb_strlen($content, 'UTF-8') > 50000) {
+        send_json(['status' => 'error', 'message' => 'Message exceeds 50,000 characters limit.']);
+      }
+      
+      if ($chat_type === 'dm') {
+        $stmt_block = $db->prepare("SELECT 1 FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)");
+        $stmt_block->execute([$user_id, $target_id, $target_id, $user_id]);
+        if ($stmt_block->fetch()) { send_json(['status' => 'error', 'message' => 'Cannot send message. A block is active.']); }
+      } else {
+        $stmt_mem = $db->prepare("SELECT 1 FROM chat_group_members WHERE group_id = ? AND user_id = ?");
+        $stmt_mem->execute([$target_id, $user_id]);
+        if (!$stmt_mem->fetch() && !$is_super_admin) { send_json(['status' => 'error', 'message' => 'You are not a member of this group.']); }
+      }
+      
+      $mediaData = null;
+      $mediaType = 'image/webp';
+      
+      if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
+        if ($_FILES['image']['size'] > 10 * 1024 * 1024) {
+          send_json(['status' => 'error', 'message' => 'File exceeds 10MB limit.']);
+        }
+        
+        $mime = strtolower($_FILES['image']['type'] ?? '');
+        if (empty($mime) && function_exists('mime_content_type')) {
+          $mime = strtolower(mime_content_type($_FILES['image']['tmp_name']));
+        }
+        
+        if (strpos($mime, 'image/') === 0) {
+          $mediaData = process_image_to_webp(file_get_contents($_FILES['image']['tmp_name']), 800, 80);
+          $mediaType = 'image/webp';
+        } elseif (strpos($mime, 'video/') === 0 || strpos($mime, 'audio/') === 0) {
+          $mediaData = file_get_contents($_FILES['image']['tmp_name']);
+          $mediaType = $mime;
+        } else {
+          send_json(['status' => 'error', 'message' => 'Invalid file format. Only Images, Audio, and Video are allowed.']);
+        }
+      }
+      
+      if ($content !== '' || $mediaData !== null) {
+        if ($chat_type === 'group') {
+          $db->prepare("INSERT INTO messages (sender_id, receiver_id, group_id, reply_to_id, content, image, media_type) VALUES (?, ?, ?, ?, ?, ?, ?)")->execute([$user_id, $user_id, $target_id, $reply_to_id, format_user_text($content), $mediaData, $mediaType]);
+        } else {
+          $db->prepare("INSERT INTO messages (sender_id, receiver_id, reply_to_id, content, image, media_type) VALUES (?, ?, ?, ?, ?, ?)")->execute([$user_id, $target_id, $reply_to_id, format_user_text($content), $mediaData, $mediaType]);
+        }
+        send_json(['status' => 'success']);
+      } else {
+        send_json(['status' => 'error', 'message' => 'Empty message.']);
+      }
       break;
 
     case 'edit_message':
@@ -3080,43 +3332,268 @@ if (isset($_GET['action'])) {
       send_json(['status' => 'success']);
       break;
 
-    case 'send_message':
+    case 'toggle_message_reaction':
       if (!$user_id) { http_response_code(403); exit; }
-      $target_id = intval($_POST['target_id'] ?? 0);
-      $content = trim(htmlspecialchars($_POST['content'] ?? '', ENT_QUOTES, 'UTF-8'));
-      
-      $stmt_block = $db->prepare("SELECT 1 FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)");
-      $stmt_block->execute([$user_id, $target_id, $target_id, $user_id]);
-      if ($stmt_block->fetch()) {
-         send_json(['status' => 'error', 'message' => 'Cannot send message. A block is active.']);
+      $data = json_decode(file_get_contents('php://input'), true);
+      $msg_id = intval($data['message_id']);
+      $reaction = $data['reaction'];
+      $existing = $db->prepare("SELECT reaction FROM message_reactions WHERE user_id = ? AND message_id = ?");
+      $existing->execute([$user_id, $msg_id]);
+      if ($existing->fetchColumn() === $reaction) {
+        $db->prepare("DELETE FROM message_reactions WHERE user_id = ? AND message_id = ?")->execute([$user_id, $msg_id]);
+      } else {
+        $db->prepare("REPLACE INTO message_reactions (user_id, message_id, reaction) VALUES (?, ?, ?)")->execute([$user_id, $msg_id, $reaction]);
       }
+      send_json(['status' => 'success']);
+      break;
+
+    case 'get_group_image':
+      header('Cache-Control: public, max-age=31536000, immutable');
+      $group_id = intval($_GET['id'] ?? 0);
+      $stmt = $db->prepare("SELECT image FROM chat_groups WHERE id = ?");
+      $stmt->execute([$group_id]);
+      $img = $stmt->fetchColumn();
+      if ($img) {
+        header('Content-Type: image/webp');
+        echo $img;
+        exit;
+      }
+      http_response_code(404); exit;
+
+    case 'create_chat_group':
+      if (!$user_id) { http_response_code(403); exit; }
+      $name = trim(htmlspecialchars($_POST['name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $desc = trim(htmlspecialchars($_POST['description'] ?? '', ENT_QUOTES, 'UTF-8'));
+      if (empty($name)) { send_json(['status' => 'error', 'message' => 'Name required']); }
       
       $webpData = null;
       if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
-        $allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-        if (in_array($_FILES['image']['type'], $allowed_types)) {
-          $webpData = process_image_to_webp(file_get_contents($_FILES['image']['tmp_name']), 800, 80);
+        $allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        if (in_array($_FILES['image']['type'], $allowed)) {
+          $webpData = process_image_to_webp(file_get_contents($_FILES['image']['tmp_name']), 300, 80);
+        }
+      }
+
+      $db->prepare("INSERT INTO chat_groups (name, description, owner_id, image) VALUES (?, ?, ?, ?)")->execute([$name, $desc, $user_id, $webpData]);
+      $group_id = $db->lastInsertId();
+      $db->prepare("INSERT INTO chat_group_members (group_id, user_id, role) VALUES (?, ?, 'owner')")->execute([$group_id, $user_id]);
+      send_json(['status' => 'success', 'group_id' => $group_id]);
+      break;
+      
+    case 'get_group_info':
+      if (!$user_id) { send_json([]); }
+      $group_id = intval($_GET['id'] ?? 0);
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * 25;
+
+      $stmt = $db->prepare("SELECT id, name, description, owner_id, created_at FROM chat_groups WHERE id = ?");
+      $stmt->execute([$group_id]);
+      $group = $stmt->fetch();
+      if ($group) {
+        $mem_stmt = $db->prepare("SELECT u.id, u.artist, m.role FROM chat_group_members m JOIN users u ON m.user_id = u.id WHERE m.group_id = ? ORDER BY m.role = 'owner' DESC, u.artist ASC LIMIT 25 OFFSET ?");
+        $mem_stmt->execute([$group_id, $offset]);
+        $group['members'] = $mem_stmt->fetchAll();
+         
+        $count_stmt = $db->prepare("SELECT COUNT(*) FROM chat_group_members WHERE group_id = ?");
+        $count_stmt->execute([$group_id]);
+        $group['total_members'] = $count_stmt->fetchColumn();
+         
+         send_json(['status' => 'success', 'group' => $group, 'page' => $page]);
+      } else {
+        send_json(['status' => 'error']);
+      }
+      break;
+      
+    case 'edit_chat_group':
+      if (!$user_id) { http_response_code(403); exit; }
+      $group_id = intval($_POST['id'] ?? 0);
+      $name = trim(htmlspecialchars($_POST['name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $desc = trim(htmlspecialchars($_POST['description'] ?? '', ENT_QUOTES, 'UTF-8'));
+      
+      $webpData = null;
+      if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
+        $allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        if (in_array($_FILES['image']['type'], $allowed)) {
+          $webpData = process_image_to_webp(file_get_contents($_FILES['image']['tmp_name']), 300, 80);
+        }
+        if ($is_super_admin) {
+          $db->prepare("UPDATE chat_groups SET name = ?, description = ?, image = ? WHERE id = ?")->execute([$name, $desc, $webpData, $group_id]);
+        } else {
+          $db->prepare("UPDATE chat_groups SET name = ?, description = ?, image = ? WHERE id = ? AND owner_id = ?")->execute([$name, $desc, $webpData, $group_id, $user_id]);
+        }
+      } else {
+        if ($is_super_admin) {
+          $db->prepare("UPDATE chat_groups SET name = ?, description = ? WHERE id = ?")->execute([$name, $desc, $group_id]);
+        } else {
+          $db->prepare("UPDATE chat_groups SET name = ?, description = ? WHERE id = ? AND owner_id = ?")->execute([$name, $desc, $group_id, $user_id]);
         }
       }
       
-      if ($content !== '' || $webpData !== null) {
-        $db->prepare("INSERT INTO messages (sender_id, receiver_id, content, image) VALUES (?, ?, ?, ?)")->execute([$user_id, $target_id, format_user_text($content), $webpData]);
-        send_json(['status' => 'success']);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'delete_chat_group':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      if ($is_super_admin) {
+        $db->prepare("DELETE FROM chat_groups WHERE id = ?")->execute([intval($data['id'])]);
       } else {
-        send_json(['status' => 'error', 'message' => 'Empty message.']);
+        $db->prepare("DELETE FROM chat_groups WHERE id = ? AND owner_id = ?")->execute([intval($data['id']), $user_id]);
       }
+      send_json(['status' => 'success']);
+      break;
+
+    case 'transfer_group_ownership':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $group_id = intval($data['group_id']);
+      $new_owner_id = intval($data['new_owner_id']);
+      
+      $stmt = $db->prepare("SELECT owner_id FROM chat_groups WHERE id = ?");
+      $stmt->execute([$group_id]);
+      $current_owner = $stmt->fetchColumn();
+      
+      if ($current_owner != $user_id && !$is_super_admin) {
+        send_json(['status' => 'error', 'message' => 'Only the current owner can transfer ownership.']);
+      }
+      
+      $db->beginTransaction();
+      try {
+        $db->prepare("UPDATE chat_groups SET owner_id = ? WHERE id = ?")->execute([$new_owner_id, $group_id]);
+        $db->prepare("UPDATE chat_group_members SET role = 'member' WHERE group_id = ? AND user_id = ?")->execute([$group_id, $current_owner]);
+        $db->prepare("UPDATE chat_group_members SET role = 'owner' WHERE group_id = ? AND user_id = ?")->execute([$group_id, $new_owner_id]);
+        $db->commit();
+        send_json(['status' => 'success', 'message' => 'Ownership transferred successfully.']);
+      } catch (Exception $e) {
+        $db->rollBack();
+        send_json(['status' => 'error', 'message' => 'Database error.']);
+      }
+      break;
+
+    case 'leave_chat_group':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $group_id = intval($data['id']);
+      
+      $stmt = $db->prepare("SELECT owner_id FROM chat_groups WHERE id = ?");
+      $stmt->execute([$group_id]);
+      $owner_id = $stmt->fetchColumn();
+      
+      if ($owner_id == $user_id) {
+        $stmt_rand = $db->prepare("SELECT user_id FROM chat_group_members WHERE group_id = ? AND user_id != ? ORDER BY RANDOM() LIMIT 1");
+        $stmt_rand->execute([$group_id, $user_id]);
+        $new_owner = $stmt_rand->fetchColumn();
+        
+        if ($new_owner) {
+          $db->prepare("UPDATE chat_groups SET owner_id = ? WHERE id = ?")->execute([$new_owner, $group_id]);
+          $db->prepare("UPDATE chat_group_members SET role = 'owner' WHERE group_id = ? AND user_id = ?")->execute([$group_id, $new_owner]);
+        } else {
+          $db->prepare("DELETE FROM chat_groups WHERE id = ?")->execute([$group_id]);
+          send_json(['status' => 'success', 'message' => 'Group deleted as it was empty.']);
+          exit;
+        }
+      }
+      
+      $db->prepare("DELETE FROM chat_group_members WHERE group_id = ? AND user_id = ?")->execute([$group_id, $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'generate_group_invite':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $group_id = intval($data['id']);
+      $expire_val = $data['expire'] ?? null;
+      $db->exec("DELETE FROM chat_group_invites WHERE expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP");
+      
+      $stmt_owner = $db->prepare("SELECT 1 FROM chat_groups WHERE id = ? AND owner_id = ?");
+      $stmt_owner->execute([$group_id, $user_id]);
+      if (!$stmt_owner->fetch() && !$is_super_admin) { send_json(['status' => 'error', 'message' => 'Only owners can invite.']); }
+      
+      $expires_at = null;
+      if ($expire_val && is_numeric($expire_val)) {
+        $expires_at = date('Y-m-d H:i:s', time() + ((int)$expire_val * 60));
+      }
+      $token = bin2hex(random_bytes(16));
+      $db->prepare("INSERT INTO chat_group_invites (token, group_id, expires_at) VALUES (?, ?, ?)")->execute([$token, $group_id, $expires_at]);
+      send_json(['status' => 'success', 'token' => $token]);
+      break;
+
+    case 'join_group':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $token = $data['token'] ?? '';
+      $stmt_inv = $db->prepare("SELECT group_id FROM chat_group_invites WHERE token = ? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)");
+      $stmt_inv->execute([$token]);
+      $inv_group_id = $stmt_inv->fetchColumn();
+      
+      if (!$inv_group_id) { send_json(['status' => 'error', 'message' => 'Invalid or expired invite link.']); }
+      
+      $db->prepare("INSERT OR IGNORE INTO chat_group_members (group_id, user_id) VALUES (?, ?)")->execute([$inv_group_id, $user_id]);
+      send_json(['status' => 'success', 'group_id' => $inv_group_id]);
       break;
 
     case 'get_message_image':
       header('Cache-Control: public, max-age=31536000, immutable');
       $msg_id = intval($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT image, sender_id, receiver_id FROM messages WHERE id = ?");
+      
+      try {
+        $stmt = $db->prepare("SELECT image, sender_id, receiver_id, media_type FROM messages WHERE id = ?");
+      } catch (Exception $e) {
+        $stmt = $db->prepare("SELECT image, sender_id, receiver_id, 'image/webp' as media_type FROM messages WHERE id = ?");
+      }
       $stmt->execute([$msg_id]);
       $msg = $stmt->fetch();
-      if ($msg && $msg['image'] && ($msg['sender_id'] == $user_id || $msg['receiver_id'] == $user_id || $is_super_admin)) {
-        header('Content-Type: image/webp');
-        echo $msg['image'];
-        exit;
+      
+      if ($msg && $msg['image']) {
+        $stmt_grp = $db->prepare("SELECT group_id FROM messages WHERE id = ?");
+        $stmt_grp->execute([$msg_id]);
+        $grp_id = $stmt_grp->fetchColumn();
+        
+        $has_access = false;
+        if ($grp_id) {
+          $stmt_mem = $db->prepare("SELECT 1 FROM chat_group_members WHERE group_id = ? AND user_id = ?");
+          $stmt_mem->execute([$grp_id, $user_id]);
+          if ($stmt_mem->fetch() || $is_super_admin) $has_access = true;
+        } else {
+          if ($msg['sender_id'] == $user_id || $msg['receiver_id'] == $user_id || $is_super_admin) $has_access = true;
+        }
+        
+        if ($has_access) {
+          $mime = $msg['media_type'] ?? 'image/webp';
+          header('Content-Type: ' . $mime);
+          
+          if (strpos($mime, 'video/') === 0 || strpos($mime, 'audio/') === 0) {
+            header('Accept-Ranges: bytes');
+            $filesize = strlen($msg['image']);
+            $start = 0;
+            $end = $filesize - 1;
+            $length = $filesize;
+
+            if (isset($_SERVER['HTTP_RANGE'])) {
+              $range = str_replace('bytes=', '', $_SERVER['HTTP_RANGE']);
+              $parts = explode('-', $range, 2);
+              $start = intval($parts[0]);
+              if (isset($parts[1]) && $parts[1] !== '') {
+                $end = intval($parts[1]);
+              }
+              if ($start > $end || $start >= $filesize) {
+                header('HTTP/1.1 416 Range Not Satisfiable');
+                header("Content-Range: bytes */$filesize");
+                exit;
+              }
+              $length = $end - $start + 1;
+              header('HTTP/1.1 206 Partial Content');
+              header("Content-Range: bytes $start-$end/$filesize");
+            } else {
+              header('HTTP/1.1 200 OK');
+            }
+            header('Content-Length: ' . $length);
+            echo substr($msg['image'], $start, $length);
+          } else {
+            echo $msg['image'];
+          }
+          exit;
+        }
       }
       http_response_code(404); exit;
 
@@ -3642,11 +4119,11 @@ if (isset($_GET['action'])) {
             $details['background_url'] = '?action=get_profile_background&id=' . $artist_user_id;
             $details['bio'] = $artist_user['bio'] ?? '';
             
-            $stmt_rec_art = $db->prepare("SELECT id, artist FROM users WHERE id != ? AND banned = 0 AND email NOT LIKE 'deleted_%' ORDER BY RANDOM() LIMIT 5");
+            $stmt_rec_art = $db->prepare("SELECT id, artist FROM users WHERE id != ? AND banned = 0 AND email NOT LIKE 'deleted_%' ORDER BY RANDOM() LIMIT 25");
             $stmt_rec_art->execute([$artist_user_id]);
             $details['recommended_artists'] = $stmt_rec_art->fetchAll();
-
-            $stmt_rec_songs = $db->prepare("SELECT id, title, artist, last_modified FROM music WHERE user_id = ? AND is_private = 0 ORDER BY (SELECT SUM(play_count) FROM play_counts WHERE song_id = music.id) DESC LIMIT 5");
+    
+            $stmt_rec_songs = $db->prepare("SELECT id, title, artist, last_modified FROM music WHERE user_id = ? AND is_private = 0 ORDER BY (SELECT SUM(play_count) FROM play_counts WHERE song_id = music.id) DESC LIMIT 25");
             $stmt_rec_songs->execute([$artist_user_id]);
             $details['recommended_songs'] = $stmt_rec_songs->fetchAll();
 
@@ -4934,6 +5411,65 @@ if (isset($_GET['action'])) {
       echo $final_rec_json ?: '{"shelves":[]}';
       exit;
 
+    case 'export_tasks':
+      if (!$user_id) { http_response_code(403); exit; }
+      $stmt = $db->prepare("SELECT title, items, category, starred, created_at, updated_at FROM tasks WHERE user_id = ? ORDER BY created_at ASC");
+      $stmt->execute([$user_id]);
+      $rows = $stmt->fetchAll();
+      if (empty($rows)) { http_response_code(404); exit; }
+
+      $export_data = [
+        'name' => 'Tasks',
+        'tasks' => $rows
+      ];
+      
+      header('Content-Type: application/json');
+      header('Content-Disposition: attachment; filename="tasks.json"');
+      echo json_encode($export_data, JSON_PRETTY_PRINT);
+      exit;
+
+    case 'import_tasks':
+      if (!$user_id) { http_response_code(403); exit; }
+      $import_data = json_decode(file_get_contents('php://input'), true);
+      if (json_last_error() !== JSON_ERROR_NONE || !isset($import_data['tasks']) || !is_array($import_data['tasks'])) {
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or malformed JSON payload.']);
+      }
+
+      $db->beginTransaction();
+      try {
+        $stmt_insert = $db->prepare("INSERT INTO tasks (user_id, title, items, category, starred, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        $count = 0;
+        foreach ($import_data['tasks'] as $task) {
+          $title = isset($task['title']) ? htmlspecialchars($task['title']) : 'Imported Task';
+          $items = isset($task['items']) ? $task['items'] : '[]'; 
+          $category = isset($task['category']) ? $task['category'] : 'all';
+          $starred = isset($task['starred']) ? (int)$task['starred'] : 0;
+          $created_at = isset($task['created_at']) ? $task['created_at'] : date('Y-m-d H:i:s');
+          $updated_at = isset($task['updated_at']) ? $task['updated_at'] : date('Y-m-d H:i:s');
+          
+          $stmt_insert->execute([$user_id, $title, $items, $category, $starred, $created_at, $updated_at]);
+          $count++;
+        }
+        $db->commit();
+        send_json(['status' => 'success', 'message' => "Successfully imported {$count} tasks."]);
+      } catch (Exception $e) {
+        $db->rollBack();
+        http_response_code(500); send_json(['status' => 'error', 'message' => 'Database error during import.']);
+      }
+      break;
+
+    case 'get_categories':
+      if (!$user_id) { send_json([]); }
+      $type = $_GET['filter'] ?? $_GET['type'] ?? 'note';
+      if ($type === 'task') {
+        $stmt = $db->prepare("SELECT id, name, 'task' as category_type, (SELECT COUNT(*) FROM tasks WHERE category = task_categories.id) as item_count FROM task_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
+      } else {
+        $stmt = $db->prepare("SELECT id, name, 'note' as category_type, (SELECT COUNT(*) FROM personal_notes WHERE category = note_categories.id) as item_count FROM note_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
+      }
+      $stmt->execute([$user_id]);
+      send_json($stmt->fetchAll());
+      break;
+
     case 'export_notes':
       if (!$user_id) { http_response_code(403); exit; }
       $stmt = $db->prepare("SELECT title, content, created_at, updated_at FROM personal_notes WHERE user_id = ? ORDER BY created_at ASC");
@@ -5723,7 +6259,7 @@ function perform_full_scan($db) {
         }
         .song-item.history-item { grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 80px 40px; }
       }
-      .song-item { cursor: pointer; border-radius: 0.5em; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+      .song-item { cursor: pointer; border-radius: 0.5em; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; content-visibility: auto; contain-intrinsic-size: auto 72px; }
       .offcanvas-body .nav-link { padding: 0.75rem 1.5rem; }
       .sidebar .logo { font-size: 1.5rem; font-weight: 700; padding: 0 1.5rem 1.5rem 1.5rem; }
       .sidebar .logo span { color: var(--ytm-accent); }
@@ -6183,12 +6719,13 @@ function perform_full_scan($db) {
       .card-star-btn.starred { color: #f5b041; }
       
       .editor-overlay {
-        position: fixed; top: 0; left: 0; width: 100%; height: 100dvh;
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
         background-color: var(--ytm-bg); z-index: 1050;
         display: flex; flex-direction: column;
-        transform: translateY(100%); transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+        transform: translateY(100%); transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.35s;
+        opacity: 0; pointer-events: none;
       }
-      .editor-overlay.active { transform: translateY(0); }
+      .editor-overlay.active { transform: translateY(0); opacity: 1; pointer-events: auto; }
       .editor-header {
         display: flex; align-items: center; justify-content: space-between;
         padding: 12px 24px; border-bottom: 1px solid var(--ytm-surface-2); background-color: var(--ytm-bg);
@@ -6231,7 +6768,8 @@ function perform_full_scan($db) {
       #editorMarkdownPreview table { width: 100%; margin-bottom: 1rem; color: var(--ytm-primary-text); border-collapse: collapse; }
       #editorMarkdownPreview table th, #editorMarkdownPreview table td { padding: 0.5rem; border: 1px solid #404040; }
       #editorMarkdownPreview table th { background-color: var(--ytm-surface-2); font-weight: 700; }
-      #editorMarkdownPreview img { max-width: 100%; border-radius: 8px; margin-bottom: 1rem; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+      #editorMarkdownPreview img, #editorMarkdownPreview video, #editorMarkdownPreview iframe { max-width: 100%; border-radius: 8px; margin-bottom: 1rem; box-shadow: 0 4px 12px rgba(0,0,0,0.5); display: block; }
+      #editorMarkdownPreview iframe { width: 100%; height: auto; aspect-ratio: 16/9; }
       .editor-toolbar { background-color: var(--ytm-surface-2); padding: 8px; border-radius: 8px; border: 1px solid #404040; margin-bottom: 12px; }
       .editor-toolbar .btn { color: var(--ytm-secondary-text); transition: all 0.2s; }
       .editor-toolbar .btn:hover { color: var(--ytm-primary-text); background-color: #404040; }
@@ -6247,7 +6785,7 @@ function perform_full_scan($db) {
       .task-card-item { display: flex; align-items: flex-start; gap: 8px; font-size: 0.9rem; color: var(--ytm-secondary-text); margin-bottom: 6px; }
       .task-card-item.completed { text-decoration: line-through; opacity: 0.5; }
       
-      .cat-manage-list { max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+      .cat-manage-list { display: flex; flex-direction: column; gap: 8px; padding-bottom: 1rem; }
       .cat-manage-item { display: flex; align-items: center; justify-content: space-between; background: var(--ytm-surface-2); padding: 12px 16px; border-radius: 8px; border: 1px solid #404040; }
       
       .note-icon-btn { background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.25rem; cursor: pointer; padding: 4px 8px; border-radius: 4px; transition: 0.2s; }
@@ -6421,6 +6959,24 @@ function perform_full_scan($db) {
       .phpmusic-profile-dropdown .dropdown-item:hover i {
         color: var(--ytm-primary-text);
       }
+      .modern-custom-scroll {
+        scrollbar-width: thin;
+        scrollbar-color: #555 transparent;
+      }
+      .modern-custom-scroll::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      .modern-custom-scroll::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .modern-custom-scroll::-webkit-scrollbar-thumb {
+        background-color: #555;
+        border-radius: 10px;
+      }
+      .modern-custom-scroll::-webkit-scrollbar-thumb:hover {
+        background-color: #777;
+      }
       .api-content pre {
         white-space: pre-wrap !important;
         word-break: break-word !important;
@@ -6447,6 +7003,86 @@ function perform_full_scan($db) {
         white-space: normal !important;
         min-width: 250px;
         line-height: 1.5;
+      }
+      
+      /* Full Page Chat Layout CSS (Modern & Responsive WhatsApp Style) */
+      .chat-wrapper {
+        height: 100% !important;
+        border-radius: 0;
+        overflow: hidden;
+        background: var(--ytm-bg);
+        border: none;
+        display: flex;
+        box-shadow: none;
+        width: 100% !important;
+        max-width: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+      body.player-visible .app-container {
+        height: calc(100vh - 90px);
+        height: calc(100dvh - 90px);
+      }
+      .chat-sidebar { width: 350px; background: var(--ytm-surface); border-right: 1px solid var(--ytm-border); display: flex; flex-direction: column; flex-shrink: 0; transition: transform 0.3s ease; }
+      .chat-main { flex-grow: 1; display: flex; flex-direction: column; background: var(--ytm-bg); position: relative; background-image: radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px); background-size: 20px 20px; }
+      .chat-header { height: 72px; min-height: 72px; max-height: 72px; flex-shrink: 0; box-sizing: border-box; padding: 0 1.5rem; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--ytm-border); background: var(--ytm-surface); z-index: 10; box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
+      .chat-messages { flex-grow: 1; overflow-y: auto; overflow-x: hidden; padding: 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; scrollbar-width: thin; scrollbar-color: #555 transparent; }
+      .chat-messages::-webkit-scrollbar { width: 6px; }
+      .chat-messages::-webkit-scrollbar-track { background: transparent; }
+      .chat-messages::-webkit-scrollbar-thumb { background-color: #555; border-radius: 10px; }
+      .chat-messages::-webkit-scrollbar-thumb:hover { background-color: #777; }
+      
+      .chat-input-area { padding: 12px 1.5rem; background: var(--ytm-surface); border-top: 1px solid var(--ytm-border); display: flex; flex-direction: column; z-index: 10; }
+      
+      .chat-bubble { max-width: 80%; padding: 8px 14px; border-radius: 12px; position: relative; font-size: 0.95rem; line-height: 1.4; overflow-wrap: break-word; word-break: break-word; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+      .chat-bubble img { max-width: 100%; height: auto; border-radius: 8px; margin-top: 4px; }
+      .chat-bubble.me { align-self: flex-end; background-color: var(--ytm-accent); color: #fff; border-top-right-radius: 4px; }
+      .chat-bubble.other { align-self: flex-start; background-color: var(--ytm-surface-2); color: var(--ytm-primary-text); border-top-left-radius: 4px; }
+      
+      .chat-reply-quote { background: rgba(0,0,0,0.2); border-left: 4px solid rgba(255,255,255,0.5); padding: 6px 10px; margin-bottom: 8px; border-radius: 8px; font-size: 0.85rem; cursor: pointer; overflow: hidden; }
+      .chat-bubble.me .chat-reply-quote { background: rgba(0,0,0,0.15); border-left-color: rgba(255,255,255,0.8); }
+      
+      /* FIXED: Toolbar inside the bubble to prevent off-screen overflow and ensure equal sides */
+      .chat-msg-actions { position: absolute; top: 4px; right: 4px; background: rgba(0,0,0,0.65); backdrop-filter: blur(4px); border-radius: 16px; padding: 2px 6px; opacity: 0; transition: opacity 0.2s; display: flex; gap: 4px; z-index: 5; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+      .chat-bubble:hover .chat-msg-actions { opacity: 1; }
+      .chat-action-btn { background: transparent; border: none; color: #fff; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 0.95rem; transition: transform 0.2s; }
+      .chat-action-btn:hover { transform: scale(1.15); color: var(--ytm-accent); }
+      
+      #chat-info-btn { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--ytm-border) !important; background-color: var(--ytm-surface-2) !important; color: var(--ytm-primary-text) !important; transition: all 0.2s ease-in-out !important; }
+      #chat-info-btn:hover { background-color: var(--ytm-accent) !important; border-color: var(--ytm-accent) !important; color: #ffffff !important; transform: scale(1.05); }
+      
+      .reaction-pill { display: inline-flex; align-items: center; gap: 4px; background: rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; margin-top: 4px; cursor: pointer; border: 1px solid transparent; box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+      .reaction-pill.reacted { border-color: var(--ytm-accent); background: rgba(255,0,0,0.15); }
+      .reaction-picker { position: absolute; bottom: 100%; right: 0; background: var(--ytm-surface-2); border: 1px solid #444; border-radius: 24px; padding: 6px 10px; display: none; gap: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.8); z-index: 20; white-space: nowrap; }
+      .chat-bubble.other .reaction-picker { right: auto; left: 0; }
+      .reactions-container { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; justify-content: flex-end; }
+      .chat-bubble.other .reactions-container { justify-content: flex-start; }
+      .reaction-picker.show { display: flex; }
+      .emoji-btn { background: none; border: none; font-size: 1.35rem; cursor: pointer; padding: 2px; transition: transform 0.2s; }
+      .emoji-btn:hover { transform: scale(1.3); }
+
+      .chat-input-wrapper { display: flex; align-items: center; gap: 8px; background: var(--ytm-surface-2); border-radius: 24px; padding: 4px 16px; border: 1px solid var(--ytm-border); box-shadow: inset 0 1px 3px rgba(0,0,0,0.2); }
+      .chat-input-wrapper textarea { border: none; background: transparent; color: #fff; flex-grow: 1; padding: 12px 0; outline: none; font-size: 0.95rem; resize: none; min-height: 44px; max-height: 120px; overflow-y: auto; line-height: 1.4; scrollbar-width: none; }
+      .chat-input-wrapper textarea::-webkit-scrollbar { display: none; }
+      .chat-input-wrapper textarea::placeholder { color: #888; }
+      
+      .reply-preview-bar { background: var(--ytm-surface-2); border-left: 4px solid var(--ytm-accent); padding: 8px 16px; display: none; justify-content: space-between; align-items: center; border-radius: 8px 8px 0 0; font-size: 0.85rem; margin-bottom: 4px; }
+      .reply-preview-bar.active { display: flex; }
+      
+      .chat-img-upload-preview { display: none; padding: 10px 16px; background: var(--ytm-surface-2); position: relative; border-radius: 8px 8px 0 0; margin-bottom: 4px; }
+      .chat-img-upload-preview.active { display: block; }
+      .chat-img-upload-preview img, .chat-img-upload-preview video { max-height: 150px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+      .chat-img-remove { position: absolute; top: 16px; right: 24px; background: rgba(0,0,0,0.8); color: #fff; border: none; border-radius: 50%; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 10; }
+
+      @media (max-width: 767.98px) {
+        .chat-wrapper { position: relative; height: 100% !important; border-radius: 0; border: none; overflow: hidden; display: flex; flex-direction: row; }
+        .chat-sidebar { width: 100%; position: absolute; height: 100%; top: 0; left: 0; z-index: 5; background: var(--ytm-surface); }
+        .chat-sidebar.hidden { transform: translateX(-100%); }
+        .chat-main { width: 100%; position: absolute; height: 100%; top: 0; left: 0; z-index: 10; background: var(--ytm-bg); transform: translateX(100%); transition: transform 0.3s ease; }
+        .chat-main.active { transform: translateX(0); }
+        .chat-header { padding: 0 1rem; }
+        .chat-input-area { padding: 10px 1rem; }
+        .chat-bubble { max-width: 90%; }
       }
     </style>
   </head>
@@ -6528,12 +7164,12 @@ function perform_full_scan($db) {
               <i class="bi bi-people"></i>
               <span>Community</span>
             </a>
-            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#inbox-modal">
+            <a href="#" class="nav-link" data-view="get_inbox">
               <i class="bi bi-chat-dots-fill"></i>
               <span>Messages</span>
               <span class="badge bg-danger rounded-pill d-none ms-auto inbox-badge">0</span>
             </a>
-            <a href="#notesSubmenu" data-bs-toggle="collapse" class="dl-independent collapsed" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;border-left:3px solid transparent;gap:1rem;text-decoration:none;padding:0.75rem 1.5rem;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'">
+            <a href="#notesSubmenu" data-bs-toggle="collapse" class="nav-link collapsed">
               <i class="bi bi-journal-text" style="font-size:1.25rem;width:24px;text-align:center;"></i>
               <span>Personal Notes</span>
               <i class="bi bi-chevron-down ms-auto" style="font-size: 0.8rem; transition: transform 0.2s;"></i>
@@ -6542,16 +7178,16 @@ function perform_full_scan($db) {
               <ul class="list-unstyled ms-4 mb-0 pb-2">
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 note-filter-link" data-view="get_notes" data-filter="all"><i class="bi bi-folder2"></i> All Notes</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 note-filter-link" data-view="get_notes" data-filter="starred"><i class="bi bi-star"></i> Starred</a></li>
-                <div id="note-categories-menu-list"></div>
-                <li><a href="#" class="nav-link py-2 ps-3 border-0" data-view="manage_note_categories"><i class="bi bi-tags"></i> Edit Categories</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="get_categories" data-cat-type="note"><i class="bi bi-grid-fill"></i> View All Note Categories</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="manage_note_categories" data-cat-type="note"><i class="bi bi-tags"></i> Edit Note Categories</a></li>
                 <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
-                <li><a href="#" class="dl-independent py-2 ps-3 border-0" id="import-txt-btn-menu" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;gap:1rem;text-decoration:none;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'"><i class="bi bi-file-earmark-text" style="font-size:1.25rem;width:24px;text-align:center;"></i> Upload TXT</a></li>
-                <li><a href="#" class="dl-independent py-2 ps-3 border-0" id="import-json-btn-menu" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;gap:1rem;text-decoration:none;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'"><i class="bi bi-filetype-json" style="font-size:1.25rem;width:24px;text-align:center;"></i> Import JSON</a></li>
-                <li><a href="#" class="dl-independent py-2 ps-3 border-0" id="export-json-notes-menu" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;gap:1rem;text-decoration:none;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'"><i class="bi bi-download" style="font-size:1.25rem;width:24px;text-align:center;"></i> Export JSON</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0" id="import-txt-btn-menu"><i class="bi bi-file-earmark-text"></i> Upload TXT</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0" id="import-json-btn-menu"><i class="bi bi-filetype-json"></i> Import JSON</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0" id="export-json-notes-menu"><i class="bi bi-download"></i> Export JSON</a></li>
               </ul>
-            </ul>
             </div>
-            <a href="#tasksSubmenu" data-bs-toggle="collapse" class="dl-independent collapsed" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;border-left:3px solid transparent;gap:1rem;text-decoration:none;padding:0.75rem 1.5rem;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'">
+            
+            <a href="#tasksSubmenu" data-bs-toggle="collapse" class="nav-link collapsed">
               <i class="bi bi-check2-square" style="font-size:1.25rem;width:24px;text-align:center;"></i>
               <span>Tasks</span>
               <i class="bi bi-chevron-down ms-auto" style="font-size: 0.8rem; transition: transform 0.2s;"></i>
@@ -6560,6 +7196,11 @@ function perform_full_scan($db) {
               <ul class="list-unstyled ms-4 mb-0 pb-2">
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 task-filter-link" data-view="get_tasks" data-filter="all"><i class="bi bi-ui-checks"></i> All Tasks</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 task-filter-link" data-view="get_tasks" data-filter="starred"><i class="bi bi-star"></i> Starred Tasks</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="get_categories" data-cat-type="task"><i class="bi bi-grid-fill"></i> View All Task Categories</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="manage_note_categories" data-cat-type="task"><i class="bi bi-tags"></i> Edit Task Categories</a></li>
+                <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0" id="import-json-btn-tasks"><i class="bi bi-filetype-json"></i> Import Tasks</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0" id="export-json-tasks-menu"><i class="bi bi-download"></i> Export Tasks</a></li>
               </ul>
             </div>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#calendar-modal">
@@ -6665,7 +7306,7 @@ function perform_full_scan($db) {
                 <span><i class="bi bi-bell-fill"></i> My Activity</span>
                 <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
               </a></li>
-              <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#inbox-modal">
+              <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="javascript:void(0);" onclick="document.querySelector('.nav-link[data-view=\'get_inbox\']').click();">
                 <span><i class="bi bi-chat-dots-fill"></i> Direct Messages</span>
                 <span class="badge bg-danger rounded-pill d-none inbox-badge">0</span>
               </a></li>
@@ -6710,7 +7351,7 @@ function perform_full_scan($db) {
                   <span><i class="bi bi-bell-fill"></i> My Activity</span>
                   <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
                 </a></li>
-                <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="#" data-bs-toggle="modal" data-bs-target="#inbox-modal">
+                <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="javascript:void(0);" onclick="document.querySelector('.nav-link[data-view=\'get_inbox\']').click();">
                   <span><i class="bi bi-chat-dots-fill"></i> Direct Messages</span>
                   <span class="badge bg-danger rounded-pill d-none inbox-badge">0</span>
                 </a></li>
@@ -7183,50 +7824,59 @@ function perform_full_scan($db) {
     </div>
 
     <div class="modal fade" id="shortcuts-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
-        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
-          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
-            <h5 class="modal-title text-white"><i class="bi bi-keyboard-fill text-info me-2"></i>Detailed Keyboard Shortcuts</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      <div class="modal-dialog modal-fullscreen">
+        <div class="modal-content" style="background-color: var(--ytm-bg); border: none;">
+          <div class="modal-header border-0 pb-2 px-4" style="border-bottom: 1px solid var(--ytm-surface-2) !important; background-color: var(--ytm-surface);">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-keyboard-fill text-danger me-2"></i>Keyboard Shortcuts</h5>
+            <button type="button" class="btn-close btn-close-white fs-5" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body text-light">
-            <p class="text-secondary mb-4 small">Master the music player instantly with these advanced, hands-free keyboard commands.</p>
+          <div class="modal-body text-light px-4 py-4 mx-auto">
             
             <div class="d-flex flex-column gap-3">
               
+              <!-- PLAYBACK CONTROLS -->
               <h5 class="text-white mt-2 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Playback Controls</h5>
               
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="70" height="36" viewBox="0 0 70 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="70" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SPACE</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Play / Pause</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The Spacebar serves as the universal standard command for controlling media playback across nearly every modern software application and streaming platform. By pressing the Spacebar while a track is loaded into the PHP Music player, you can instantly toggle the current playback state between active playing and paused. This operates flawlessly regardless of which tab, menu, or view you are currently browsing, provided you are not actively typing inside a text input field, search bar, or comment box. Using this critical shortcut drastically reduces your reliance on moving the mouse to the bottom player bar, offering a seamless, hands-free listening experience. Whether you need to abruptly pause the audio to answer a sudden phone call, speak to someone in the room, or quickly resume the beat once you are ready, the Spacebar delivers instantaneous zero-latency response directly to the internal Web Audio API engine. It is arguably the most essential and frequently used keyboard command for managing your continuous stream of music.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the Spacebar once to toggle the current audio state between active playing and paused.</li>
+                  <li><strong>Context & Requirements:</strong> Works globally across all views. Will not trigger if a text input field, search bar, comment box, or note editor is actively focused.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><path d="M14 12L22 18L14 24V12Z" fill="#ffffff"/></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Next Track</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the Right Arrow key triggers an immediate skip to the next track in your active playing queue. This powerful shortcut allows you to rapidly cycle through playlists, albums, or randomly shuffled recommendations without ever needing to physically click the 'Next' button on the user interface. It evaluates your current repeat and shuffle settings intelligently; if you have Repeat All enabled, it will seamlessly loop back to the beginning of the queue once it hits the end. By keeping your hands on the keyboard, you can effortlessly browse and curate your listening session, bypassing tracks that do not fit your current mood with a single keystroke. This functionality is heavily optimized for speed, instantly dumping the current audio buffer and requesting the subsequent stream from the server, ensuring minimal delay between track transitions. It is an indispensable tool for power users who want to aggressively filter through massive discovery mixes.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the Right Arrow key once to skip the current track.</li>
+                  <li><strong>Context & Requirements:</strong> Triggers the subsequent song in the active queue. Respects current repeat and shuffle parameters. If at the end of the queue, it automatically queries Autoplay/Radio tracks for continuous streaming.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><path d="M22 12L14 18L22 24V12Z" fill="#ffffff"/></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Previous Track</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The Left Arrow key is your dedicated command for navigating backward through your listening session. Its behavior is contextually aware of the current playback position. If the currently playing track has progressed beyond the first three seconds, pressing this key will instantly rewind the audio back to the absolute beginning of the song, allowing you to restart your favorite verses effortlessly. However, if the track is still within its opening three seconds, pressing the Left Arrow key will physically pull the previous song from the queue history and begin playing it immediately. This dual-function logic mirrors industry-standard professional audio players, giving you precise chronological control over your playlists. It is exceptionally useful when you accidentally skip a song you wanted to hear, or when a track transitions and you realize you weren't finished vibing with the prior masterpiece. The transition occurs instantly via the background audio engine.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the Left Arrow key once.</li>
+                  <li><strong>Context & Requirements:</strong> Rewinds to <code>0:00</code> if the current song has played for more than 3 seconds. Navigates to the previously played queue item if the song has played for less than 3 seconds.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
@@ -7235,10 +7885,13 @@ function perform_full_scan($db) {
                   </div>
                   <span class="fw-bold text-white fs-5">Seek Forward 10s</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">By holding the Shift key and pressing the Right Arrow, you initiate a precise chronological seek forward within the currently playing audio track. Specifically, this combination jumps the playback head exactly ten seconds into the future. This is a highly technical tool designed for bypassing long, drawn-out instrumental intros, skipping over podcast-style dialogue segments in mixes, or fast-forwarding to your absolute favorite chorus or drop in a song. Because it interacts directly with the HTML5 Media Element API, the time-shift is executed with frame-perfect accuracy and zero graphical stuttering. You can rapidly tap this key combination multiple times in succession to jump 20, 30, or 40 seconds ahead in a matter of milliseconds. This shortcut completely removes the friction of attempting to click a tiny position on the visual progress bar, granting you authoritative control over the exact timestamp of your listening experience.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Hold the Shift key down and press the Right Arrow key.</li>
+                  <li><strong>Context & Requirements:</strong> Instantly seeks the timeline forward by precisely 10 seconds. Processes the shift locally through the HTML5 audio element without reloading the streaming buffer.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
@@ -7247,202 +7900,402 @@ function perform_full_scan($db) {
                   </div>
                   <span class="fw-bold text-white fs-5">Seek Backward 10s</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Engaging the Shift key while pressing the Left Arrow instantly rewinds the active audio stream by exactly ten seconds. This is the ultimate tool for lyrical comprehension and musical appreciation. If an artist delivers a complex, rapid-fire rap verse, or if a guitarist executes a mesmerizing, lightning-fast solo that you couldn't quite process on the first listen, this shortcut allows you to instantly pull the track back to analyze it again. It provides a massive quality-of-life improvement over manually dragging the progress bar with your cursor, which is often inaccurate and frustrating. The internal engine dynamically recalculates the buffer position to ensure that the audio resumes smoothly without popping or artifacting. You can reliably spam this shortcut to scrub backwards through minutes of audio in seconds, giving you unparalleled precision to catch every single hidden detail, background vocal, or subtle instrumental layer buried in the mix.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Hold the Shift key down and press the Left Arrow key.</li>
+                  <li><strong>Context & Requirements:</strong> Rewinds the playback head by exactly 10 seconds. Enables fine-grained backtracking without requiring manual progress bar scrubbing.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="50" height="36" viewBox="0 0 50 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="50" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="14" font-weight="bold">1-9</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Jump 10% - 90%</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The number keys across the top of your keyboard (1 through 9) act as absolute percentage markers for the currently playing track. Pressing '1' instantly teleports the playback head to the 10% mark of the song's total duration, '5' jumps exactly to the halfway point (50%), and '9' skips straight to the final 10% of the track. This feature is heavily inspired by professional video and audio editing timelines, providing a mathematically perfect way to scrub through a file. If you are listening to a massive, hour-long DJ mix or a lengthy ambient compilation, using these number keys allows you to slice through the file in massive chunks to find the exact transition or track you are looking for. It mathematically calculates the total duration metadata and applies the percentage instantly. This is a highly advanced navigation method that significantly elevates your ability to browse long-form audio without touching the mouse.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Tap any number key from 1 to 9 on the keyboard or numpad.</li>
+                  <li><strong>Context & Requirements:</strong> Snaps playback position directly to the relative percentage of the song (e.g. <code>5</code> seeks to 50%). Ideal for rapid indexing of long mixes and podcasts.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">0</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Restart Song</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the '0' key acts as a hard reset for the current audio stream. Regardless of whether you are two seconds into the track or three milliseconds away from the final fade-out, striking this key instantly snaps the playback head back to the 0:00 timestamp. This is incredibly satisfying when you want to experience the atmospheric build-up of a song's intro all over again, or if you were momentarily distracted and want to give the track the undivided attention it deserves from the very first beat. It completely bypasses the nuanced logic of the Left Arrow key, functioning purely as an absolute zeroing mechanism. The underlying Web Audio context handles the buffer reset cleanly, ensuring that any active equalizers, spatial audio filters, or volume normalizations remain perfectly intact while the song begins its playback cycle anew. It is the absolute fastest way to start your listening experience fresh.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the '0' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Snaps the timeline tracker instantly to <code>0:00</code>. This is an absolute reset action and preserves your current loop, volume, and EQ settings.</li>
+                </ul>
               </div>
-
-              <!-- Audio & Modes -->
+    
+              <!-- AUDIO & MODES -->
               <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Audio & Modes</h5>
               
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><path d="M18 12L12 18H24L18 12Z" fill="#ffffff"/></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Volume Up</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The Up Arrow key serves as your primary hardware interface for increasing the master audio output of the PHP Music platform. Every single press of this key digitally increments the internal volume multiplier by exactly five percent (0.05). This grants you granular, step-by-step control over your listening levels without needing to squint at the tiny volume slider in the bottom corner of the interface. If a specific track was mastered too quietly, you can rapidly tap the Up Arrow to compensate in real-time. Because the volume logic is routed through a specialized Gain Node within the Web Audio API context, the increase is applied smoothly, preventing harsh digital clipping or sudden audio spikes that could damage your hearing or speaker equipment. It synchronizes visually with the on-screen volume slider, ensuring that the graphical interface accurately reflects the physical adjustments you are making through your keyboard.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the Up Arrow key once.</li>
+                  <li><strong>Context & Requirements:</strong> Increments the master output volume by exactly 5% per press. Smoothly communicates with the Web Audio Gain Node to prevent digital crackling.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><path d="M18 24L12 18H24L18 24Z" fill="#ffffff"/></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Volume Down</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the Down Arrow key systematically decreases the application's master volume by five percent (0.05) per keystroke. This is an absolutely vital shortcut for instantly managing sudden, overwhelmingly loud audio mastering differences between tracks, especially when listening through sensitive studio headphones. Instead of frantically searching for your mouse to drag a slider, you can swiftly tap this key to bring the audio down to a comfortable, ambient background level. The underlying math ensures that the volume scales linearly down to absolute zero, and it perfectly updates the graphical UI slider in the player bar to reflect the new state. If you need to quickly lower the volume to hear a notification from another application, converse with a coworker, or just reduce ear fatigue during a long listening session, the Down Arrow provides an immediate, reliable, and ergonomically superior solution compared to manual cursor adjustments.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the Down Arrow key once.</li>
+                  <li><strong>Context & Requirements:</strong> Decrements the master output volume by exactly 5% per press, scaling cleanly down to absolute zero. Updates the player's visual volume slider in real-time.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">M</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Mute / Unmute</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'M' key acts as a digital kill switch for the master audio output. Striking this key instantly mutes all sound emanating from the player without actually pausing the track's progression. Pressing it again will perfectly restore the volume to the exact level it was at before you muted it. This is a highly strategic shortcut for situations where you need absolute silence immediately—such as answering an unexpected phone call, joining a virtual meeting, or watching a video in another tab—but you don't necessarily want to interrupt the flow of a live, synchronized listening session or a live radio queue. The graphical user interface responds in real-time, changing the speaker icon in the bottom right corner to visually confirm the muted state. The memory retention system ensures that your carefully calibrated volume preferences are never lost when toggling this essential hardware shortcut.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'M' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Instantly toggles the master gain level between muted and its prior non-zero value. Audio tracks continue processing silently in the background while muted.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">S</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Toggle Shuffle</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'S' key is a powerful algorithmic trigger that instantly toggles the randomized shuffle state of your active playing queue. When activated, the system takes your currently loaded playlist, album, or history view and applies a cryptographic Fisher-Yates shuffle algorithm to completely randomize the upcoming track order. This mathematically guarantees that every single song will be played exactly once before the queue repeats, completely eliminating the repetitive boredom of listening to a playlist in the exact same chronological order every day. Pressing the 'S' key again disables the algorithm, instantly snapping the remaining unplayed tracks back into their original, sequential database order. A visual highlight on the shuffle icon in the main player bar confirms your selection. This hands-free shortcut is the ultimate tool for injecting spontaneity and unpredictability into your daily listening habits without disrupting your workflow.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'S' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Randomizes the upcoming track order using the Fisher-Yates array shuffle. Pressing again restores the original folder or view order.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">R</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Toggle Repeat Mode</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the 'R' key allows you to cycle seamlessly through the three fundamental repeat modes of the audio engine: Repeat Off, Repeat All, and Repeat One. The first press locks the queue into a continuous loop, ensuring that once your playlist or album reaches the final track, it will instantly wrap around and start from the beginning without any dead silence. Pressing the key a second time activates the 'Repeat One' protocol, which traps the currently playing song in an infinite loop—perfect for when you become completely obsessed with a new track and need to hear it dozens of times in a row to dissect the lyrics and production. A third press disengages the system, allowing playback to stop naturally at the end of the queue. The visual icon dynamically updates to reflect your current mode, giving you total authoritative control over the continuous flow of your music.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'R' key sequentially to cycle through repeat states.</li>
+                  <li><strong>Context & Requirements:</strong> Cycles through the three primary modes: Repeat Off → Repeat All (loops active playlist) → Repeat One (loops current song).</li>
+                </ul>
               </div>
-
-              <!-- Interface & Actions -->
+    
+              <!-- INTERFACE & ACTIONS -->
               <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Interface & Actions</h5>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+              
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">F</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Toggle Fullscreen Player</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'F' key is your gateway to an incredibly immersive, distraction-free visual experience. Striking this key instantly sends a request to the browser's Fullscreen API, stripping away all browser tabs, URL bars, and operating system taskbars to dedicate your entire monitor exclusively to the PHP Music interface. This is specifically designed for users who want to leave the application running on a secondary monitor, a living room television, or a party display. When combined with the dynamic blurred background generation and the audio-reactive visualizer canvas, the fullscreen mode transforms your screen into a mesmerizing, professional-grade media centerpiece. Pressing the 'F' key a second time (or hitting the Escape key) gracefully collapses the view back into standard windowed mode. It completely redefines the aesthetic atmosphere of your listening environment with a single, effortless keystroke.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'F' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Expands the interface to full screen via the browser Fullscreen API. Tap again or press `ESC` to return to windowed mode.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">P</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Picture-in-Picture (PiP)</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the 'P' key activates one of the most advanced technical features of the entire platform: the Document Picture-in-Picture (PiP) mode. This command detaches the core playback interface, including the high-resolution album art, synchronized lyrics, and media controls, into a compact, floating window that hovers persistently above all other applications on your computer. This means you can actively read along with the lyrics or skip tracks while browsing completely different websites, writing documents, or playing video games. The PiP window operates in its own isolated DOM context, maintaining a flawless, real-time connection to the main audio engine without consuming massive amounts of system memory. If your browser does not support Document PiP, the system intelligently falls back to standard Video PiP, rendering the album art and a dynamic audio visualizer onto a canvas element. It is the ultimate multitasking shortcut for power users.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'P' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Spawns a Document Picture-in-Picture floating interface (or Canvas Video fallback) on top of other desktop windows. Supports system-level playback commands.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">L</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Show Lyrics</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'L' key is a dedicated shortcut that instantly summons the synchronized lyrics modal over your current view. If the currently playing track contains deeply embedded LRC timestamp metadata, this interface will automatically display the lyrics scrolling in perfect, real-time synchronization with the artist's vocals. The active line will be beautifully highlighted and magnified, allowing you to easily read along or host impromptu karaoke sessions. Even if the track only contains standard, unsynchronized text lyrics, this shortcut provides immediate access to the full textual composition, completely bypassing the need to navigate through the context menu with your mouse. The modal heavily utilizes the dynamic blurred background system, creating a stunning visual contrast that makes the text highly readable. It is an essential tool for music enthusiasts who want to deeply understand the poetry and storytelling behind their favorite compositions at a moment's notice.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'L' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Summons the lyrics modal instantly. Tracks containing LRC structures will scroll automatically to match vocals.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">C</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Open Comments</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">By pressing the 'C' key, you instantly open the dynamic community interaction modal for the currently playing track. This specialized shortcut bridges the gap between solitary listening and global social engagement. Inside the modal, you can read the thoughts, analyses, and reactions of other users across the server, reply directly to their insights, or drop your own hot take on the production quality of the song. You can also view the aggregate Like and Dislike statistics to gauge the track's popularity. By assigning this function to a single keystroke, the application encourages spontaneous community interaction; if a specific beat drop or lyrical punchline amazes you, you can hit 'C', type your reaction, and return to your work in a matter of seconds. It transforms the music player from a passive audio stream into an active, collaborative social experience.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'C' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Opens the comment/reaction modal for the playing track. Requires active account authentication to write, reply, or rate comments.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">I</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">View Metadata (Info)</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'I' (Information) key is designed specifically for audiophiles, data hoarders, and library curators. Pressing this shortcut instantly generates a clean, readable overlay detailing the absolute core metadata of the currently playing track. You will be presented with the exact Title, Artist, Album, and Genre tags, alongside the release Year, the mathematically calculated Duration, and the precise Bitrate (e.g., 320 kbps) of the physical audio file. This is incredibly useful when you are listening to a massive, auto-generated discovery mix and suddenly encounter a track with pristine audio fidelity or an obscure genre classification that you want to investigate further. It completely removes the guesswork from understanding exactly what format and quality of audio your browser is currently decoding. For users who obsess over their library's organization and file integrity, this shortcut provides instant, transparent verification of the backend database.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'I' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Pulls exact information logs from SQLite regarding the active track, detailing codec bitrate, genre tags, and physical file path maps.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">E</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Per-Song Audio Settings</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the 'E' key launches the advanced Per-Song Audio Settings panel, which is an absolute game-changer for users with highly diverse music libraries. If you encounter a track that was mastered in the 1980s and sounds incredibly quiet, or an underground rap song with overpowering, muddy bass frequencies, you can use this shortcut to fix it permanently. The interface allows you to define a specific volume multiplier and a custom 5-band Equalizer curve that applies exclusively to that exact song. The database permanently memorizes these adjustments, ensuring that every time this specific track plays in the future—whether in a playlist or on shuffle—the custom audio filters will automatically engage to correct the mastering flaws. It is an unparalleled quality-of-life feature that prevents you from constantly adjusting your master volume or global EQ when transitioning between drastically different eras and genres of music.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'E' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Opens local equalizer configuration panel for this specific track. Any changes will write directly to SQLite and trigger automatically on future playback of this track.</li>
+                </ul>
               </div>
-
-              <!-- Library Management -->
+    
+              <!-- LIBRARY MANAGEMENT -->
               <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Library Management</h5>
               
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">H</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Toggle Favorite (Heart)</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'H' (Heart) key is the fastest and most ergonomic way to curate your personal music library. Whenever a song resonates with you, simply strike the 'H' key to instantly pin it to your global Favorites collection. The system communicates directly with the SQLite database via an asynchronous background API request, permanently saving the association without interrupting the audio playback or forcing the page to reload. A visual toast notification will appear confirming the addition, and the heart icon on the interface will illuminate. If you press 'H' while listening to a song that is already in your Favorites, it will intelligently remove it from the list. This hands-free bookmarking system is essential for rapidly building an elite collection of top-tier tracks while passively listening to complex "For You" algorithmic recommendations or expansive radio mixes.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'H' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Instantly toggles the active track's placement in your global Favorites playlist. Requires active login session.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">O</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Make Offline / Re-cache</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Pressing the 'O' key triggers the platform's incredibly sophisticated Progressive Web App (PWA) caching engine. When activated, the browser forcefully downloads the physical MP3/FLAC audio stream, the high-resolution cover art, and the core JSON metadata of the currently playing track, securely encrypting and storing them directly into your device's internal hard drive via the Cache Storage API. Once cached, the song will play instantaneously, with zero buffering, even if you completely disconnect from the internet or board a flight. If the song is already cached but the file has become corrupted due to your operating system aggressively clearing space, pressing 'O' will force the engine to securely re-download and repair the cache chunk. This shortcut gives you absolute, authoritative control over your bandwidth consumption and guarantees that your most critical tracks are fundamentally immune to network outages or server downtime.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'O' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Forces the PWA service worker to download and save the raw audio, metadata, and artwork files directly to your browser's persistent cache. Allows smooth offline playback.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">B</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Toggle Listen Later (Bookmark)</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'B' (Bookmark) key is a highly strategic organizational tool designed for heavy music discoverers. When you are listening to a new album or a shared community playlist and you hear a track that sounds promising but you don't have the time to fully appreciate it right now, pressing 'B' instantly sends it to your "Listen Later" queue. This acts as a temporary holding zone—a purgatory for tracks that require a second, more focused listening session before you decide whether to permanently Favorite them or discard them. It prevents your primary Favorites list from becoming cluttered with songs you are unsure about. The background API handles the insertion seamlessly, allowing you to rapidly tag dozens of tracks during a fast-paced browsing session without breaking your focus or navigating away from your current view.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'B' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Add or remove the active track from your bookmarks. Requires active account authentication.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">D</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Download MP3 File</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">By pressing the 'D' key, you bypass the internal browser player and directly request the raw, physical audio file from the backend server. The system immediately initiates a forced file download, transferring the pristine MP3, FLAC, or M4A file straight into your operating system's native 'Downloads' folder. The backend dynamically intercepts the request and renames the file using the clean, properly formatted "Title - Artist" metadata, ensuring your local hard drive remains perfectly organized instead of being cluttered with random alphanumeric database hashes. This shortcut is heavily utilized by DJs, local hoarders, and users who want to transfer their music to legacy hardware devices like iPods or USB drives for car stereos. It is the ultimate bridge between the cloud-based streaming architecture and pure, localized file ownership.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'D' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Triggers a direct download of the active audio file. Renames the downloaded file to matches standard `Title - Artist` structure.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">U</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Copy Share Link</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The 'U' key is a lightning-fast social utility that instantly generates a cryptographic URL hook for the currently playing track and copies it directly to your operating system's clipboard. This completely bypasses the need to open the share modal, click the copy button, and close the interface. As soon as you hit 'U', you can immediately paste the link into Discord, WhatsApp, Twitter, or an email to share the exact song with your friends. The link contains specialized routing parameters that will automatically boot up the PHP Music platform, query the database, and load the specific track on the recipient's screen. It is an incredibly efficient workflow optimization for users who heavily interact in communities, allowing you to instantly broadcast the music you are currently enjoying with absolute minimal physical effort.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'U' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Automatically copy a deep link to the active track to your system clipboard.</li>
+                </ul>
               </div>
-
-              <!-- System Actions -->
+    
+              <!-- NAVIGATION & QUICK ACCESS -->
+              <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Navigation & Quick Access</h5>
+              
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">Q</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Focus Up Next (Queue)</span>
+                </div>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'Q' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Summons the fullscreen player view and focuses the queue panel (Up Next) directly.</li>
+                </ul>
+              </div>
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">N</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Navigate to Notes</span>
+                </div>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'N' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Navigates you to the Notes board, ensuring you can quickly write down notes. Needs active login session.</li>
+                </ul>
+              </div>
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">K</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Navigate to Tasks</span>
+                </div>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'K' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Opens the Tasks view directly. Requires active login session.</li>
+                </ul>
+              </div>
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">V</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Global Audio Settings</span>
+                </div>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'V' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Summons the settings window directly to the global Audio Engine tab. Requires active login session.</li>
+                </ul>
+              </div>
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">W</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Toggle Wake Lock</span>
+                </div>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the 'W' key once.</li>
+                  <li><strong>Context & Requirements:</strong> Instantly toggles the screen awake state, preventing your device from dimming or sleeping while you are reading lyrics.</li>
+                </ul>
+              </div>
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
+                    <span class="text-secondary fw-bold">+</span>
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">P</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Open Playlists View</span>
+                </div>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Hold the Shift key down and press the 'P' key.</li>
+                  <li><strong>Context & Requirements:</strong> Jumps directly to your Playlists view. Requires active login session.</li>
+                </ul>
+              </div>
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
+                    <span class="text-secondary fw-bold">+</span>
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">U</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Launch Uploader</span>
+                </div>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Hold the Shift key down and press the 'U' key.</li>
+                  <li><strong>Context & Requirements:</strong> Summons the music uploader modal. Requires verification clearance.</li>
+                </ul>
+              </div>
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
+                    <span class="text-secondary fw-bold">+</span>
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">M</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Open Direct Messages</span>
+                </div>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Hold the Shift key down and press the 'M' key.</li>
+                  <li><strong>Context & Requirements:</strong> Summons the direct messages modal instantly. Requires active login session.</li>
+                </ul>
+              </div>
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
+                    <span class="text-secondary fw-bold">+</span>
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">F</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Open Favorites</span>
+                </div>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Hold the Shift key down and press the 'F' key.</li>
+                  <li><strong>Context & Requirements:</strong> Navigates you to your Favorites collection. Requires active login session.</li>
+                </ul>
+              </div>
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3 mb-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
+                    <span class="text-secondary fw-bold">+</span>
+                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="16" font-weight="bold">A</text></svg>
+                  </div>
+                  <span class="fw-bold text-white fs-5">Open Activity Feed</span>
+                </div>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Hold the Shift key down and press the 'A' key.</li>
+                  <li><strong>Context & Requirements:</strong> Summons the activity feed modal instantly. Requires active login session.</li>
+                </ul>
+              </div>
+    
+              <!-- SYSTEM ACTIONS -->
               <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">System Actions</h5>
               
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
@@ -7451,10 +8304,13 @@ function perform_full_scan($db) {
                   </div>
                   <span class="fw-bold text-white fs-5">Focus Search Bar</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Engaging the Shift key and pressing 'S' immediately teleports your cursor directly into the master search bar, regardless of how far down the page you have scrolled or which menu you are currently viewing. It automatically summons your keyboard focus, meaning you can begin typing your search query the exact millisecond you execute the shortcut. This completely eliminates the tedious necessity of grabbing your mouse, scrolling all the way back to the top of the interface, and physically clicking inside the input box. Because the search engine features ultra-fast, live-updating dropdown results, this shortcut allows you to dynamically pivot from listening to a track to searching for a completely different artist or album in a matter of seconds. It is a fundamental navigation tool for power users with massive libraries.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Hold the Shift key down and press the 'S' key.</li>
+                  <li><strong>Context & Requirements:</strong> Instantly focuses the navigation search bar, allowing you to search without using the mouse.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="12" font-weight="bold">SHIFT</text></svg>
@@ -7463,21 +8319,27 @@ function perform_full_scan($db) {
                   </div>
                   <span class="fw-bold text-white fs-5">Clear Listening History</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">Holding Shift and pressing 'C' serves as a rapid execution trigger for wiping your personalized listening history. If you are currently inside the dedicated "Playback History" tab, this shortcut instantly simulates a click on the "Clear History" button. You will be prompted with a secure confirmation dialog to ensure you don't accidentally execute the wipe. Once confirmed, the system communicates with the SQLite database to permanently incinerate your chronological playback logs and wipe your analytical play count arrays, effectively resetting your algorithmic recommendations back to zero. This is exceptionally useful if you accidentally left the player running overnight on a genre you dislike, or if you simply want to aggressively purge your profile statistics to rebuild your "For You" algorithms from scratch with entirely new musical tastes.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Hold the Shift key down and press the 'C' key.</li>
+                  <li><strong>Context & Requirements:</strong> Only works while viewing the Playback History tab. Opens a system confirmation dialog before clearing SQLite statistics.</li>
+                </ul>
               </div>
-
-              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+    
+              <div class="d-flex flex-column p-3 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3 mb-2">
                   <div class="d-flex align-items-center gap-2">
                     <svg width="60" height="36" viewBox="0 0 60 36" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="36" rx="6" fill="#282828" stroke="#555555" stroke-width="2"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="14" font-weight="bold">ESC</text></svg>
                   </div>
                   <span class="fw-bold text-white fs-5">Close Modals / Context Menu</span>
                 </div>
-                <p class="text-secondary mb-0" style="font-size: 0.9rem; line-height: 1.6;">The Escape key serves as the ultimate, universal panic button and interface reset tool. Striking this key instantly obliterates any active overlay, context menu, modal window, or full-screen view currently obstructing the main application interface. Whether you are deeply buried inside the metadata editor, browsing the synchronized lyrics panel, reading community comments, managing a collaborative playlist, or trapped in the immersive Fullscreen visualizer, hitting Escape guarantees an immediate return to the core browsing experience. It forcefully unbinds focus states, hides translucent backdrops, and restores scrolling capabilities to the main document body. This hardware standard provides a psychological safety net, ensuring that you can rapidly back out of complex menus without needing to hunt down tiny, microscopic "X" buttons with your mouse cursor.</p>
+                <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
+                  <li><strong>Trigger Instructions:</strong> Press the Escape key.</li>
+                  <li><strong>Context & Requirements:</strong> Closes any active modals, dropdowns, and context menu layers. Focuses the main content window.</li>
+                </ul>
               </div>
-
+    
             </div>
-
+    
           </div>
         </div>
       </div>
@@ -7809,7 +8671,7 @@ function perform_full_scan($db) {
           <input type="hidden" id="editorNoteType" value="note">
           <input type="text" class="editor-title" id="editorTitle" placeholder="Note Title" />
           <div class="d-flex align-items-center gap-3 text-secondary small">
-            <span id="editorDate"></span>
+            <span id="editorDate"></span><span id="noteSaveStatus" class="ms-1 fw-bold text-info"></span>
             <div style="width:1px;height:14px;background:#404040;"></div>
             <i class="bi bi-folder2"></i>
             <select id="editorCategorySelect" style="background: transparent; color: var(--ytm-primary-text); border: none; outline: none; cursor: pointer;">
@@ -7837,6 +8699,7 @@ function perform_full_scan($db) {
           <div class="vr bg-secondary mx-1 opacity-50"></div>
           <button class="btn btn-sm btn-outline-secondary border-0" data-md="link" title="Link"><i class="bi bi-link-45deg"></i></button>
           <button class="btn btn-sm btn-outline-secondary border-0" data-md="image" title="Image URL & Resize"><i class="bi bi-image"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="video" title="Video / YouTube URL"><i class="bi bi-camera-video"></i></button>
         </div>
         <textarea class="editor-content" id="editorContent" placeholder="Start typing here... (Markdown & Task-lists supported)"></textarea>
         <div class="editor-content d-none" id="editorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
@@ -7870,7 +8733,7 @@ function perform_full_scan($db) {
           <input type="hidden" id="taskEditorId">
           <input type="text" class="editor-title" id="taskEditorTitle" placeholder="Task List Title" />
           <div class="d-flex align-items-center gap-3 text-secondary small">
-            <span id="taskEditorDate"></span>
+            <span id="taskEditorDate"></span><span id="taskSaveStatus" class="ms-1 fw-bold text-info"></span>
             <div style="width:1px;height:14px;background:#404040;"></div>
             <i class="bi bi-folder2"></i>
             <select id="taskEditorCategorySelect" style="background: transparent; color: var(--ytm-primary-text); border: none; outline: none; cursor: pointer;">
@@ -7897,6 +8760,7 @@ function perform_full_scan($db) {
 
     <input type="file" id="fileImportTxt" accept=".txt" multiple style="display: none;" />
     <input type="file" id="fileImportJson" accept=".json" style="display: none;" />
+    <input type="file" id="fileImportTasks" accept=".json" style="display: none;" />
 
     <div class="modal fade" id="bbcode-info-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
@@ -7919,6 +8783,10 @@ function perform_full_scan($db) {
               <li class="list-group-item bg-dark text-white border-secondary">
                 <strong>Mentions:</strong><br>
                 <span class="text-secondary small">Use <code>@Username</code> (without spaces) to link directly to a user's profile.</span>
+              </li>
+              <li class="list-group-item bg-dark text-white border-secondary">
+                <strong>Video Embeds:</strong><br>
+                <span class="text-secondary small">Use <code>[video] youtube_or_mp4_link [/video]</code> to securely embed playable videos.</span>
               </li>
             </ul>
           </div>
@@ -8036,6 +8904,11 @@ function perform_full_scan($db) {
                     <td><strong>Resize Image</strong></td>
                     <td><code>&lt;img src="url" width="50%" height="auto"&gt;</code></td>
                     <td><i class="bi bi-image"></i> Resized Image</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Video / YouTube</strong></td>
+                    <td><code>&lt;video src="..."&gt;</code> or <code>&lt;iframe&gt;</code></td>
+                    <td><i class="bi bi-camera-video"></i> Embedded Video</td>
                   </tr>
                   <tr>
                     <td><strong>Horizontal Rule</strong></td>
@@ -8722,6 +9595,12 @@ function perform_full_scan($db) {
               <!-- Account Tab -->
               <div class="tab-pane fade phpmusic-settings-pane" id="settings-account" role="tabpanel">
                 <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-bell-fill text-warning"></i> Notifications</h6>
+                  <p class="text-secondary small mb-3">Enable OS-level push notifications to receive alerts for new messages and activity even when the app is minimized.</p>
+                  <button type="button" class="btn btn-outline-light w-100 fw-bold" id="enable-os-notif-btn"><i class="bi bi-app-indicator me-2"></i>Enable Push Notifications</button>
+                </div>
+                
+                <div class="phpmusic-settings-section">
                   <h6 class="phpmusic-settings-section-title"><i class="bi bi-key text-white"></i> Security</h6>
                   <form id="change-password-form">
                     <div class="mb-3">
@@ -8746,61 +9625,78 @@ function perform_full_scan($db) {
       </div>
     </div>
 
-    <div class="modal fade" id="inbox-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
-        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; height: 85vh;">
-          <div class="modal-header border-secondary pb-2">
-            <h5 class="modal-title text-white"><i class="bi bi-envelope-paper-heart-fill text-danger me-2"></i>Direct Messages</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body p-0 position-relative">
-            <div class="p-3 border-bottom border-secondary position-relative">
-              <input type="text" id="inbox-search-input" class="form-control bg-dark text-white border-secondary" placeholder="Search Artist Name...">
-              <div id="inbox-search-dropdown" class="search-dropdown d-none w-100" style="top: 100%; position: absolute; z-index: 2000; background-color: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 0 0 8px 8px; max-height: 250px; overflow-y: auto; left: 0; width: calc(100% - 2rem) !important; margin: 0 1rem; box-shadow: 0 8px 24px rgba(0,0,0,0.8);"></div>
-            </div>
-            <div class="list-group list-group-flush bg-transparent" id="inbox-list"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="modal fade" id="chat-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
-        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; height: 80vh;">
-          <div class="modal-header border-secondary pb-2">
-            <h5 class="modal-title text-white fw-bold d-flex align-items-center gap-2" id="chat-modal-title"></h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body d-flex flex-column gap-3 p-3 overflow-auto" id="chat-messages-list" style="background-color: #000;">
-          </div>
-          <div class="modal-footer border-secondary p-2">
-            <form id="chat-form" class="w-100 d-flex gap-2">
-              <input type="hidden" id="chat-target-id">
-              <label class="btn btn-outline-secondary mb-0 d-flex align-items-center justify-content-center" style="cursor: pointer;">
-                 <i class="bi bi-image"></i>
-                 <input type="file" id="chat-image-input" accept="image/*" class="d-none">
-              </label>
-              <input type="text" id="chat-input" class="form-control bg-dark text-white border-secondary" placeholder="Type a message..." autocomplete="off">
-              <button type="submit" class="btn btn-danger"><i class="bi bi-send"></i></button>
-            </form>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="modal fade" id="edit-message-modal" tabindex="-1">
+    <div class="modal fade" id="group-manage-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content" style="background-color: var(--ytm-surface);">
-          <div class="modal-header border-0">
-            <h5 class="modal-title text-white">Edit Message</h5>
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2 border-bottom border-secondary">
+            <h5 class="modal-title text-white" id="group-manage-title"><i class="bi bi-people-fill text-info me-2"></i>Create Group Chat</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body">
-            <form id="edit-message-form">
-              <input type="hidden" id="edit-message-id">
-              <input type="text" id="edit-message-input" class="form-control bg-dark text-white border-secondary mb-3" maxlength="2000" required>
-              <button type="submit" class="btn btn-danger w-100">Save Changes</button>
+          <div class="modal-body p-4">
+            <form id="group-manage-form">
+              <input type="hidden" id="group-manage-id">
+              <div class="mb-4 text-center d-flex flex-column align-items-center">
+                <div style="width: 130px; height: 130px; margin: 0 auto;" class="mb-3 position-relative">
+                  <img id="group-manage-image-preview" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="rounded-circle border border-secondary shadow-lg" style="width: 100%; height: 100%; object-fit: cover; display: none; margin: 0 auto;">
+                </div>
+                <label class="form-label text-secondary small fw-bold text-center w-100 mb-2">UPLOAD GROUP IMAGE</label>
+                <input type="file" id="group-manage-image" class="form-control bg-dark text-white border-secondary mb-3 w-100" accept="image/png, image/jpeg, image/gif, image/webp">
+                <label class="form-label text-secondary small fw-bold text-center w-100 mb-2">OR CHOOSE PRESET</label>
+                <div class="d-flex align-items-center justify-content-center gap-2 overflow-auto w-100 pb-2" id="group-preset-avatar-container" style="scrollbar-width: thin;"></div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label text-secondary small fw-bold">GROUP NAME</label>
+                <input type="text" id="group-manage-name" class="form-control bg-dark text-white border-secondary" required maxlength="50">
+              </div>
+              <div class="mb-4">
+                <label class="form-label text-secondary small fw-bold">DESCRIPTION</label>
+                <textarea id="group-manage-desc" class="form-control bg-dark text-white border-secondary" rows="3" maxlength="200"></textarea>
+              </div>
+              <button type="submit" class="btn btn-info text-dark fw-bold w-100" id="group-manage-submit">Create Group</button>
             </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="group-info-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2 border-bottom border-secondary">
+            <h5 class="modal-title text-white">Group Info</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4">
+            <div class="text-center mb-4">
+              <div class="rounded-circle bg-dark d-flex align-items-center justify-content-center mx-auto mb-3 border border-secondary shadow-lg position-relative" style="width: 100px; height: 100px; overflow: hidden;" id="group-info-img-container">
+                <i class="bi bi-people-fill text-secondary" style="font-size: 3rem;"></i>
+              </div>
+              <h4 class="text-white fw-bold mb-1" id="group-info-name"></h4>
+              <p class="text-secondary small mb-3" id="group-info-desc"></p>
+            </div>
+
+            <div id="group-owner-controls" class="d-none mb-4 p-3 rounded bg-dark border border-secondary">
+              <h6 class="text-white small fw-bold mb-2">OWNER CONTROLS</h6>
+              <div class="d-flex gap-2 mb-2">
+                <button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold" id="group-btn-edit"><i class="bi bi-pencil-square"></i> Edit Group & Picture</button>
+                <button class="btn btn-sm btn-outline-danger flex-grow-1 fw-bold" id="group-btn-delete"><i class="bi bi-trash"></i> Delete</button>
+              </div>
+              <hr class="border-secondary my-2">
+              <label class="form-label text-secondary small mb-1">Generate Invite Link</label>
+              <div class="input-group input-group-sm mb-2">
+                <select id="group-invite-expire" class="form-select bg-black text-white border-secondary" style="max-width: 120px;">
+                  <option value="1440">1 Day</option>
+                  <option value="10080">1 Week</option>
+                  <option value="forever">Forever</option>
+                </select>
+                <button class="btn btn-info text-dark fw-bold" id="group-btn-invite"><i class="bi bi-link-45deg"></i> Copy Link</button>
+              </div>
+            </div>
+
+            <h6 class="text-white small fw-bold mb-2 text-uppercase">Members (<span id="group-info-count">0</span>)</h6>
+            <div class="list-group list-group-flush bg-transparent" id="group-info-members"></div>
+            
+            <button class="btn btn-outline-danger w-100 mt-4 fw-bold" id="group-btn-leave"><i class="bi bi-box-arrow-left"></i> Leave Group</button>
           </div>
         </div>
       </div>
@@ -10074,8 +10970,8 @@ curl_close($ch);
             ::-webkit-scrollbar-thumb:hover { background: #5e5e5e; }
             .ytm-header { position: fixed; top: 0; left: 0; right: 0; height: 72px; background-color: var(--ytm-surface); border-bottom: 1px solid var(--ytm-border); z-index: 1100; }
             @media (min-width: 769px) { .ytm-header { display: none !important; } }
-            .app-container { display: flex; min-height: calc(100dvh - 72px); }
-            .sidebar { width: var(--sidebar-width); background-color: var(--ytm-surface); border-right: 1px solid var(--ytm-border); position: fixed; top: 0; bottom: 0; left: 0; height: 100dvh; padding: 1.25rem 1rem; display: flex; flex-direction: column; z-index: 1200; transition: transform 0.3s ease, padding 0.3s ease; }
+            .app-container { display: flex; min-height: calc(100vh - 72px); min-height: calc(100dvh - 72px); }
+            .sidebar { width: var(--sidebar-width); background-color: var(--ytm-surface); border-right: 1px solid var(--ytm-border); position: fixed; top: 0; bottom: 0; left: 0; height: 100vh; height: 100dvh; padding: 1.25rem 1rem; display: flex; flex-direction: column; z-index: 1200; transition: transform 0.3s ease, padding 0.3s ease; }
             .form-control, .form-select { background-color: #212121; border: 1px solid var(--ytm-border); color: var(--ytm-primary-text); border-radius: 8px; }
             .form-control:focus, .form-select:focus { background-color: #212121; border-color: #555; color: var(--ytm-primary-text); box-shadow: none; }
             .songs-header { display: grid; grid-template-columns: 48px 4fr 3fr 80px; gap: 1rem; padding: 0.75rem 1rem; color: var(--ytm-secondary-text); font-size: 0.85rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -10622,6 +11518,11 @@ curl_close($ch);
               } else {
                 songsContainer.insertAdjacentHTML('beforeend', html);
               }
+              
+              songsContainer.querySelectorAll('.song-item:not(.v-obs)').forEach(el => {
+                el.classList.add('v-obs');
+                virtualObserver.observe(el);
+              });
             }
 
             songsContainer.addEventListener('click', (e) => {
@@ -11410,276 +12311,718 @@ SOFTWARE.</div>
             });
           }
 
-          const inboxModalEl = document.getElementById('inbox-modal');
-          const chatModalEl = document.getElementById('chat-modal');
-          const chatForm = document.getElementById('chat-form');
-          
-          let chatPollingInterval = null;
-
-          const getPreviewText = (htmlStr) => {
+          // --- FULL PAGE CHAT APP LOGIC ---
+          window.getPreviewText = (htmlStr) => {
             if (!htmlStr) return '';
             const tmp = document.createElement('div');
             tmp.innerHTML = htmlStr;
             return tmp.textContent || tmp.innerText || '';
           };
 
-          const loadInbox = async () => {
-            const listEl = document.getElementById('inbox-list');
-            listEl.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>';
-            const inbox = await fetchData('?action=get_inbox');
-            if (inbox && inbox.length > 0) {
-              listEl.innerHTML = inbox.map(m => {
-                const previewText = m.has_image ? 'Photo' : getPreviewText(m.content);
-                const isMe = m.sender_id == currentUser.id;
-                
-                let readStatusHtml = '';
-                if (isMe) {
-                  readStatusHtml = `<i class="bi bi-check2-all ms-1 ${m.is_read ? 'text-info' : 'text-secondary'}" title="${m.is_read ? 'Read' : 'Delivered'}"></i>`;
-                }
+          if (!window.chatAudioObj) {
+            window.chatAudioObj = new Audio();
+            window.chatAudioActiveMsgId = null;
 
-                let activeStatusHtml = '';
-                if (m.last_active) {
-                  let isoTime = m.last_active;
-                  if (!isoTime.endsWith('Z')) isoTime += 'Z'; 
-                  const lastActiveDate = new Date(isoTime);
-                  const minsDiff = Math.floor((new Date() - lastActiveDate) / 60000);
-                  if (minsDiff < 5) {
-                    activeStatusHtml = `<span class="position-absolute bottom-0 end-0 p-1 bg-success border border-dark rounded-circle" title="Active now"></span>`;
-                  } else {
-                    activeStatusHtml = `<span class="position-absolute bottom-0 end-0 p-1 bg-secondary border border-dark rounded-circle" title="Active ${timeAgo(m.last_active)}"></span>`;
+            window.chatAudioObj.addEventListener('timeupdate', () => {
+              if (window.chatAudioActiveMsgId && isFinite(window.chatAudioObj.duration)) {
+                const playerEl = document.querySelector(`.chat-audio-player[data-msg-id="${window.chatAudioActiveMsgId}"]`);
+                if (playerEl) {
+                  const pct = (window.chatAudioObj.currentTime / window.chatAudioObj.duration) * 100;
+                  const track = playerEl.querySelector('.chat-audio-progress');
+                  const timeDisplay = playerEl.querySelector('.chat-audio-time');
+                  const icon = playerEl.querySelector('.chat-audio-play-btn i');
+                     
+                  if (track) track.style.width = pct + '%';
+                  if (timeDisplay) {
+                    const cur = window.chatAudioObj.currentTime;
+                    const m = Math.floor(cur / 60);
+                    const s = Math.floor(cur % 60).toString().padStart(2, '0');
+                    timeDisplay.innerText = `${m}:${s}`;
+                  }
+                  if (icon && !window.chatAudioObj.paused) {
+                    icon.className = 'bi bi-pause-fill fs-4';
                   }
                 }
-
-                return `
-                <div class="list-group-item bg-transparent text-white border-secondary px-3 py-3 d-flex align-items-center gap-3 hover-bg-dark open-chat-btn" data-userid="${m.other_id}" data-artist="${encodeURIComponent(m.other_name)}" style="cursor: pointer;" title="Preview: ${escapeHTML(previewText)}">
-                  <div class="position-relative user-profile-link" data-userid="${m.other_id}" data-artist="${encodeURIComponent(m.other_name)}">
-                    <img src="?action=get_profile_picture&id=${m.other_id}" class="rounded-circle" style="width: 48px; height: 48px; object-fit: cover;">
-                    ${activeStatusHtml}
-                  </div>
-                  <div class="flex-grow-1 overflow-hidden">
-                    <div class="d-flex justify-content-between align-items-center">
-                      <span class="fw-bold text-truncate user-profile-link hover-underline" data-userid="${m.other_id}" data-artist="${encodeURIComponent(m.other_name)}">${escapeHTML(m.other_name)}</span>
-                      <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(m.created_at)}</small>
-                    </div>
-                    <div class="text-secondary small text-truncate ${m.unread_count > 0 ? 'text-white fw-bold' : ''}">
-                       ${isMe ? 'You: ' : ''}${m.has_image ? '<i class="bi bi-image"></i> ' : ''}${escapeHTML(previewText)}${readStatusHtml}
-                    </div>
-                  </div>
-                  ${m.unread_count > 0 ? `<span class="badge bg-danger rounded-pill">${m.unread_count}</span>` : ''}
-                </div>
-              `}).join('');
-            } else {
-              listEl.innerHTML = '<div class="p-4 text-center text-secondary">No conversations yet. Go to a profile to send a message!</div>';
-            }
-          };
-
-          if (inboxModalEl) {
-            inboxModalEl.addEventListener('show.bs.modal', loadInbox);
-            inboxModalEl.addEventListener('click', (e) => {
-              const userLink = e.target.closest('.user-profile-link');
-              if (userLink) {
-                e.stopPropagation();
-                bootstrap.Modal.getInstance(inboxModalEl).hide();
-                loadView({ type: 'artist_songs', param: decodeURIComponent(userLink.dataset.artist), sort: 'album_asc', filter_user_id: userLink.dataset.userid, artist_name: '' });
-                return;
-              }
-              const chatBtn = e.target.closest('.open-chat-btn');
-              if (chatBtn) {
-                bootstrap.Modal.getInstance(inboxModalEl).hide();
-                window.openChat(chatBtn.dataset.userid, decodeURIComponent(chatBtn.dataset.artist));
               }
             });
-            
-            const inboxSearchInput = document.getElementById('inbox-search-input');
-            const inboxSearchDropdown = document.getElementById('inbox-search-dropdown');
-            let inboxSearchTimeout;
-
-            if (inboxSearchInput) {
-              inboxSearchInput.addEventListener('input', (e) => {
-                clearTimeout(inboxSearchTimeout);
-                const q = e.target.value.trim();
-                if (q === '') {
-                  inboxSearchDropdown.classList.add('d-none');
-                  return;
-                }
-                inboxSearchTimeout = setTimeout(async () => {
-                  const res = await fetchData(`?action=search&q=${encodeURIComponent(q)}`);
-                  inboxSearchDropdown.innerHTML = '';
-                  let usersFound = false;
-                  if (res && res.shelves) {
-                    const artistShelf = res.shelves.find(s => s.type === 'artists');
-                    if (artistShelf && artistShelf.items.length > 0) {
-                      const users = artistShelf.items.filter(u => u.is_user);
-                      if (users.length > 0) {
-                        usersFound = true;
-                        inboxSearchDropdown.innerHTML = users.map(u => `
-                          <div class="search-dropdown-item d-flex justify-content-between align-items-center w-100 px-3 py-2">
-                            <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${u.id}" data-artist="${encodeURIComponent(u.name)}">
-                              <img src="?action=get_profile_picture&id=${u.id}" class="search-dropdown-img rounded-circle" style="width: 32px; height: 32px;">
-                              <div class="search-dropdown-text">
-                                <div class="search-dropdown-title text-white fw-bold hover-underline">${escapeHTML(u.name)}</div>
-                                <div class="search-dropdown-subtitle text-secondary">ID: ${u.id}</div>
-                              </div>
-                            </div>
-                            <button class="btn btn-sm btn-outline-info rounded-pill ms-2 start-chat-btn" data-userid="${u.id}" data-artist="${escapeHTML(u.name)}">
-                              <i class="bi bi-chat-dots-fill"></i> Message
-                            </button>
-                          </div>
-                        `).join('');
-                      }
-                    }
-                  }
-                  if (!usersFound) {
-                    inboxSearchDropdown.innerHTML = '<div class="p-3 text-secondary text-center small">No users found</div>';
-                  }
-                  inboxSearchDropdown.classList.remove('d-none');
-                }, 300);
-              });
-
-              inboxSearchDropdown.addEventListener('click', (e) => {
-                const startChatBtn = e.target.closest('.start-chat-btn');
-                if (startChatBtn) {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  const userId = startChatBtn.dataset.userid;
-                  const artistName = startChatBtn.dataset.artist;
-                  
-                  inboxSearchDropdown.classList.add('d-none');
-                  inboxSearchInput.value = '';
-                  bootstrap.Modal.getInstance(inboxModalEl).hide();
-                  
-                  window.openChat(userId, artistName);
-                }
-              });
-
-              document.addEventListener('click', (e) => {
-                if (inboxSearchDropdown && !inboxSearchDropdown.contains(e.target) && e.target !== inboxSearchInput) {
-                  inboxSearchDropdown.classList.add('d-none');
-                }
-              });
-            }
+            window.chatAudioObj.addEventListener('ended', () => {
+              const playerEl = document.querySelector(`.chat-audio-player[data-msg-id="${window.chatAudioActiveMsgId}"]`);
+              if (playerEl) {
+                const icon = playerEl.querySelector('.chat-audio-play-btn i');
+                const track = playerEl.querySelector('.chat-audio-progress');
+                const timeDisplay = playerEl.querySelector('.chat-audio-time');
+                if (icon) icon.className = 'bi bi-play-fill fs-4';
+                if (track) track.style.width = '0%';
+                if (timeDisplay) timeDisplay.innerText = '0:00';
+              }
+              window.chatAudioActiveMsgId = null;
+            });
           }
 
-          window.openChat = async (targetId, artistName) => {
-            document.getElementById('chat-target-id').value = targetId;
-            document.getElementById('chat-modal-title').innerHTML = `<img src="?action=get_profile_picture&id=${targetId}" class="rounded-circle" style="width: 32px; height: 32px;"> ${escapeHTML(artistName)}`;
-            bootstrap.Modal.getOrCreateInstance(chatModalEl).show();
-            await refreshChat();
-            if (chatPollingInterval) clearInterval(chatPollingInterval);
-            chatPollingInterval = setInterval(refreshChat, 5000);
+          window.playChatAudio = (msgId, url) => {
+            const isPlayingThis = window.chatAudioActiveMsgId == msgId && !window.chatAudioObj.paused;
+             
+            document.querySelectorAll('.chat-audio-play-btn i').forEach(i => i.className = 'bi bi-play-fill fs-4');
+             
+            if (isPlayingThis) {
+              window.chatAudioObj.pause();
+            } else {
+              if (window.chatAudioActiveMsgId != msgId) {
+                window.chatAudioObj.src = url;
+                window.chatAudioActiveMsgId = msgId;
+              }
+                
+              const mainAudio = document.getElementById('audio-player');
+              if (mainAudio && !mainAudio.paused) {
+                document.getElementById('btn-play-pause').click();
+              }
+
+              window.chatAudioObj.play().catch(e => console.error(e));
+            }
+          };
+          
+          window.seekChatAudio = (e, msgId) => {
+            if (window.chatAudioActiveMsgId != msgId) return;
+            const playerEl = document.querySelector(`.chat-audio-player[data-msg-id="${msgId}"]`);
+            if (!playerEl) return;
+            const trackContainer = playerEl.querySelector('.chat-audio-track');
+            const rect = trackContainer.getBoundingClientRect();
+            const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            if (isFinite(window.chatAudioObj.duration)) {
+              window.chatAudioObj.currentTime = pos * window.chatAudioObj.duration;
+            }
           };
 
-          const refreshChat = async () => {
-            const targetId = document.getElementById('chat-target-id').value;
-            if (!targetId) return;
-            const messages = await fetchData(`?action=get_chat&target_id=${targetId}`);
-            const listEl = document.getElementById('chat-messages-list');
+          window.openChatFull = async (targetId, type, name) => {
+            requestNotificationPermission(); // Ask OS permission to send Push Notifications
+            activeChatConfig = { id: targetId, type: type, name: name };
+            const mainArea = document.querySelector('.chat-main');
+            const sidebarArea = document.querySelector('.chat-sidebar');
+            
+            const mentionBtn = document.getElementById('chat-mention-btn');
+            const chatInput = document.getElementById('chat-input');
+            if (mentionBtn) {
+              if (type === 'group') mentionBtn.classList.remove('d-none');
+              else mentionBtn.classList.add('d-none');
+            }
+            if (chatInput) {
+              chatInput.placeholder = type === 'group' ? 'Type a message... (use @ to mention)' : 'Type a message...';
+            }
              
-            if (messages && messages.length > 0) {
-              listEl.innerHTML = messages.map(m => {
+            if (mainArea) mainArea.classList.add('active');
+            if (sidebarArea && window.innerWidth < 768) sidebarArea.classList.add('hidden');
+             
+            const headerTitle = document.getElementById('chat-header-title');
+            if (headerTitle) {
+              headerTitle.innerHTML = (type === 'group' 
+                ? `<div class="d-flex align-items-center justify-content-center rounded-circle me-2 overflow-hidden bg-dark border border-secondary" style="width: 36px; height: 36px; min-width: 36px; flex-shrink: 0; line-height: 1;"><img src="?action=get_group_image&id=${targetId}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-info fs-5\\'></i>'" style="width: 100%; height: 100%; object-fit: cover; display: block;"></div>` 
+                : `<img src="?action=get_profile_picture&id=${targetId}" class="rounded-circle me-2 border border-secondary" style="width: 36px; height: 36px; min-width: 36px; object-fit: cover; flex-shrink: 0; display: block;">`) + 
+                `<span class="text-truncate" style="max-width: 60vw; display: inline-block; vertical-align: middle;">${escapeHTML(name)}</span>`;
+            }
+             
+            const infoBtn = document.getElementById('chat-info-btn');
+            if (infoBtn) {
+              infoBtn.classList.remove('d-none'); // Always show the info button
+              if (type === 'group') {
+                infoBtn.onclick = () => window.showGroupInfo(targetId);
+              } else {
+                // For DMs, the info button will seamlessly open their public profile
+                infoBtn.onclick = () => {
+                  loadView({ type: 'artist_songs', param: name, sort: 'album_asc', filter_user_id: targetId });
+                };
+              }
+            }
+
+            const msgContainer = document.getElementById('chat-messages-container');
+            if (msgContainer) {
+              msgContainer.innerHTML = '<div class="text-center p-5"><div class="spinner-border text-secondary"></div></div>';
+            }
+            if (typeof window.clearChatReply === 'function') window.clearChatReply();
+             
+            await window.refreshChatFull();
+            if (chatPollingInterval) clearInterval(chatPollingInterval);
+            chatPollingInterval = setInterval(window.refreshChatFull, 1500); // Ultra-fast real-time sync
+          };
+
+          window.currentChatFetchId = 0;
+
+          window.refreshChatFull = async (forceSync = false) => {
+            if (!activeChatConfig.id) return;
+            if (window.isReacting && !forceSync) return;
+            
+            let isMediaPlaying = false;
+            if (window.chatAudioObj && !window.chatAudioObj.paused) isMediaPlaying = true;
+            document.querySelectorAll('.chat-main video').forEach(v => {
+              if (!v.paused && !v.ended) isMediaPlaying = true;
+            });
+            if (isMediaPlaying && !forceSync) return;
+            
+            window.currentChatFetchId++;
+            const fetchId = window.currentChatFetchId;
+            
+            try {
+              const messages = await fetchData(`?action=get_chat&target_id=${activeChatConfig.id}&chat_type=${activeChatConfig.type}`);
+              
+              if (fetchId !== window.currentChatFetchId || (window.isReacting && !forceSync)) return;
+
+              const listEl = document.getElementById('chat-messages-container');
+              if (!listEl) return; 
+
+              if (messages && messages.status === 'error') {
+                listEl.innerHTML = `<div class="text-center text-danger p-4 mt-auto mb-auto">${escapeHTML(messages.message)}</div>`;
+                return;
+              }
+
+              if (messages && Array.isArray(messages) && messages.length > 0) {
+                const isScrolledToBottom = listEl.scrollHeight - listEl.clientHeight <= listEl.scrollTop + 50;
+
+                listEl.innerHTML = messages.map(m => {
                 const isMe = m.sender_id == currentUser.id;
-                const align = isMe ? 'align-self-end' : 'align-self-start';
-                const bg = isMe ? 'bg-danger text-white' : 'bg-dark border border-secondary text-white';
-                const imgHtml = m.has_image ? `<img src="?action=get_message_image&id=${m.id}" class="img-fluid rounded-3 mb-2" style="max-height: 200px;">` : '';
+                const bubbleClass = isMe ? 'me' : 'other';
+                
+                let mediaHtml = '';
+                if (m.has_image) {
+                  const mediaUrl = `?action=get_message_image&id=${m.id}`;
+                  if (m.media_type && m.media_type.startsWith('video/')) {
+                    mediaHtml = `
+                      <div class="position-relative mb-2 rounded overflow-hidden shadow-sm" style="max-height: 250px; max-width: 100%; background: #000;">
+                        <video src="${mediaUrl}" controls preload="metadata" style="max-height: 250px; width: 100%; display: block;"></video>
+                      </div>`;
+                  } else if (m.media_type && m.media_type.startsWith('audio/')) {
+                    // Injecting data-msg-id into the container and passing the ID cleanly to the click functions!
+                    mediaHtml = `
+                      <div class="chat-audio-player d-flex align-items-center gap-3 mb-2 p-2 rounded shadow-sm" data-msg-id="${m.id}" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.05); min-width: 220px;">
+                        <button class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 chat-audio-play-btn" onclick="window.playChatAudio(${m.id}, '${mediaUrl}')" style="width: 38px; height: 38px; padding: 0; transition: transform 0.1s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
+                          <i class="bi bi-${window.chatAudioActiveMsgId == m.id && !window.chatAudioObj.paused ? 'pause' : 'play'}-fill fs-4"></i>
+                        </button>
+                        <div class="chat-audio-track flex-grow-1 position-relative" style="height: 6px; background: rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;" onclick="window.seekChatAudio(event, ${m.id})">
+                          <div class="chat-audio-progress" style="width: ${window.chatAudioActiveMsgId == m.id && isFinite(window.chatAudioObj.duration) ? (window.chatAudioObj.currentTime / window.chatAudioObj.duration) * 100 : 0}%; height: 100%; background: var(--ytm-accent); border-radius: 3px; pointer-events: none; transition: width 0.1s linear;"></div>
+                        </div>
+                        <span class="chat-audio-time small fw-bold" style="font-size: 0.75rem; min-width: 35px; user-select: none; color: rgba(255,255,255,0.8);">
+                          ${window.chatAudioActiveMsgId == m.id ? Math.floor(window.chatAudioObj.currentTime / 60) + ':' + Math.floor(window.chatAudioObj.currentTime % 60).toString().padStart(2, '0') : '0:00'}
+                        </span>
+                      </div>`;
+                  } else {
+                    mediaHtml = `<img src="${mediaUrl}" class="img-fluid rounded mb-2 shadow-sm" style="max-height: 250px; cursor:zoom-in;" onclick="window.open(this.src)">`;
+                  }
+                }
+                
                 const editedHtml = m.is_edited ? '<small class="text-white-50 ms-2" style="font-size: 0.65rem;">(Edited)</small>' : '';
                  
-                let actionHtml = '';
-                if (isMe) {
-                  actionHtml = `
-                    <div class="d-flex justify-content-end gap-2 mt-1">
-                      <button class="btn btn-link btn-sm text-white-50 p-0 edit-msg-btn" data-id="${m.id}" data-content="${escapeHTML(m.content)}"><i class="bi bi-pencil"></i></button>
-                      <button class="btn btn-link btn-sm text-white-50 p-0 del-msg-btn" data-id="${m.id}"><i class="bi bi-trash"></i></button>
+                let replyHtml = '';
+                if (m.reply_to_id) {
+                  const cleanRep = (m.reply_content || 'Photo').replace(/<[^>]*>?/gm, '');
+                  replyHtml = `
+                    <div class="chat-reply-quote" onclick="document.querySelector('.msg-anchor-${m.reply_to_id}')?.scrollIntoView({behavior:'smooth', block:'center'})">
+                      <strong style="color: ${isMe ? '#fff' : 'var(--ytm-accent)'};">${escapeHTML(m.reply_sender || 'Someone')}</strong><br>
+                      <span class="text-truncate d-block">${escapeHTML(cleanRep)}</span>
                     </div>
                   `;
                 }
 
-                return `
-                  <div class="${align} ${bg} p-2 rounded-4 shadow-sm" style="max-width: 80%; min-width: 100px;">
-                    ${imgHtml}
-                    ${m.content ? `<div style="font-size: 0.95rem; white-space: pre-wrap;">${parseUserText(m.content)}</div>` : ''}
-                    <div class="d-flex justify-content-between align-items-center mt-1">
-                      <div style="font-size: 0.65rem; opacity: 0.7;">${timeAgo(m.created_at)}${editedHtml}</div>
-                      ${actionHtml}
+                let reactionsHtml = '';
+                if (m.reactions && m.reactions.length > 0) {
+                  const reactMap = {};
+                  m.reactions.forEach(r => {
+                    if(!reactMap[r.reaction]) reactMap[r.reaction] = { count:0, me:false };
+                    reactMap[r.reaction].count++;
+                    if (r.user_id == currentUser.id) reactMap[r.reaction].me = true;
+                  });
+                    
+                  const pills = Object.keys(reactMap).map(emoji => `
+                    <span class="reaction-pill ${reactMap[emoji].me ? 'reacted' : ''}" onclick="window.toggleMsgReaction(${m.id}, '${emoji}')">
+                      ${emoji} <small>${reactMap[emoji].count}</small>
+                    </span>
+                   `).join('');
+                   reactionsHtml = `<div class="reactions-container">${pills}</div>`;
+                }
+
+                let senderNameHtml = '';
+                if (!isMe && activeChatConfig.type === 'group') {
+                  senderNameHtml = `<div class="fw-bold mb-1 user-profile-link" data-userid="${m.sender_id}" data-artist="${encodeURIComponent(m.sender_name)}" style="font-size: 0.8rem; color: var(--ytm-accent); cursor: pointer;">${escapeHTML(m.sender_name)}</div>`;
+                }
+
+                // CRITICAL FIX: Explicitly escape quote entities alongside hard line-terminator drops
+                const safeSender = m.sender_name ? escapeHTML(m.sender_name).replace(/&#39;/g, "\\'") : 'Someone';
+                const safeContent = m.content ? escapeHTML(m.content).replace(/&#39;/g, "\\'").replace(/\n/g, ' ').replace(/\r/g, '') : '';
+
+                let actionHtml = `
+                  <div class="chat-msg-actions">
+                    <div class="position-relative">
+                      <button class="chat-action-btn" onclick="this.nextElementSibling.classList.toggle('show')"><i class="bi bi-emoji-smile"></i></button>
+                      <div class="reaction-picker">
+                        ${['👍','❤️','😂','😮','😢'].map(em => `<button class="emoji-btn" onclick="window.toggleMsgReaction(${m.id}, '${em}')">${em}</button>`).join('')}
+                      </div>
                     </div>
+                    <button class="chat-action-btn" title="Reply" onclick="window.setChatReply(${m.id}, '${safeSender}', '${safeContent}')"><i class="bi bi-reply-fill"></i></button>
+                    ${isMe ? `
+                      <button class="chat-action-btn" title="Edit" onclick="window.editChatMsg(${m.id}, '${safeContent}')"><i class="bi bi-pencil"></i></button>
+                      <button class="chat-action-btn text-danger" title="Delete" onclick="window.delChatMsg(${m.id})"><i class="bi bi-trash"></i></button>
+                    ` : ''}
+                  </div>
+                `;
+
+                return `
+                  <div class="chat-bubble ${bubbleClass} msg-anchor-${m.id}">
+                    ${actionHtml}
+                    ${senderNameHtml}
+                    ${replyHtml}
+                    ${mediaHtml}
+                    ${m.content ? `<div style="white-space: pre-wrap;">${parseUserText(m.content)}</div>` : ''}
+                    <div class="text-end mt-1" style="font-size: 0.65rem; opacity: 0.7;">${timeAgo(m.created_at)}${editedHtml}</div>
+                    ${reactionsHtml}
                   </div>
                 `;
               }).join('');
-              listEl.scrollTop = listEl.scrollHeight;
+              
+              if (isScrolledToBottom) {
+                listEl.scrollTop = listEl.scrollHeight;
+              }
             } else {
               listEl.innerHTML = '<div class="text-center text-secondary p-4 mt-auto mb-auto">Start the conversation!</div>';
+              }
+              updateNotifBadge();
+            } catch (err) {
+              const listEl = document.getElementById('chat-messages-container');
+              if (listEl) listEl.innerHTML = '<div class="text-center text-danger p-4 mt-auto mb-auto">Failed to load messages.</div>';
             }
-            updateNotifBadge();
           };
 
-          if (chatModalEl) {
-             chatModalEl.addEventListener('click', async (e) => {
-               const editBtn = e.target.closest('.edit-msg-btn');
-               if (editBtn) {
-                 document.getElementById('edit-message-id').value = editBtn.dataset.id;
-                 document.getElementById('edit-message-input').value = decodeHTML(editBtn.dataset.content);
-                 bootstrap.Modal.getOrCreateInstance(document.getElementById('edit-message-modal')).show();
-               }
-               const delBtn = e.target.closest('.del-msg-btn');
-               if (delBtn) {
-                 if (confirm('Delete this message?')) {
-                   await fetchData('?action=delete_message', { method: 'POST', body: JSON.stringify({ id: delBtn.dataset.id }) });
-                   refreshChat();
-                 }
-               }
-             });
+          window.setChatReply = (id, sender, content) => {
+            document.getElementById('chat-reply-id').value = id;
+            const preview = document.getElementById('chat-reply-preview');
+            preview.innerHTML = `<strong>Replying to ${sender}:</strong><br><span class="text-secondary text-truncate d-block">${content.replace(/<[^>]*>?/gm, '')}</span>`;
+            document.getElementById('chat-reply-bar').classList.add('active');
+            document.getElementById('chat-input').focus();
+          };
+          window.clearChatReply = () => {
+            document.getElementById('chat-reply-id').value = '';
+            document.getElementById('chat-reply-bar').classList.remove('active');
+          };
+          
+          window.toggleMsgReaction = async (msgId, emoji) => {
+            document.querySelectorAll('.reaction-picker').forEach(p => p.classList.remove('show'));
+            
+            window.isReacting = true; // Lock background polling
+            window.currentChatFetchId++; // Invalidate any currently running background polls
 
-             chatModalEl.addEventListener('hidden.bs.modal', () => {
-               if (chatPollingInterval) clearInterval(chatPollingInterval);
-               document.getElementById('chat-target-id').value = '';
-             });
-          }
+            // Optimistic UI Update: Apply visually before network confirms
+            const msgBubble = document.querySelector(`.msg-anchor-${msgId}`);
+            if (msgBubble) {
+              let container = msgBubble.querySelector('.reactions-container');
+              if (!container) {
+                container = document.createElement('div');
+                container.className = 'reactions-container';
+                msgBubble.appendChild(container);
+              }
+              
+              let foundPill = false;
+              container.querySelectorAll('.reaction-pill').forEach(pill => {
+                const pillEmoji = pill.textContent.replace(/[0-9]/g, '').trim(); // Safely extract emoji
+                
+                if (pillEmoji === emoji) {
+                  foundPill = true;
+                  const countEl = pill.querySelector('small');
+                  let count = parseInt(countEl.textContent) || 0;
+                  if (pill.classList.contains('reacted')) {
+                    pill.classList.remove('reacted');
+                    count--;
+                    if (count <= 0) pill.remove();
+                    else countEl.textContent = count;
+                  } else {
+                    pill.classList.add('reacted');
+                    count++;
+                    countEl.textContent = count;
+                  }
+                } else if (pill.classList.contains('reacted')) {
+                  pill.classList.remove('reacted');
+                  const countEl = pill.querySelector('small');
+                  let count = parseInt(countEl.textContent) || 0;
+                  count--;
+                  if (count <= 0) pill.remove();
+                  else countEl.textContent = count;
+                }
+              });
+              
+              if (!foundPill) {
+                container.insertAdjacentHTML('beforeend', `<span class="reaction-pill reacted" onclick="window.toggleMsgReaction(${msgId}, '${emoji}')">${emoji} <small>1</small></span>`);
+              }
+            }
+            
+            // Dispatch async mutation
+            await fetchData('?action=toggle_message_reaction', { method: 'POST', body: JSON.stringify({ message_id: msgId, reaction: emoji }) });
+            
+            window.isReacting = false; // Unlock polling
+            window.refreshChatFull(true); // Force an immediate fresh sync from DB
+          };
+          
+          window.delChatMsg = async (id) => {
+            if(confirm('Delete message?')) {
+              await fetchData('?action=delete_message', { method: 'POST', body: JSON.stringify({ id: id }) });
+              window.refreshChatFull();
+            }
+          };
+          window.editChatMsg = (id, content) => {
+            const newContent = prompt('Edit your message:', decodeHTML(content));
+            if (newContent !== null && newContent.trim() !== '') {
+              fetchData('?action=edit_message', { method: 'POST', body: JSON.stringify({ id: id, content: newContent }) }).then(() => window.refreshChatFull());
+            }
+          };
 
-          const editMsgForm = document.getElementById('edit-message-form');
-          if (editMsgForm) {
-            editMsgForm.addEventListener('submit', async e => {
+          // Chat Media Preview logic
+          window.handleChatImageSelection = (file) => {
+            if (file) {
+              if (file.size > 10 * 1024 * 1024) {
+                showToast('File exceeds 10MB limit.', 'error');
+                return;
+              }
+              const dataTransfer = new DataTransfer();
+              dataTransfer.items.add(file);
+              document.getElementById('chat-image-input').files = dataTransfer.files;
+               
+              const previewBar = document.getElementById('chat-img-preview-bar');
+              const previewImg = document.getElementById('chat-img-preview-src');
+              const previewVid = document.getElementById('chat-video-preview-src');
+              const previewAud = document.getElementById('chat-audio-preview-src');
+              
+              previewImg.classList.add('d-none');
+              previewVid.classList.add('d-none');
+              previewAud.classList.add('d-none');
+              
+              if (previewVid.src) URL.revokeObjectURL(previewVid.src);
+              if (previewAud.src) URL.revokeObjectURL(previewAud.src);
+              
+              let fileType = file.type;
+              if (!fileType) {
+                const ext = file.name.split('.').pop().toLowerCase();
+                if (['mp3', 'wav', 'ogg', 'm4a'].includes(ext)) fileType = 'audio/' + ext;
+                else if (['mp4', 'webm', 'mov'].includes(ext)) fileType = 'video/' + ext;
+              }
+              
+              if (fileType.startsWith('image/')) {
+                const reader = new FileReader();
+                reader.onload = ev => {
+                  previewImg.src = ev.target.result;
+                  previewImg.classList.remove('d-none');
+                  previewBar.classList.add('active');
+                };
+                reader.readAsDataURL(file);
+              } else if (fileType.startsWith('video/')) {
+                previewVid.src = URL.createObjectURL(file);
+                previewVid.classList.remove('d-none');
+                previewBar.classList.add('active');
+              } else if (fileType.startsWith('audio/')) {
+                previewAud.src = URL.createObjectURL(file);
+                previewAud.classList.remove('d-none');
+                previewBar.classList.add('active');
+              } else {
+                showToast('Format not supported.', 'error');
+                document.getElementById('chat-image-input').value = '';
+              }
+            }
+          };
+
+          document.addEventListener('change', e => {
+            if (e.target.id === 'chat-image-input') {
+              window.handleChatImageSelection(e.target.files[0]);
+            }
+          });
+
+          // Drag and Drop Images into Chat
+          const chatMainArea = document.querySelector('.chat-main');
+          if (chatMainArea) {
+            chatMainArea.addEventListener('dragover', (e) => {
               e.preventDefault();
-              const id = document.getElementById('edit-message-id').value;
-              const content = document.getElementById('edit-message-input').value;
-              await fetchData('?action=edit_message', { method: 'POST', body: JSON.stringify({ id, content }) });
-              bootstrap.Modal.getInstance(document.getElementById('edit-message-modal')).hide();
-              refreshChat();
+              e.stopPropagation();
+              chatMainArea.style.opacity = '0.7';
+            });
+            chatMainArea.addEventListener('dragleave', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              chatMainArea.style.opacity = '1';
+            });
+            chatMainArea.addEventListener('drop', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              chatMainArea.style.opacity = '1';
+              if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                handleChatImageSelection(e.dataTransfer.files[0]);
+              }
             });
           }
 
-          if (chatForm) {
-             chatForm.addEventListener('submit', async e => {
-               e.preventDefault();
-               const targetId = document.getElementById('chat-target-id').value;
-               const input = document.getElementById('chat-input');
-               const imgInput = document.getElementById('chat-image-input');
-               
-               if (!input.value.trim() && imgInput.files.length === 0) return;
-               
-               const formData = new FormData();
-               formData.append('target_id', targetId);
-               formData.append('content', input.value);
-               if (imgInput.files.length > 0) {
-                 formData.append('image', imgInput.files[0]);
-               }
+          window.clearChatImage = () => {
+            document.getElementById('chat-image-input').value = '';
+            document.getElementById('chat-img-preview-bar').classList.remove('active');
+            document.getElementById('chat-img-preview-src').classList.add('d-none');
+            const vid = document.getElementById('chat-video-preview-src');
+            const aud = document.getElementById('chat-audio-preview-src');
+            vid.classList.add('d-none');
+            aud.classList.add('d-none');
+            vid.pause(); aud.pause();
+            if (vid.src) URL.revokeObjectURL(vid.src);
+            if (aud.src) URL.revokeObjectURL(aud.src);
+          };
 
-               const submitBtn = chatForm.querySelector('button[type="submit"]');
-               submitBtn.disabled = true;
+          // Chat Input Auto-Resize & Enter to Send
+          document.addEventListener('input', (e) => {
+            if (e.target.id === 'chat-input') {
+              e.target.style.height = 'auto';
+              e.target.style.height = (e.target.scrollHeight) + 'px';
+            }
+          });
 
-               const res = await fetch('?action=send_message', { method: 'POST', body: formData });
-               const result = await res.json();
+          document.addEventListener('keydown', (e) => {
+            if (e.target.id === 'chat-input' && e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              const form = document.getElementById('chat-form-full');
+              if (form) form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+            }
+          });
+
+          // Group Chat Management
+          window.showGroupInfo = async (id, page = 1) => {
+            const res = await fetchData(`?action=get_group_info&id=${id}&page=${page}`);
+            if (res && res.status === 'success') {
+              const g = res.group;
+              if (page === 1) {
+                document.getElementById('group-info-name').textContent = g.name;
+                document.getElementById('group-info-desc').textContent = g.description || 'No description provided.';
+                document.getElementById('group-info-count').textContent = g.total_members || g.members.length;
+              }
+                
+              // Set the group profile picture
+              const groupImgContainer = document.getElementById('group-info-img-container');
+              if (groupImgContainer) {
+                groupImgContainer.innerHTML = `<img src="?action=get_group_image&id=${g.id}&t=${Date.now()}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-secondary\\' style=\\'font-size: 3rem;\\'></i>'" style="width: 100%; height: 100%; object-fit: cover;">`;
+              }
+
+              const isOwner = g.owner_id == currentUser.id || (currentUser && currentUser.email === 'musiclibrary@mail.com');
+              const controls = document.getElementById('group-owner-controls');
+              if (isOwner) {
+                controls.classList.remove('d-none');
+                document.getElementById('group-btn-edit').onclick = async () => {
+                  document.getElementById('group-manage-title').innerHTML = '<i class="bi bi-pencil-square text-warning me-2"></i>Edit Group';
+                  document.getElementById('group-manage-id').value = g.id;
+                  document.getElementById('group-manage-name').value = g.name;
+                  document.getElementById('group-manage-desc').value = g.description || '';
+                     
+                  const previewImg = document.getElementById('group-manage-image-preview');
+                  previewImg.src = `?action=get_group_image&id=${g.id}&t=${Date.now()}`;
+                  previewImg.style.display = 'block';
+                  if (groupCropper) { groupCropper.destroy(); groupCropper = null; }
+                  if (document.getElementById('group-manage-image')) document.getElementById('group-manage-image').value = '';
+
+                  document.getElementById('group-manage-submit').textContent = 'Save Changes';
+                  document.getElementById('group-manage-submit').className = 'btn btn-warning text-dark fw-bold w-100';
+                  bootstrap.Modal.getOrCreateInstance(document.getElementById('group-info-modal')).hide();
+                  bootstrap.Modal.getOrCreateInstance(document.getElementById('group-manage-modal')).show();
+                };
+                document.getElementById('group-btn-delete').onclick = async () => {
+                  if (confirm('Permanently delete this group?')) {
+                    await fetchData('?action=delete_chat_group', { method:'POST', body: JSON.stringify({id: g.id}) });
+                    bootstrap.Modal.getInstance(document.getElementById('group-info-modal')).hide();
+                    loadView(currentView);
+                  }
+                };
+                document.getElementById('group-btn-invite').onclick = async () => {
+                  const exp = document.getElementById('group-invite-expire').value;
+                  const iRes = await fetchData('?action=generate_group_invite', { method:'POST', body: JSON.stringify({id: g.id, expire: exp==='forever'?null:exp}) });
+                  if (iRes && iRes.status === 'success') {
+                    const link = window.location.origin + window.location.pathname + '?chat_invite=' + iRes.token;
+                    navigator.clipboard.writeText(link);
+                    showToast('Invite link copied!', 'success');
+                  }
+                };
+              } else {
+                controls.classList.add('d-none');
+              }
+
+              const membersHtml = g.members.map(m => `
+                <div class="list-group-item bg-transparent text-white px-0 d-flex justify-content-between align-items-center border-secondary">
+                   <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${m.id}" data-artist="${encodeURIComponent(m.artist)}" style="cursor: pointer;">
+                     <img src="?action=get_profile_picture&id=${m.id}" class="rounded-circle" style="width:32px; height:32px; object-fit:cover;">
+                     <div>
+                       <div class="fw-bold fs-6 hover-underline">${escapeHTML(m.artist)}</div>
+                       <small class="text-secondary" style="font-size:0.75rem;">ID: ${m.id}</small>
+                     </div>
+                   </div>
+                   <div class="d-flex align-items-center gap-2">
+                     ${isOwner && m.role !== 'owner' ? `<button class="btn btn-sm btn-outline-warning fw-bold transfer-owner-btn" data-userid="${m.id}">Make Owner</button>` : ''}
+                     ${m.role === 'owner' ? '<span class="badge bg-warning text-dark"><i class="bi bi-star-fill"></i> Owner</span>' : ''}
+                   </div>
+                </div>
+              `).join('');
+
+              const container = document.getElementById('group-info-members');
+              if (page === 1) {
+                container.innerHTML = membersHtml;
+              } else {
+                container.insertAdjacentHTML('beforeend', membersHtml);
+              }
+
+              container.onclick = async (e) => {
+                const transferBtn = e.target.closest('.transfer-owner-btn');
+                if (transferBtn) {
+                  const newOwnerId = transferBtn.dataset.userid;
+                  if (confirm('Transfer ownership to this member? You will become a regular member.')) {
+                    const res = await fetchData('?action=transfer_group_ownership', {
+                      method: 'POST',
+                      body: JSON.stringify({ group_id: g.id, new_owner_id: newOwnerId })
+                    });
+                    if (res && res.status === 'success') {
+                      showToast(res.message, 'success');
+                      window.showGroupInfo(g.id, 1);
+                    } else {
+                      showToast(res?.message || 'Error transferring ownership', 'error');
+                    }
+                  }
+                }
+              };
+
+              const existingLoadMore = document.getElementById('group-load-more-btn');
+              if (existingLoadMore) existingLoadMore.remove();
+
+              if (g.members.length === 25) {
+                container.insertAdjacentHTML('afterend', `
+                  <button class="btn btn-outline-light btn-sm w-100 mt-2 mb-3 fw-bold" id="group-load-more-btn" onclick="window.showGroupInfo(${id}, ${page + 1})">
+                    Load More Members
+                  </button>
+                `);
+              }
+
+              document.getElementById('group-btn-leave').onclick = async () => {
+                const confirmMsg = isOwner ? 'As the owner, if you leave, ownership will be given to a random member. Leave group?' : 'Leave this group?';
+                if (confirm(confirmMsg)) {
+                  await fetchData('?action=leave_chat_group', { method:'POST', body: JSON.stringify({id: g.id}) });
+                  bootstrap.Modal.getInstance(document.getElementById('group-info-modal')).hide();
+                  loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' });
+                }
+              };
+              bootstrap.Modal.getOrCreateInstance(document.getElementById('group-info-modal')).show();
+            }
+          };
+
+          document.addEventListener('submit', async e => {
+            if (e.target.id === 'group-manage-form') {
+              e.preventDefault();
+              const submitBtn = document.getElementById('group-manage-submit');
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
                
-               submitBtn.disabled = false;
+              const id = document.getElementById('group-manage-id').value;
+              const name = document.getElementById('group-manage-name').value;
+              const desc = document.getElementById('group-manage-desc').value;
+              const imgInput = document.getElementById('group-manage-image');
                
-               if (result && result.status === 'success') {
-                 input.value = '';
-                 imgInput.value = '';
-                 await refreshChat();
-               } else {
-                 showToast(result.message || 'Failed to send', 'error');
-               }
-             });
-          }
+              const formData = new FormData();
+              formData.append('name', name);
+              formData.append('description', desc);
+              if (id) formData.append('id', id);
+
+              const processUpload = async () => {
+                try {
+                  const res = await fetch(`?action=${id ? 'edit_chat_group' : 'create_chat_group'}`, { method: 'POST', body: formData });
+                  const result = await res.json();
+                   
+                  if (result && result.status === 'success') {
+                    showToast(id ? 'Group updated' : 'Group created', 'success');
+                    bootstrap.Modal.getInstance(document.getElementById('group-manage-modal')).hide();
+                    loadView(currentView);
+                  } else {
+                    showToast(result.message || 'Action failed', 'error');
+                  }
+                } catch (err) {
+                  showToast('Network error', 'error');
+                }
+                submitBtn.disabled = false;
+                submitBtn.textContent = id ? 'Save Changes' : 'Create Group';
+              };
+
+              if (groupCropper) {
+                groupCropper.getCroppedCanvas({ width: 300, height: 300 }).toBlob(blob => {
+                  formData.append('image', blob, 'group.jpg');
+                  processUpload();
+                }, 'image/jpeg', 0.85);
+              } else if (imgInput && imgInput.files.length > 0) {
+                formData.append('image', imgInput.files[0]);
+                processUpload();
+              } else {
+                processUpload();
+              }
+            }
+             
+            if (e.target.id === 'chat-form-full') {
+              e.preventDefault();
+              const input = document.getElementById('chat-input');
+              const imgInput = document.getElementById('chat-image-input');
+              const replyId = document.getElementById('chat-reply-id').value;
+               
+              if (!input.value.trim() && imgInput.files.length === 0) return;
+               
+              const formData = new FormData();
+              formData.append('target_id', activeChatConfig.id);
+              formData.append('chat_type', activeChatConfig.type);
+              formData.append('content', input.value);
+              if (replyId) formData.append('reply_to_id', replyId);
+              if (imgInput.files.length > 0) formData.append('image', imgInput.files[0]);
+
+              const submitBtn = document.getElementById('chat-submit-btn');
+              const originalBtnHtml = submitBtn.innerHTML;
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm" style="width: 1.2rem; height: 1.2rem;"></span>';
+              
+              const progContainer = document.getElementById('chat-upload-progress-container');
+              const progBar = document.getElementById('chat-upload-progress');
+              if (imgInput.files.length > 0) {
+                 progContainer.classList.remove('d-none');
+                 progBar.style.width = '0%';
+              }
+
+              const xhr = new XMLHttpRequest();
+              xhr.upload.onprogress = (evt) => {
+                if (evt.lengthComputable && imgInput.files.length > 0) {
+                  const pct = Math.round((evt.loaded / evt.total) * 100);
+                  progBar.style.width = pct + '%';
+                }
+              };
+              
+              xhr.open('POST', '?action=send_message', true);
+              xhr.onload = async () => {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = originalBtnHtml;
+                progContainer.classList.add('d-none');
+                
+                if (xhr.status === 200) {
+                  try {
+                    const result = JSON.parse(xhr.responseText);
+                    if (result && result.status === 'success') {
+                      input.value = '';
+                      input.style.height = 'auto'; // Reset textarea height
+                      window.clearChatImage();
+                      window.clearChatReply();
+                      await window.refreshChatFull();
+                    } else {
+                      showToast(result.message || 'Failed to send', 'error');
+                    }
+                  } catch (err) {
+                    showToast('Invalid server response.', 'error');
+                  }
+                } else {
+                  showToast('Network error during upload', 'error');
+                }
+              };
+              xhr.onerror = () => {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = originalBtnHtml;
+                progContainer.classList.add('d-none');
+                showToast('Network error during upload', 'error');
+              };
+              xhr.send(formData);
+            }
+          });
           
+          // --- END FULL PAGE CHAT APP LOGIC ---
           const clearBtn = document.getElementById('clear-activity-btn');
           if (clearBtn) {
             clearBtn.addEventListener('click', async () => {
@@ -11694,7 +13037,14 @@ SOFTWARE.</div>
             });
           }
           
-          body.addEventListener('click', (e) => {
+          body.addEventListener('click', async (e) => {
+            const openChatBtn = e.target.closest('.open-chat-btn');
+            if (openChatBtn) {
+              bootstrap.Modal.getInstance(activityModalEl).hide();
+              await loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' });
+              window.openChatFull(openChatBtn.dataset.userid, 'dm', openChatBtn.dataset.artist);
+              return;
+            }
             const replyBtn = e.target.closest('.notif-reply-btn');
             if (replyBtn) {
               const songId = parseInt(replyBtn.dataset.songId);
@@ -12102,8 +13452,16 @@ SOFTWARE.</div>
           });
           
           // Append to the queue DOM
-          if (queueContainerDesktop && queueContainerDesktop.querySelector('.song-list')) queueContainerDesktop.querySelector('.song-list').insertAdjacentHTML('beforeend', html);
-          if (queueContainerMobile && queueContainerMobile.querySelector('.song-list')) queueContainerMobile.querySelector('.song-list').insertAdjacentHTML('beforeend', html);
+          if (queueContainerDesktop && queueContainerDesktop.querySelector('.song-list')) {
+            const lst = queueContainerDesktop.querySelector('.song-list');
+            lst.insertAdjacentHTML('beforeend', html);
+            lst.querySelectorAll('.song-item:not(.v-obs)').forEach(el => { el.classList.add('v-obs'); virtualObserver.observe(el); });
+          }
+          if (queueContainerMobile && queueContainerMobile.querySelector('.song-list')) {
+            const lst = queueContainerMobile.querySelector('.song-list');
+            lst.insertAdjacentHTML('beforeend', html);
+            lst.querySelectorAll('.song-item:not(.v-obs)').forEach(el => { el.classList.add('v-obs'); virtualObserver.observe(el); });
+          }
           
           renderedQueueCount += nextChunkIds.length;
           isQueueLoading = false;
@@ -12522,6 +13880,37 @@ SOFTWARE.</div>
         let wakeLockSentinel = null;
         let sleepTimerKeepAwake = false;
         
+        let chatPollingInterval = null;
+        let activeChatConfig = { id: null, type: null, name: null };
+        
+        // --- SIMPLE VIRTUAL SCROLLING SCRIPT ---
+        const virtualObserver = new IntersectionObserver((entries) => {
+          entries.forEach(entry => {
+            const el = entry.target;
+            if (entry.isIntersecting) {
+              // Restore HTML when scrolling into view
+              if (el.dataset.virtualHtml) {
+                el.innerHTML = el.dataset.virtualHtml;
+                el.dataset.virtualHtml = '';
+                el.style.height = ''; 
+              }
+            } else {
+              // Extract and wipe HTML to free RAM when off-screen
+              if (!el.dataset.virtualHtml && el.innerHTML !== '') {
+                // Ignore the currently playing track to keep animations running natively
+                if (el.classList.contains('now-playing')) return;
+                const h = el.offsetHeight;
+                if (h > 0) {
+                   el.style.height = h + 'px';
+                   el.dataset.virtualHtml = el.innerHTML;
+                   el.innerHTML = '';
+                }
+              }
+            }
+          });
+        }, { rootMargin: '800px 0px' });
+        // ---------------------------------------
+
         let holdTimer;
         let multiSelectMode = false;
         let selectedSongs = new Set();
@@ -12646,15 +14035,28 @@ SOFTWARE.</div>
           return txt.value;
         };
 
-        // Parses DB content to active HTML at runtime (Applies [url] and @mentions)
+        // Parses DB content to active HTML at runtime (Applies [video], [url] and @mentions)
         const parseUserText = (text) => {
           if (!text) return '';
           let parsed = text;
+          
+          // Safely transform explicit [video] tags into responsive YouTube or Native Video players
+          parsed = parsed.replace(/\[video\]\s*([^\s<>\[\]]+)\s*\[\/video\]/gi, function(match, url) {
+            const ytMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+            if (ytMatch && ytMatch[1]) {
+              return `<div class="position-relative w-100 mb-2 mt-1 rounded overflow-hidden shadow-sm" style="padding-top: 56.25%; max-width: 500px;"><iframe src="https://www.youtube.com/embed/${ytMatch[1]}" class="position-absolute top-0 start-0 w-100 h-100" frameborder="0" allowfullscreen></iframe></div>`;
+            }
+            return `<video src="${url}" controls preload="metadata" class="w-100 mb-2 mt-1 rounded shadow-sm" style="max-height: 250px; background: #000; max-width: 500px; display: block;"></video>`;
+          });
+          
           // Safely transform explicit [url] tags into active clickable links, auto-appending https:// if missing!
           parsed = parsed.replace(/\[url\]\s*([^\s<>\[\]]+)\s*\[\/url\]/gi, function(match, url) {
             let href = url.match(/^https?:\/\//i) ? url : 'https://' + url;
             return `<a href="${href}" target="_blank" class="text-info text-decoration-none hover-underline">${url}</a>`;
           });
+          // Defensive fallback: Parse any unformatted raw URLs directly into active links
+          parsed = parsed.replace(/(^|[^"'])(https?:\/\/[^\s<]+)/gi, '$1<a href="$2" target="_blank" class="text-info text-decoration-none hover-underline">$2</a>');
+          
           // Convert mentions
           parsed = parsed.replace(/@([\w\.\-_]+)/g, '<strong class="text-info mention-link" data-artist="$1" style="cursor:pointer;" title="Go to Profile">@$1</strong>');
           return parsed;
@@ -13272,7 +14674,7 @@ SOFTWARE.</div>
               recommendedSidebarHTML += `
                 <div class="d-flex flex-column" style="min-height: 0; flex: 1 1 40%;">
                   <h6 class="text-white fw-bold border-bottom border-secondary pb-2 mb-2 text-uppercase d-flex align-items-center gap-2" style="letter-spacing: 1px; font-size: 0.85rem;"><i class="bi bi-stars text-warning fs-5"></i> Similar Artists</h6>
-                  <div class="list-group list-group-flush bg-transparent overflow-auto" style="scrollbar-width: thin; padding-right: 4px; flex-grow: 1;">
+                  <div class="list-group list-group-flush bg-transparent overflow-auto modern-custom-scroll" style="padding-right: 4px; flex-grow: 1;">
                     ${details.recommended_artists.map(a => `
                       <div class="list-group-item list-group-item-action bg-transparent text-white border-0 rounded px-2 py-2 mb-1 d-flex align-items-center gap-3 user-profile-link" data-userid="${a.id}" data-artist="${encodeURIComponent(a.artist)}" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.08)'" onmouseout="this.style.backgroundColor='transparent'">
                         <img src="?action=get_profile_picture&id=${a.id}" class="rounded-circle shadow-sm" style="width: 48px; height: 48px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
@@ -13287,7 +14689,7 @@ SOFTWARE.</div>
               recommendedSidebarHTML += `
                 <div class="d-flex flex-column" style="min-height: 0; flex: 1 1 60%;">
                   <h6 class="text-white fw-bold border-bottom border-secondary pb-2 mb-2 text-uppercase d-flex align-items-center gap-2" style="letter-spacing: 1px; font-size: 0.85rem;"><i class="bi bi-fire text-danger fs-5"></i> Popular Tracks</h6>
-                  <div class="list-group list-group-flush bg-transparent overflow-auto" style="scrollbar-width: thin; padding-right: 4px; flex-grow: 1;">
+                  <div class="list-group list-group-flush bg-transparent overflow-auto modern-custom-scroll" style="padding-right: 4px; flex-grow: 1;">
                     ${details.recommended_songs.map(s => `
                       <div class="list-group-item list-group-item-action bg-transparent text-white border-0 rounded px-2 py-2 mb-1 d-flex align-items-center gap-3 top-result-card" data-song-id="${s.id}" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.08)'" onmouseout="this.style.backgroundColor='transparent'">
                         <img src="?action=get_image&id=${s.id}&v=${s.last_modified || 0}" class="rounded shadow-sm" style="width: 48px; height: 48px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
@@ -13599,6 +15001,14 @@ SOFTWARE.</div>
                 dataType = 'playlist';
                 dataValue = item.public_id;
                 publicId = item.public_id;
+              } else if (type === 'get_categories') {
+                name = item.name;
+                subtext = `${item.item_count} items`;
+                imageId = null;
+                dataType = 'category';
+                dataValue = item.id;
+                publicId = '';
+                icon = 'bi-folder-fill';
               } else if (type === 'get_genres' || type === 'get_years') {
                 name = item.name;
                 subtext = null;
@@ -13662,6 +15072,7 @@ SOFTWARE.</div>
                     </div>
                     <div class="card-body px-0 py-2">
                       <h5 class="card-title fs-6 fw-normal text-truncate">${escapeHTML(name)}</h5>
+                      ${subtext ? `<p class="card-text small text-secondary text-truncate m-0">${escapeHTML(subtext)}</p>` : ''}
                     </div>
                   </div>
                 </div>`;
@@ -14067,6 +15478,7 @@ SOFTWARE.</div>
                 data = playlistData.songs;
               }
               break;
+            case 'get_categories':
             case 'get_albums':
             case 'get_artists':
             case 'get_genres':
@@ -14117,7 +15529,7 @@ SOFTWARE.</div>
                     const itemsHtml = items.slice(0, 4).map(item => `
                       <div class="task-card-item ${item.completed ? 'completed' : ''}">
                         <i class="bi ${item.completed ? 'bi-check-square-fill text-success' : 'bi-square'}"></i>
-                        <span class="text-truncate">${escapeHTML(item.text)}</span>
+                        <span style="word-break: break-word;">${escapeHTML(item.text)}</span>
                       </div>
                     `).join('') + (items.length > 4 ? `<div class="text-secondary small mt-1">+${items.length - 4} more</div>` : '');
 
@@ -14195,6 +15607,7 @@ SOFTWARE.</div>
           allNavLinks.forEach(l => l.classList.remove('active'));
           document.querySelectorAll('.note-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
           document.querySelectorAll('.task-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
+          document.querySelectorAll('.cat-nav-link').forEach(el => el.classList.remove('active', 'text-white'));
           let activeLink;
           switch (viewType) {
             case 'artist_songs': activeLink = document.querySelector('.nav-link[data-view="get_artists"]'); break;
@@ -14228,6 +15641,26 @@ SOFTWARE.</div>
               }
               activeLink = document.querySelector('a[href="#tasksSubmenu"]');
               break;
+            case 'get_categories':
+            case 'manage_note_categories':
+              if (currentView.filter === 'task') {
+                activeLink = document.querySelector('a[href="#tasksSubmenu"]');
+                const catLink = document.querySelector(`.cat-nav-link[data-view="${viewType}"][data-cat-type="task"]`);
+                if (catLink) {
+                  catLink.classList.add('active', 'text-white');
+                  const collapseParent = catLink.closest('.collapse');
+                  if (collapseParent && !collapseParent.classList.contains('show')) bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              } else {
+                activeLink = document.querySelector('a[href="#notesSubmenu"]');
+                const catLink = document.querySelector(`.cat-nav-link[data-view="${viewType}"][data-cat-type="note"]`);
+                if (catLink) {
+                  catLink.classList.add('active', 'text-white');
+                  const collapseParent = catLink.closest('.collapse');
+                  if (collapseParent && !collapseParent.classList.contains('show')) bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              }
+              break;
             default: activeLink = document.querySelector(`.nav-link[data-view="${viewType}"]`);
           }
           if (activeLink) {
@@ -14250,6 +15683,18 @@ SOFTWARE.</div>
           });
           
           if (currentLoadId !== viewLoadCounter) return;
+
+          const edOver = document.getElementById('editorOverlay');
+          const taskOver = document.getElementById('taskEditorOverlay');
+          if (edOver && edOver.classList.contains('active')) {
+            saveCurrentEditorNote(true);
+            edOver.classList.remove('active');
+            activeEditorNote = null;
+          }
+          if (taskOver && taskOver.classList.contains('active')) {
+            window.saveCurrentTask(true);
+            taskOver.classList.remove('active');
+          }
 
           if (pushHistory) {
             const isSameView = currentView.type === viewConfig.type &&
@@ -14280,6 +15725,32 @@ SOFTWARE.</div>
           currentView = viewConfig;
           updateActiveNavLink(currentView.type);
           setupSortOptions(currentView.type);
+
+          const pageHeaderEl = document.querySelector('.page-header');
+          const mainContentEl = document.getElementById('main-content');
+          if (currentView.type === 'get_inbox') {
+            if (pageHeaderEl) pageHeaderEl.classList.add('d-none');
+            contentArea.style.padding = '0';
+            contentArea.style.margin = '0';
+            contentArea.style.width = '100%';
+            contentArea.style.maxWidth = '100%';
+            contentArea.style.height = '100%';
+            if (mainContentEl) {
+              mainContentEl.style.height = '100%';
+              mainContentEl.style.overflow = 'hidden';
+            }
+          } else {
+            if (pageHeaderEl) pageHeaderEl.classList.remove('d-none');
+            contentArea.style.padding = '';
+            contentArea.style.margin = '';
+            contentArea.style.width = '';
+            contentArea.style.maxWidth = '';
+            contentArea.style.height = '';
+            if (mainContentEl) {
+              mainContentEl.style.height = '';
+              mainContentEl.style.overflow = '';
+            }
+          }
           
           let data;
           let pageParams = new URLSearchParams({ sort: currentView.sort, page: 1 });
@@ -14288,8 +15759,217 @@ SOFTWARE.</div>
           if (currentView.f_date) pageParams.append('f_date', currentView.f_date);
           if (currentView.f_dur) pageParams.append('f_dur', currentView.f_dur);
           if (currentView.f_sort) pageParams.append('f_sort', currentView.f_sort);
+          if (currentView.filter) pageParams.append('filter', currentView.filter);
           
           switch (currentView.type) {
+            case 'get_inbox':
+              updateContentTitle('Messages', !!currentUser);
+              if (chatPollingInterval) { clearInterval(chatPollingInterval); chatPollingInterval = null; }
+              
+              if (currentUser) {
+                // Completely replace the content area with the full width chat app
+                contentArea.innerHTML = `
+                  <div class="chat-wrapper">
+                    <div class="chat-sidebar">
+                      <div class="p-3 border-bottom border-secondary d-flex flex-column gap-3">
+                        <div class="d-flex justify-content-between align-items-center">
+                          <h4 class="text-white fw-bold m-0"><i class="bi bi-chat-dots-fill text-danger me-2"></i> Messages</h4>
+                          <button class="btn btn-sm btn-outline-info rounded-pill fw-bold" onclick="document.getElementById('group-manage-id').value=''; document.getElementById('group-manage-form').reset(); document.getElementById('group-manage-title').innerHTML='<i class=\\'bi bi-people-fill text-info me-2\\'></i>Create Group'; document.getElementById('group-manage-submit').textContent='Create Group'; document.getElementById('group-manage-submit').className='btn btn-info text-dark fw-bold w-100'; bootstrap.Modal.getOrCreateInstance(document.getElementById('group-manage-modal')).show();">
+                            <i class="bi bi-plus-lg"></i> Group
+                          </button>
+                        </div>
+                        <input type="text" id="inbox-search-input" class="form-control bg-dark text-white border-secondary rounded-pill" placeholder="Search Users & Groups...">
+                      </div>
+                      <div id="inbox-list" class="flex-grow-1 overflow-auto p-2" style="scrollbar-width: none;">
+                        <div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>
+                      </div>
+                    </div>
+                    
+                    <div class="chat-main">
+                      <div class="chat-header">
+                         <div class="d-flex align-items-center gap-3">
+                           <button class="btn btn-link text-white p-0 d-md-none" onclick="document.querySelector('.chat-main').classList.remove('active'); document.querySelector('.chat-sidebar').classList.remove('hidden'); if(chatPollingInterval) clearInterval(chatPollingInterval);"><i class="bi bi-arrow-left fs-4"></i></button>
+                           <h5 class="text-white fw-bold m-0 d-flex align-items-center" id="chat-header-title">Select a chat</h5>
+                         </div>
+                         <button class="btn btn-outline-light rounded-circle d-none" id="chat-info-btn" style="width: 40px; height: 40px;"><i class="bi bi-info-lg fs-5"></i></button>
+                      </div>
+                      
+                      <div class="chat-messages" id="chat-messages-container">
+                         <div class="d-flex flex-column align-items-center justify-content-center h-100 text-secondary opacity-50">
+                           <i class="bi bi-chat-heart" style="font-size: 5rem;"></i>
+                           <h4 class="mt-3">Your Messages</h4>
+                           <p>Send private photos and messages to a friend or group.</p>
+                         </div>
+                      </div>
+                      
+                      <div class="chat-input-area">
+                        <div class="d-flex justify-content-end w-100 mb-1">
+                          <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+                        </div>
+                        <div class="reply-preview-bar" id="chat-reply-bar">
+                           <div id="chat-reply-preview" class="text-truncate" style="max-width: 85%;"></div>
+                           <button class="btn-close btn-close-white" onclick="window.clearChatReply()"></button>
+                        </div>
+                        
+                        <div class="chat-img-upload-preview" id="chat-img-preview-bar">
+                           <img src="" id="chat-img-preview-src" class="d-none">
+                           <video src="" id="chat-video-preview-src" controls class="d-none"></video>
+                           <audio src="" id="chat-audio-preview-src" controls class="d-none w-100 mt-2"></audio>
+                           <button class="chat-img-remove" onclick="window.clearChatImage()"><i class="bi bi-x"></i></button>
+                           <div class="progress mt-3 d-none" id="chat-upload-progress-container" style="height: 8px; background-color: var(--ytm-bg);">
+                             <div class="progress-bar bg-danger progress-bar-striped progress-bar-animated" id="chat-upload-progress" role="progressbar" style="width: 0%;"></div>
+                           </div>
+                        </div>
+
+                        <form id="chat-form-full" class="d-flex gap-2 w-100 position-relative align-items-center">
+                          <input type="hidden" id="chat-reply-id">
+                          <div class="chat-input-wrapper flex-grow-1">
+                            <div class="dropup d-flex align-items-center justify-content-center">
+                              <button class="btn btn-link text-secondary p-0 border-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" aria-expanded="false" style="width: 28px; height: 28px; transition: color 0.2s;" onmouseover="this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.color='var(--ytm-secondary-text)'" title="Attach Media">
+                                <i class="bi bi-paperclip fs-4"></i>
+                              </button>
+                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg mb-2" style="background-color: var(--ytm-surface-2); border: 1px solid var(--ytm-border); border-radius: 12px; min-width: 150px; padding: 0.5rem 0;">
+                                <li>
+                                  <a class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" href="#" onclick="document.getElementById('chat-image-input').accept='image/*'; document.getElementById('chat-image-input').click(); return false;">
+                                    <i class="bi bi-image fs-5 text-info"></i> Photo
+                                  </a>
+                                </li>
+                                <li>
+                                  <a class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" href="#" onclick="document.getElementById('chat-image-input').accept='video/*'; document.getElementById('chat-image-input').click(); return false;">
+                                    <i class="bi bi-camera-video fs-5 text-danger"></i> Video
+                                  </a>
+                                </li>
+                                <li>
+                                  <a class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" href="#" onclick="document.getElementById('chat-image-input').accept='audio/*'; document.getElementById('chat-image-input').click(); return false;">
+                                    <i class="bi bi-headphones fs-5 text-warning"></i> Audio
+                                  </a>
+                                </li>
+                              </ul>
+                            </div>
+                            <button id="chat-mention-btn" class="btn btn-link text-secondary p-0 border-0 d-flex align-items-center justify-content-center ms-1" type="button" onclick="const i = document.getElementById('chat-input'); i.value += '@'; i.focus();" style="width: 28px; height: 28px; transition: color 0.2s;" onmouseover="this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.color='var(--ytm-secondary-text)'" title="Mention User">
+                              <i class="bi bi-at fs-4"></i>
+                            </button>
+                            <input type="file" id="chat-image-input" class="d-none">
+                            <textarea id="chat-input" placeholder="Type a message... (use @ to mention)" autocomplete="off" maxlength="50000" rows="1"></textarea>
+                          </div>
+                          <button type="submit" class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 shadow-sm mb-1" id="chat-submit-btn" style="width: 42px; height: 42px;"><i class="bi bi-send-fill fs-5"></i></button>
+                        </form>
+                      </div>
+                    </div>
+                  </div>
+                `;
+
+                // Initialize Drag and Drop for Chat
+                const chatMainEl = document.querySelector('.chat-main');
+                if (chatMainEl) {
+                  chatMainEl.addEventListener('dragover', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    chatMainEl.style.boxShadow = 'inset 0 0 20px var(--ytm-accent)';
+                  });
+                  chatMainEl.addEventListener('dragleave', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    chatMainEl.style.boxShadow = 'none';
+                  });
+                  chatMainEl.addEventListener('drop', (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    chatMainEl.style.boxShadow = 'none';
+                    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                      if (typeof window.handleChatImageSelection === 'function') {
+                        window.handleChatImageSelection(e.dataTransfer.files[0]);
+                      }
+                    }
+                  });
+                }
+
+                // Load Inbox List
+                const loadInboxList = async (query = '') => {
+                  const listEl = document.getElementById('inbox-list');
+                  if(!listEl) return;
+                  
+                  let inbox = await fetchData('?action=get_inbox');
+                  if (!Array.isArray(inbox)) inbox = []; // Protect against SQL error strings
+
+                  if (query) {
+                    inbox = inbox.filter(i => i.name && i.name.toLowerCase().includes(query.toLowerCase()));
+                  }
+
+                  if (inbox.length > 0) {
+                    listEl.innerHTML = inbox.map(m => {
+                      const isGroup = m.chat_type === 'group';
+                      let previewText = window.getPreviewText(m.content);
+                      if (m.has_image) {
+                        if (m.media_type && m.media_type.startsWith('video/')) previewText = 'Video';
+                        else if (m.media_type && m.media_type.startsWith('audio/')) previewText = 'Audio';
+                        else previewText = 'Photo';
+                      }
+                      const isMe = m.sender_id == currentUser.id;
+                      
+                      let activeHtml = '';
+                      if (!isGroup && m.last_active) {
+                        const mins = Math.floor((new Date() - new Date(m.last_active + 'Z')) / 60000);
+                        activeHtml = `<span class="position-absolute bottom-0 end-0 p-1 ${mins<5 ? 'bg-success' : 'bg-secondary'} border border-dark rounded-circle" title="Active"></span>`;
+                      }
+
+                      return `
+                      <div class="list-group-item bg-transparent text-white border-secondary px-3 py-3 d-flex align-items-center gap-3 rounded mb-1" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'" onclick="window.openChatFull(${m.target_id}, '${m.chat_type}', '${escapeHTML(m.name).replace(/&#39;/g, "\\'")}')">
+                        <div class="position-relative">
+                          ${isGroup ? `<div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary overflow-hidden" style="width: 50px; height: 50px;"><img src="?action=get_group_image&id=${m.target_id}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-info fs-4\\'></i>'" style="width: 100%; height: 100%; object-fit: cover;"></div>` : `<img src="?action=get_profile_picture&id=${m.target_id}" class="rounded-circle shadow-sm" style="width: 50px; height: 50px; object-fit: cover;">`}
+                          ${activeHtml}
+                        </div>
+                        <div class="flex-grow-1 overflow-hidden">
+                          <div class="d-flex justify-content-between align-items-center">
+                            <span class="fw-bold text-truncate">${escapeHTML(m.name)}${isGroup && m.member_count ? ` <small class="text-secondary fw-normal">(${m.member_count} members)</small>` : ''}</span>
+                            <small class="text-secondary" style="font-size: 0.7rem;">${timeAgo(m.created_at)}</small>
+                          </div>
+                          <div class="text-secondary small text-truncate ${m.unread_count > 0 ? 'text-white fw-bold' : ''}">
+                             ${isGroup && !isMe && m.content ? `<span class="text-info">${m.sender_name || 'Someone'}:</span> ` : ''}
+                             ${isMe && !isGroup ? 'You: ' : ''}${m.has_image ? '<i class="bi bi-image"></i> ' : ''}${escapeHTML(previewText) || 'New Chat'}
+                          </div>
+                        </div>
+                        ${m.unread_count > 0 ? `<span class="badge bg-danger rounded-pill">${m.unread_count}</span>` : ''}
+                      </div>
+                    `}).join('');
+                  } else {
+                    listEl.innerHTML = '<div class="p-4 text-center text-secondary">No conversations. Search to start one!</div>';
+                  }
+                };
+                
+                loadInboxList();
+                
+                let inboxSearchTimeout = null;
+                document.getElementById('inbox-search-input').addEventListener('input', (e) => {
+                  clearTimeout(inboxSearchTimeout);
+                  inboxSearchTimeout = setTimeout(async () => {
+                    const q = e.target.value.trim();
+                    await loadInboxList(q); // Must await the inbox rendering FIRST
+                    
+                    if (q.length > 1) {
+                      const res = await fetchData(`?action=search&q=${encodeURIComponent(q)}`);
+                      if(res && res.shelves) {
+                        const artistShelf = res.shelves.find(s => s.type === 'artists');
+                        if (artistShelf && artistShelf.items.length > 0) {
+                          const users = artistShelf.items.filter(u => u.is_user);
+                          if(users.length > 0) {
+                             const listEl = document.getElementById('inbox-list');
+                             const extraHtml = `<h6 class="text-secondary small fw-bold mt-3 mb-2 px-2">NEW CHATS</h6>` + users.map(u => `
+                                <div class="list-group-item bg-transparent text-white border-secondary px-3 py-2 d-flex align-items-center gap-3 rounded mb-1" style="cursor: pointer;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'" onclick="window.openChatFull(${u.id}, 'dm', '${escapeHTML(u.name).replace(/&#39;/g, "\\'")}')">
+                                  <img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle" style="width: 40px; height: 40px; object-fit: cover;">
+                                  <span class="fw-bold">${escapeHTML(u.name)}</span>
+                                </div>
+                             `).join('');
+                             listEl.innerHTML += extraHtml;
+                          }
+                        }
+                      }
+                    }
+                  }, 400); // 400ms debounce prevents SQLite from locking and wiping the UI
+                });
+
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to view messages.</div>`;
+              }
+              allContentloaded = true;
+              break;
             case 'get_songs':
               updateContentTitle('All Songs', false);
               if (!cachedExploreData) {
@@ -14446,24 +16126,28 @@ SOFTWARE.</div>
               break;
 
             case 'manage_note_categories':
-              updateContentTitle('Manage Categories', !!currentUser);
+              const mCatType = currentView.filter || 'note';
+              updateContentTitle(mCatType === 'task' ? 'Manage Task Categories' : 'Manage Note Categories', !!currentUser);
               if (currentUser) {
-                if (!window.noteCategories) {
-                  window.noteCategories = await fetchData('?action=get_note_categories') || [];
+                if (mCatType === 'task' && (!window.taskCategories || window.taskCategories.length === 0)) {
+                   window.taskCategories = await fetchData('?action=get_note_categories&type=task') || [];
+                } else if (mCatType === 'note' && (!window.noteCategories || window.noteCategories.length === 0)) {
+                   window.noteCategories = await fetchData('?action=get_note_categories&type=note') || [];
                 }
+                
                 contentArea.innerHTML = `
                   <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3">
-                    <h4 class="text-white fw-bold m-0"><i class="bi bi-tags text-danger me-2"></i> Edit Categories</h4>
+                    <h4 class="text-white fw-bold m-0"><i class="bi bi-tags text-danger me-2"></i> Edit ${mCatType === 'task' ? 'Task' : 'Note'} Categories</h4>
                   </div>
                   <div class="px-md-3 mb-5" style="max-width: 600px;">
                     <div class="d-flex gap-2 mb-4">
-                      <input type="text" id="newCatInputPage" class="form-control bg-dark text-white border-secondary" placeholder="New Category Name" />
+                      <input type="text" id="newCatInputPage" data-type="${mCatType}" class="form-control bg-dark text-white border-secondary" placeholder="New Category Name" />
                       <button class="btn btn-danger px-4 fw-bold" id="addCatBtnPage">Add</button>
                     </div>
                     <div class="cat-manage-list d-flex flex-column gap-2" id="cat-manage-list-page"></div>
                   </div>
                 `;
-                window.loadManageCategoriesPage();
+                window.loadManageCategoriesPage(mCatType);
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to manage categories.</div>`;
               }
@@ -14479,11 +16163,13 @@ SOFTWARE.</div>
               updateContentTitle(filterName, !!currentUser);
 
               if (currentUser) {
-                // Ensure categories are loaded
-                if (!window.noteCategories) {
-                  window.noteCategories = await fetchData('?action=get_note_categories') || [];
-                  window.renderNoteCategories();
+                if (!window.noteCategories || window.noteCategories.length === 0) {
+                  window.noteCategories = await fetchData('?action=get_note_categories&type=note') || [];
                 }
+                if (!window.taskCategories || window.taskCategories.length === 0) {
+                  window.taskCategories = await fetchData('?action=get_note_categories&type=task') || [];
+                }
+                window.renderNoteCategories();
 
                 contentArea.innerHTML = `
                   <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3">
@@ -14506,8 +16192,8 @@ SOFTWARE.</div>
                   }, 400);
                 });
 
-                if (currentView.searchQuery) pageParams.append('q', currentView.searchQuery);
-                pageParams.append('filter', noteFilter);
+                if (currentView.searchQuery) pageParams.set('q', currentView.searchQuery);
+                pageParams.set('filter', noteFilter);
                 
                 const notes = await fetchData(`?action=get_notes&${pageParams.toString()}`);
                 const grid = document.getElementById('notes-grid');
@@ -14601,10 +16287,13 @@ SOFTWARE.</div>
               updateContentTitle(taskFilterName, !!currentUser);
 
               if (currentUser) {
-                if (!window.noteCategories) {
-                  window.noteCategories = await fetchData('?action=get_note_categories') || [];
-                  window.renderNoteCategories();
+                if (!window.taskCategories || window.taskCategories.length === 0) {
+                  window.taskCategories = await fetchData('?action=get_note_categories&type=task') || [];
                 }
+                if (!window.noteCategories || window.noteCategories.length === 0) {
+                  window.noteCategories = await fetchData('?action=get_note_categories&type=note') || [];
+                }
+                window.renderNoteCategories();
 
                 contentArea.innerHTML = `
                   <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3">
@@ -14627,8 +16316,8 @@ SOFTWARE.</div>
                   }, 400);
                 });
 
-                if (currentView.searchQuery) pageParams.append('q', currentView.searchQuery);
-                pageParams.append('filter', taskFilter);
+                if (currentView.searchQuery) pageParams.set('q', currentView.searchQuery);
+                pageParams.set('filter', taskFilter);
                 
                 const tasks = await fetchData(`?action=get_tasks&${pageParams.toString()}`);
                 const grid = document.getElementById('tasks-grid');
@@ -14645,7 +16334,7 @@ SOFTWARE.</div>
                     const itemsHtml = items.slice(0, 4).map(item => `
                       <div class="task-card-item ${item.completed ? 'completed' : ''}">
                         <i class="bi ${item.completed ? 'bi-check-square-fill text-success' : 'bi-square'}"></i>
-                        <span class="text-truncate">${escapeHTML(item.text)}</span>
+                        <span style="word-break: break-word;">${escapeHTML(item.text)}</span>
                       </div>
                     `).join('') + (items.length > 4 ? `<div class="text-secondary small mt-1">+${items.length - 4} more</div>` : '');
 
@@ -14825,6 +16514,21 @@ SOFTWARE.</div>
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to get recommendations.</div>`;
               }
               allContentloaded = true;
+              break;
+            case 'get_categories':
+              updateContentTitle('Categories', !!currentUser);
+              if (currentUser) {
+                contentArea.innerHTML = `
+                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-folder-fill text-warning me-3 fs-3"></i> My Categories</div>
+                    <button class="btn btn-warning text-dark rounded-pill px-4 fw-medium shadow-sm edit-cat-btn-global" data-type="${currentView.filter || 'note'}" data-view="manage_note_categories"><i class="bi bi-tags me-1"></i> Edit Categories</button>
+                  </div>
+                `;
+                data = await fetchData(`?action=${currentView.type}&${pageParams.toString()}`);
+                renderGrid(data, currentView.type, true); 
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to view categories.</div>`;
+              }
               break;
             case 'get_albums':
             case 'get_artists':
@@ -15791,8 +17495,8 @@ SOFTWARE.</div>
               body: JSON.stringify({ view_type: viewTypeForIds, param: contextView.param, sort: contextView.sort, filter_user_id: contextView.filter_user_id || '', artist_name: contextView.artist_name || '' })
             }, true);
             
-            if (allIds && allIds.length > 0) {
-                fetchedQueue = allIds.map(id => parseInt(id));
+            if (Array.isArray(allIds) && allIds.length > 0) {
+              fetchedQueue = allIds.map(id => parseInt(id));
             }
           }
           
@@ -15875,7 +17579,7 @@ SOFTWARE.</div>
         };
         
         allNavLinks.forEach(link => {
-          if (link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
+          if (!link.hasAttribute('data-view') || link.classList.contains('cat-nav-link') || link.classList.contains('note-filter-link') || link.classList.contains('task-filter-link') || link.getAttribute('data-bs-toggle') === 'collapse' || link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
@@ -16142,8 +17846,8 @@ SOFTWARE.</div>
                 if (artistsModal) artistsModal.show();
               }
             } else {
-              // FIX: Only close choice popups, letting player modal stay open in background
-              closeChoiceModals();
+              // FIX: Close all modals so the artist view is visible immediately
+              closeOpenModals();
               loadView({ type: 'artist_songs', param: artistRaw, sort: 'album_asc', filter_user_id: userId });
             }
           });
@@ -16453,15 +18157,16 @@ SOFTWARE.</div>
           loadView(currentView);
         };
 
-        window.loadManageCategoriesPage = () => {
+        window.loadManageCategoriesPage = (type) => {
           const list = document.getElementById('cat-manage-list-page');
-          if (list && window.noteCategories) {
-            list.innerHTML = window.noteCategories.map(c => `
+          const catArray = type === 'task' ? window.taskCategories : window.noteCategories;
+          if (list && catArray) {
+            list.innerHTML = catArray.map(c => `
               <div class="cat-manage-item">
                 <span class="text-white fw-medium">${escapeHTML(c.name)}</span>
                 <div class="d-flex gap-2">
-                  <button class="note-icon-btn edit-cat-btn" data-id="${c.id}" data-name="${escapeHTML(c.name)}"><i class="bi bi-pencil"></i></button>
-                  <button class="note-icon-btn text-danger del-cat-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
+                  <button class="note-icon-btn edit-cat-btn" data-id="${c.id}" data-name="${escapeHTML(c.name)}" data-type="${type}"><i class="bi bi-pencil"></i></button>
+                  <button class="note-icon-btn text-danger del-cat-btn" data-id="${c.id}" data-type="${type}"><i class="bi bi-trash"></i></button>
                 </div>
               </div>
               `).join('');
@@ -16473,25 +18178,29 @@ SOFTWARE.</div>
             const addCatBtnPage = e.target.closest('#addCatBtnPage');
             if (addCatBtnPage) {
               const input = document.getElementById('newCatInputPage');
+              const type = input.dataset.type || 'note';
               const name = input.value.trim();
               if (!name) return;
               const id = 'cat_' + Date.now();
-              await fetchData('?action=save_note_category', { method:'POST', body: JSON.stringify({id, name}) });
-              window.noteCategories.push({id, name});
+              await fetchData('?action=save_note_category', { method:'POST', body: JSON.stringify({id, name, type}) });
+              if (type === 'task') window.taskCategories.push({id, name});
+              else window.noteCategories.push({id, name});
               input.value = '';
-              window.loadManageCategoriesPage();
+              window.loadManageCategoriesPage(type);
               window.renderNoteCategories();
               return;
             }
 
             const editBtn = e.target.closest('.edit-cat-btn');
             if (editBtn && e.target.closest('#cat-manage-list-page')) {
+              const type = editBtn.dataset.type || 'note';
               const newName = prompt('Rename category:', decodeHTML(editBtn.dataset.name));
               if (newName && newName.trim()) {
-                await fetchData('?action=save_note_category', { method:'POST', body: JSON.stringify({id: editBtn.dataset.id, name: newName.trim()}) });
-                const cat = window.noteCategories.find(c => c.id === editBtn.dataset.id);
+                await fetchData('?action=save_note_category', { method:'POST', body: JSON.stringify({id: editBtn.dataset.id, name: newName.trim(), type}) });
+                const catArray = type === 'task' ? window.taskCategories : window.noteCategories;
+                const cat = catArray.find(c => c.id === editBtn.dataset.id);
                 if (cat) cat.name = newName.trim();
-                window.loadManageCategoriesPage();
+                window.loadManageCategoriesPage(type);
                 window.renderNoteCategories();
               }
               return;
@@ -16499,10 +18208,12 @@ SOFTWARE.</div>
 
             const delBtn = e.target.closest('.del-cat-btn');
             if (delBtn && e.target.closest('#cat-manage-list-page')) {
-              if (confirm('Delete category? Notes will become Uncategorized.')) {
-                await fetchData('?action=delete_note_category', { method:'POST', body: JSON.stringify({id: delBtn.dataset.id}) });
-                window.noteCategories = window.noteCategories.filter(c => c.id !== delBtn.dataset.id);
-                window.loadManageCategoriesPage();
+              const type = delBtn.dataset.type || 'note';
+              if (confirm('Delete category? Items will become Uncategorized.')) {
+                await fetchData('?action=delete_note_category', { method:'POST', body: JSON.stringify({id: delBtn.dataset.id, type}) });
+                if (type === 'task') window.taskCategories = window.taskCategories.filter(c => c.id !== delBtn.dataset.id);
+                else window.noteCategories = window.noteCategories.filter(c => c.id !== delBtn.dataset.id);
+                window.loadManageCategoriesPage(type);
                 window.renderNoteCategories();
               }
               return;
@@ -16518,6 +18229,7 @@ SOFTWARE.</div>
               document.querySelectorAll('.note-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
               filterLink.classList.add('active', 'text-white');
               loadView({ type: 'get_notes', param: '', sort: 'newest', filter: filter });
+              hideMobileSidebar();
             }
             
             const taskFilterLink = e.target.closest('.task-filter-link');
@@ -16528,9 +18240,55 @@ SOFTWARE.</div>
               document.querySelectorAll('.task-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
               taskFilterLink.classList.add('active', 'text-white');
               loadView({ type: 'get_tasks', param: '', sort: 'newest', filter: filter });
+              hideMobileSidebar();
+            }
+
+            const catNavLink = e.target.closest('.cat-nav-link');
+            if (catNavLink) {
+              e.preventDefault();
+              e.stopPropagation();
+              const view = catNavLink.dataset.view;
+              const type = catNavLink.dataset.catType;
+              document.querySelectorAll('.cat-nav-link, .note-filter-link, .task-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
+              catNavLink.classList.add('active', 'text-white');
+              loadView({ type: view, param: '', sort: '', filter: type });
+              hideMobileSidebar();
             }
           });
           
+          document.getElementById('import-json-btn-tasks')?.addEventListener('click', (e) => { e.preventDefault(); document.getElementById('fileImportTasks').click(); });
+          document.getElementById('export-json-tasks-menu')?.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const tasks = await fetchData('?action=export_tasks');
+            const blob = new Blob([JSON.stringify(tasks, null, 2)], { type: 'application/json' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `TasksBackup_${Date.now()}.json`;
+            a.click();
+          });
+          
+          document.getElementById('fileImportTasks')?.addEventListener('change', async (e) => {
+             const file = e.target.files[0];
+             if (!file) return;
+             const text = await file.text();
+             try {
+               let importData = JSON.parse(text);
+               if (importData.name === "Tasks" && importData.tasks) {
+                  const response = await fetch('?action=import_tasks', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(importData)
+                  });
+                  const result = await response.json();
+                  if (result) {
+                    showToast(result.message, result.status);
+                    if (currentView.type === 'get_tasks') loadView(currentView);
+                  }
+               } else {
+                 showToast('Invalid Task JSON format.', 'error');
+               }
+             } catch(err) { showToast('Invalid JSON file.', 'error'); }
+             e.target.value = '';
+          });
+
           document.getElementById('import-txt-btn-menu')?.addEventListener('click', (e) => { e.preventDefault(); document.getElementById('fileImportTxt').click(); });
           document.getElementById('import-json-btn-menu')?.addEventListener('click', (e) => { e.preventDefault(); document.getElementById('fileImportJson').click(); });
           document.getElementById('export-json-notes-menu')?.addEventListener('click', async (e) => {
@@ -16605,7 +18363,8 @@ SOFTWARE.</div>
           const messageBtn = target.closest('.message-btn');
           if (messageBtn) {
             e.stopPropagation();
-            window.openChat(messageBtn.dataset.userId, decodeURIComponent(messageBtn.dataset.artist));
+            await loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' });
+            window.openChatFull(messageBtn.dataset.userId, 'dm', decodeURIComponent(messageBtn.dataset.artist));
             return;
           }
 
@@ -16961,6 +18720,13 @@ SOFTWARE.</div>
               viewType = 'mix_songs';
               param = decodeURIComponent(cardEl.dataset.mix);
               sort = 'manual_order';
+            } else if (cardEl.dataset.category) {
+              viewType = currentView.filter === 'task' ? 'get_tasks' : 'get_notes';
+              param = '';
+              sort = 'newest';
+              currentView.filter = decodeURIComponent(cardEl.dataset.category);
+              loadView({ type: viewType, param: param, sort: sort, filter: currentView.filter });
+              return;
             }
             
             if (viewType) {
@@ -17062,6 +18828,14 @@ SOFTWARE.</div>
             window.scrollTo({ top: 0, behavior: 'smooth' });
             return;
           }
+          const editCatBtnGlobal = target.closest('.edit-cat-btn-global');
+          if (editCatBtnGlobal) {
+            e.stopPropagation();
+            const type = editCatBtnGlobal.dataset.type || 'note';
+            loadView({ type: 'manage_note_categories', param: '', sort: '', filter: type, filter_user_id: '' });
+            return;
+          }
+
           const seeAllButton = target.closest('.shelf-header button');
           if (seeAllButton) {
             e.stopPropagation();
@@ -17148,7 +18922,7 @@ SOFTWARE.</div>
               }
               break;
             case 'go_album':
-              closeChoiceModals();
+              closeOpenModals();
               const albumRaw = decodeURIComponent(name);
               const songArtistRaw = decodeURIComponent(item.dataset.artistname || '');
               const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
@@ -17168,8 +18942,8 @@ SOFTWARE.</div>
                   if (artistsModal) artistsModal.show();
                 }
               } else {
-                // FIX: Only close choice popups, letting player modal stay open in background
-                closeChoiceModals();
+                // FIX: Close all modals so the album view is immediately visible
+                closeOpenModals();
                 loadView({ type: 'album_songs', param: albumRaw, sort: 'title_asc', filter_user_id: safeMenuUserId, artist_name: songArtistRaw });
                 hideMobileSidebar();
               }
@@ -17710,7 +19484,7 @@ SOFTWARE.</div>
             if (!target) return;
             
             const genreName = target.dataset.genre;
-            closeChoiceModals();
+            closeOpenModals();
             
             setTimeout(() => {
               loadView({ type: 'genre_songs', param: genreName, sort: 'artist_asc', filter_user_id: '' });
@@ -18460,6 +20234,25 @@ SOFTWARE.</div>
         const editMetadataForm = document.getElementById('edit-metadata-form');
         const btnDeleteKeep = document.getElementById('btn-delete-keep');
         const btnDeleteAll = document.getElementById('btn-delete-all');
+        const osNotifBtn = document.getElementById('enable-os-notif-btn');
+
+        if (osNotifBtn) {
+          osNotifBtn.addEventListener('click', async () => {
+            if (!('Notification' in window)) {
+              showToast('Push notifications are not supported on this device/browser.', 'error');
+              return;
+            }
+            if (Notification.permission === 'granted') {
+              showToast('Notifications are already enabled!', 'success');
+            } else if (Notification.permission === 'denied') {
+              showToast('Notifications are blocked. Please unblock them in your browser settings.', 'error');
+            } else {
+              const perm = await Notification.requestPermission();
+              if (perm === 'granted') showToast('Push notifications enabled successfully!', 'success');
+              else showToast('Push notification permission denied.', 'error');
+            }
+          });
+        }
 
         loginForm.addEventListener('submit', async e => {
           e.preventDefault();
@@ -19540,14 +21333,18 @@ SOFTWARE.</div>
         });
         
         let profileCropper = null;
+        let groupCropper = null;
         const profilePicInput = document.getElementById('profile-picture-input');
         const profilePicPreview = document.getElementById('profile-picture-preview');
         const presetContainer = document.getElementById('preset-avatar-container');
         const refreshPresetsBtn = document.getElementById('refresh-presets-btn');
+        const groupPicInput = document.getElementById('group-manage-image');
+        const groupPicPreview = document.getElementById('group-manage-image-preview');
+        const groupPresetContainer = document.getElementById('group-preset-avatar-container');
 
-        const loadPresets = () => {
-          if (!presetContainer || typeof multiavatar === 'undefined') return;
-          presetContainer.innerHTML = '';
+        const loadPresets = (targetContainer, isGroup = false) => {
+          if (!targetContainer || typeof multiavatar === 'undefined') return;
+          targetContainer.innerHTML = '';
           for (let i = 0; i < 6; i++) {
             const seed = Math.random().toString(36).substring(2, 8);
             const svgCode = multiavatar(seed);
@@ -19568,44 +21365,79 @@ SOFTWARE.</div>
             img.addEventListener('mouseout', () => img.style.transform = 'scale(1)');
             
             img.addEventListener('click', () => {
-              profilePicPreview.src = url;
-              if (profileCropper) profileCropper.destroy();
-              profileCropper = new Cropper(profilePicPreview, {
-                aspectRatio: 1,
-                viewMode: 1,
-                autoCropArea: 1,
-                dragMode: 'move',
-                background: false
-              });
-              if (profilePicInput) profilePicInput.value = '';
+              if (isGroup) {
+                groupPicPreview.src = url;
+                groupPicPreview.style.display = 'block';
+                if (groupCropper) groupCropper.destroy();
+                groupCropper = new Cropper(groupPicPreview, {
+                  aspectRatio: 1, viewMode: 1, autoCropArea: 1, dragMode: 'move', background: false
+                });
+                if (groupPicInput) groupPicInput.value = '';
+              } else {
+                profilePicPreview.src = url;
+                if (profileCropper) profileCropper.destroy();
+                profileCropper = new Cropper(profilePicPreview, {
+                  aspectRatio: 1, viewMode: 1, autoCropArea: 1, dragMode: 'move', background: false
+                });
+                if (profilePicInput) profilePicInput.value = '';
+              }
             });
             
-            presetContainer.appendChild(img);
+            targetContainer.appendChild(img);
           }
         };
 
         if (refreshPresetsBtn) {
-          refreshPresetsBtn.addEventListener('click', loadPresets);
+          refreshPresetsBtn.addEventListener('click', () => loadPresets(presetContainer, false));
         }
 
         const settingsModalEl = document.getElementById('settings-modal');
         if (settingsModalEl) {
-          settingsModalEl.addEventListener('show.bs.modal', loadPresets);
+          settingsModalEl.addEventListener('show.bs.modal', () => loadPresets(presetContainer, false));
+        }
+
+        const groupManageModalEl = document.getElementById('group-manage-modal');
+        if (groupManageModalEl) {
+          groupManageModalEl.addEventListener('show.bs.modal', () => {
+            loadPresets(groupPresetContainer, true);
+            if (!document.getElementById('group-manage-id').value) {
+               groupPicPreview.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+               groupPicPreview.style.display = 'none';
+               if (groupCropper) { groupCropper.destroy(); groupCropper = null; }
+               if (groupPicInput) groupPicInput.value = '';
+            }
+          });
+          groupManageModalEl.addEventListener('hidden.bs.modal', () => {
+            if (groupCropper) { groupCropper.destroy(); groupCropper = null; }
+          });
         }
         
         if (profilePicInput) {
           profilePicInput.addEventListener('change', function(e) {
             if (this.files && this.files[0]) {
               const reader = new FileReader();
-              reader.onload = e => {
+              reader.onload = ev => {
                 profilePicPreview.src = e.target.result;
                 if (profileCropper) profileCropper.destroy();
                 profileCropper = new Cropper(profilePicPreview, {
-                  aspectRatio: 1,
-                  viewMode: 1,
-                  autoCropArea: 1,
-                  dragMode: 'move',
-                  background: false
+                  aspectRatio: 1, viewMode: 1, autoCropArea: 1, dragMode: 'move', background: false
+                });
+              };
+              reader.readAsDataURL(this.files[0]);
+            }
+          });
+        }
+        
+        if (groupPicInput) {
+          groupPicInput.addEventListener('change', function(e) {
+            if (this.files && this.files[0]) {
+              const reader = new FileReader();
+              reader.onload = ev => {
+                groupPicPreview.src = ev.target.result;
+                groupPicPreview.style.display = 'block';
+                if (groupCropper) groupCropper.destroy();
+                groupCropper = new Cropper(groupPicPreview, {
+                  aspectRatio: 1, viewMode: 1, autoCropArea: 1, dragMode: 'move', background: false
                 });
               };
               reader.readAsDataURL(this.files[0]);
@@ -20139,6 +21971,35 @@ SOFTWARE.</div>
           });
         }
 
+        let lastNotifiedMsgId = localStorage.getItem('ytm_lastMsgId') || 0;
+
+        const requestNotificationPermission = async () => {
+          if (!('Notification' in window)) return;
+          if (Notification.permission === 'default') {
+            try { await Notification.requestPermission(); } catch (e) {}
+          }
+        };
+
+        const showNativeNotification = (title, body) => {
+          if (!('Notification' in window) || Notification.permission !== 'granted') return;
+          
+          const opts = {
+            body: body,
+            icon: '?action=get_app_icon&size=192',
+            badge: '?action=get_app_icon&size=192',
+            vibrate: [200, 100, 200]
+          };
+
+          if ('serviceWorker' in navigator && navigator.serviceWorker.ready) {
+            navigator.serviceWorker.ready.then(reg => {
+              reg.showNotification(title, opts);
+            });
+          } else {
+            const n = new Notification(title, opts);
+            n.onclick = () => { window.focus(); };
+          }
+        };
+
         const updateNotifBadge = async () => {
           if (!currentUser) return;
           const data = await fetchData('?action=get_unread_notif_count');
@@ -20152,9 +22013,30 @@ SOFTWARE.</div>
           // Check Unread Messages (Inbox)
           const inboxData = await fetchData('?action=get_inbox', {}, true);
           let totalUnread = 0;
-          if (inboxData && inboxData.length > 0) {
-             inboxData.forEach(m => totalUnread += m.unread_count);
+          let highestMsgId = parseInt(lastNotifiedMsgId);
+
+          if (Array.isArray(inboxData) && inboxData.length > 0) {
+            inboxData.forEach(m => {
+              totalUnread += m.unread_count;
+              // Trigger Real-Time OS Notification for New Messages
+              if (m.unread_count > 0 && m.id > highestMsgId && m.sender_id != currentUser.id) {
+                highestMsgId = m.id;
+                let previewText = window.getPreviewText(m.content);
+                if (m.has_image) {
+                  if (m.media_type && m.media_type.startsWith('video/')) previewText = '📹 Video';
+                  else if (m.media_type && m.media_type.startsWith('audio/')) previewText = '🎵 Audio';
+                  else previewText = '📷 Photo';
+                }
+                showNativeNotification(`New message from ${m.name}`, previewText);
+              }
+            });
           }
+
+          if (highestMsgId > parseInt(lastNotifiedMsgId)) {
+            lastNotifiedMsgId = highestMsgId;
+            localStorage.setItem('ytm_lastMsgId', highestMsgId);
+          }
+
           const inboxBadges = document.querySelectorAll('.inbox-badge');
           if (totalUnread > 0) {
             inboxBadges.forEach(b => { b.textContent = totalUnread; b.classList.remove('d-none'); });
@@ -20162,6 +22044,14 @@ SOFTWARE.</div>
             inboxBadges.forEach(b => b.classList.add('d-none'));
           }
         };
+        
+        // Background Real-Time Notification Poller
+        // This ensures you get notifications even if the tab is minimized!
+        setInterval(() => {
+          if (currentUser && document.visibilityState !== 'visible') {
+            updateNotifBadge();
+          }
+        }, 5000);
 
         function updateUIForAuthState() {
           const isLoggedIn = !!currentUser;
@@ -20265,18 +22155,16 @@ SOFTWARE.</div>
         }
 
         window.noteCategories = [];
-        window.getCategoryName = (id) => {
-          const c = window.noteCategories.find(c => c.id === id);
+        window.taskCategories = [];
+        window.noteViewerStates = {}; // Holds markdown state
+        
+        window.getCategoryName = (id, type = 'note') => {
+          const arr = type === 'task' ? window.taskCategories : window.noteCategories;
+          const c = arr.find(c => c.id === id);
           return c ? c.name : 'Uncategorized';
         };
 
         window.renderNoteCategories = () => {
-          const menuList = document.getElementById('note-categories-menu-list');
-          if (menuList) {
-            menuList.innerHTML = window.noteCategories.map(c => `
-              <li><a href="#" class="nav-link py-2 ps-3 border-0 note-filter-link" data-view="get_notes" data-filter="${c.id}"><i class="bi bi-folder"></i> ${escapeHTML(c.name)}</a></li>
-            `).join('');
-          }
           const catSelect = document.getElementById('editorCategorySelect');
           if (catSelect) {
             catSelect.innerHTML = '<option value="all" style="background: var(--ytm-surface-2);">Uncategorized</option>';
@@ -20287,15 +22175,30 @@ SOFTWARE.</div>
               catSelect.appendChild(opt);
             });
           }
+
+          const taskCatSelect = document.getElementById('taskEditorCategorySelect');
+          if (taskCatSelect) {
+            taskCatSelect.innerHTML = '<option value="all" style="background: var(--ytm-surface-2);">Uncategorized</option>';
+            window.taskCategories.forEach(c => {
+              const opt = document.createElement('option');
+              opt.value = c.id; opt.innerText = c.name;
+              opt.style.background = 'var(--ytm-surface-2)';
+              taskCatSelect.appendChild(opt);
+            });
+          }
         };
 
         const updateNoteSelectionUI = () => {
           document.getElementById('selectionCountNotes').innerText = window.selectedNoteIds.size;
-          document.querySelectorAll('.note-card-item').forEach(card => {
+          document.querySelectorAll('.note-card-item, .task-card-wrapper').forEach(card => {
             if (window.selectedNoteIds.has(card.dataset.id)) card.classList.add('selected');
             else card.classList.remove('selected');
           });
           const bar = document.getElementById('selectionBarNotes');
+          const dlBtn = document.getElementById('bulkDownloadNotesBtn');
+          if (currentView.type === 'get_tasks') dlBtn.classList.add('d-none');
+          else dlBtn.classList.remove('d-none');
+          
           if (window.multiSelectNoteMode) bar.classList.add('active');
           else bar.classList.remove('active');
         };
@@ -20329,11 +22232,22 @@ SOFTWARE.</div>
           const catSelect = document.getElementById('editorCategorySelect');
           if (catSelect && note.category) catSelect.value = note.category;
           
+          // History state implementation for back/forth
+          if (!history.state || history.state.overlay !== 'note_' + note.id) {
+            history.pushState({ viewConfig: currentView, overlay: 'note_' + note.id }, '');
+          }
+
           isMarkdownPreview = false;
           const mdIcon = document.getElementById('editorMarkdownBtn').querySelector('i');
-          mdIcon.className = 'bi bi-markdown';
-          document.getElementById('editorContent').classList.remove('d-none');
-          document.getElementById('editorMarkdownPreview').classList.add('d-none');
+          
+          // Persist Markdown state if the user previously toggled it for this note
+          if (window.noteViewerStates[note.id] === 'markdown') {
+            document.getElementById('editorMarkdownBtn').click();
+          } else {
+            mdIcon.className = 'bi bi-markdown';
+            document.getElementById('editorContent').classList.remove('d-none');
+            document.getElementById('editorMarkdownPreview').classList.add('d-none');
+          }
           
           noteTextHistory = [document.getElementById('editorContent').value];
           noteHistoryIdx = 0;
@@ -20350,6 +22264,8 @@ SOFTWARE.</div>
         };
 
         const saveCurrentEditorNote = async (force = false) => {
+          const statusIndicator = document.getElementById('noteSaveStatus');
+          if (statusIndicator) statusIndicator.textContent = "Saving...";
           const idInput = document.getElementById('editorNoteId');
           const id = idInput.value;
           const title = document.getElementById('editorTitle').value.trim();
@@ -20370,10 +22286,17 @@ SOFTWARE.</div>
           if (res && res.status === 'success' && res.id && !id) {
             idInput.value = res.id;
           }
+          if (statusIndicator && res && res.status === 'success') {
+            statusIndicator.textContent = "Saved";
+            setTimeout(() => { if (statusIndicator.textContent === "Saved") statusIndicator.textContent = ""; }, 2000);
+          }
         };
 
         document.getElementById('editorMarkdownBtn').addEventListener('click', () => {
           isMarkdownPreview = !isMarkdownPreview;
+          const idInput = document.getElementById('editorNoteId').value;
+          if (idInput) window.noteViewerStates[idInput] = isMarkdownPreview ? 'markdown' : 'editor';
+          
           const contentArea = document.getElementById('editorContent');
           const previewArea = document.getElementById('editorMarkdownPreview');
           const icon = document.getElementById('editorMarkdownBtn').querySelector('i');
@@ -20484,6 +22407,21 @@ SOFTWARE.</div>
                   return; // Cancelled
                 }
                 break;
+              case 'video':
+                const vidUrl = prompt("Enter Video or YouTube URL:", "https://www.youtube.com/watch?v=...");
+                if (vidUrl) {
+                  const ytMatch = vidUrl.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+                  if (ytMatch && ytMatch[1]) {
+                    pre = `\n<iframe src="https://www.youtube.com/embed/${ytMatch[1]}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>\n`;
+                  } else {
+                    pre = `\n<video src="${vidUrl}" controls style="background: #000;"></video>\n`;
+                  }
+                  suf = '';
+                  def = '';
+                } else {
+                  return; // Cancelled
+                }
+                break;
             }
 
             const insertText = selectedText || def;
@@ -20507,13 +22445,15 @@ SOFTWARE.</div>
         let taskSaveTimeout = null;
 
         window.openTaskEditor = (task) => {
+          if (!history.state || history.state.overlay !== 'task_' + task.id) {
+             history.pushState({ viewConfig: currentView, overlay: 'task_' + task.id }, '');
+          }
           document.getElementById('taskEditorId').value = task.id || '';
           document.getElementById('taskEditorTitle').value = task.title ? decodeHTML(task.title) : '';
           document.getElementById('taskEditorDate').innerText = task.updated_at ? new Date(task.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString() : new Date().toLocaleDateString();
           
           const catSelect = document.getElementById('taskEditorCategorySelect');
           if (catSelect) {
-            catSelect.innerHTML = document.getElementById('editorCategorySelect').innerHTML;
             if (task.category) catSelect.value = task.category;
           }
           
@@ -20533,16 +22473,23 @@ SOFTWARE.</div>
         window.renderTaskItems = () => {
           const container = document.getElementById('taskItemsContainer');
           if (!container) return;
+          const autoResizeTaskInput = (el) => {
+            el.style.height = 'auto';
+            el.style.height = (el.scrollHeight) + 'px';
+          };
+
           container.innerHTML = window.currentTaskItems.map((item, idx) => `
             <div class="task-item-row">
               <input type="checkbox" class="task-item-checkbox" data-idx="${idx}" ${item.completed ? 'checked' : ''}>
-              <input type="text" class="task-item-input ${item.completed ? 'completed' : ''}" data-idx="${idx}" value="${escapeHTML(item.text)}" placeholder="Task description...">
+              <textarea class="task-item-input ${item.completed ? 'completed' : ''}" data-idx="${idx}" placeholder="Task description..." rows="1" style="resize: none; overflow: hidden; padding-top: 4px;">${escapeHTML(item.text)}</textarea>
               <button class="task-item-del" data-idx="${idx}"><i class="bi bi-x-lg"></i></button>
             </div>
           `).join('');
 
           container.querySelectorAll('.task-item-input').forEach(input => {
+            autoResizeTaskInput(input);
             input.addEventListener('input', (e) => {
+              autoResizeTaskInput(e.target);
               window.currentTaskItems[e.target.dataset.idx].text = e.target.value;
               clearTimeout(taskSaveTimeout);
               taskSaveTimeout = setTimeout(() => window.saveCurrentTask(false), 800);
@@ -20605,6 +22552,8 @@ SOFTWARE.</div>
         };
 
         window.saveCurrentTask = async (force = false) => {
+          const statusIndicator = document.getElementById('taskSaveStatus');
+          if (statusIndicator) statusIndicator.textContent = "Saving...";
           const idInput = document.getElementById('taskEditorId');
           const id = idInput.value;
           const title = document.getElementById('taskEditorTitle').value.trim();
@@ -20623,6 +22572,10 @@ SOFTWARE.</div>
 
           if (res && res.status === 'success' && res.id && !id) {
             idInput.value = res.id;
+          }
+          if (statusIndicator && res && res.status === 'success') {
+            statusIndicator.textContent = "Saved";
+            setTimeout(() => { if (statusIndicator.textContent === "Saved") statusIndicator.textContent = ""; }, 2000);
           }
         };
 
@@ -20840,33 +22793,45 @@ SOFTWARE.</div>
         let findNoteMatches = [];
         let currentNoteMatchIdx = -1;
 
-        const executeNoteFind = () => {
+        const executeNoteFind = (fromInput = true) => {
           const text = document.getElementById('editorContent').value;
           const query = document.getElementById('findInput').value;
           findNoteMatches = [];
-          if (!query) { updateNoteFindUI(-1); return; }
+          if (!query) { updateNoteFindUI(-1, false); return; }
 
           const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
           let match;
           while ((match = regex.exec(text)) !== null) {
             findNoteMatches.push({ index: match.index, length: match[0].length });
           }
-          currentNoteMatchIdx = findNoteMatches.length > 0 ? 0 : -1;
-          updateNoteFindUI(currentNoteMatchIdx);
+          
+          if (findNoteMatches.length > 0) {
+            if (fromInput) {
+              if (currentNoteMatchIdx < 0 || currentNoteMatchIdx >= findNoteMatches.length) currentNoteMatchIdx = 0;
+              updateNoteFindUI(currentNoteMatchIdx, false); // Update counts without focus jumping
+            } else {
+              currentNoteMatchIdx = 0;
+              updateNoteFindUI(currentNoteMatchIdx, true); // Actually scroll to it
+            }
+          } else {
+            updateNoteFindUI(-1, false);
+          }
         };
 
-        const updateNoteFindUI = (idx) => {
+        const updateNoteFindUI = (idx, doFocusJump = true) => {
           currentNoteMatchIdx = idx;
           const counter = document.getElementById('findCounter');
-          if (findNoteMatches.length === 0) {
+          if (findNoteMatches.length === 0 || idx < 0) {
             counter.innerText = '0/0'; return;
           }
           counter.innerText = `${idx + 1}/${findNoteMatches.length}`;
           
-          const ta = document.getElementById('editorContent');
-          const match = findNoteMatches[idx];
-          ta.focus({ preventScroll: true });
-          ta.setSelectionRange(match.index, match.index + match.length);
+          if (doFocusJump) {
+            const ta = document.getElementById('editorContent');
+            const match = findNoteMatches[idx];
+            ta.focus({ preventScroll: true });
+            ta.setSelectionRange(match.index, match.index + match.length);
+          }
         };
 
         document.getElementById('editorFindBtn').addEventListener('click', () => {
@@ -20885,13 +22850,13 @@ SOFTWARE.</div>
           if (findNoteMatches.length === 0) return;
           let next = currentNoteMatchIdx + 1;
           if (next >= findNoteMatches.length) next = 0;
-          updateNoteFindUI(next);
+          updateNoteFindUI(next, true);
         });
         document.getElementById('findPrevBtn').addEventListener('click', () => {
           if (findNoteMatches.length === 0) return;
           let next = currentNoteMatchIdx - 1;
           if (next < 0) next = findNoteMatches.length - 1;
-          updateNoteFindUI(next);
+          updateNoteFindUI(next, true);
         });
         document.getElementById('replaceBtn').addEventListener('click', () => {
           if (currentNoteMatchIdx < 0 || findNoteMatches.length === 0) return;
@@ -20899,7 +22864,7 @@ SOFTWARE.</div>
           const ta = document.getElementById('editorContent');
           const match = findNoteMatches[currentNoteMatchIdx];
           ta.value = ta.value.substring(0, match.index) + rep + ta.value.substring(match.index + match.length);
-          executeNoteFind();
+          executeNoteFind(false);
         });
         document.getElementById('replaceAllBtn').addEventListener('click', () => {
           const query = document.getElementById('findInput').value;
@@ -20908,7 +22873,7 @@ SOFTWARE.</div>
           const ta = document.getElementById('editorContent');
           const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
           ta.value = ta.value.replace(regex, rep);
-          executeNoteFind();
+          executeNoteFind(false);
         });
 
         document.getElementById('toggleSelectAllNotesBtn').addEventListener('click', () => {
@@ -21039,8 +23004,30 @@ SOFTWARE.</div>
 
           await checkSession();
 
-          // Intercept Invite Link before normal rendering
+          // Intercept Invite Links before normal rendering
           const urlParams = new URLSearchParams(window.location.search);
+          
+          const chatInviteToken = urlParams.get('chat_invite');
+          if (chatInviteToken) {
+            if (!currentUser) {
+              showToast("Please log in to join the group chat.", "warning");
+              const loginModal = new bootstrap.Modal(document.getElementById('login-modal'));
+              loginModal.show();
+            } else {
+              fetchData('?action=join_group', { method:'POST', body: JSON.stringify({token: chatInviteToken}) }).then(res => {
+                if (res && res.status === 'success') {
+                  showToast('Joined group successfully!', 'success');
+                  window.history.replaceState({}, document.title, window.location.pathname);
+                  loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' });
+                  setTimeout(() => window.openChatFull(res.group_id, 'group', 'Group Chat'), 1000);
+                } else {
+                  showToast(res?.message || "Invalid invite link.", "error");
+                  window.history.replaceState({}, document.title, window.location.pathname);
+                }
+              });
+            }
+          }
+
           const inviteToken = urlParams.get('collab_invite');
           if (inviteToken) {
             if (!currentUser) {
@@ -21088,6 +23075,8 @@ SOFTWARE.</div>
             }
           }
 
+          if (chatInviteToken || inviteToken) return; // Prevent overwriting view when handling invites
+
           if (window.initialView) {
             history.replaceState({ viewConfig: window.initialView }, "");
             loadView(window.initialView, false);
@@ -21099,11 +23088,30 @@ SOFTWARE.</div>
         };
 
         window.addEventListener('popstate', (e) => {
+          const edOver = document.getElementById('editorOverlay');
+          const taskOver = document.getElementById('taskEditorOverlay');
+          
+          if (e.state && e.state.overlay) {
+            // An overlay is meant to be active. We will let standard navigation handle it for now, 
+            // but if we are here, we don't close it yet.
+          } else {
+            // No overlay in state. Close any open overlays securely.
+            if (edOver && edOver.classList.contains('active')) {
+              saveCurrentEditorNote(true);
+              edOver.classList.remove('active');
+              activeEditorNote = null;
+              if (currentView.type === 'get_notes') loadView(currentView, false);
+            }
+            if (taskOver && taskOver.classList.contains('active')) {
+              window.saveCurrentTask(true);
+              taskOver.classList.remove('active');
+              if (currentView.type === 'get_tasks') loadView(currentView, false);
+            }
+          }
+
           if (e.state && e.state.viewConfig) {
-            // Load the previous view without pushing it to history again
             loadView(e.state.viewConfig, false);
           } else {
-            // Fallback to Home if state is lost
             loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' }, false);
           }
         });
@@ -21167,6 +23175,81 @@ SOFTWARE.</div>
             if (clearBtn && !clearBtn.closest('#history-controls').classList.contains('d-none')) {
               clearBtn.click();
             }
+            return;
+          }
+
+          // Navigation & Quick Access Shortcuts (Global)
+          if (e.code === 'KeyN' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            if (currentUser) loadView({ type: 'get_notes', param: '', sort: 'newest', filter: 'all' });
+            else showToast('Please login to view notes', 'error');
+            return;
+          }
+          if (e.code === 'KeyK' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            if (currentUser) loadView({ type: 'get_tasks', param: '', sort: 'newest', filter: 'all' });
+            else showToast('Please login to view tasks', 'error');
+            return;
+          }
+          if (e.code === 'KeyV' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            if (currentUser) {
+              const setModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('settings-modal'));
+              setModal.show();
+              setTimeout(() => {
+                const audioTab = document.querySelector('.phpmusic-settings-nav button[data-bs-target="#settings-audio"]');
+                if (audioTab) audioTab.click();
+              }, 200);
+            } else {
+               showToast('Please login for settings', 'error');
+            }
+            return;
+          }
+          if (e.code === 'KeyQ' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            if (currentSong) {
+              const pm = bootstrap.Modal.getOrCreateInstance(window.innerWidth >= 768 ? document.getElementById('desktop-player-modal') : document.getElementById('player-modal'));
+              pm.show();
+              setTimeout(() => {
+                const qTab = window.innerWidth >= 768 ? document.getElementById('dp-queue-tab') : document.querySelector('#mp-tabs [data-bs-target="#mp-queue-pane"]');
+                if (qTab) qTab.click();
+              }, 200);
+            }
+            return;
+          }
+          if (e.code === 'KeyW' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            if (typeof toggleWakeLock === 'function') toggleWakeLock();
+            return;
+          }
+          if (e.shiftKey && e.code === 'KeyP') {
+            e.preventDefault();
+            if (currentUser) loadView({ type: 'get_user_playlists', param: '', sort: 'modified_desc', filter_user_id: '' });
+            else showToast('Please login to view playlists', 'error');
+            return;
+          }
+          if (e.shiftKey && e.code === 'KeyU') {
+            e.preventDefault();
+            const upBtn = document.getElementById('nav-upload-btn');
+            if (upBtn) upBtn.click();
+            return;
+          }
+          if (e.shiftKey && e.code === 'KeyM') {
+            e.preventDefault();
+            if (currentUser) loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' });
+            else showToast('Please login to view messages', 'error');
+            return;
+          }
+          if (e.shiftKey && e.code === 'KeyF') {
+            e.preventDefault();
+            if (currentUser) loadView({ type: 'get_favorites', param: '', sort: 'manual_order', filter_user_id: '' });
+            else showToast('Please login to view favorites', 'error');
+            return;
+          }
+          if (e.shiftKey && e.code === 'KeyA') {
+            e.preventDefault();
+            if (currentUser) bootstrap.Modal.getOrCreateInstance(document.getElementById('activity-modal')).show();
+            else showToast('Please login to view activity', 'error');
             return;
           }
 
