@@ -1,4 +1,6 @@
 <?php
+$admin_password = 'admin'; // Change this password once here!
+
 if (isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip')) {
   ob_start('ob_gzhandler');
 }
@@ -363,10 +365,10 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '4.4');
+define('APP_VERSION', '4.5');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
-define('ADMIN_PASSWORD', 'admin');
+define('ADMIN_PASSWORD', $admin_password ?? 'admin');
 define('ADMIN_PASSWORD_HASH', password_hash(ADMIN_PASSWORD, PASSWORD_DEFAULT));
 define('DAILY_UPLOAD_LIMIT', 10);
 
@@ -1391,6 +1393,30 @@ if (isset($_GET['action'])) {
     try { $db->exec("ALTER TABLE messages ADD COLUMN reply_to_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE community_posts ADD COLUMN parent_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE messages ADD COLUMN media_type TEXT DEFAULT 'image/webp';"); } catch(Exception $e) {}
+    
+    try { $db->exec("ALTER TABLE personal_notes ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE tasks ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE projects ADD COLUMN project_type TEXT DEFAULT 'note';"); } catch(Exception $e) {}
+    try {
+      $db->exec("
+        CREATE TABLE IF NOT EXISTS projects (
+          id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT, owner_id INTEGER NOT NULL, is_public INTEGER DEFAULT 0, project_type TEXT DEFAULT 'note', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS project_members (
+          project_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT DEFAULT 'editor', joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (project_id, user_id), FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS project_invites (
+          token TEXT PRIMARY KEY, project_id INTEGER NOT NULL, expires_at DATETIME,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS project_presence (
+          user_id INTEGER NOT NULL, item_id INTEGER NOT NULL, item_type TEXT NOT NULL, last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (user_id, item_id, item_type), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+      ");
+    } catch(Exception $e) {}
     
     try {
       $db->exec("
@@ -2417,6 +2443,7 @@ if (isset($_GET['action'])) {
     case 'get_songs':
       $sort_key = $_GET['sort'] ?? 'id_desc';
       $sort_map = [
+        'random' => 'ORDER BY RANDOM()',
         'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
         'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
         'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
@@ -2719,6 +2746,88 @@ if (isset($_GET['action'])) {
       send_json(['status' => 'success']);
       break;
 
+    case 'get_projects':
+      if (!$user_id) { send_json([]); }
+      $proj_type = $_GET['filter'] ?? 'note';
+      $stmt = $db->prepare("
+        SELECT p.*, u.artist as owner_name, 
+        (SELECT COUNT(*) FROM project_members WHERE project_id = p.id) as member_count,
+        (SELECT COUNT(*) FROM personal_notes WHERE project_id = p.id) as note_count,
+        (SELECT COUNT(*) FROM tasks WHERE project_id = p.id) as task_count
+        FROM projects p 
+        JOIN project_members pm ON p.id = pm.project_id 
+        JOIN users u ON p.owner_id = u.id
+        WHERE pm.user_id = ? AND p.project_type = ? ORDER BY p.created_at DESC
+      ");
+      $stmt->execute([$user_id, $proj_type]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'manage_project':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $action_type = $data['action_type'];
+
+      if ($action_type === 'create') {
+        $name = trim(htmlspecialchars($data['name'] ?? 'Untitled Project', ENT_QUOTES, 'UTF-8'));
+        $ptype = $data['project_type'] ?? 'note';
+        $db->prepare("INSERT INTO projects (name, owner_id, project_type) VALUES (?, ?, ?)")->execute([$name, $user_id, $ptype]);
+        $pid = $db->lastInsertId();
+        $db->prepare("INSERT INTO project_members (project_id, user_id, role) VALUES (?, ?, 'owner')")->execute([$pid, $user_id]);
+        send_json(['status' => 'success', 'project_id' => $pid]);
+      } elseif ($action_type === 'delete') {
+        $db->prepare("DELETE FROM projects WHERE id = ? AND owner_id = ?")->execute([$data['project_id'], $user_id]);
+        send_json(['status' => 'success']);
+      } elseif ($action_type === 'generate_link') {
+        $db->exec("DELETE FROM project_invites WHERE expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP");
+        $expire_val = $data['expire'] ?? null;
+        $expires_at = ($expire_val && is_numeric($expire_val)) ? date('Y-m-d H:i:s', time() + ((int)$expire_val * 60)) : null;
+        $token = bin2hex(random_bytes(16));
+        $db->prepare("INSERT INTO project_invites (token, project_id, expires_at) VALUES (?, ?, ?)")->execute([$token, $data['project_id'], $expires_at]);
+        send_json(['status' => 'success', 'token' => $token]);
+      } elseif ($action_type === 'join') {
+        $token = $data['token'] ?? '';
+        $stmt_inv = $db->prepare("SELECT project_id FROM project_invites WHERE token = ? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)");
+        $stmt_inv->execute([$token]);
+        $inv_pid = $stmt_inv->fetchColumn();
+        if (!$inv_pid) send_json(['status' => 'error', 'message' => 'Invalid or expired invite.']);
+        $db->prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, role) VALUES (?, ?, 'editor')")->execute([$inv_pid, $user_id]);
+        send_json(['status' => 'success']);
+      } elseif ($action_type === 'move_item') {
+        $table = $data['item_type'] === 'task' ? 'tasks' : 'personal_notes';
+        $pid = $data['project_id'] ? (int)$data['project_id'] : null;
+        // Verify user owns the item OR is moving it out of a project they belong to
+        $db->prepare("UPDATE $table SET project_id = ? WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$pid, $data['item_id'], $user_id, $user_id]);
+        send_json(['status' => 'success']);
+      }
+      break;
+
+    case 'sync_presence':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $item_id = (int)$data['item_id'];
+      $item_type = $data['item_type'];
+      
+      // Update my presence
+      $db->prepare("REPLACE INTO project_presence (user_id, item_id, item_type, last_active) VALUES (?, ?, ?, CURRENT_TIMESTAMP)")->execute([$user_id, $item_id, $item_type]);
+      
+      // Clean up dead connections (inactive > 15 seconds)
+      $db->exec("DELETE FROM project_presence WHERE last_active < datetime('now', '-15 seconds')");
+      
+      // Fetch active users in this document
+      $stmt = $db->prepare("SELECT u.id, u.artist FROM project_presence pp JOIN users u ON pp.user_id = u.id WHERE pp.item_id = ? AND pp.item_type = ? AND pp.user_id != ?");
+      $stmt->execute([$item_id, $item_type, $user_id]);
+      $active_users = $stmt->fetchAll();
+      
+      // Return the absolute latest content timestamp so UI knows if it needs to pull fresh data
+      $table = $item_type === 'task' ? 'tasks' : 'personal_notes';
+      $content_stmt = $db->prepare("SELECT updated_at FROM $table WHERE id = ?");
+      $content_stmt->execute([$item_id]);
+      $latest_time = $content_stmt->fetchColumn();
+      
+      send_json(['active_users' => $active_users, 'latest_update' => $latest_time]);
+      break;
+
     case 'get_note_categories':
       if (!$user_id) { send_json([]); }
       $type = $_GET['filter'] ?? $_GET['type'] ?? 'note';
@@ -2774,8 +2883,17 @@ if (isset($_GET['action'])) {
       $filter = $_GET['filter'] ?? 'all';
       $order_by = ['newest' => 'ORDER BY updated_at DESC', 'oldest' => 'ORDER BY updated_at ASC', 'modified' => 'ORDER BY updated_at DESC'][$sort_key] ?? 'ORDER BY updated_at DESC';
       
-      $where = "WHERE user_id = ?";
-      $params = [$user_id];
+      $where = "";
+      $params = [];
+      if (strpos($filter, 'proj_') === 0) {
+        $pid = (int)str_replace('proj_', '', $filter);
+        $where = "WHERE project_id = ? AND project_id IN (SELECT project_id FROM project_members WHERE user_id = ?)";
+        $params = [$pid, $user_id];
+      } else {
+        $where = "WHERE user_id = ? AND project_id IS NULL";
+        $params = [$user_id];
+      }
+      
       if ($search !== '') {
         $where .= " AND (title LIKE ? OR content LIKE ?)";
         $params[] = "%$search%";
@@ -2785,7 +2903,7 @@ if (isset($_GET['action'])) {
         $where .= " AND starred = 1";
       } elseif ($filter === 'tasks') {
         $where .= " AND note_type = 'task'";
-      } elseif ($filter !== 'all') {
+      } elseif ($filter !== 'all' && strpos($filter, 'proj_') !== 0) {
         $where .= " AND category = ?";
         $params[] = $filter;
       }
@@ -2802,8 +2920,17 @@ if (isset($_GET['action'])) {
       $filter = $_GET['filter'] ?? 'all';
       $order_by = ['newest' => 'ORDER BY updated_at DESC', 'oldest' => 'ORDER BY updated_at ASC', 'modified' => 'ORDER BY updated_at DESC'][$sort_key] ?? 'ORDER BY updated_at DESC';
       
-      $where = "WHERE user_id = ?";
-      $params = [$user_id];
+      $where = "";
+      $params = [];
+      if (strpos($filter, 'proj_') === 0) {
+        $pid = (int)str_replace('proj_', '', $filter);
+        $where = "WHERE project_id = ? AND project_id IN (SELECT project_id FROM project_members WHERE user_id = ?)";
+        $params = [$pid, $user_id];
+      } else {
+        $where = "WHERE user_id = ? AND project_id IS NULL";
+        $params = [$user_id];
+      }
+      
       if ($search !== '') {
         $where .= " AND (title LIKE ? OR items LIKE ?)";
         $params[] = "%$search%";
@@ -2811,7 +2938,7 @@ if (isset($_GET['action'])) {
       }
       if ($filter === 'starred') {
         $where .= " AND starred = 1";
-      } elseif ($filter !== 'all') {
+      } elseif ($filter !== 'all' && strpos($filter, 'proj_') !== 0) {
         $where .= " AND category = ?";
         $params[] = $filter;
       }
@@ -2831,10 +2958,11 @@ if (isset($_GET['action'])) {
       $category = $data['category'] ?? 'all';
       $starred = !empty($data['starred']) ? 1 : 0;
       
+      $proj_id = !empty($data['project_id']) ? (int)$data['project_id'] : null;
       if ($task_id) {
-        $db->prepare("UPDATE tasks SET title = ?, items = ?, category = ?, starred = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")->execute([$title, $items, $category, $starred, $task_id, $user_id]);
+        $db->prepare("UPDATE tasks SET title = ?, items = ?, category = ?, starred = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$title, $items, $category, $starred, $task_id, $user_id, $user_id]);
       } else {
-        $db->prepare("INSERT INTO tasks (user_id, title, items, category, starred) VALUES (?, ?, ?, ?, ?)")->execute([$user_id, $title, $items, $category, $starred]);
+        $db->prepare("INSERT INTO tasks (user_id, title, items, category, starred, project_id) VALUES (?, ?, ?, ?, ?, ?)")->execute([$user_id, $title, $items, $category, $starred, $proj_id]);
         $task_id = $db->lastInsertId();
       }
       send_json(['status' => 'success', 'id' => $task_id]);
@@ -2842,7 +2970,7 @@ if (isset($_GET['action'])) {
 
     case 'delete_task':
       if (!$user_id) { http_response_code(403); exit; }
-      $db->prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id]);
+      $db->prepare("DELETE FROM tasks WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id, $user_id]);
       send_json(['status' => 'success']);
       break;
 
@@ -2862,10 +2990,11 @@ if (isset($_GET['action'])) {
       $starred = !empty($data['starred']) ? 1 : 0;
       $note_type = $data['note_type'] ?? 'note';
       
+      $proj_id = !empty($data['project_id']) ? (int)$data['project_id'] : null;
       if ($note_id) {
-        $db->prepare("UPDATE personal_notes SET title = ?, content = ?, category = ?, starred = ?, note_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")->execute([$title, $content, $category, $starred, $note_type, $note_id, $user_id]);
+        $db->prepare("UPDATE personal_notes SET title = ?, content = ?, category = ?, starred = ?, note_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$title, $content, $category, $starred, $note_type, $note_id, $user_id, $user_id]);
       } else {
-        $db->prepare("INSERT INTO personal_notes (user_id, title, content, category, starred, note_type) VALUES (?, ?, ?, ?, ?, ?)")->execute([$user_id, $title, $content, $category, $starred, $note_type]);
+        $db->prepare("INSERT INTO personal_notes (user_id, title, content, category, starred, note_type, project_id) VALUES (?, ?, ?, ?, ?, ?, ?)")->execute([$user_id, $title, $content, $category, $starred, $note_type, $proj_id]);
         $note_id = $db->lastInsertId();
       }
       send_json(['status' => 'success', 'id' => $note_id]);
@@ -2873,7 +3002,7 @@ if (isset($_GET['action'])) {
 
     case 'delete_note':
       if (!$user_id) { http_response_code(403); exit; }
-      $db->prepare("DELETE FROM personal_notes WHERE id = ? AND user_id = ?")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id]);
+      $db->prepare("DELETE FROM personal_notes WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id, $user_id]);
       send_json(['status' => 'success']);
       break;
 
@@ -6205,7 +6334,6 @@ function perform_full_scan($db) {
         font-family: 'Roboto', sans-serif;
         margin: 0;
       }
-      body.player-visible { padding-bottom: 90px; }
       ::-webkit-scrollbar { width: 8px; }
       ::-webkit-scrollbar-track { background: var(--ytm-surface); }
       ::-webkit-scrollbar-thumb { background: var(--ytm-surface-2); border-radius: 4px; }
@@ -6336,15 +6464,60 @@ function perform_full_scan($db) {
         z-index: 10; color: #ffffff; text-shadow: 0 2px 6px rgba(0,0,0,0.9);
       }
       .context-menu {
-        display: none; position: fixed; background-color: var(--ytm-surface-2); border-radius: 4px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5); z-index: 1080; list-style: none; padding: 0.5rem 0;
-        min-width: 220px; max-height: 50vh; overflow-y: auto;
+        display: none;
+        position: fixed;
+        background-color: rgba(18, 18, 18, 0.85) !important;
+        backdrop-filter: blur(12px) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
+        border: 1px solid var(--ytm-surface-2) !important;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.8) !important;
+        border-radius: 14px !important;
+        z-index: 1080;
+        list-style: none;
+        padding: 0.5rem 0 !important;
+        min-width: 280px !important;
+        max-height: 60vh;
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: #555 transparent;
+      }
+      .context-menu::-webkit-scrollbar {
+        width: 6px;
+      }
+      .context-menu::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .context-menu::-webkit-scrollbar-thumb {
+        background: var(--ytm-surface-2);
+        border-radius: 3px;
       }
       .context-menu-item {
-        padding: 0.75rem 1.25rem; color: var(--ytm-primary-text); cursor: pointer; display: flex; align-items: center; gap: 0.75rem;
+        padding: 0.75rem 1.25rem !important;
+        color: var(--ytm-secondary-text) !important;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        transition: all 0.2s ease-in-out;
       }
-      .context-menu-item:hover { background-color: #404040; }
-      .context-menu-item .bi { font-size: 1.1rem; }
+      .context-menu-item:hover {
+        background-color: var(--ytm-surface-2) !important;
+        color: var(--ytm-primary-text) !important;
+      }
+      .context-menu-item .bi {
+        font-size: 1.15rem;
+        color: var(--ytm-secondary-text);
+        transition: color 0.2s;
+      }
+      .context-menu-item:hover .bi {
+        color: var(--ytm-primary-text) !important;
+      }
+      .context-menu hr.dropdown-divider {
+        border-color: var(--ytm-surface-2) !important;
+        margin: 0.5rem 0;
+        opacity: 0.7;
+      }
       .player-bar {
         position: fixed; bottom: 0; left: 0; right: 0; height: 90px; background-color: var(--ytm-bg);
         border-top: 1px solid var(--ytm-surface-2); display: grid;
@@ -6468,7 +6641,6 @@ function perform_full_scan($db) {
       }
       @media (max-width: 767.98px) {
         .text-truncate-width { max-width: 250px; }
-        body.player-visible { padding-bottom: 130px; }
         .main-content { padding-top: var(--header-height-mobile); }
         .content-area-wrapper { padding: 1rem; }
         .mobile-header {
@@ -7023,6 +7195,12 @@ function perform_full_scan($db) {
         height: calc(100vh - 90px);
         height: calc(100dvh - 90px);
       }
+      @media (max-width: 767.98px) {
+        body.player-visible .app-container {
+          height: calc(100vh - 150px);
+          height: calc(100dvh - 150px);
+        }
+      }
       .chat-sidebar { width: 350px; background: var(--ytm-surface); border-right: 1px solid var(--ytm-border); display: flex; flex-direction: column; flex-shrink: 0; transition: transform 0.3s ease; }
       .chat-main { flex-grow: 1; display: flex; flex-direction: column; background: var(--ytm-bg); position: relative; background-image: radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px); background-size: 20px 20px; }
       .chat-header { height: 72px; min-height: 72px; max-height: 72px; flex-shrink: 0; box-sizing: border-box; padding: 0 1.5rem; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--ytm-border); background: var(--ytm-surface); z-index: 10; box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
@@ -7042,8 +7220,8 @@ function perform_full_scan($db) {
       .chat-reply-quote { background: rgba(0,0,0,0.2); border-left: 4px solid rgba(255,255,255,0.5); padding: 6px 10px; margin-bottom: 8px; border-radius: 8px; font-size: 0.85rem; cursor: pointer; overflow: hidden; }
       .chat-bubble.me .chat-reply-quote { background: rgba(0,0,0,0.15); border-left-color: rgba(255,255,255,0.8); }
       
-      /* FIXED: Toolbar inside the bubble to prevent off-screen overflow and ensure equal sides */
-      .chat-msg-actions { position: absolute; top: 4px; right: 4px; background: rgba(0,0,0,0.65); backdrop-filter: blur(4px); border-radius: 16px; padding: 2px 6px; opacity: 0; transition: opacity 0.2s; display: flex; gap: 4px; z-index: 5; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+      /* FIXED: Toolbar floating above the bubble to prevent blocking names/text */
+      .chat-msg-actions { position: absolute; top: -16px; right: 8px; background: rgba(0,0,0,0.85); backdrop-filter: blur(4px); border-radius: 16px; padding: 2px 6px; opacity: 0; transition: opacity 0.2s; display: flex; gap: 4px; z-index: 5; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
       .chat-bubble:hover .chat-msg-actions { opacity: 1; }
       .chat-action-btn { background: transparent; border: none; color: #fff; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 0.95rem; transition: transform 0.2s; }
       .chat-action-btn:hover { transform: scale(1.15); color: var(--ytm-accent); }
@@ -7180,6 +7358,7 @@ function perform_full_scan($db) {
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 note-filter-link" data-view="get_notes" data-filter="starred"><i class="bi bi-star"></i> Starred</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="get_categories" data-cat-type="note"><i class="bi bi-grid-fill"></i> View All Note Categories</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="manage_note_categories" data-cat-type="note"><i class="bi bi-tags"></i> Edit Note Categories</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 filter-nav-link" data-view="get_projects" data-filter="note"><i class="bi bi-briefcase-fill text-danger"></i> Note Projects</a></li>
                 <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0" id="import-txt-btn-menu"><i class="bi bi-file-earmark-text"></i> Upload TXT</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0" id="import-json-btn-menu"><i class="bi bi-filetype-json"></i> Import JSON</a></li>
@@ -7198,6 +7377,7 @@ function perform_full_scan($db) {
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 task-filter-link" data-view="get_tasks" data-filter="starred"><i class="bi bi-star"></i> Starred Tasks</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="get_categories" data-cat-type="task"><i class="bi bi-grid-fill"></i> View All Task Categories</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="manage_note_categories" data-cat-type="task"><i class="bi bi-tags"></i> Edit Task Categories</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 filter-nav-link" data-view="get_projects" data-filter="task"><i class="bi bi-briefcase-fill text-danger"></i> Task Projects</a></li>
                 <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0" id="import-json-btn-tasks"><i class="bi bi-filetype-json"></i> Import Tasks</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0" id="export-json-tasks-menu"><i class="bi bi-download"></i> Export Tasks</a></li>
@@ -8623,6 +8803,7 @@ function perform_full_scan($db) {
           <button class="note-icon-btn" id="closeEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
+          <div id="editorPresenceAvatars" class="d-flex align-items-center me-2" style="direction: rtl;"></div>
           <button class="note-icon-btn" id="editorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
           <button class="note-icon-btn" id="editorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
           <button class="note-icon-btn" id="editorStarBtn" title="Toggle Star"><i class="bi bi-star" id="editorStarIcon"></i></button>
@@ -8633,6 +8814,7 @@ function perform_full_scan($db) {
               <div class="editor-dropdown-item" id="editorCopyBtn"><i class="bi bi-copy"></i> Copy Content</div>
               <div class="editor-dropdown-item" id="editorUndoBtn"><i class="bi bi-arrow-counterclockwise"></i> Undo</div>
               <div class="editor-dropdown-item" id="editorRedoBtn"><i class="bi bi-arrow-clockwise"></i> Redo</div>
+              <div class="editor-dropdown-item text-info fw-bold" id="editorMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</div>
               <div class="editor-dropdown-item" id="editorMarkdownHelpBtn" data-bs-toggle="modal" data-bs-target="#markdown-info-modal"><i class="bi bi-markdown"></i> Markdown Guide</div>
               <div class="editor-dropdown-item" id="editorDownloadModalBtn" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Note...</div>
               <div class="editor-dropdown-item text-danger" id="editorDeleteBtn"><i class="bi bi-trash"></i> Delete</div>
@@ -8717,12 +8899,14 @@ function perform_full_scan($db) {
           <button class="note-icon-btn" id="closeTaskEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
+          <div id="taskPresenceAvatars" class="d-flex align-items-center me-2" style="direction: rtl;"></div>
           <button class="note-icon-btn" id="taskEditorStarBtn" title="Toggle Star"><i class="bi bi-star" id="taskEditorStarIcon"></i></button>
           <div style="position: relative;">
             <button class="note-icon-btn" id="taskEditorMoreBtn" title="More Options"><i class="bi bi-three-dots-vertical"></i></button>
             <div class="editor-dropdown-menu" id="taskEditorMoreMenu">
               <div class="editor-dropdown-item" id="taskEditorForceSaveBtn"><i class="bi bi-floppy"></i> Save</div>
               <div class="editor-dropdown-item" id="taskEditorCopyBtn"><i class="bi bi-copy"></i> Copy Content</div>
+              <div class="editor-dropdown-item text-info fw-bold" id="taskMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</div>
               <div class="editor-dropdown-item text-danger" id="taskEditorDeleteBtn"><i class="bi bi-trash"></i> Delete List</div>
             </div>
           </div>
@@ -10278,7 +10462,7 @@ function perform_full_scan($db) {
                       <button class="nav-link active bg-dark text-white border-secondary border-bottom-0 fw-bold px-4 py-2" data-bs-toggle="tab" data-bs-target="#api-tab-json" type="button" role="tab"><i class="bi bi-filetype-json text-warning me-2"></i> Raw JSON Response</button>
                     </li>
                     <li class="nav-item" role="presentation">
-                      <button class="nav-link bg-transparent text-secondary border-0 fw-bold px-4 py-2" data-bs-toggle="tab" data-bs-target="#api-tab-visual" type="button" role="tab"><i class="bi bi-play-circle-fill text-danger me-2"></i> Visual Client Tester</button>
+                      <button class="nav-link bg-transparent text-secondary border-0 fw-bold px-4 py-2" id="api-visual-tab-btn" data-bs-toggle="tab" data-bs-target="#api-tab-visual" type="button" role="tab"><i class="bi bi-play-circle-fill text-danger me-2"></i> Visual Client Tester</button>
                     </li>
                   </ul>
                   <div class="tab-content">
@@ -10286,7 +10470,10 @@ function perform_full_scan($db) {
                       <iframe id="api-example-iframe" class="w-100 rounded border border-secondary shadow-lg" style="height: 400px; background-color: #050505; overflow: auto; display: block;" src="about:blank"></iframe>
                     </div>
                     <div class="tab-pane fade" id="api-tab-visual" role="tabpanel">
-                      <iframe id="api-visual-iframe" class="w-100 rounded border border-secondary shadow-lg" style="height: 600px; background-color: #030303; overflow: hidden; display: block; border: none;" src="about:blank"></iframe>
+                      <div class="iframe-container shadow-lg" id="api-visual-container" style="width: 100%; aspect-ratio: 16/9; position: relative; overflow: hidden; border: 1px solid var(--ytm-surface-2); border-radius: 8px; background-color: #030303; cursor: pointer;">
+                        <iframe id="api-visual-iframe" style="position: absolute; top: 0; left: 0; border: none; overflow: hidden; width: 1280px; height: 720px; transform-origin: 0 0;" src="about:blank"></iframe>
+                        <button id="api-visual-fullscreen-btn" class="btn btn-dark rounded-circle" style="position: absolute; bottom: 15px; right: 15px; z-index: 10; width: 44px; height: 44px; background: rgba(0,0,0,0.8); border: 1px solid rgba(255,255,255,0.2); color: #fff; display: flex; align-items: center; justify-content: center;" title="Fullscreen"><i class="bi bi-fullscreen"></i></button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -10948,6 +11135,42 @@ curl_close($ch);
       </div>
     </div>
 
+    <!-- PROJECT MANAGEMENT MODALS -->
+    <div class="modal fade" id="project-move-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title text-white"><i class="bi bi-briefcase-fill text-danger me-2"></i> Move Item</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4">
+            <label class="form-label text-secondary small fw-bold mb-2">SELECT DESTINATION</label>
+            <select id="project-move-select" class="form-select bg-dark text-white border-secondary mb-4">
+              <option value="">🏠 Personal (Private)</option>
+              <!-- Populated dynamically via JS -->
+            </select>
+            <button type="button" class="btn btn-info w-100 fw-bold" id="confirm-move-project-btn">Move to Destination</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal fade" id="project-invite-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-secondary">
+            <h5 class="modal-title text-white">Project Invitation</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4 text-center">
+            <i class="bi bi-briefcase text-info mb-3" style="font-size: 3rem; display: block;"></i>
+            <h5 class="text-white mb-2">You've been invited!</h5>
+            <p class="text-secondary mb-4">You have been invited to collaborate on a private project workspace.</p>
+            <button class="btn btn-info px-4 w-100 fw-bold" id="project-invite-accept-btn">Accept & Join Workspace</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- PLAY.HTML VISUAL CLIENT TEMPLATE (Injected into iframe) -->
     <template id="play-client-template">
       <!DOCTYPE html>
@@ -11074,6 +11297,8 @@ curl_close($ch);
                       <option value="all">All Tracks</option>
                       <option value="playlist">Playlist Feed</option>
                       <option value="artist">Artist Feed</option>
+                      <option value="album">Album Feed</option>
+                      <option value="search">Search Songs</option>
                     </select>
                   </div>
                   <div class="mb-3 d-none" id="playlist-id-container">
@@ -11083,6 +11308,26 @@ curl_close($ch);
                   <div class="mb-3 d-none" id="artist-id-container">
                     <label for="artist-id" class="form-label small text-secondary mb-1">Artist ID / Name</label>
                     <input type="text" class="form-control form-control-sm" id="artist-id" placeholder="Artist ID or Name">
+                  </div>
+                  <div class="mb-3 d-none" id="album-name-container">
+                    <label for="album-name" class="form-label small text-secondary mb-1">Album Name</label>
+                    <input type="text" class="form-control form-control-sm" id="album-name" placeholder="Album Name">
+                  </div>
+                  <div class="mb-3 d-none" id="search-query-container">
+                    <label for="search-query" class="form-label small text-secondary mb-1">Search Query</label>
+                    <input type="text" class="form-control form-control-sm" id="search-query" placeholder="Enter keywords...">
+                  </div>
+                  <div class="mb-3" id="sort-by-container">
+                    <label for="sort-by" class="form-label small text-secondary mb-1">Sort By</label>
+                    <select class="form-select form-select-sm" id="sort-by">
+                      <option value="id_desc">Recently Added</option>
+                      <option value="title_asc">Title (A-Z)</option>
+                      <option value="artist_asc">Artist (A-Z)</option>
+                      <option value="album_asc">Album (A-Z)</option>
+                      <option value="year_desc">Year (Newest)</option>
+                      <option value="year_asc">Year (Oldest)</option>
+                      <option value="random">Random Shuffle</option>
+                    </select>
                   </div>
                   <div class="mb-3">
                     <label for="api-url" class="form-label small text-secondary mb-1">Backend URL</label>
@@ -11221,6 +11466,11 @@ curl_close($ch);
             const playlistIdContainer = document.getElementById('playlist-id-container');
             const artistIdInput = document.getElementById('artist-id');
             const artistIdContainer = document.getElementById('artist-id-container');
+            const albumNameInput = document.getElementById('album-name');
+            const albumNameContainer = document.getElementById('album-name-container');
+            const searchQueryInput = document.getElementById('search-query');
+            const searchQueryContainer = document.getElementById('search-query-container');
+            const sortBySelect = document.getElementById('sort-by');
             const sidebarStatus = document.getElementById('sidebar-status');
             const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
             const sidebar = document.querySelector('.sidebar');
@@ -11279,17 +11529,50 @@ curl_close($ch);
             let lastSavedTime = 0;
             let isRestoringTime = false;
             
-            // MODIFIED: Automatically grab Admin Key from Parent Frame Cache if available
-            let apiKey = (window.parent && window.parent.adminApiKey) ? window.parent.adminApiKey : (localStorage.getItem('ytm_apiKey') || '');
+            const virtualObserver = new IntersectionObserver((entries) => {
+              entries.forEach(entry => {
+                const el = entry.target;
+                if (entry.isIntersecting) {
+                  if (el.dataset.virtualHtml) {
+                    el.innerHTML = el.dataset.virtualHtml;
+                    el.dataset.virtualHtml = '';
+                    el.style.height = ''; 
+                  }
+                } else {
+                  if (!el.dataset.virtualHtml && el.innerHTML !== '') {
+                    if (el.classList.contains('now-playing')) return;
+                    const h = el.offsetHeight;
+                    if (h > 0) {
+                      el.style.height = h + 'px';
+                      el.dataset.virtualHtml = el.innerHTML;
+                      el.innerHTML = '';
+                    }
+                  }
+                }
+              });
+            }, { rootMargin: '800px 0px' });
 
-            audioPlayer.volume = lastVolume;
+            // FIX: Safely retrieve the Admin Password from shared localStorage or parent to prevent 401 crashes
+            let apiKey = '';
+            try { if (window.parent && window.parent.adminApiKey) apiKey = window.parent.adminApiKey; } catch(e) {}
+            if (!apiKey) apiKey = localStorage.getItem('admin_api_key') || localStorage.getItem('ytm_apiKey') || '';
 
             const checkApiKey = () => {
               if (!apiKey) {
-                const keyInput = prompt("Please enter your API Key (Admin Password):");
-                if (keyInput !== null) {
-                  apiKey = keyInput.trim();
-                  localStorage.setItem('ytm_apiKey', apiKey);
+                try { if (window.parent && window.parent.adminApiKey) apiKey = window.parent.adminApiKey; } catch(e) {}
+              }
+              if (!apiKey) {
+                apiKey = localStorage.getItem('admin_api_key') || localStorage.getItem('ytm_apiKey') || '';
+              }
+              if (!apiKey) {
+                try {
+                  const keyInput = prompt("Please enter your API Key (Admin Password):");
+                  if (keyInput !== null) {
+                    apiKey = keyInput.trim();
+                    localStorage.setItem('ytm_apiKey', apiKey);
+                  }
+                } catch(e) {
+                  console.warn("Prompt blocked in iframe context.");
                 }
               }
             };
@@ -11307,25 +11590,27 @@ curl_close($ch);
             };
 
             sourceTypeSelect.addEventListener('change', (e) => {
+              playlistIdContainer.classList.add('d-none');
+              playlistIdInput.required = false;
+              artistIdContainer.classList.add('d-none');
+              artistIdInput.required = false;
+              albumNameContainer.classList.add('d-none');
+              albumNameInput.required = false;
+              searchQueryContainer.classList.add('d-none');
+              searchQueryInput.required = false;
+              
               if (e.target.value === 'playlist') {
                 playlistIdContainer.classList.remove('d-none');
                 playlistIdInput.required = true;
-                artistIdContainer.classList.add('d-none');
-                artistIdInput.required = false;
-                artistIdInput.value = '';
               } else if (e.target.value === 'artist') {
                 artistIdContainer.classList.remove('d-none');
                 artistIdInput.required = true;
-                playlistIdContainer.classList.add('d-none');
-                playlistIdInput.required = false;
-                playlistIdInput.value = '';
-              } else {
-                playlistIdContainer.classList.add('d-none');
-                playlistIdInput.required = false;
-                playlistIdInput.value = '';
-                artistIdContainer.classList.add('d-none');
-                artistIdInput.required = false;
-                artistIdInput.value = '';
+              } else if (e.target.value === 'album') {
+                albumNameContainer.classList.remove('d-none');
+                albumNameInput.required = true;
+              } else if (e.target.value === 'search') {
+                searchQueryContainer.classList.remove('d-none');
+                searchQueryInput.required = true;
               }
             });
 
@@ -11337,23 +11622,32 @@ curl_close($ch);
             };
 
             const getApiUrl = (page) => {
-              let joiner = currentBaseUrl.includes('?') ? '&' : '/?';
+              let joiner = currentBaseUrl.includes('?') ? '&' : (currentBaseUrl.endsWith('/') ? '?' : '/?');
               let url = `${currentBaseUrl}${joiner}action=`;
               const apiKeyStr = `&api_key=${encodeURIComponent(apiKey)}`;
+              const sortVal = sortBySelect.value || 'id_desc';
               
               if (sourceTypeSelect.value === 'playlist') {
                 const pId = encodeURIComponent(playlistIdInput.value.trim());
-                url += `get_playlist_songs&public_id=${pId}&sort=manual_order&page=${page}${apiKeyStr}`;
+                url += `get_playlist_songs&public_id=${pId}&sort=${sortVal}&page=${page}${apiKeyStr}`;
               } else if (sourceTypeSelect.value === 'artist') {
                 const val = artistIdInput.value.trim();
                 if (/^\d+$/.test(val)) {
                   const encodedVal = encodeURIComponent(val);
-                  url += `get_songs&filter_user_id=${encodedVal}&share_type=artist&id=${encodedVal}&page=${page}${apiKeyStr}`;
+                  url += `get_songs&filter_user_id=${encodedVal}&sort=${sortVal}&page=${page}${apiKeyStr}`;
                 } else {
-                  url += `get_songs&artist=${encodeURIComponent(val)}&page=${page}${apiKeyStr}`;
+                  url += `get_songs&artist=${encodeURIComponent(val)}&sort=${sortVal}&page=${page}${apiKeyStr}`;
                 }
+              } else if (sourceTypeSelect.value === 'album') {
+                const val = encodeURIComponent(albumNameInput.value.trim());
+                url += `get_songs&album=${val}&sort=${sortVal}&page=${page}${apiKeyStr}`;
+              } else if (sourceTypeSelect.value === 'search') {
+                const val = encodeURIComponent(searchQueryInput.value.trim());
+                let searchSort = 'relevance';
+                if (sortVal === 'id_desc' || sortVal === 'year_desc') searchSort = 'date';
+                url += `search&q=${val}&f_sort=${searchSort}${apiKeyStr}`;
               } else {
-                url += `get_songs&sort=id_desc&page=${page}${apiKeyStr}`;
+                url += `get_songs&sort=${sortVal}&page=${page}${apiKeyStr}`;
               }
               return url;
             };
@@ -11380,16 +11674,23 @@ curl_close($ch);
                   localStorage.removeItem('ytm_apiKey');
                   apiKey = '';
                   sidebarStatus.innerHTML = `<i class="bi bi-x-circle-fill text-danger me-1"></i> Invalid API Key`;
-                  alert("API Key was rejected (401 Unauthorized). Please check your password and enter it again.");
+                  try { alert("API Key was rejected (401 Unauthorized). Please check your password and enter it again."); } catch(e) {}
                   checkApiKey();
                   isFetching = false;
                   scrollSpinner.classList.add('d-none');
                   return;
                 }
 
-                if (!response.ok) throw new Error("Connection failed");
+                if (!response.ok) throw new Error("Connection failed: HTTP " + response.status);
                 
-                const newSongs = await response.json();
+                let newSongs = await response.json();
+                
+                // Unpack 'search' endpoint JSON layout into standard song arrays
+                if (newSongs && newSongs.shelves) {
+                  const songShelf = newSongs.shelves.find(s => s.type === 'songs_list' || s.type === 'songs');
+                  newSongs = songShelf ? songShelf.items : [];
+                  hasMoreSongs = false; // Search provides bulk chunks, prevent infinite loop attempts
+                }
                 
                 if (newSongs && newSongs.length > 0) {
                   sidebarStatus.innerHTML = `<i class="bi bi-check-circle-fill text-success me-1"></i> Connected`;
@@ -11412,13 +11713,19 @@ curl_close($ch);
                 }
               } catch (error) {
                 sidebarStatus.innerHTML = `<i class="bi bi-x-circle-fill text-danger me-1"></i> Error API Connection`;
-                console.error(error);
+                console.error("Fetch Content Error:", error);
                 hasMoreSongs = false;
                 if (!isLoadMore) {
                   songsContainer.innerHTML = `
-                    <div class="text-center text-danger py-5">
-                      <i class="bi bi-exclamation-triangle-fill" style="font-size: 3rem;"></i>
-                      <p class="mt-2">Failed to connect to backend endpoint.</p>
+                    <div class="text-center text-danger py-5 px-3">
+                      <i class="bi bi-exclamation-triangle-fill" style="font-size: 3.5rem;"></i>
+                      <h4 class="mt-3 fw-bold">Connection Failed</h4>
+                      <p class="mt-2 text-secondary">Failed to connect to backend endpoint.</p>
+                      <div class="bg-dark p-3 rounded mt-3 text-start mx-auto border border-secondary" style="max-width: 600px;">
+                        <code class="text-warning d-block" style="font-size: 0.85rem; overflow-wrap: break-word;">Error: ${error.message || 'Unknown Network Error'}</code>
+                        <code class="text-info d-block mt-2" style="font-size: 0.8rem; overflow-wrap: break-word;">URL: ${getApiUrl(currentPage)}</code>
+                      </div>
+                      <p class="mt-3 small text-secondary">Verify your Backend URL and API Key in the sidebar menu.</p>
                     </div>`;
                 }
               }
@@ -11449,6 +11756,9 @@ curl_close($ch);
               localStorage.setItem('ytm_sourceType', sourceTypeSelect.value);
               localStorage.setItem('ytm_playlistId', playlistIdInput.value.trim());
               localStorage.setItem('ytm_artistId', artistIdInput.value.trim());
+              localStorage.setItem('ytm_albumName', albumNameInput.value.trim());
+              localStorage.setItem('ytm_searchQuery', searchQueryInput.value.trim());
+              localStorage.setItem('ytm_sortBy', sortBySelect.value);
 
               hasMoreSongs = true;
               fetchContent(false);
@@ -11560,7 +11870,7 @@ curl_close($ch);
               
               lastSavedTime = 0;
               isRestoringTime = false;
-              let joiner = currentBaseUrl.includes('?') ? '&' : '/?';
+              let joiner = currentBaseUrl.includes('?') ? '&' : (currentBaseUrl.endsWith('/') ? '?' : '/?');
               audioPlayer.src = `${currentBaseUrl}${joiner}action=get_stream&id=${song.id}&api_key=${encodeURIComponent(apiKey)}`;
               audioPlayer.play().catch(err => console.error("Playback restriction: ", err));
 
@@ -11588,7 +11898,7 @@ curl_close($ch);
                 if (!audioPlayer.src || audioPlayer.src === window.location.href || audioPlayer.src.endsWith('/')) {
                   const song = songQueue[currentIndex];
                   isRestoringTime = true;
-                  let joiner = currentBaseUrl.includes('?') ? '&' : '/?';
+                  let joiner = currentBaseUrl.includes('?') ? '&' : (currentBaseUrl.endsWith('/') ? '?' : '/?');
                   audioPlayer.src = `${currentBaseUrl}${joiner}action=get_stream&id=${song.id}&api_key=${encodeURIComponent(apiKey)}`;
                 }
                 audioPlayer.play();
@@ -11800,10 +12110,21 @@ curl_close($ch);
             }
 
             // MODIFIED: Inject URL securely from Parent frame to avoid domain typing
-            const savedApiUrl = (window.parent && window.parent.location) ? (window.parent.location.origin + window.parent.location.pathname) : localStorage.getItem('ytm_apiUrl');
+            let savedApiUrl = '';
+            try {
+              savedApiUrl = (window.parent && window.parent.location) ? (window.parent.location.origin + window.parent.location.pathname) : localStorage.getItem('ytm_apiUrl');
+            } catch(e) {
+              savedApiUrl = localStorage.getItem('ytm_apiUrl');
+            }
+            if (savedApiUrl && !savedApiUrl.includes('access=api')) {
+              savedApiUrl += (savedApiUrl.includes('?') ? '&' : '/?') + 'access=api';
+            }
             const savedSourceType = localStorage.getItem('ytm_sourceType');
             const savedPlaylistId = localStorage.getItem('ytm_playlistId');
             const savedArtistId = localStorage.getItem('ytm_artistId');
+            const savedAlbumName = localStorage.getItem('ytm_albumName');
+            const savedSearchQuery = localStorage.getItem('ytm_searchQuery');
+            const savedSortBy = localStorage.getItem('ytm_sortBy');
 
             if (savedApiUrl) {
               apiUrlInput.value = savedApiUrl;
@@ -11813,12 +12134,11 @@ curl_close($ch);
               sourceTypeSelect.value = savedSourceType;
               sourceTypeSelect.dispatchEvent(new Event('change'));
             }
-            if (savedPlaylistId) {
-              playlistIdInput.value = savedPlaylistId;
-            }
-            if (savedArtistId) {
-              artistIdInput.value = savedArtistId;
-            }
+            if (savedPlaylistId) playlistIdInput.value = savedPlaylistId;
+            if (savedArtistId) artistIdInput.value = savedArtistId;
+            if (savedAlbumName) albumNameInput.value = savedAlbumName;
+            if (savedSearchQuery) searchQueryInput.value = savedSearchQuery;
+            if (savedSortBy) sortBySelect.value = savedSortBy;
 
             const parseHashParams = () => {
               const hash = window.location.hash.substring(1);
@@ -11834,43 +12154,61 @@ curl_close($ch);
               return params;
             };
 
-            const hashParams = parseHashParams();
-            if (hashParams) {
-              const hashBackendUrl = hashParams['backendurl'];
-              const hashSourceType = hashParams['sourcetype'];
-              const hashIdName = hashParams['id/name'] || hashParams['id'] || hashParams['name'];
-
-              if (hashBackendUrl) {
-                let rawUrl = hashBackendUrl.replace(/\/$/, '');
-                if (!rawUrl.includes('access=api')) {
-                  rawUrl += (rawUrl.includes('?') ? '&' : '/?') + 'access=api';
+            const applyHashParams = () => {
+              const hashParams = parseHashParams();
+              if (hashParams) {
+                const hashBackendUrl = hashParams['backendurl'];
+                const hashSourceType = hashParams['sourcetype'];
+                const hashIdName = hashParams['id/name'] || hashParams['id'] || hashParams['name'];
+                const hashApiKey = hashParams['apikey'];
+              
+                if (hashApiKey) {
+                  apiKey = hashApiKey;
+                  localStorage.setItem('ytm_apiKey', apiKey);
                 }
-                apiUrlInput.value = rawUrl;
-                currentBaseUrl = rawUrl;
-                localStorage.setItem('ytm_apiUrl', rawUrl);
-              }
-              if (hashSourceType) {
-                sourceTypeSelect.value = hashSourceType;
-                sourceTypeSelect.dispatchEvent(new Event('change'));
-                localStorage.setItem('ytm_sourceType', hashSourceType);
-              }
-              if (hashIdName) {
-                if (hashSourceType === 'playlist') {
-                  playlistIdInput.value = hashIdName;
-                  localStorage.setItem('ytm_playlistId', hashIdName);
-                } else if (hashSourceType === 'artist') {
-                  artistIdInput.value = hashIdName;
-                  localStorage.setItem('ytm_artistId', hashIdName);
+
+                if (hashBackendUrl) {
+                  let rawUrl = hashBackendUrl.replace(/\/$/, '');
+                  if (!rawUrl.includes('access=api')) {
+                    rawUrl += (rawUrl.includes('?') ? '&' : '/?') + 'access=api';
+                  }
+                  apiUrlInput.value = rawUrl;
+                  currentBaseUrl = rawUrl;
+                  localStorage.setItem('ytm_apiUrl', rawUrl);
+                }
+                if (hashSourceType) {
+                  sourceTypeSelect.value = hashSourceType;
+                  sourceTypeSelect.dispatchEvent(new Event('change'));
+                  localStorage.setItem('ytm_sourceType', hashSourceType);
+                }
+                if (hashIdName) {
+                  if (hashSourceType === 'playlist') {
+                    playlistIdInput.value = hashIdName;
+                    localStorage.setItem('ytm_playlistId', hashIdName);
+                  } else if (hashSourceType === 'artist') {
+                    artistIdInput.value = hashIdName;
+                    localStorage.setItem('ytm_artistId', hashIdName);
+                  } else if (hashSourceType === 'album') {
+                    albumNameInput.value = hashIdName;
+                    localStorage.setItem('ytm_albumName', hashIdName);
+                  } else if (hashSourceType === 'search') {
+                    searchQueryInput.value = hashIdName;
+                    localStorage.setItem('ytm_searchQuery', hashIdName);
+                  }
                 }
               }
-            }
 
-            checkApiKey();
+              checkApiKey();
 
-            if (currentBaseUrl && apiKey) {
-              hasMoreSongs = true;
-              fetchContent(false);
-            }
+              if (currentBaseUrl && apiKey) {
+                hasMoreSongs = true;
+                isFetching = false;
+                fetchContent(false);
+              }
+            };
+
+            window.addEventListener('hashchange', applyHashParams);
+            applyHashParams();
 
             if (btnShare) {
               btnShare.addEventListener('click', () => {
@@ -11881,6 +12219,10 @@ curl_close($ch);
                   idName = playlistIdInput.value.trim();
                 } else if (sourceType === 'artist') {
                   idName = artistIdInput.value.trim();
+                } else if (sourceType === 'album') {
+                  idName = albumNameInput.value.trim();
+                } else if (sourceType === 'search') {
+                  idName = searchQueryInput.value.trim();
                 }
 
                 const baseUrl = window.location.origin + window.location.pathname;
@@ -12090,6 +12432,23 @@ SOFTWARE.</div>
     <script>
       document.addEventListener('DOMContentLoaded', () => {
         'use strict';
+        
+        window.scrollToCenter = (container, element, smooth = true) => {
+          if (!container || !element) return;
+          if (window.getComputedStyle(container).position === 'static') {
+            container.style.position = 'relative';
+          }
+          const containerHeight = container.clientHeight;
+          const elemTop = element.offsetTop;
+          const elemHeight = element.offsetHeight;
+          const targetScroll = elemTop - (container.clientHeight / 2) + (elemHeight / 2);
+          
+          container.scrollTo({
+            top: targetScroll,
+            behavior: smooth ? 'smooth' : 'auto'
+          });
+        };
+
         const mainContent = document.getElementById('main-content');
         const contentArea = document.getElementById('content-area');
         const contentTitle = document.getElementById('content-title');
@@ -12406,7 +12765,7 @@ SOFTWARE.</div>
               else mentionBtn.classList.add('d-none');
             }
             if (chatInput) {
-              chatInput.placeholder = type === 'group' ? 'Type a message... (use @ to mention)' : 'Type a message...';
+              chatInput.placeholder = type === 'group' ? 'Type a message...' : 'Type a message...';
             }
              
             if (mainArea) mainArea.classList.add('active');
@@ -12448,7 +12807,8 @@ SOFTWARE.</div>
 
           window.refreshChatFull = async (forceSync = false) => {
             if (!activeChatConfig.id) return;
-            if (window.isReacting && !forceSync) return;
+            // Prevent polling if reaction picker is open or user is reacting
+            if ((window.isReacting || document.querySelector('.reaction-picker.show')) && !forceSync) return;
             
             let isMediaPlaying = false;
             if (window.chatAudioObj && !window.chatAudioObj.paused) isMediaPlaying = true;
@@ -13124,9 +13484,9 @@ SOFTWARE.</div>
               idName = '1';
             }
             const bUrl = window.location.origin + window.location.pathname;
-            const hash = `#sourcetype=${sourceType}&id/name=${idName}&backendurl=${encodeURIComponent(bUrl)}`;
-            
-            // Set hash dynamically if iframe is already loaded, else wait for onload
+            const safeApiKey = window.adminApiKey ? encodeURIComponent(window.adminApiKey) : '';
+            const hash = `#sourcetype=${sourceType}&id/name=${idName}&backendurl=${encodeURIComponent(bUrl)}&apikey=${safeApiKey}`;
+          
             if (visualIframe.contentWindow && visualIframe.contentWindow.location && visualIframe.contentWindow.document.readyState === 'complete') {
                visualIframe.contentWindow.location.hash = hash;
             } else {
@@ -13208,6 +13568,60 @@ SOFTWARE.</div>
           if (apiActionSelect) {
             apiActionSelect.addEventListener('change', updateApiUrl);
           }
+        }
+
+        // API Visual Client Scaling & Fullscreen (16:9 Desktop Simulation)
+        const resizeVisualIframe = () => {
+          const iframe = document.getElementById('api-visual-iframe');
+          if (!iframe) return;
+          const container = iframe.parentElement;
+          const containerWidth = container.clientWidth;
+          const scale = containerWidth / 1280;
+          iframe.style.transform = `scale(${scale})`;
+          
+          const containerHeight = container.clientHeight;
+          const expectedHeight = containerWidth * (9/16);
+          if (containerHeight > expectedHeight) {
+            iframe.style.top = `${(containerHeight - expectedHeight) / 2}px`;
+          } else {
+            iframe.style.top = '0px';
+          }
+        };
+
+        const visualContainer = document.getElementById('api-visual-container');
+        const visualFullscreenBtn = document.getElementById('api-visual-fullscreen-btn');
+        if (visualContainer && visualFullscreenBtn) {
+          visualFullscreenBtn.addEventListener('click', () => {
+            if (!document.fullscreenElement) {
+              visualContainer.requestFullscreen().catch(err => {
+                console.error("Fullscreen initiation failed:", err);
+              });
+            } else {
+              document.exitFullscreen();
+            }
+          });
+          
+          visualContainer.addEventListener('dblclick', (e) => {
+            if (e.target.closest('#api-visual-fullscreen-btn')) return;
+            visualFullscreenBtn.click();
+          });
+        }
+
+        document.addEventListener('fullscreenchange', () => {
+          const btn = document.getElementById('api-visual-fullscreen-btn');
+          if (btn) {
+            btn.innerHTML = document.fullscreenElement ? '<i class="bi bi-fullscreen-exit"></i>' : '<i class="bi bi-fullscreen"></i>';
+          }
+          setTimeout(resizeVisualIframe, 100);
+        });
+
+        window.addEventListener('resize', resizeVisualIframe);
+
+        const apiVisualTabBtn = document.getElementById('api-visual-tab-btn');
+        if (apiVisualTabBtn) {
+          apiVisualTabBtn.addEventListener('shown.bs.tab', () => {
+            setTimeout(resizeVisualIframe, 100);
+          });
         }
 
         if (copyApiBtn) {
@@ -13357,6 +13771,50 @@ SOFTWARE.</div>
         const desktopPlayerModalEl = document.getElementById('desktop-player-modal');
         const desktopPlayerModal = desktopPlayerModalEl ? new bootstrap.Modal(desktopPlayerModalEl) : null;
         
+        if (playerModalEl) {
+          playerModalEl.addEventListener('shown.bs.modal', () => {
+            const activeMob = document.querySelector('#mobile-player-queue-list .song-item.now-playing');
+            const pane = document.getElementById('mp-queue-pane');
+            if (activeMob && pane && activeMob.offsetParent !== null) {
+              window.scrollToCenter(pane, activeMob, false);
+            }
+          });
+          
+          // CRITICAL: Scroll when the "Up Next" tab is clicked/revealed on mobile
+          const mpQueueTabBtn = document.querySelector('button[data-bs-target="#mp-queue-pane"]');
+          if (mpQueueTabBtn) {
+            mpQueueTabBtn.addEventListener('shown.bs.tab', () => {
+              const activeMob = document.querySelector('#mobile-player-queue-list .song-item.now-playing');
+              const pane = document.getElementById('mp-queue-pane');
+              if (activeMob && pane) {
+                window.scrollToCenter(pane, activeMob, false);
+              }
+            });
+          }
+        }
+        
+        if (desktopPlayerModalEl) {
+          desktopPlayerModalEl.addEventListener('shown.bs.modal', () => {
+            const activeDesk = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
+            const pane = document.getElementById('dp-queue-pane');
+            if (activeDesk && pane && activeDesk.offsetParent !== null) {
+              window.scrollToCenter(pane, activeDesk, false);
+            }
+          });
+          
+          // Backup check for Desktop tabs
+          const dpQueueTabBtn = document.querySelector('button[data-bs-target="#dp-queue-pane"]');
+          if (dpQueueTabBtn) {
+            dpQueueTabBtn.addEventListener('shown.bs.tab', () => {
+              const activeDesk = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
+              const pane = document.getElementById('dp-queue-pane');
+              if (activeDesk && pane) {
+                window.scrollToCenter(pane, activeDesk, false);
+              }
+            });
+          }
+        }
+        
         const renderDesktopLyrics = () => {
           const lyricsContainer = document.getElementById('desktop-synced-lyrics');
           if (!lyricsContainer || !currentSong) return;
@@ -13499,8 +13957,17 @@ SOFTWARE.</div>
           // Focus the playing song if it was a total reset
           if (reset && currentSong) {
             setTimeout(() => {
-              const active = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
-              if (active) active.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              const activeDesk = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
+              const paneDesk = document.getElementById('dp-queue-pane');
+              if (activeDesk && paneDesk && activeDesk.offsetParent !== null) {
+                window.scrollToCenter(paneDesk, activeDesk, true);
+              }
+              
+              const activeMob = document.querySelector('#mobile-player-queue-list .song-item.now-playing');
+              const paneMob = document.getElementById('mp-queue-pane');
+              if (activeMob && paneMob && activeMob.offsetParent !== null) {
+                window.scrollToCenter(paneMob, activeMob, true);
+              }
             }, 100);
           }
         };
@@ -13848,7 +14315,7 @@ SOFTWARE.</div>
         });
 
         document.body.addEventListener('click', initWebAudio, { once: true });
-        let currentView = { type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' };
+        let currentView = { type: 'get_songs', param: '', sort: 'random', filter_user_id: '', artist_name: '' };
         let currentUser = null;
         let currentViewOwnerId = null;
         let currentSong = null;
@@ -15486,6 +15953,7 @@ SOFTWARE.</div>
             case 'get_user_playlists':
             case 'get_collab_playlists':
             case 'get_following':
+            case 'get_projects':
               data = await fetchData(`?action=${type}&${params.toString()}`);
               renderGrid(data, type, true);
               break;
@@ -15641,6 +16109,7 @@ SOFTWARE.</div>
               }
               activeLink = document.querySelector('a[href="#tasksSubmenu"]');
               break;
+            case 'get_projects':
             case 'get_categories':
             case 'manage_note_categories':
               if (currentView.filter === 'task') {
@@ -15850,7 +16319,7 @@ SOFTWARE.</div>
                               <i class="bi bi-at fs-4"></i>
                             </button>
                             <input type="file" id="chat-image-input" class="d-none">
-                            <textarea id="chat-input" placeholder="Type a message... (use @ to mention)" autocomplete="off" maxlength="50000" rows="1"></textarea>
+                            <textarea id="chat-input" placeholder="Type a message..." autocomplete="off" maxlength="50000" rows="1"></textarea>
                           </div>
                           <button type="submit" class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 shadow-sm mb-1" id="chat-submit-btn" style="width: 42px; height: 42px;"><i class="bi bi-send-fill fs-5"></i></button>
                         </form>
@@ -15986,6 +16455,7 @@ SOFTWARE.</div>
                   <div class="d-flex align-items-center gap-2">
                     <label for="sort-select-all" class="text-secondary small d-none d-sm-block">Sort by</label>
                     <select id="sort-select-all" class="form-select form-select-sm" style="width: auto;">
+                      <option value="random" ${currentView.sort === 'random' ? 'selected' : ''}>Random Shuffle</option>
                       <option value="id_desc" ${currentView.sort === 'id_desc' ? 'selected' : ''}>Recently Added</option>
                       <option value="artist_asc" ${currentView.sort === 'artist_asc' ? 'selected' : ''}>Artist</option>
                       <option value="title_asc" ${currentView.sort === 'title_asc' ? 'selected' : ''}>Title</option>
@@ -16160,6 +16630,7 @@ SOFTWARE.</div>
                 const catText = document.querySelector(`.note-filter-link[data-filter="${noteFilter}"]`)?.textContent;
                 if (catText) filterName = catText.trim();
               }
+              if (noteFilter.startsWith('proj_')) filterName = 'Workspace Notes';
               updateContentTitle(filterName, !!currentUser);
 
               if (currentUser) {
@@ -16284,6 +16755,7 @@ SOFTWARE.</div>
             case 'get_tasks':
               let taskFilter = currentView.filter || 'all';
               let taskFilterName = taskFilter === 'all' ? 'All Tasks' : (taskFilter === 'starred' ? 'Starred Tasks' : 'Category Tasks');
+              if (taskFilter.startsWith('proj_')) taskFilterName = 'Workspace Tasks';
               updateContentTitle(taskFilterName, !!currentUser);
 
               if (currentUser) {
@@ -16530,6 +17002,45 @@ SOFTWARE.</div>
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to view categories.</div>`;
               }
               break;
+            case 'get_projects': {
+              const pType = currentView.filter || 'note';
+              const pTitle = pType === 'task' ? 'Task Projects' : 'Note Projects';
+              const pIcon = pType === 'task' ? 'bi-check2-square text-success' : 'bi-journal-text text-warning';
+              
+              updateContentTitle(pTitle, !!currentUser);
+              if (currentUser) {
+                contentArea.innerHTML = `
+                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-briefcase-fill text-danger me-3 fs-3"></i> ${pTitle}</div>
+                    <button class="btn btn-info text-dark rounded-pill px-4 fw-bold shadow-sm create-typed-project-btn" data-type="${pType}"><i class="bi bi-plus-lg me-1"></i> New Project</button>
+                  </div>
+                  <div id="projects-list-container" class="mx-md-3 mb-5 d-flex flex-column gap-3"></div>
+                `;
+                data = await fetchData(`?action=get_projects&filter=${pType}`);
+                if (data && data.length > 0) {
+                  document.getElementById('projects-list-container').innerHTML = data.map(p => `
+                    <div class="card bg-dark border-secondary text-white p-3 shadow-sm hover-bg-dark" style="border-radius: 12px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+                      <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="fw-bold m-0"><i class="bi bi-briefcase text-info me-2"></i>${escapeHTML(p.name)}</h5>
+                        ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-outline-danger delete-project-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>` : `<span class="badge bg-secondary">Shared with you</span>`}
+                      </div>
+                      <div class="d-flex gap-4 small text-secondary">
+                        <span><i class="bi bi-person-fill"></i> Owner: ${escapeHTML(p.owner_name)}</span>
+                        <span><i class="bi bi-people"></i> ${p.member_count} Members</span>
+                      </div>
+                      <div class="d-flex gap-2 mt-3">
+                        ${pType === 'note' ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_notes" data-filter="proj_${p.id}"><i class="bi bi-journal-text text-warning"></i> ${p.note_count} Notes</button>` : ''}
+                        ${pType === 'task' ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_tasks" data-filter="proj_${p.id}"><i class="bi bi-check2-square text-success"></i> ${p.task_count} Tasks</button>` : ''}
+                        ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-info text-dark fw-bold invite-project-btn" data-id="${p.id}"><i class="bi bi-link-45deg"></i> Invite</button>` : ''}
+                      </div>
+                    </div>
+                  `).join('');
+                } else {
+                  document.getElementById('projects-list-container').innerHTML = '<div class="text-center p-5 text-secondary">No collaborative projects found. Create one above!</div>';
+                }
+              }
+              break;
+            }
             case 'get_albums':
             case 'get_artists':
             case 'get_genres':
@@ -16779,7 +17290,18 @@ SOFTWARE.</div>
             renderDesktopLyrics();
             
             const activeInModal = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
-            if (activeInModal) activeInModal.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            const pane = document.getElementById('dp-queue-pane');
+            if (activeInModal && pane) {
+              window.scrollToCenter(pane, activeInModal, true);
+            }
+          }
+
+          if (playerModalEl && playerModalEl.classList.contains('show')) {
+            const activeMobileModal = document.querySelector('#mobile-player-queue-list .song-item.now-playing');
+            const pane = document.getElementById('mp-queue-pane');
+            if (activeMobileModal && pane && activeMobileModal.offsetParent !== null) {
+              window.scrollToCenter(pane, activeMobileModal, true);
+            }
           }
 
           if (typeof window.renderPipLyrics === 'function') {
@@ -17592,7 +18114,7 @@ SOFTWARE.</div>
             if (viewType === 'get_artists') sort = 'name_asc';
             if (viewType === 'user_profile') sort = 'id_desc';
             if (viewType === 'get_history') sort = 'history_desc';
-            if (viewType === 'get_songs') sort = 'id_desc';
+            if (viewType === 'get_songs') sort = 'random';
 
             loadView({ type: viewType, param: '', sort: sort, filter_user_id: '' });
             hideMobileSidebar();
@@ -17682,7 +18204,7 @@ SOFTWARE.</div>
 
           if (query.trim() === '') {
             targetDropdown.classList.add('d-none');
-            if (currentView.type === 'search') loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
+            if (currentView.type === 'search') loadView({ type: 'get_songs', param: '', sort: 'random', filter_user_id: '', artist_name: '' });
             return;
           }
 
@@ -18249,9 +18771,21 @@ SOFTWARE.</div>
               e.stopPropagation();
               const view = catNavLink.dataset.view;
               const type = catNavLink.dataset.catType;
-              document.querySelectorAll('.cat-nav-link, .note-filter-link, .task-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
+              document.querySelectorAll('.cat-nav-link, .note-filter-link, .task-filter-link, .filter-nav-link').forEach(el => el.classList.remove('active', 'text-white'));
               catNavLink.classList.add('active', 'text-white');
               loadView({ type: view, param: '', sort: '', filter: type });
+              hideMobileSidebar();
+            }
+
+            const filterNavLink = e.target.closest('.filter-nav-link');
+            if (filterNavLink) {
+              e.preventDefault();
+              e.stopPropagation();
+              const view = filterNavLink.dataset.view;
+              const filter = filterNavLink.dataset.filter;
+              document.querySelectorAll('.cat-nav-link, .note-filter-link, .task-filter-link, .filter-nav-link').forEach(el => el.classList.remove('active', 'text-white'));
+              filterNavLink.classList.add('active', 'text-white');
+              loadView({ type: view, param: '', sort: '', filter: filter });
               hideMobileSidebar();
             }
           });
@@ -18833,6 +19367,75 @@ SOFTWARE.</div>
             e.stopPropagation();
             const type = editCatBtnGlobal.dataset.type || 'note';
             loadView({ type: 'manage_note_categories', param: '', sort: '', filter: type, filter_user_id: '' });
+            return;
+          }
+
+          const createTypedProjectBtn = target.closest('.create-typed-project-btn');
+          if (createTypedProjectBtn) {
+            e.stopPropagation();
+            const pType = createTypedProjectBtn.dataset.type;
+            const n = prompt('Project Name:');
+            if (n && n.trim() !== '') {
+              fetchData('?action=manage_project', {
+                method: 'POST', body: JSON.stringify({ action_type: 'create', name: n, project_type: pType })
+              }).then(res => {
+                if (res && res.status === 'success') {
+                  showToast('Project created successfully!', 'success');
+                  loadView(currentView);
+                }
+              });
+            }
+            return;
+          }
+
+          const deleteProjectBtn = target.closest('.delete-project-btn');
+          if (deleteProjectBtn) {
+            e.stopPropagation();
+            if (confirm('Are you sure you want to delete this project permanently?')) {
+              fetchData('?action=manage_project', {
+                method: 'POST', body: JSON.stringify({ action_type: 'delete', project_id: deleteProjectBtn.dataset.id })
+              }).then(res => {
+                if (res && res.status === 'success') {
+                  showToast('Project deleted.', 'success');
+                  loadView(currentView);
+                }
+              });
+            }
+            return;
+          }
+
+          const projectNavBtn = target.closest('.project-nav-btn');
+          if (projectNavBtn) {
+            e.stopPropagation();
+            loadView({ type: projectNavBtn.dataset.target, param: '', sort: 'newest', filter: projectNavBtn.dataset.filter });
+            return;
+          }
+
+          const inviteProjectBtn = target.closest('.invite-project-btn');
+          if (inviteProjectBtn) {
+            e.stopPropagation();
+            fetchData('?action=manage_project', {
+              method: 'POST', body: JSON.stringify({ action_type: 'generate_link', project_id: inviteProjectBtn.dataset.id })
+            }).then(r => {
+              if (r && r.status === 'success') {
+                const inviteLink = window.location.origin + window.location.pathname + '?project_invite=' + r.token;
+                if (navigator.clipboard && window.isSecureContext) {
+                  navigator.clipboard.writeText(inviteLink).then(() => showToast('Invite link copied to clipboard!', 'success'));
+                } else {
+                  const textArea = document.createElement("textarea");
+                  textArea.value = inviteLink;
+                  textArea.style.position = "fixed";
+                  textArea.style.opacity = "0";
+                  document.body.appendChild(textArea);
+                  textArea.focus();
+                  textArea.select();
+                  try {
+                    if (document.execCommand('copy')) showToast('Invite link copied!', 'success');
+                  } catch (err) {}
+                  document.body.removeChild(textArea);
+                }
+              }
+            });
             return;
           }
 
@@ -20722,7 +21325,7 @@ SOFTWARE.</div>
           const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists', 'get_collab_playlists'];
           
           if (authRequiredViews.includes(currentView.type)) {
-            loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
+            loadView({ type: 'get_songs', param: '', sort: 'random', filter_user_id: '', artist_name: '' });
           } else {
             loadView(currentView);
           }
@@ -21541,7 +22144,7 @@ SOFTWARE.</div>
               
               const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists', 'get_collab_playlists'];
               if (authRequiredViews.includes(currentView.type)) {
-                loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
+                loadView({ type: 'get_songs', param: '', sort: 'random', filter_user_id: '', artist_name: '' });
               } else {
                 loadView(currentView);
               }
@@ -21560,7 +22163,7 @@ SOFTWARE.</div>
               
               const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists', 'get_collab_playlists'];
               if (authRequiredViews.includes(currentView.type)) {
-                loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' });
+                loadView({ type: 'get_songs', param: '', sort: 'random', filter_user_id: '', artist_name: '' });
               } else {
                 loadView(currentView);
               }
@@ -22220,6 +22823,85 @@ SOFTWARE.</div>
         let noteHistoryTimeout = null;
         let activeEditorNote = null;
         let isMarkdownPreview = false;
+        let presenceSyncInterval = null;
+        let lastSyncContentTime = null;
+
+        const startPresenceSync = (itemId, itemType) => {
+          if (presenceSyncInterval) clearInterval(presenceSyncInterval);
+          const avContainer = document.getElementById(itemType === 'task' ? 'taskPresenceAvatars' : 'editorPresenceAvatars');
+          
+          presenceSyncInterval = setInterval(async () => {
+            if (!itemId) return;
+            const res = await fetchData('?action=sync_presence', {
+              method: 'POST', body: JSON.stringify({ item_id: itemId, item_type: itemType })
+            }, true); // Silent fetch
+            
+            if (res && res.active_users) {
+              if (res.active_users.length > 0) {
+                avContainer.innerHTML = res.active_users.map(u => `<img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle border border-dark shadow-sm" style="width: 28px; height: 28px; margin-left: -8px; object-fit: cover;" title="${escapeHTML(u.artist)} is editing">`).join('');
+              } else {
+                avContainer.innerHTML = '';
+              }
+              
+              // Soft conflict detection
+              if (res.latest_update && lastSyncContentTime && res.latest_update !== lastSyncContentTime) {
+                const indicator = document.getElementById(itemType === 'task' ? 'taskSaveStatus' : 'noteSaveStatus');
+                if (indicator && !indicator.textContent.includes('Remote Update')) {
+                   indicator.innerHTML = '<span class="text-warning"><i class="bi bi-exclamation-triangle"></i> Modified remotely</span>';
+                }
+              }
+              lastSyncContentTime = res.latest_update || lastSyncContentTime;
+            }
+          }, 3000);
+        };
+        
+        const stopPresenceSync = () => {
+          if (presenceSyncInterval) clearInterval(presenceSyncInterval);
+          presenceSyncInterval = null;
+          lastSyncContentTime = null;
+          const noteAv = document.getElementById('editorPresenceAvatars');
+          const taskAv = document.getElementById('taskPresenceAvatars');
+          if (noteAv) noteAv.innerHTML = '';
+          if (taskAv) taskAv.innerHTML = '';
+        };
+
+        const populateProjectMoveSelect = async (type) => {
+          const select = document.getElementById('project-move-select');
+          select.innerHTML = '<option value="">🏠 Personal (Private)</option>';
+          const projs = await fetchData(`?action=get_projects&filter=${type}`);
+          if (projs && projs.length > 0) {
+            projs.forEach(p => {
+              select.insertAdjacentHTML('beforeend', `<option value="${p.id}">📁 Project: ${escapeHTML(p.name)}</option>`);
+            });
+          }
+        };
+
+        document.getElementById('confirm-move-project-btn')?.addEventListener('click', async () => {
+          const destProjId = document.getElementById('project-move-select').value;
+          let itemId, itemType;
+          
+          if (document.getElementById('editorOverlay').classList.contains('active')) {
+             itemId = document.getElementById('editorNoteId').value;
+             itemType = 'note';
+          } else {
+             itemId = document.getElementById('taskEditorId').value;
+             itemType = 'task';
+          }
+          
+          if (!itemId) return showToast("Save the item first before moving it.", "error");
+          
+          const res = await fetchData('?action=manage_project', {
+            method: 'POST', body: JSON.stringify({ action_type: 'move_item', item_id: itemId, item_type: itemType, project_id: destProjId })
+          });
+          
+          if (res && res.status === 'success') {
+            showToast('Moved successfully!', 'success');
+            bootstrap.Modal.getInstance(document.getElementById('project-move-modal')).hide();
+          }
+        });
+
+        document.getElementById('editorMoveProjectBtn')?.addEventListener('click', () => { document.getElementById('editorMoreMenu').classList.remove('active'); populateProjectMoveSelect('note'); });
+        document.getElementById('taskMoveProjectBtn')?.addEventListener('click', () => { document.getElementById('taskEditorMoreMenu').classList.remove('active'); populateProjectMoveSelect('task'); });
         
         window.openEditorNote = (note) => {
           activeEditorNote = note;
@@ -22261,6 +22943,11 @@ SOFTWARE.</div>
           document.getElementById('findReplacePanel').classList.remove('active');
           document.getElementById('editorMoreMenu').classList.remove('active');
           document.getElementById('editorOverlay').classList.add('active');
+          
+          if (note.id) {
+            lastSyncContentTime = note.updated_at;
+            startPresenceSync(note.id, 'note');
+          }
         };
 
         const saveCurrentEditorNote = async (force = false) => {
@@ -22279,8 +22966,12 @@ SOFTWARE.</div>
           // CONDITIONAL SAVE: Do not auto-save a brand new note unless the user explicitly hits Save/Close
           if (!id && !force) return;
           
+          let projId = null;
+          if (currentView.filter && currentView.filter.startsWith('proj_')) {
+            projId = currentView.filter.replace('proj_', '');
+          }
           const res = await fetchData('?action=save_note', { 
-            method: 'POST', body: JSON.stringify({id: id || null, title, content, category, starred: isStarred, note_type: noteType}) 
+            method: 'POST', body: JSON.stringify({id: id || null, title, content, category, starred: isStarred, note_type: noteType, project_id: projId}) 
           }, true);
 
           if (res && res.status === 'success' && res.id && !id) {
@@ -22468,6 +23159,11 @@ SOFTWARE.</div>
 
           document.getElementById('taskEditorMoreMenu').classList.remove('active');
           document.getElementById('taskEditorOverlay').classList.add('active');
+          
+          if (task.id) {
+            lastSyncContentTime = task.updated_at;
+            startPresenceSync(task.id, 'task');
+          }
         };
 
         window.renderTaskItems = () => {
@@ -22566,8 +23262,12 @@ SOFTWARE.</div>
           // CONDITIONAL SAVE: Do not auto-save a brand new task list unless explicitly requested
           if (!id && !force) return;
           
+          let projId = null;
+          if (currentView.filter && currentView.filter.startsWith('proj_')) {
+            projId = currentView.filter.replace('proj_', '');
+          }
           const res = await fetchData('?action=save_task', { 
-            method: 'POST', body: JSON.stringify({id: id || null, title, items, category, starred: isStarred}) 
+            method: 'POST', body: JSON.stringify({id: id || null, title, items, category, starred: isStarred, project_id: projId}) 
           }, true);
 
           if (res && res.status === 'success' && res.id && !id) {
@@ -22595,6 +23295,7 @@ SOFTWARE.</div>
 
         document.getElementById('closeTaskEditorBtn')?.addEventListener('click', async () => {
           await window.saveCurrentTask(true);
+          stopPresenceSync();
           document.getElementById('taskEditorOverlay').classList.remove('active');
           if (currentView.type === 'get_tasks') loadView(currentView);
         });
@@ -22666,6 +23367,7 @@ SOFTWARE.</div>
 
         document.getElementById('closeEditorBtn').addEventListener('click', async () => {
           await saveCurrentEditorNote(true);
+          stopPresenceSync();
           document.getElementById('editorOverlay').classList.remove('active');
           activeEditorNote = null;
           if (currentView.type === 'get_notes') loadView(currentView);
@@ -23029,6 +23731,32 @@ SOFTWARE.</div>
           }
 
           const inviteToken = urlParams.get('collab_invite');
+          const projToken = urlParams.get('project_invite');
+          if (projToken) {
+            if (!currentUser) {
+              showToast("Please log in to join the project.", "warning");
+              new bootstrap.Modal(document.getElementById('login-modal')).show();
+            } else {
+              const projModalEl = document.getElementById('project-invite-modal');
+              if (projModalEl) {
+                const projModal = new bootstrap.Modal(projModalEl);
+                document.getElementById('project-invite-accept-btn').onclick = async () => {
+                  const res = await fetchData('?action=manage_project', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ action_type: 'join', token: projToken })
+                  });
+                  if (res) {
+                    showToast(res.message || 'Joined successfully', res.status);
+                    projModal.hide();
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                    loadView({ type: 'get_projects', param: '', sort: '', filter: '' });
+                  }
+                };
+                projModal.show();
+              }
+            }
+          }
+
           if (inviteToken) {
             if (!currentUser) {
               showToast("Please log in to accept the collaboration invite.", "warning");
@@ -23081,7 +23809,7 @@ SOFTWARE.</div>
             history.replaceState({ viewConfig: window.initialView }, "");
             loadView(window.initialView, false);
           } else {
-            const defaultView = { type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' };
+            const defaultView = { type: 'get_songs', param: '', sort: 'random', filter_user_id: '' };
             history.replaceState({ viewConfig: defaultView }, "");
             loadView(defaultView, false);
           }
@@ -23112,7 +23840,7 @@ SOFTWARE.</div>
           if (e.state && e.state.viewConfig) {
             loadView(e.state.viewConfig, false);
           } else {
-            loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', artist_name: '' }, false);
+            loadView({ type: 'get_songs', param: '', sort: 'random', filter_user_id: '', artist_name: '' }, false);
           }
         });
 
