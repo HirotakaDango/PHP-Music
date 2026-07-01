@@ -154,7 +154,7 @@ if (empty($temp_action) && preg_match('/action=([a-zA-Z0-9_]+)/', $raw_uri, $act
   $temp_action = $act_match[1];
 }
 
-$is_media_request = in_array($temp_action, ['get_stream', 'get_image', 'download_song', 'download_cover']);
+$is_media_request = in_array($temp_action, ['embed', 'get_stream', 'get_image', 'download_song', 'download_cover']);
 $is_explicit_api = strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && $_GET['access'] === 'api');
 
 $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
@@ -365,7 +365,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '4.5');
+define('APP_VERSION', '4.6');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', $admin_password ?? 'admin');
@@ -996,6 +996,9 @@ function init_db($db) {
   if (!in_array('play_count', $playlists_columns)) {
     $db->exec("ALTER TABLE playlists ADD COLUMN play_count INTEGER DEFAULT 0;");
   }
+  if (!in_array('description', $playlists_columns)) {
+    $db->exec("ALTER TABLE playlists ADD COLUMN description TEXT;");
+  }
   if ($music_table_exists && !in_array('is_private', $music_columns)) {
     $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;");
   }
@@ -1306,7 +1309,8 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
   // 3. Global API Firewall: Require Admin Password (api_key) for ALL external requests
   $api_extracted_action = $_GET['action'] ?? '';
   
-  if (($_GET['api_key'] ?? '') !== ADMIN_PASSWORD) {
+  $public_media_actions = ['embed', 'get_stream', 'get_image', 'get_app_icon'];
+  if (!in_array($api_extracted_action, $public_media_actions) && ($_GET['api_key'] ?? '') !== ADMIN_PASSWORD) {
     http_response_code(401);
     header('Content-Type: application/json');
     echo '{"status":"error", "message":"API access denied. Valid api_key (Admin Password) required."}';
@@ -1335,7 +1339,7 @@ if (isset($_GET['action'])) {
       $is_valid_internal = true;
     } elseif ($referer && parse_url($referer, PHP_URL_HOST) === $host) {
       $is_valid_internal = true;
-    } elseif (in_array($action, ['get_stream', 'get_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes'])) {
+    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes'])) {
       // Media routes are allowed internally without headers, but data JSON routes are strictly blocked!
       $is_valid_internal = true;
     }
@@ -1441,6 +1445,7 @@ if (isset($_GET['action'])) {
     try { $db->exec("ALTER TABLE chat_groups ADD COLUMN image BLOB;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE playlists ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE playlists ADD COLUMN play_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE playlists ADD COLUMN description TEXT;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;"); } catch(Exception $e) {}
     
     try {
@@ -1484,6 +1489,181 @@ if (isset($_GET['action'])) {
   }
 
   switch ($action) {
+    case 'embed':
+      $id = intval($_GET['id'] ?? 0);
+      $stmt = $db->prepare("SELECT id, title, artist, last_modified FROM music WHERE id = ? AND is_private = 0");
+      $stmt->execute([$id]);
+      $song = $stmt->fetch();
+      if (!$song) {
+        die("<!DOCTYPE html><html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:2rem;'>Song not found or is private.</body></html>");
+      }
+      $title = htmlspecialchars($song['title'], ENT_QUOTES);
+      $artist = htmlspecialchars($song['artist'], ENT_QUOTES);
+      $baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . strtok($_SERVER["REQUEST_URI"], '?');
+      
+      // Append access=api to easily bypass the anti-bot firewall on cross-origin requests
+      $imgUrl = $baseUrl . "?access=api&action=get_image&id={$song['id']}&v={$song['last_modified']}";
+      $streamUrl = $baseUrl . "?access=api&action=get_stream&id={$song['id']}";
+      $shareUrl = $baseUrl . "?share_type=song&id={$song['id']}";
+      
+      echo <<<HTML
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{$title} - {$artist}</title>
+  <style>
+    :root { --accent: #ff0000; --bg: #0f0f0f; --text: #ffffff; --text-muted: #aaaaaa; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; font-family: 'Roboto', -apple-system, sans-serif; background-color: var(--bg); color: var(--text); overflow: hidden; height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .player-wrapper { position: relative; width: 100%; height: 100%; display: flex; align-items: center; overflow: hidden; background: #000; }
+    .bg-blur { position: absolute; top: -50%; left: -50%; width: 200%; height: 200%; background-image: url('{$imgUrl}'); background-size: cover; background-position: center; filter: blur(35px) brightness(0.3); z-index: 0; pointer-events: none; }
+    .content { position: relative; z-index: 1; display: flex; width: 100%; height: 100%; padding: 15px; align-items: center; gap: 15px; }
+    .cover-art { width: 120px; height: 120px; border-radius: 10px; object-fit: cover; box-shadow: 0 8px 24px rgba(0,0,0,0.8); flex-shrink: 0; background-color: #222; }
+    .info-pane { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; height: 100%; }
+    .title { font-size: 1.2rem; font-weight: 700; margin: 0 0 5px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 2px 4px rgba(0,0,0,0.8); }
+    .artist { font-size: 0.95rem; color: var(--text-muted); margin: 0 0 15px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+    .controls { display: flex; align-items: center; gap: 15px; }
+    .play-btn { width: 48px; height: 48px; border-radius: 50%; background: var(--text); color: #000; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform 0.2s ease, background 0.2s ease; flex-shrink: 0; padding: 0; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+    .play-btn:hover { transform: scale(1.08); background: #f0f0f0; }
+    .play-btn svg { width: 22px; height: 22px; fill: currentColor; margin-left: 3px; }
+    .play-btn.playing .icon-play { display: none; }
+    .play-btn.playing .icon-pause { display: block; margin-left: 0; }
+    .icon-pause, .spinner { display: none; }
+    .play-btn.loading .icon-play, .play-btn.loading .icon-pause { display: none !important; }
+    .play-btn.loading .spinner { display: block; margin-left: 0; width: 24px; height: 24px; animation: rotate 2s linear infinite; }
+    .spinner circle { stroke: currentColor; stroke-linecap: round; animation: dash 1.5s ease-in-out infinite; }
+    @keyframes rotate { 100% { transform: rotate(360deg); } }
+    @keyframes dash { 0% { stroke-dasharray: 1, 150; stroke-dashoffset: 0; } 50% { stroke-dasharray: 90, 150; stroke-dashoffset: -35; } 100% { stroke-dasharray: 90, 150; stroke-dashoffset: -124; } }
+    .progress-wrapper { flex-grow: 1; display: flex; flex-direction: column; gap: 6px; }
+    .progress-bar { width: 100%; height: 6px; background: rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer; position: relative; }
+    .progress-fill { height: 100%; width: 0%; background: var(--accent); border-radius: 3px; pointer-events: none; position: absolute; top: 0; left: 0; }
+    .progress-fill::after { content: ''; position: absolute; right: -5px; top: -3px; width: 12px; height: 12px; background: var(--text); border-radius: 50%; opacity: 0; transition: opacity 0.2s; box-shadow: 0 1px 4px rgba(0,0,0,0.5); }
+    .progress-bar:hover .progress-fill::after { opacity: 1; }
+    .time-stamps { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); font-variant-numeric: tabular-nums; font-weight: 500; }
+    .brand { position: absolute; top: 12px; right: 15px; font-size: 0.75rem; font-weight: 700; color: rgba(255,255,255,0.4); text-decoration: none; z-index: 2; transition: color 0.2s; letter-spacing: 0.5px; }
+    .brand:hover { color: rgba(255,255,255,0.9); }
+    @media (max-width: 400px) {
+      .cover-art { width: 90px; height: 90px; }
+      .play-btn { width: 40px; height: 40px; }
+      .play-btn svg { width: 18px; height: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="player-wrapper">
+    <div class="bg-blur"></div>
+    <a href="{$shareUrl}" target="_blank" class="brand">PHP MUSIC</a>
+    <div class="content">
+      <img src="{$imgUrl}" class="cover-art" alt="Cover Art">
+      <div class="info-pane">
+        <div class="title">{$title}</div>
+        <div class="artist">{$artist}</div>
+        <div class="controls">
+          <button class="play-btn" id="playBtn" aria-label="Play/Pause">
+            <svg class="icon-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            <svg class="icon-pause" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+            <svg class="spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="5"></circle></svg>
+          </button>
+          <div class="progress-wrapper">
+            <div class="progress-bar" id="progBar">
+              <div class="progress-fill" id="progFill"></div>
+            </div>
+            <div class="time-stamps">
+              <span id="timeCurrent">0:00</span>
+              <span id="timeTotal">0:00</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <audio id="audio" src="{$streamUrl}" preload="metadata" crossorigin="anonymous"></audio>
+  <script>
+    const audio = document.getElementById('audio');
+    const playBtn = document.getElementById('playBtn');
+    const progBar = document.getElementById('progBar');
+    const progFill = document.getElementById('progFill');
+    const timeCurrent = document.getElementById('timeCurrent');
+    const timeTotal = document.getElementById('timeTotal');
+
+    const formatTime = (s) => {
+      if (isNaN(s) || !isFinite(s)) return '0:00';
+      const min = Math.floor(s / 60);
+      const sec = Math.floor(s % 60).toString().padStart(2, '0');
+      return min + ':' + sec;
+    };
+
+    const updateDuration = () => {
+      if (audio.duration && isFinite(audio.duration)) {
+        timeTotal.textContent = formatTime(audio.duration);
+      }
+    };
+
+    audio.addEventListener('loadedmetadata', updateDuration);
+    audio.addEventListener('durationchange', updateDuration);
+
+    audio.addEventListener('timeupdate', () => {
+      timeCurrent.textContent = formatTime(audio.currentTime);
+      if (audio.duration && isFinite(audio.duration)) {
+        progFill.style.width = ((audio.currentTime / audio.duration) * 100) + '%';
+      }
+    });
+
+    audio.addEventListener('waiting', () => playBtn.classList.add('loading'));
+    
+    audio.addEventListener('playing', () => {
+      playBtn.classList.remove('loading');
+      playBtn.classList.add('playing');
+      updateDuration();
+    });
+
+    audio.addEventListener('pause', () => {
+      playBtn.classList.remove('loading');
+      playBtn.classList.remove('playing');
+    });
+
+    audio.addEventListener('error', (e) => {
+      playBtn.classList.remove('loading', 'playing');
+      playBtn.innerHTML = "<svg viewBox='0 0 24 24' fill='#ff4444' style='margin-left:0; width:24px; height:24px;'><path d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z'/></svg>";
+      console.error('Audio stream error', e);
+    });
+
+    playBtn.addEventListener('click', () => {
+      if (audio.paused) {
+        const p = audio.play();
+        if (p !== undefined) {
+          playBtn.classList.add('loading');
+          p.catch(e => {
+            console.error('Playback failed:', e);
+            playBtn.classList.remove('loading');
+          });
+        }
+      } else {
+        audio.pause();
+      }
+    });
+
+    progBar.addEventListener('click', (e) => {
+      if (!audio.duration || !isFinite(audio.duration)) return;
+      const rect = progBar.getBoundingClientRect();
+      const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      audio.currentTime = pos * audio.duration;
+    });
+
+    audio.addEventListener('ended', () => {
+      progFill.style.width = '0%';
+      timeCurrent.textContent = '0:00';
+      audio.currentTime = 0;
+      playBtn.classList.remove('playing');
+    });
+  </script>
+</body>
+</html>
+HTML;
+      exit;
+
     case 'toggle_collaborative':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
@@ -3982,7 +4162,7 @@ if (isset($_GET['action'])) {
     case 'get_albums':
       $sort_key = $_GET['sort'] ?? 'album_asc';
       
-      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, m.id, m.year, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m WHERE m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY m.id DESC");
+      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, m.id, m.year, m.last_modified, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m WHERE m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY m.id DESC");
       $stmt->execute([$user_id]);
       $rows = $stmt->fetchAll();
       
@@ -4000,6 +4180,7 @@ if (isset($_GET['action'])) {
                 'artist' => $p,
                 'user_id' => $row['user_id'],
                 'id' => $row['id'],
+                'image_v' => $row['last_modified'],
                 'year' => $row['year'],
                 'song_count' => 1,
                 'total_plays' => $row['pc']
@@ -4133,7 +4314,7 @@ if (isset($_GET['action'])) {
       } elseif ($type === 'playlist') {
         if (empty($name)) { http_response_code(400); exit; }
         $stmt_details = $db->prepare("
-          SELECT p.name, p.public_id, p.user_id, p.is_private, u.artist as creator, p.play_count,
+          SELECT p.name, p.description, p.public_id, p.user_id, p.is_private, u.artist as creator, p.play_count,
           (SELECT COUNT(*) FROM playlist_songs WHERE playlist_id = p.id) as song_count,
           (SELECT SUM(m.duration) FROM music m JOIN playlist_songs ps ON m.id = ps.song_id WHERE ps.playlist_id = p.id) as total_duration,
           (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
@@ -4232,12 +4413,14 @@ if (isset($_GET['action'])) {
         $details = $stmt_details->fetch();
         
         // Advanced Fallback: Query explicitly for the newest song that actually has a cover image
-        $stmt_img = $db->prepare("SELECT id FROM music m WHERE {$field_cond} {$user_cond} AND image IS NOT NULL ORDER BY id DESC LIMIT 1");
+        $stmt_img = $db->prepare("SELECT id, last_modified FROM music m WHERE {$field_cond} {$user_cond} AND image IS NOT NULL ORDER BY id DESC LIMIT 1");
         $stmt_img->execute($user_params);
-        $verified_image_id = $stmt_img->fetchColumn();
+        $img_row = $stmt_img->fetch();
+        $verified_image_id = $img_row ? $img_row['id'] : 0;
+        $verified_image_v = $img_row ? $img_row['last_modified'] : 0;
 
         $details['name'] = $name;
-        $details['image_url'] = '?action=get_image&id=' . ($verified_image_id ?: 0);
+        $details['image_url'] = '?action=get_image&id=' . $verified_image_id . '&v=' . $verified_image_v;
         $details['public_id'] = null;
 
         if ($type === 'artist') {
@@ -4433,6 +4616,7 @@ if (isset($_GET['action'])) {
       $stmt = $db->prepare("
         SELECT p.name, p.public_id, p.is_collaborative, p.is_private, p.play_count, p.created_at, u.artist as creator, 
         (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, 
+        (SELECT m.last_modified FROM playlist_songs ps JOIN music m ON ps.song_id = m.id WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_v,
         (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count,
         (SELECT SUM(m.duration) FROM playlist_songs ps JOIN music m ON ps.song_id = m.id WHERE ps.playlist_id = p.id) as total_duration
         FROM playlists p JOIN users u ON p.user_id = u.id 
@@ -4683,12 +4867,15 @@ if (isset($_GET['action'])) {
       }
       
       $stmt = $db->prepare("
-        SELECT p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, p.play_count, COUNT(ps.song_id) as song_count,
-        (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
+        SELECT p.id, p.name, p.description, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, u.artist as creator, p.play_count, COUNT(ps.song_id) as song_count,
+        (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id,
+        (SELECT m.last_modified FROM playlist_songs ps2 JOIN music m ON ps2.song_id = m.id WHERE ps2.playlist_id = p.id ORDER BY ps2.added_at DESC LIMIT 1) as image_v
         {$is_added_sql}
-        FROM playlists p LEFT JOIN playlist_songs ps ON p.id = ps.playlist_id
+        FROM playlists p 
+        LEFT JOIN playlist_songs ps ON p.id = ps.playlist_id
+        LEFT JOIN users u ON p.user_id = u.id
         WHERE p.user_id = ?
-        GROUP BY p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id, p.play_count
+        GROUP BY p.id, p.name, p.description, p.public_id, p.is_collaborative, p.is_private, p.user_id, u.artist, p.play_count
         {$order_by} {$limit_clause}
       ");
       $stmt->execute([$user_id]);
@@ -4707,14 +4894,15 @@ if (isset($_GET['action'])) {
       $order_by = $sort_map[$sort_key] ?? $sort_map['name_asc'];
       
       $stmt = $db->prepare("
-        SELECT p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, u.artist as creator, p.play_count, COUNT(ps.song_id) as song_count,
-        (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
-        FROM playlists p 
+        SELECT p.id, p.name, p.description, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, u.artist as creator, p.play_count, COUNT(ps.song_id) as song_count,
+        (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id,
+        (SELECT m.last_modified FROM playlist_songs ps2 JOIN music m ON ps2.song_id = m.id WHERE ps2.playlist_id = p.id ORDER BY ps2.added_at DESC LIMIT 1) as image_v
+        FROM playlists p
         JOIN playlist_collaborators pc ON p.id = pc.playlist_id
         JOIN users u ON p.user_id = u.id
         LEFT JOIN playlist_songs ps ON p.id = ps.playlist_id
         WHERE pc.user_id = ?
-        GROUP BY p.id, p.name, p.public_id, p.is_collaborative, p.is_private, p.user_id, u.artist, p.play_count
+        GROUP BY p.id, p.name, p.description, p.public_id, p.is_collaborative, p.is_private, p.user_id, u.artist, p.play_count
         {$order_by} {$limit_clause}
       ");
       $stmt->execute([$user_id]);
@@ -5000,12 +5188,17 @@ if (isset($_GET['action'])) {
       $data = json_decode(file_get_contents('php://input'), true);
       $public_id = $data['public_id'];
       $new_name = trim(htmlspecialchars($data['name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $description = trim(htmlspecialchars($data['description'] ?? '', ENT_QUOTES, 'UTF-8'));
       $is_private = intval($data['is_private'] ?? 0);
       if (empty($new_name)) {
         http_response_code(400); send_json(['status' => 'error', 'message' => 'Playlist name cannot be empty.']);
       }
-      $stmt = $db->prepare("UPDATE playlists SET name = ?, is_private = ?, is_collaborative = CASE WHEN ? = 1 THEN 0 ELSE is_collaborative END WHERE public_id = ? AND (user_id = ? OR {$is_super_admin} = 1)");
-      $stmt->execute([$new_name, $is_private, $is_private, $public_id, $user_id]);
+      
+      // Forcefully ensure the description column exists to prevent 500 errors if the session wasn't reset
+      try { $db->exec("ALTER TABLE playlists ADD COLUMN description TEXT;"); } catch(Exception $e) {}
+      
+      $stmt = $db->prepare("UPDATE playlists SET name = ?, description = ?, is_private = ?, is_collaborative = CASE WHEN ? = 1 THEN 0 ELSE is_collaborative END WHERE public_id = ? AND (user_id = ? OR {$is_super_admin} = 1)");
+      $stmt->execute([$new_name, $description, $is_private, $is_private, $public_id, $user_id]);
       
       // Destroy collaborators safely if transitioning to Private
       if ($is_private == 1) {
@@ -6420,9 +6613,48 @@ function perform_full_scan($db) {
       .page-header { padding: 1.5rem 2rem; display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
       .header-controls { display: flex; gap: 1rem; align-items: center; margin-left: auto; }
       #sort-controls { display: flex; align-items: center; gap: 0.5rem; }
-      #sort-select {
-        background-color: var(--ytm-surface-2); color: var(--ytm-primary-text);
-        border: 1px solid #404040; border-radius: 4px; padding: 0.25rem 0.5rem;
+      
+      /* Modernized Sort Dropdown Styling */
+      select[id*="sort"] {
+        appearance: none;
+        -webkit-appearance: none;
+        background-color: rgba(255, 255, 255, 0.05) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-radius: 20px !important;
+        color: var(--ytm-primary-text) !important;
+        font-weight: 600;
+        font-size: 0.85rem;
+        padding: 0.4rem 2rem 0.4rem 1rem !important;
+        cursor: pointer;
+        transition: all 0.2s ease-in-out;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23aaaaaa'%3E%3Cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E") !important;
+        background-repeat: no-repeat !important;
+        background-position: right 0.75rem center !important;
+        background-size: 12px 12px !important;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
+      }
+      select[id*="sort"]:hover {
+        background-color: rgba(255, 255, 255, 0.1) !important;
+        border-color: rgba(255, 255, 255, 0.2) !important;
+      }
+      select[id*="sort"]:focus {
+        outline: none;
+        border-color: var(--ytm-accent) !important;
+        box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.2) !important;
+      }
+      select[id*="sort"] option {
+        background-color: var(--ytm-surface-2);
+        color: #ffffff;
+        font-weight: 500;
+      }
+      label[for*="sort"] {
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        font-size: 0.7rem !important;
+        font-weight: 700;
+        color: var(--ytm-secondary-text) !important;
+        margin-right: 0.25rem;
       }
       .search-bar.input-group { width: auto; min-width: 250px; }
       .search-bar.input-group .form-control {
@@ -10104,6 +10336,13 @@ function perform_full_scan($db) {
                 <label for="edit-playlist-name-input" class="form-label">Playlist Name</label>
                 <input type="text" class="form-control" id="edit-playlist-name-input" required>
               </div>
+              <div class="mb-3">
+                <label for="edit-playlist-desc-input" class="form-label">Description (Bio)</label>
+                <textarea class="form-control" id="edit-playlist-desc-input" rows="3" placeholder="Tell us about this playlist..."></textarea>
+                <div class="d-flex justify-content-end mt-1">
+                  <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+                </div>
+              </div>
               <div class="form-check form-switch mb-3">
                 <input class="form-check-input" type="checkbox" id="edit-playlist-is-private">
                 <label class="form-check-label text-white" for="edit-playlist-is-private"><i class="bi bi-lock-fill text-warning"></i> Private Playlist</label>
@@ -10311,6 +10550,26 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+
+    <div class="modal fade" id="embed-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white"><i class="bi bi-code-slash text-info me-2"></i>Embed Song</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-light p-4">
+            <p class="text-secondary text-center mb-3">Copy the HTML snippet below to embed this song onto your website or blog.</p>
+            <div id="embed-preview-container" class="mb-4"></div>
+            <div class="input-group">
+              <input type="text" class="form-control bg-dark text-info border-secondary font-monospace" id="embed-code-input" readonly>
+              <button class="btn btn-danger fw-bold px-4" type="button" id="copy-embed-code-btn"><i class="bi bi-clipboard"></i> Copy</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="full-scan-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content">
@@ -11279,6 +11538,13 @@ curl_close($ch);
             .sidebar { width: var(--sidebar-width); background-color: var(--ytm-surface); border-right: 1px solid var(--ytm-border); position: fixed; top: 0; bottom: 0; left: 0; height: 100vh; height: 100dvh; padding: 1.25rem 1rem; display: flex; flex-direction: column; z-index: 1200; transition: transform 0.3s ease, padding 0.3s ease; }
             .form-control, .form-select { background-color: #212121; border: 1px solid var(--ytm-border); color: var(--ytm-primary-text); border-radius: 8px; }
             .form-control:focus, .form-select:focus { background-color: #212121; border-color: #555; color: var(--ytm-primary-text); box-shadow: none; }
+            
+            /* Modernized Sort Dropdown Styling */
+            select[id*="sort"] { appearance: none; -webkit-appearance: none; background-color: rgba(255, 255, 255, 0.05) !important; border: 1px solid rgba(255, 255, 255, 0.1) !important; border-radius: 20px !important; color: var(--ytm-primary-text) !important; font-weight: 600; font-size: 0.85rem; padding: 0.4rem 2rem 0.4rem 1rem !important; cursor: pointer; transition: all 0.2s ease-in-out; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23aaaaaa'%3E%3Cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E") !important; background-repeat: no-repeat !important; background-position: right 0.75rem center !important; background-size: 12px 12px !important; backdrop-filter: blur(10px); box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important; }
+            select[id*="sort"]:hover { background-color: rgba(255, 255, 255, 0.1) !important; border-color: rgba(255, 255, 255, 0.2) !important; }
+            select[id*="sort"]:focus { outline: none; border-color: var(--ytm-accent) !important; box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.2) !important; }
+            select[id*="sort"] option { background-color: #212121; color: #ffffff; font-weight: 500; }
+            label[for*="sort"] { text-transform: uppercase; letter-spacing: 1px; font-size: 0.7rem !important; font-weight: 700; color: var(--ytm-secondary-text) !important; margin-right: 0.25rem; }
             .songs-header { display: grid; grid-template-columns: 48px 4fr 3fr 80px; gap: 1rem; padding: 0.75rem 1rem; color: var(--ytm-secondary-text); font-size: 0.85rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
             .song-item { display: grid; grid-template-columns: 48px 4fr 3fr 80px; gap: 1rem; align-items: center; padding: 0.75rem 1rem; border-radius: 8px; cursor: pointer; transition: background-color 0.15s; border-bottom: 1px solid rgba(255, 255, 255, 0.03); }
             .song-item:hover { background-color: var(--ytm-surface-hover); }
@@ -12516,19 +12782,45 @@ SOFTWARE.</div>
         'use strict';
         
         window.scrollToCenter = (container, element, smooth = true) => {
-          if (!container || !element) return;
-          if (window.getComputedStyle(container).position === 'static') {
-            container.style.position = 'relative';
-          }
-          const containerHeight = container.clientHeight;
-          const elemTop = element.offsetTop;
-          const elemHeight = element.offsetHeight;
-          const targetScroll = elemTop - (container.clientHeight / 2) + (elemHeight / 2);
+          if (!container || !element) return false;
+          
+          const containerRect = container.getBoundingClientRect();
+          const elementRect = element.getBoundingClientRect();
+          
+          // If the element or container is not visible (e.g. display: none), heights will be 0
+          if (containerRect.height === 0 || elementRect.height === 0) return false;
+          
+          // Accurately calculate the scroll target using absolute bounding box coordinates
+          const targetScroll = container.scrollTop + (elementRect.top - containerRect.top) - (container.clientHeight / 2) + (elementRect.height / 2);
           
           container.scrollTo({
             top: targetScroll,
             behavior: smooth ? 'smooth' : 'auto'
           });
+          return true;
+        };
+
+        window.enforceScrollToActive = (paneId, queueListId, smooth = false) => {
+          let attempts = 0;
+          const tryScroll = () => {
+            attempts++;
+            const pane = document.getElementById(paneId);
+            const activeItem = document.querySelector(`#${queueListId} .song-item.now-playing`);
+            
+            if (pane && activeItem) {
+              const success = window.scrollToCenter(pane, activeItem, smooth);
+              // Double check after 150ms to counteract layout shifts from images loading or modal fading in
+              if (success && attempts === 1) {
+                setTimeout(tryScroll, 150);
+              } else if (!success && attempts < 15) {
+                setTimeout(tryScroll, 50);
+              }
+            } else if (attempts < 15) {
+              setTimeout(tryScroll, 50); 
+            }
+          };
+          // Start the first attempt slightly deferred to allow initial DOM render
+          setTimeout(tryScroll, 20);
         };
 
         const mainContent = document.getElementById('main-content');
@@ -13855,44 +14147,26 @@ SOFTWARE.</div>
         
         if (playerModalEl) {
           playerModalEl.addEventListener('shown.bs.modal', () => {
-            const activeMob = document.querySelector('#mobile-player-queue-list .song-item.now-playing');
-            const pane = document.getElementById('mp-queue-pane');
-            if (activeMob && pane && activeMob.offsetParent !== null) {
-              window.scrollToCenter(pane, activeMob, false);
-            }
+            window.enforceScrollToActive('mp-queue-pane', 'mobile-player-queue-list', false);
           });
           
-          // CRITICAL: Scroll when the "Up Next" tab is clicked/revealed on mobile
           const mpQueueTabBtn = document.querySelector('button[data-bs-target="#mp-queue-pane"]');
           if (mpQueueTabBtn) {
             mpQueueTabBtn.addEventListener('shown.bs.tab', () => {
-              const activeMob = document.querySelector('#mobile-player-queue-list .song-item.now-playing');
-              const pane = document.getElementById('mp-queue-pane');
-              if (activeMob && pane) {
-                window.scrollToCenter(pane, activeMob, false);
-              }
+              window.enforceScrollToActive('mp-queue-pane', 'mobile-player-queue-list', false);
             });
           }
         }
         
         if (desktopPlayerModalEl) {
           desktopPlayerModalEl.addEventListener('shown.bs.modal', () => {
-            const activeDesk = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
-            const pane = document.getElementById('dp-queue-pane');
-            if (activeDesk && pane && activeDesk.offsetParent !== null) {
-              window.scrollToCenter(pane, activeDesk, false);
-            }
+            window.enforceScrollToActive('dp-queue-pane', 'desktop-player-queue-list', false);
           });
           
-          // Backup check for Desktop tabs
           const dpQueueTabBtn = document.querySelector('button[data-bs-target="#dp-queue-pane"]');
           if (dpQueueTabBtn) {
             dpQueueTabBtn.addEventListener('shown.bs.tab', () => {
-              const activeDesk = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
-              const pane = document.getElementById('dp-queue-pane');
-              if (activeDesk && pane) {
-                window.scrollToCenter(pane, activeDesk, false);
-              }
+              window.enforceScrollToActive('dp-queue-pane', 'desktop-player-queue-list', false);
             });
           }
         }
@@ -13936,8 +14210,13 @@ SOFTWARE.</div>
           if (renderedQueueCount >= queue.length || isQueueLoading) return;
           isQueueLoading = true;
           
-          // Grab the next 25 IDs
-          const nextChunkIds = queue.slice(renderedQueueCount, renderedQueueCount + 25);
+          // Determine chunk size. If resetting, ensure we render up to the active song so it can be scrolled to immediately.
+          let chunkSize = 25;
+          if (reset && typeof queueIndex !== 'undefined' && queueIndex >= 25) {
+            chunkSize = queueIndex + 15;
+          }
+          
+          const nextChunkIds = queue.slice(renderedQueueCount, renderedQueueCount + chunkSize);
           const missingIds = nextChunkIds.filter(id => !globalSongCache[id]);
           
           // Fetch any data that isn't cached yet
@@ -14038,19 +14317,10 @@ SOFTWARE.</div>
           
           // Focus the playing song if it was a total reset
           if (reset && currentSong) {
-            setTimeout(() => {
-              const activeDesk = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
-              const paneDesk = document.getElementById('dp-queue-pane');
-              if (activeDesk && paneDesk && activeDesk.offsetParent !== null) {
-                window.scrollToCenter(paneDesk, activeDesk, true);
-              }
-              
-              const activeMob = document.querySelector('#mobile-player-queue-list .song-item.now-playing');
-              const paneMob = document.getElementById('mp-queue-pane');
-              if (activeMob && paneMob && activeMob.offsetParent !== null) {
-                window.scrollToCenter(paneMob, activeMob, true);
-              }
-            }, 100);
+            if (typeof window.enforceScrollToActive === 'function') {
+              window.enforceScrollToActive('dp-queue-pane', 'desktop-player-queue-list', true);
+              window.enforceScrollToActive('mp-queue-pane', 'mobile-player-queue-list', true);
+            }
           }
         };
 
@@ -14650,6 +14920,34 @@ SOFTWARE.</div>
           return "Just now";
         };
 
+        window.exportData = async (url, defaultFilename) => {
+          showToast('Exporting...', 'info');
+          try {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error('Export failed');
+            const blob = await res.blob();
+            const urlBlob = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = urlBlob;
+            
+            const disposition = res.headers.get('Content-Disposition');
+            let filename = defaultFilename;
+            if (disposition && disposition.indexOf('filename=') !== -1) {
+              const matches = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(disposition);
+              if (matches != null && matches[1]) {
+                filename = matches[1].replace(/['"]/g, '');
+              }
+            }
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(urlBlob);
+          } catch (err) {
+            showToast('Failed to export', 'error');
+          }
+        };
+
         const fetchData = async (url, options = {}, silent = false) => {
           try {
             options.cache = 'no-store';
@@ -15049,7 +15347,7 @@ SOFTWARE.</div>
               <div class="list-group list-group-flush">
                 ${playlists.map(p => `
                   <button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-3 add-to-playlist-item my-1 p-2 rounded ${p.is_added == 1 ? 'bg-secondary text-white border-0 opacity-75' : 'bg-transparent text-white border border-secondary'}" data-playlist-id="${p.id}" ${p.is_added == 1 ? 'disabled' : ''}>
-                    <img src="?action=get_image&id=${p.image_id || 0}" class="rounded" style="width: 48px; height: 48px; object-fit: cover; background-color: var(--ytm-surface-2);">
+                    <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}" class="rounded" style="width: 48px; height: 48px; object-fit: cover; background-color: var(--ytm-surface-2);">
                     <div class="d-flex flex-column flex-grow-1 text-start overflow-hidden">
                       <span class="text-truncate fw-medium">${escapeHTML(p.name)}</span>
                       <span class="small ${p.is_added == 1 ? 'text-white-50' : 'text-secondary'}">${p.song_count} songs</span>
@@ -15110,7 +15408,7 @@ SOFTWARE.</div>
             shareId = details.public_id;
             document.title = `${details.name} - ${details.creator} - PHP Music`;
             downloadButtonHTML = `<button class="btn btn-outline-light border-0 open-pd-btn" data-public-id="${details.public_id}" title="Download Playlist"><i class="bi bi-download"></i> <span class="d-none d-md-inline">Download</span></button>`;
-            downloadExportPlaylistZipButtonHTML = `<a href="?action=export_playlist&id=${details.public_id}" target="_blank" class="btn btn-outline-light border-0" title="Export Playlist"><i class="bi bi-box-arrow-up"></i> <span class="d-none d-md-inline">Export</span></a>`;
+            downloadExportPlaylistZipButtonHTML = `<button class="btn btn-outline-light border-0 export-playlist-btn" data-public-id="${details.public_id}" title="Export Playlist"><i class="bi bi-box-arrow-up"></i> <span class="d-none d-md-inline">Export</span></button>`;
             if (currentUser && currentUser.id !== details.user_id) {
               copyButtonHTML = `<button class="btn btn-outline-light border-0 copy-playlist-btn" data-public-id="${details.public_id}"><i class="bi bi-copy"></i> <span class="d-none d-md-inline">Copy Playlist</span></button>`;
             }
@@ -15169,7 +15467,9 @@ SOFTWARE.</div>
           }
 
           const bioHTML = (details.bio && (type === 'artist' || type === 'profile')) ? 
-            `<div class="mt-2 text-white" style="font-size: 0.95rem; white-space: pre-wrap; max-width: 800px;">${parseUserText(details.bio)}</div>` : '';
+            `<div class="mt-2 text-white" style="font-size: 0.95rem; white-space: pre-wrap; max-width: 800px;">${parseUserText(details.bio)}</div>` : 
+            (details.description && type === 'playlist') ? 
+            `<div class="mt-2 text-white" style="font-size: 0.95rem; white-space: pre-wrap; max-width: 800px;">${parseUserText(details.description)}</div>` : '';
 
           const headerHTML = `
             <div class="view-details-header position-relative overflow-hidden" style="min-height: 250px; background-color: var(--ytm-surface);">
@@ -15276,7 +15576,7 @@ SOFTWARE.</div>
                             <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
                               ${(currentUser && (currentUser.id == details.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${details.user_id}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
                               <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
-                                <img src="?action=get_image&id=${p.image_id || 0}" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
+                                <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
                                 ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ''}
                               </div>
                               <div class="card-body px-0 py-2">
@@ -15578,14 +15878,14 @@ SOFTWARE.</div>
               const artistNameAttr = (type === 'get_albums' && item.artist) ? `data-artistname="${encodeURIComponent(item.artist)}"` : '';
 
               const moreButton = (type === 'get_user_playlists' || type === 'get_collab_playlists') ? `
-                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${name}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}" data-owner-id="${item.owner_id || ''}">
+                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-description="${escapeHTML(item.description || '')}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}" data-owner-id="${item.owner_id || ''}">
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>` : '';
 
               if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_collab_playlists' || type === 'get_artists' || type === 'get_following' || type === 'get_genres' || type === 'get_years') {
                 let songCountBadge = '';
                 if ((type === 'get_albums' || type === 'get_user_playlists' || type === 'get_collab_playlists') && item.song_count !== undefined) {
-                  songCountBadge = `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(item.song_count)}</div>`;
+                  songCountBadge = `<div class="position-absolute bottom-0 start-0 ms-2 mb-2 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(item.song_count)}</div>`;
                 }
                 
                 let viewCountHtml = '';
@@ -15601,7 +15901,7 @@ SOFTWARE.</div>
                   <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} ${artistNameAttr} style="cursor: pointer;">
                     ${moreButton}
                     <div style="position: relative; display: block; ${borderStyle} overflow: hidden;">
-                      <img src="${imgSrc}${imageId || 0}" class="card-img-top" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
+                      <img src="${imgSrc}${imageId || 0}&v=${item.image_v || 0}" class="card-img-top" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
                       ${songCountBadge}
                     </div>
                     <div class="card-body px-0 py-2">
@@ -15801,7 +16101,7 @@ SOFTWARE.</div>
               itemsHTML = shelf.items.map(album => `
                 <div class="shelf-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
                   <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
-                    <img src="?action=get_image&id=${album.id || 0}" alt="${escapeHTML(album.album)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
+                    <img src="?action=get_image&id=${album.id || 0}&v=${album.image_v || 0}" alt="${escapeHTML(album.album)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
                     ${album.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(album.song_count)}</div>` : ''}
                   </div>
                   <div class="item-title">${escapeHTML(album.album)}</div>
@@ -15813,7 +16113,7 @@ SOFTWARE.</div>
               itemsHTML = shelf.items.map(playlist => `
                 <div class="shelf-item" data-${shelf.type === 'mixes' ? 'mix' : 'playlist'}="${encodeURIComponent(playlist.public_id)}">
                   <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
-                    <img src="?action=get_image&id=${playlist.image_id || 0}" alt="${escapeHTML(playlist.name)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
+                    <img src="?action=get_image&id=${playlist.image_id || 0}&v=${playlist.image_v || 0}" alt="${escapeHTML(playlist.name)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
                     ${playlist.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(playlist.song_count)}</div>` : ''}
                   </div>
                   <div class="item-title">${escapeHTML(playlist.name)}</div>
@@ -15824,7 +16124,7 @@ SOFTWARE.</div>
             } else if (shelf.type === 'artists') {
               itemsHTML = shelf.items.map(artist => `
                 <div class="shelf-item text-center" data-artist="${encodeURIComponent(artist.name)}" data-userid="${artist.is_user ? artist.id : ''}">
-                  <img src="${artist.is_user ? `?action=get_profile_picture&id=${artist.id}` : `?action=get_image&id=${artist.id || 0}`}" class="rounded-circle" alt="${escapeHTML(artist.name)}" style="aspect-ratio: 1/1; object-fit: cover;">
+                  <img src="${artist.is_user ? `?action=get_profile_picture&id=${artist.id}` : `?action=get_image&id=${artist.id || 0}&v=${artist.image_v || 0}`}" class="rounded-circle" alt="${escapeHTML(artist.name)}" style="aspect-ratio: 1/1; object-fit: cover;">
                   <div class="item-title mt-2">${escapeHTML(artist.name)}</div>
                   <div class="item-subtitle text-uppercase small text-secondary">Artist</div>
                 </div>
@@ -16589,7 +16889,7 @@ SOFTWARE.</div>
                     <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-cloud-arrow-down-fill text-info me-3 fs-3"></i> Offline Library</div>
                     <div class="d-flex gap-2 flex-wrap">
                       <button class="btn btn-warning rounded-pill px-4 fw-medium shadow-sm text-dark" id="recache-all-offline-btn"><i class="bi bi-arrow-repeat me-1"></i> Re-cache All</button>
-                      <a href="?action=export_offline" class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-offline-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</a>
+                      <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-offline-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</button>
                       <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-offline-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
                     </div>
                   </div>`;
@@ -16616,7 +16916,7 @@ SOFTWARE.</div>
                   <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
                     <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-heart-fill text-danger me-3 fs-3"></i> My Favorites</div>
                     <div class="d-flex gap-2 flex-wrap">
-                      <a href="?action=export_favorites" class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-favorites-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</a>
+                      <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-favorites-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</button>
                       <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-favorites-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
                     </div>
                   </div>`;
@@ -17268,6 +17568,11 @@ SOFTWARE.</div>
           globalSongCache[currentSong.id] = currentSong;
           currentSong.logged = false;
           
+          // Ensure the new song is physically rendered in the DOM queues before highlighting
+          if (typeof queueIndex !== 'undefined' && queueIndex >= renderedQueueCount && renderedQueueCount < queue.length) {
+            await renderQueue(false);
+          }
+          
           initWebAudio();
           if (audioCtx.state === 'suspended') audioCtx.resume();
           applyAudioSettings(currentSong.id);
@@ -17373,20 +17678,21 @@ SOFTWARE.</div>
 
           if (typeof renderDesktopLyrics === 'function' && desktopPlayerModalEl && desktopPlayerModalEl.classList.contains('show')) {
             renderDesktopLyrics();
-            
-            const activeInModal = document.querySelector('#desktop-player-queue-list .song-item.now-playing');
-            const pane = document.getElementById('dp-queue-pane');
-            if (activeInModal && pane) {
-              window.scrollToCenter(pane, activeInModal, true);
-            }
+            window.enforceScrollToActive('dp-queue-pane', 'desktop-player-queue-list', true);
           }
 
           if (playerModalEl && playerModalEl.classList.contains('show')) {
-            const activeMobileModal = document.querySelector('#mobile-player-queue-list .song-item.now-playing');
-            const pane = document.getElementById('mp-queue-pane');
-            if (activeMobileModal && pane && activeMobileModal.offsetParent !== null) {
-              window.scrollToCenter(pane, activeMobileModal, true);
-            }
+            window.enforceScrollToActive('mp-queue-pane', 'mobile-player-queue-list', true);
+          }
+
+          if (playerModalEl && playerModalEl.classList.contains('show')) {
+            setTimeout(() => {
+              const activeMobileModal = document.querySelector('#mobile-player-queue-list .song-item.now-playing');
+              const pane = document.getElementById('mp-queue-pane');
+              if (activeMobileModal && pane && activeMobileModal.offsetParent !== null) {
+                window.scrollToCenter(pane, activeMobileModal, true);
+              }
+            }, 50);
           }
 
           if (typeof window.renderPipLyrics === 'function') {
@@ -17600,7 +17906,7 @@ SOFTWARE.</div>
             return;
           }
           contextMenuItemEl = buttonEl;
-          const { publicId, name, isCollab, isPrivate, ownerId } = playlistData;
+          const { publicId, name, description, isCollab, isPrivate, ownerId } = playlistData;
           
           let menuItems = '';
           
@@ -17612,12 +17918,12 @@ SOFTWARE.</div>
               const collabIcon = isCollab ? '<i class="bi bi-lock-fill"></i>' : '<i class="bi bi-globe"></i>';
               menuItems += `<li class="context-menu-item" data-action="toggle_collab" data-public-id="${publicId}">${collabIcon} ${collabText}</li>`;
               if (isCollab) {
-                menuItems += `<li class="context-menu-item" data-action="manage_collab" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-people-fill"></i> Manage Collaborators</li>`;
+                menuItems += `<li class="context-menu-item" data-action="manage_collab" data-public-id="${publicId}" data-name="${escapeHTML(name)}"><i class="bi bi-people-fill"></i> Manage Collaborators</li>`;
               }
             }
-            menuItems += `<li class="context-menu-item" data-action="edit_playlist" data-public-id="${publicId}" data-name="${name}" data-is-private="${isPrivate}"><i class="bi bi-pencil-fill"></i> Edit Playlist</li>`;
+            menuItems += `<li class="context-menu-item" data-action="edit_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-description="${escapeHTML(description)}" data-is-private="${isPrivate}"><i class="bi bi-pencil-fill"></i> Edit Playlist</li>`;
             menuItems += `<li class="context-menu-item" data-action="export_playlist" data-public-id="${publicId}"><i class="bi bi-box-arrow-up"></i> Export Playlist</li>`;
-            menuItems += `<li class="context-menu-item text-danger" data-action="delete_playlist" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-trash-fill"></i> Delete Playlist</li>`;
+            menuItems += `<li class="context-menu-item text-danger" data-action="delete_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}"><i class="bi bi-trash-fill"></i> Delete Playlist</li>`;
           } else {
             // User is just a collaborator
             menuItems += `<li class="context-menu-item" data-action="export_playlist" data-public-id="${publicId}"><i class="bi bi-box-arrow-up"></i> Export Playlist</li>`;
@@ -17659,6 +17965,7 @@ SOFTWARE.</div>
           
           menuItems += `
             <li class="context-menu-item" data-action="share_song" data-id="${songId}" data-name="${encodeURIComponent(title)}"><i class="bi bi-share-fill"></i> Share Song</li>
+            <li class="context-menu-item" data-action="embed_song" data-id="${songId}"><i class="bi bi-code-slash"></i> Embed Song</li>
             <li class="context-menu-item" data-action="go_artist" data-name="${encodeURIComponent(artist)}" data-userid="${songUserId}"><i class="bi bi-person-fill"></i> Go to Artist</li>
             <li class="context-menu-item" data-action="go_album" data-name="${encodeURIComponent(album)}" data-userid="${songUserId}" data-artistname="${encodeURIComponent(artist)}"><i class="bi bi-disc-fill"></i> Go to Album</li>
             <li class="context-menu-item" data-action="show_all_genres"><i class="bi bi-tags-fill"></i> View All Genres</li>
@@ -18263,7 +18570,7 @@ SOFTWARE.</div>
               html += `<div class="search-dropdown-header">Albums</div>`;
               shelf.items.slice(0, 2).forEach(album => {
                 html += `<div class="search-dropdown-item album-dropdown-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}" data-artistname="${encodeURIComponent(album.artist || '')}">
-                    <img src="?action=get_image&id=${album.id || 0}" class="search-dropdown-img">
+                    <img src="?action=get_image&id=${album.id || 0}&v=${album.image_v || 0}" class="search-dropdown-img">
                     <div class="search-dropdown-text">
                       <div class="search-dropdown-title">${escapeHTML(album.album)}</div>
                       <div class="search-dropdown-subtitle">${escapeHTML(album.artist)}</div>
@@ -19161,6 +19468,7 @@ SOFTWARE.</div>
             const playlistData = { 
               publicId: playlistMoreBtn.dataset.publicId, 
               name: playlistMoreBtn.dataset.name,
+              description: playlistMoreBtn.dataset.description || '',
               isCollab: parseInt(playlistMoreBtn.dataset.isCollab || 0),
               isPrivate: parseInt(playlistMoreBtn.dataset.isPrivate || 0),
               ownerId: playlistMoreBtn.dataset.ownerId
@@ -19191,9 +19499,22 @@ SOFTWARE.</div>
             return;
           }
           const exportFavoritesBtn = target.closest('#export-favorites-btn');
-          const exportNotesBtn = target.closest('#export-notes-btn');
-          if (exportFavoritesBtn || exportNotesBtn) {
-            return; // Allow the <a> tags to download the JSON files natively
+          if (exportFavoritesBtn) {
+            e.stopPropagation();
+            window.exportData('?action=export_favorites', 'favorites.json');
+            return;
+          }
+          const exportOfflineBtn = target.closest('#export-offline-btn');
+          if (exportOfflineBtn) {
+            e.stopPropagation();
+            window.exportData('?action=export_offline', 'offline_music.json');
+            return;
+          }
+          const exportPlaylistBtn = target.closest('.export-playlist-btn');
+          if (exportPlaylistBtn) {
+            e.stopPropagation();
+            window.exportData(`?action=export_playlist&id=${exportPlaylistBtn.dataset.publicId}`, `playlist_${exportPlaylistBtn.dataset.publicId}.json`);
+            return;
           }
           const recacheAllBtn = target.closest('#recache-all-offline-btn');
           if (recacheAllBtn) {
@@ -19673,8 +19994,21 @@ SOFTWARE.</div>
             case 'share_song':
               showShareModal('song', id, name);
               break;
+            case 'embed_song':
+              const embedUrl = `${window.location.origin}${window.location.pathname}?access=api&action=embed&id=${id}`;
+              const embedCode = `<iframe src="${embedUrl}" width="100%" height="175" frameborder="0" allowfullscreen allow="autoplay; clipboard-write; encrypted-media; picture-in-picture" style="border-radius: 12px; border: 1px solid #404040; box-shadow: 0 4px 12px rgba(0,0,0,0.5);"></iframe>`;
+              const embedModalEl = document.getElementById('embed-modal');
+              if (embedModalEl) {
+                document.getElementById('embed-code-input').value = embedCode;
+                const previewContainer = document.getElementById('embed-preview-container');
+                if (previewContainer) {
+                  previewContainer.innerHTML = `<div style="width: 125%; transform: scale(0.8); transform-origin: top left; margin-bottom: -30px;">${embedCode}</div>`;
+                }
+                bootstrap.Modal.getOrCreateInstance(embedModalEl).show();
+              }
+              break;
             case 'go_artist':
-              const artistRaw = decodeURIComponent(name);
+              const  artistRaw = decodeURIComponent(name);
               const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
               if (artistsList.length > 1) {
                 // Keep the player modal open, simply display the choices popup on top
@@ -20085,12 +20419,14 @@ SOFTWARE.</div>
               break;
             case 'edit_playlist':
               document.getElementById('edit-playlist-id-input').value = publicId;
-              document.getElementById('edit-playlist-name-input').value = name;
+              document.getElementById('edit-playlist-name-input').value = decodeHTML(name || '');
+              const descInput = document.getElementById('edit-playlist-desc-input');
+              if (descInput) descInput.value = decodeHTML(item.dataset.description || '');
               document.getElementById('edit-playlist-is-private').checked = item.dataset.isPrivate === '1';
               if (editPlaylistModal) editPlaylistModal.show();
               break;
             case 'export_playlist':
-              window.location.href = `?action=export_playlist&id=${publicId}`;
+              window.exportData(`?action=export_playlist&id=${publicId}`, `playlist_${publicId}.json`);
               break;
             case 'delete_playlist':
               if (confirm(`Are you sure you want to delete the playlist "${name}"? This cannot be undone.`)) {
@@ -21127,10 +21463,12 @@ SOFTWARE.</div>
             e.preventDefault();
             const public_id = document.getElementById('edit-playlist-id-input').value;
             const name = document.getElementById('edit-playlist-name-input').value;
+            const descInput = document.getElementById('edit-playlist-desc-input');
+            const description = descInput ? descInput.value : '';
             const is_private = document.getElementById('edit-playlist-is-private').checked ? 1 : 0;
             const data = await fetchData('?action=edit_playlist', {
               method: 'POST', headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ public_id, name, is_private })
+              body: JSON.stringify({ public_id, name, description, is_private })
             });
             if (data && data.status === 'success') {
               if (editPlaylistModal) editPlaylistModal.hide();
@@ -22477,6 +22815,51 @@ SOFTWARE.</div>
               try {
                 const successful = document.execCommand('copy');
                 if (successful) onSuccess();
+                else onError();
+              } catch (err) {
+                onError();
+              }
+              document.body.removeChild(textArea);
+            }
+          });
+        }
+
+        const embedModalElGlobal = document.getElementById('embed-modal');
+        if (embedModalElGlobal) {
+          embedModalElGlobal.addEventListener('hidden.bs.modal', () => {
+            const previewContainer = document.getElementById('embed-preview-container');
+            if (previewContainer) previewContainer.innerHTML = '';
+          });
+        }
+
+        const copyEmbedCodeBtn = document.getElementById('copy-embed-code-btn');
+        if (copyEmbedCodeBtn) {
+          copyEmbedCodeBtn.addEventListener('click', () => {
+            const embedInput = document.getElementById('embed-code-input');
+            const onSuccess = () => {
+              copyEmbedCodeBtn.innerHTML = '<i class="bi bi-check-lg"></i> Copied!';
+              copyEmbedCodeBtn.classList.replace('btn-danger', 'btn-success');
+              copyEmbedCodeBtn.disabled = true;
+              setTimeout(() => {
+                copyEmbedCodeBtn.innerHTML = '<i class="bi bi-clipboard"></i> Copy';
+                copyEmbedCodeBtn.classList.replace('btn-success', 'btn-danger');
+                copyEmbedCodeBtn.disabled = false;
+              }, 2000);
+            };
+            const onError = () => showToast('Failed to copy embed code.', 'error');
+
+            if (navigator.clipboard && window.isSecureContext) {
+              navigator.clipboard.writeText(embedInput.value).then(onSuccess).catch(onError);
+            } else {
+              const textArea = document.createElement("textarea");
+              textArea.value = embedInput.value;
+              textArea.style.position = "fixed";
+              textArea.style.opacity = "0";
+              document.body.appendChild(textArea);
+              textArea.focus();
+              textArea.select();
+              try {
+                if (document.execCommand('copy')) onSuccess();
                 else onError();
               } catch (err) {
                 onError();
