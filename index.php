@@ -2785,12 +2785,29 @@ if (isset($_GET['action'])) {
         $token = bin2hex(random_bytes(16));
         $db->prepare("INSERT INTO project_invites (token, project_id, expires_at) VALUES (?, ?, ?)")->execute([$token, $data['project_id'], $expires_at]);
         send_json(['status' => 'success', 'token' => $token]);
+      } elseif ($action_type === 'list_members') {
+        $page = isset($data['page']) ? max(1, (int)$data['page']) : 1;
+        $offset = ($page - 1) * 25;
+        $stmt_list = $db->prepare("SELECT u.id, u.artist, u.email, pm.role FROM project_members pm JOIN users u ON pm.user_id = u.id WHERE pm.project_id = ? ORDER BY pm.role = 'owner' DESC, u.artist ASC LIMIT 25 OFFSET ?");
+        $stmt_list->execute([$data['project_id'], $offset]);
+        send_json(['status' => 'success', 'members' => $stmt_list->fetchAll()]);
+      } elseif ($action_type === 'remove_member') {
+        $db->prepare("DELETE FROM project_members WHERE project_id = ? AND user_id = ? AND role != 'owner'")->execute([$data['project_id'], $data['user_id']]);
+        send_json(['status' => 'success']);
       } elseif ($action_type === 'join') {
         $token = $data['token'] ?? '';
         $stmt_inv = $db->prepare("SELECT project_id FROM project_invites WHERE token = ? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)");
         $stmt_inv->execute([$token]);
         $inv_pid = $stmt_inv->fetchColumn();
         if (!$inv_pid) send_json(['status' => 'error', 'message' => 'Invalid or expired invite.']);
+        
+        $stmt_owner = $db->prepare("SELECT owner_id FROM projects WHERE id = ?");
+        $stmt_owner->execute([$inv_pid]);
+        $owner_id = $stmt_owner->fetchColumn();
+        if ($owner_id == $user_id) {
+          send_json(['status' => 'error', 'message' => 'Seriously? Do you have no friend that you try to invite yourself?']);
+        }
+        
         $db->prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, role) VALUES (?, ?, 'editor')")->execute([$inv_pid, $user_id]);
         send_json(['status' => 'success']);
       } elseif ($action_type === 'move_item') {
@@ -2821,11 +2838,11 @@ if (isset($_GET['action'])) {
       
       // Return the absolute latest content timestamp so UI knows if it needs to pull fresh data
       $table = $item_type === 'task' ? 'tasks' : 'personal_notes';
-      $content_stmt = $db->prepare("SELECT updated_at FROM $table WHERE id = ?");
+      $content_stmt = $db->prepare("SELECT updated_at, " . ($item_type === 'task' ? "items, title" : "content, title") . " FROM $table WHERE id = ?");
       $content_stmt->execute([$item_id]);
-      $latest_time = $content_stmt->fetchColumn();
+      $item_data = $content_stmt->fetch();
       
-      send_json(['active_users' => $active_users, 'latest_update' => $latest_time]);
+      send_json(['active_users' => $active_users, 'latest_update' => $item_data['updated_at'] ?? null, 'item_data' => $item_data]);
       break;
 
     case 'get_note_categories':
@@ -2887,11 +2904,11 @@ if (isset($_GET['action'])) {
       $params = [];
       if (strpos($filter, 'proj_') === 0) {
         $pid = (int)str_replace('proj_', '', $filter);
-        $where = "WHERE project_id = ? AND project_id IN (SELECT project_id FROM project_members WHERE user_id = ?)";
+        $where = "WHERE project_id = ? AND (project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))";
         $params = [$pid, $user_id];
       } else {
-        $where = "WHERE user_id = ? AND project_id IS NULL";
-        $params = [$user_id];
+        $where = "WHERE ((user_id = ? AND project_id IS NULL) OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))";
+        $params = [$user_id, $user_id];
       }
       
       if ($search !== '') {
@@ -2924,11 +2941,11 @@ if (isset($_GET['action'])) {
       $params = [];
       if (strpos($filter, 'proj_') === 0) {
         $pid = (int)str_replace('proj_', '', $filter);
-        $where = "WHERE project_id = ? AND project_id IN (SELECT project_id FROM project_members WHERE user_id = ?)";
+        $where = "WHERE project_id = ? AND (project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))";
         $params = [$pid, $user_id];
       } else {
-        $where = "WHERE user_id = ? AND project_id IS NULL";
-        $params = [$user_id];
+        $where = "WHERE ((user_id = ? AND project_id IS NULL) OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))";
+        $params = [$user_id, $user_id];
       }
       
       if ($search !== '') {
@@ -5591,11 +5608,11 @@ if (isset($_GET['action'])) {
       if (!$user_id) { send_json([]); }
       $type = $_GET['filter'] ?? $_GET['type'] ?? 'note';
       if ($type === 'task') {
-        $stmt = $db->prepare("SELECT id, name, 'task' as category_type, (SELECT COUNT(*) FROM tasks WHERE category = task_categories.id) as item_count FROM task_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
+        $stmt = $db->prepare("SELECT id, name, 'task' as category_type, (SELECT COUNT(*) FROM tasks WHERE category = task_categories.id AND ((user_id = ? AND project_id IS NULL) OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))) as item_count FROM task_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
       } else {
-        $stmt = $db->prepare("SELECT id, name, 'note' as category_type, (SELECT COUNT(*) FROM personal_notes WHERE category = note_categories.id) as item_count FROM note_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
+        $stmt = $db->prepare("SELECT id, name, 'note' as category_type, (SELECT COUNT(*) FROM personal_notes WHERE category = note_categories.id AND ((user_id = ? AND project_id IS NULL) OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))) as item_count FROM note_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
       }
-      $stmt->execute([$user_id]);
+      $stmt->execute([$user_id, $user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
 
@@ -6918,6 +6935,13 @@ function perform_full_scan($db) {
         padding: 12px 32px; border-top: 1px solid var(--ytm-surface-2); display: flex; justify-content: space-between;
         font-size: 0.85rem; color: var(--ytm-secondary-text); background-color: var(--ytm-bg);
       }
+      .floating-presence-container {
+        position: absolute; bottom: 30px; right: 40px; display: flex; flex-direction: column; gap: 8px; z-index: 1060; pointer-events: none; align-items: flex-end;
+      }
+      .floating-avatar {
+        display: flex; align-items: center; gap: 10px; background: rgba(30, 30, 30, 0.85); backdrop-filter: blur(8px); padding: 4px 16px 4px 4px; border-radius: 50px; color: var(--ytm-primary-text); font-size: 0.85rem; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.15); transition: opacity 0.3s;
+      }
+      .floating-avatar img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
       .find-replace-panel {
         position: absolute; top: 70px; right: 32px; background-color: var(--ytm-surface);
         border-radius: 12px; padding: 16px; width: 360px; box-shadow: 0 8px 24px rgba(0,0,0,0.8);
@@ -7449,6 +7473,10 @@ function perform_full_scan($db) {
             <a href="#" class="nav-link" id="clear-cache-btn">
               <i class="bi bi-eraser-fill"></i>
               <span>Clear Cache</span>
+            </a>
+            <a href="#" class="nav-link" id="clear-cookies-btn">
+              <i class="bi bi-cookie"></i>
+              <span>Clear Cookies</span>
             </a>
             <a href="#" class="nav-link" id="fullscreen-btn">
               <i class="bi bi-arrows-fullscreen"></i>
@@ -8803,7 +8831,6 @@ function perform_full_scan($db) {
           <button class="note-icon-btn" id="closeEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
-          <div id="editorPresenceAvatars" class="d-flex align-items-center me-2" style="direction: rtl;"></div>
           <button class="note-icon-btn" id="editorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
           <button class="note-icon-btn" id="editorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
           <button class="note-icon-btn" id="editorStarBtn" title="Toggle Star"><i class="bi bi-star" id="editorStarIcon"></i></button>
@@ -8847,7 +8874,8 @@ function perform_full_scan($db) {
         </div>
       </div>
 
-      <div class="editor-body">
+      <div class="editor-body position-relative">
+        <div id="editorFloatingPresence" class="floating-presence-container"></div>
         <div class="flex-shrink-0 mb-4">
           <input type="hidden" id="editorNoteId">
           <input type="hidden" id="editorNoteType" value="note">
@@ -8899,7 +8927,7 @@ function perform_full_scan($db) {
           <button class="note-icon-btn" id="closeTaskEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
-          <div id="taskPresenceAvatars" class="d-flex align-items-center me-2" style="direction: rtl;"></div>
+          <button class="note-icon-btn" id="taskEditorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
           <button class="note-icon-btn" id="taskEditorStarBtn" title="Toggle Star"><i class="bi bi-star" id="taskEditorStarIcon"></i></button>
           <div style="position: relative;">
             <button class="note-icon-btn" id="taskEditorMoreBtn" title="More Options"><i class="bi bi-three-dots-vertical"></i></button>
@@ -8907,12 +8935,39 @@ function perform_full_scan($db) {
               <div class="editor-dropdown-item" id="taskEditorForceSaveBtn"><i class="bi bi-floppy"></i> Save</div>
               <div class="editor-dropdown-item" id="taskEditorCopyBtn"><i class="bi bi-copy"></i> Copy Content</div>
               <div class="editor-dropdown-item text-info fw-bold" id="taskMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</div>
+              <div class="editor-dropdown-item" id="taskEditorDownloadModalBtn" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Task List...</div>
               <div class="editor-dropdown-item text-danger" id="taskEditorDeleteBtn"><i class="bi bi-trash"></i> Delete List</div>
             </div>
           </div>
         </div>
       </header>
-      <div class="editor-body">
+
+      <div class="find-replace-panel" id="taskFindReplacePanel">
+        <div class="d-flex justify-content-between align-items-center mb-2 fw-bold text-white">
+          <span>Find and Replace</span>
+          <button class="note-icon-btn py-0 px-1" id="closeTaskFindBtn"><i class="bi bi-x-lg"></i></button>
+        </div>
+        <div class="find-row pe-3">
+          <i class="bi bi-search text-secondary flex-shrink-0"></i>
+          <input type="text" id="taskFindInput" placeholder="Find in tasks..." style="min-width: 0;" />
+          <span class="text-secondary small text-end flex-shrink-0" id="taskFindCounter" style="min-width: 45px;">0/0</span>
+          <div class="d-flex flex-shrink-0 ms-1 gap-1">
+            <button class="note-icon-btn py-0 px-1" id="taskFindPrevBtn" title="Previous"><i class="bi bi-chevron-up"></i></button>
+            <button class="note-icon-btn py-0 px-1" id="taskFindNextBtn" title="Next"><i class="bi bi-chevron-down"></i></button>
+          </div>
+        </div>
+        <div class="find-row pe-3">
+          <i class="bi bi-pencil text-secondary flex-shrink-0"></i>
+          <input type="text" id="taskReplaceInput" placeholder="Replace with..." style="min-width: 0;" />
+        </div>
+        <div class="d-flex gap-2 mt-1">
+          <button class="btn btn-sm btn-outline-light flex-grow-1" id="taskReplaceBtn">Replace</button>
+          <button class="btn btn-sm btn-outline-light flex-grow-1" id="taskReplaceAllBtn">Replace All</button>
+        </div>
+      </div>
+
+      <div class="editor-body position-relative">
+        <div id="taskFloatingPresence" class="floating-presence-container"></div>
         <div class="flex-shrink-0 mb-4">
           <input type="hidden" id="taskEditorId">
           <input type="text" class="editor-title" id="taskEditorTitle" placeholder="Task List Title" />
@@ -11136,6 +11191,33 @@ curl_close($ch);
     </div>
 
     <!-- PROJECT MANAGEMENT MODALS -->
+    <div class="modal fade" id="project-manage-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-secondary">
+            <h5 class="modal-title text-white">Manage Project</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4">
+            <input type="hidden" id="manage-project-id">
+            <div class="mb-4 p-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid #404040;">
+              <label for="project-expire-select" class="form-label text-white small mb-1">Invite Link Expiration</label>
+              <select id="project-expire-select" class="form-select form-select-sm bg-dark text-white border-secondary mb-2">
+                <option value="1440">1 Day</option>
+                <option value="10080">1 Week</option>
+                <option value="43200">1 Month</option>
+                <option value="forever">Forever</option>
+              </select>
+              <button class="btn btn-info text-dark fw-bold w-100" id="project-copy-link-btn"><i class="bi bi-link-45deg"></i> Generate & Copy Link</button>
+            </div>
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <h6 class="text-secondary m-0">Project Members</h6>
+            </div>
+            <div id="project-members-list" class="list-group list-group-flush bg-transparent"></div>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="modal fade" id="project-move-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
@@ -16192,6 +16274,9 @@ SOFTWARE.</div>
           showLoader();
 
           currentView = viewConfig;
+          try {
+            localStorage.setItem('ytm_lastView', JSON.stringify(currentView));
+          } catch (e) {}
           updateActiveNavLink(currentView.type);
           setupSortOptions(currentView.type);
 
@@ -17031,7 +17116,7 @@ SOFTWARE.</div>
                       <div class="d-flex gap-2 mt-3">
                         ${pType === 'note' ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_notes" data-filter="proj_${p.id}"><i class="bi bi-journal-text text-warning"></i> ${p.note_count} Notes</button>` : ''}
                         ${pType === 'task' ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_tasks" data-filter="proj_${p.id}"><i class="bi bi-check2-square text-success"></i> ${p.task_count} Tasks</button>` : ''}
-                        ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-info text-dark fw-bold invite-project-btn" data-id="${p.id}"><i class="bi bi-link-45deg"></i> Invite</button>` : ''}
+                        ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-info text-dark fw-bold invite-project-btn" data-id="${p.id}"><i class="bi bi-people-fill"></i> Manage</button>` : ''}
                       </div>
                     </div>
                   `).join('');
@@ -18101,7 +18186,7 @@ SOFTWARE.</div>
         };
         
         allNavLinks.forEach(link => {
-          if (!link.hasAttribute('data-view') || link.classList.contains('cat-nav-link') || link.classList.contains('note-filter-link') || link.classList.contains('task-filter-link') || link.getAttribute('data-bs-toggle') === 'collapse' || link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
+          if (!link.hasAttribute('data-view') || link.classList.contains('cat-nav-link') || link.classList.contains('note-filter-link') || link.classList.contains('task-filter-link') || link.getAttribute('data-bs-toggle') === 'collapse' || link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'clear-cookies-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
@@ -19414,13 +19499,77 @@ SOFTWARE.</div>
           const inviteProjectBtn = target.closest('.invite-project-btn');
           if (inviteProjectBtn) {
             e.stopPropagation();
-            fetchData('?action=manage_project', {
-              method: 'POST', body: JSON.stringify({ action_type: 'generate_link', project_id: inviteProjectBtn.dataset.id })
-            }).then(r => {
+            const projectId = inviteProjectBtn.dataset.id;
+            document.getElementById('manage-project-id').value = projectId;
+            
+            const loadMembers = async (page = 1) => {
+              const res = await fetchData('?action=manage_project', {
+                method: 'POST', body: JSON.stringify({ action_type: 'list_members', project_id: projectId, page: page })
+              });
+              if (res && res.status === 'success') {
+                const listEl = document.getElementById('project-members-list');
+                const html = res.members.map(m => `
+                  <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
+                    <div class="d-flex align-items-center gap-3">
+                      <img src="?action=get_profile_picture&id=${m.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                      <div>
+                        <div>${escapeHTML(m.artist)} ${m.role === 'owner' ? '<span class="badge bg-warning text-dark ms-1">Owner</span>' : ''}</div>
+                        <div class="small text-secondary" style="font-size: 0.75rem;">ID: ${m.id}</div>
+                      </div>
+                    </div>
+                    ${m.role !== 'owner' ? `<button class="btn btn-sm btn-outline-danger project-member-remove-btn" data-id="${m.id}"><i class="bi bi-x-lg"></i></button>` : ''}
+                  </div>
+                `).join('');
+                
+                if (page === 1) {
+                  listEl.innerHTML = res.members.length === 0 ? '<p class="text-secondary small">No members.</p>' : html;
+                } else {
+                  listEl.insertAdjacentHTML('beforeend', html);
+                }
+                
+                const oldBtn = document.getElementById('project-members-load-more');
+                if (oldBtn) oldBtn.remove();
+                
+                if (res.members.length === 25) {
+                   listEl.insertAdjacentHTML('afterend', `<button class="btn btn-sm btn-outline-light w-100 mt-3" id="project-members-load-more" onclick="window.loadProjectMembers(${page + 1})">Load More Members</button>`);
+                }
+              }
+            };
+            window.loadProjectMembers = loadMembers;
+            
+            // Clean up old elements when opening
+            const existingLoadMore = document.getElementById('project-members-load-more');
+            if (existingLoadMore) existingLoadMore.remove();
+
+            const copyBtn = document.getElementById('project-copy-link-btn');
+            const newCopyBtn = copyBtn.cloneNode(true);
+            copyBtn.parentNode.replaceChild(newCopyBtn, copyBtn);
+            
+            newCopyBtn.addEventListener('click', async () => {
+              let expireVal = document.getElementById('project-expire-select').value;
+              if (expireVal === 'forever') expireVal = null;
+              
+              newCopyBtn.disabled = true;
+              newCopyBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Generating...';
+
+              const r = await fetchData('?action=manage_project', {
+                method: 'POST', body: JSON.stringify({ action_type: 'generate_link', project_id: projectId, expire: expireVal })
+              });
+
               if (r && r.status === 'success') {
                 const inviteLink = window.location.origin + window.location.pathname + '?project_invite=' + r.token;
+                const onSuccess = () => {
+                  newCopyBtn.innerHTML = '<i class="bi bi-check-lg"></i> Link Copied!';
+                  newCopyBtn.classList.replace('btn-info', 'btn-success');
+                  setTimeout(() => {
+                    newCopyBtn.innerHTML = '<i class="bi bi-link-45deg"></i> Generate & Copy Link';
+                    newCopyBtn.classList.replace('btn-success', 'btn-info');
+                  }, 2000);
+                };
+                const onError = () => showToast('Failed to copy link.', 'error');
+
                 if (navigator.clipboard && window.isSecureContext) {
-                  navigator.clipboard.writeText(inviteLink).then(() => showToast('Invite link copied to clipboard!', 'success'));
+                  navigator.clipboard.writeText(inviteLink).then(onSuccess).catch(onError);
                 } else {
                   const textArea = document.createElement("textarea");
                   textArea.value = inviteLink;
@@ -19430,12 +19579,34 @@ SOFTWARE.</div>
                   textArea.focus();
                   textArea.select();
                   try {
-                    if (document.execCommand('copy')) showToast('Invite link copied!', 'success');
-                  } catch (err) {}
+                    if (document.execCommand('copy')) onSuccess();
+                    else onError();
+                  } catch (err) { onError(); }
                   document.body.removeChild(textArea);
                 }
+              } else {
+                showToast(r?.message || 'Error generating link', 'error');
+                newCopyBtn.innerHTML = '<i class="bi bi-link-45deg"></i> Generate & Copy Link';
               }
+              newCopyBtn.disabled = false;
             });
+
+            document.getElementById('project-members-list').onclick = async (evt) => {
+              const removeBtn = evt.target.closest('.project-member-remove-btn');
+              if (removeBtn) {
+                if (!confirm('Remove this collaborator?')) return;
+                const res = await fetchData('?action=manage_project', {
+                  method: 'POST', body: JSON.stringify({ action_type: 'remove_member', project_id: projectId, user_id: removeBtn.dataset.id })
+                });
+                if (res && res.status === 'success') {
+                  showToast('Member removed', 'success');
+                  loadMembers();
+                }
+              }
+            };
+
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('project-manage-modal')).show();
+            loadMembers();
             return;
           }
 
@@ -20717,6 +20888,19 @@ SOFTWARE.</div>
             showToast('Failed to clear cache.', 'error');
           }
         });
+
+        const clearCookiesBtn = document.getElementById('clear-cookies-btn');
+        if (clearCookiesBtn) {
+          clearCookiesBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            if (!confirm('This will log you out and clear all cookies. Are you sure?')) return;
+            document.cookie.split(";").forEach(function(c) { 
+              document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/"); 
+            });
+            showToast('Cookies cleared successfully. Reloading...', 'success');
+            setTimeout(() => window.location.reload(true), 1500);
+          });
+        }
         
         const navUploadBtn = document.getElementById('nav-upload-btn');
         if (navUploadBtn) {
@@ -22799,8 +22983,7 @@ SOFTWARE.</div>
           });
           const bar = document.getElementById('selectionBarNotes');
           const dlBtn = document.getElementById('bulkDownloadNotesBtn');
-          if (currentView.type === 'get_tasks') dlBtn.classList.add('d-none');
-          else dlBtn.classList.remove('d-none');
+          dlBtn.classList.remove('d-none');
           
           if (window.multiSelectNoteMode) bar.classList.add('active');
           else bar.classList.remove('active');
@@ -22828,7 +23011,7 @@ SOFTWARE.</div>
 
         const startPresenceSync = (itemId, itemType) => {
           if (presenceSyncInterval) clearInterval(presenceSyncInterval);
-          const avContainer = document.getElementById(itemType === 'task' ? 'taskPresenceAvatars' : 'editorPresenceAvatars');
+          const avContainer = document.getElementById(itemType === 'task' ? 'taskFloatingPresence' : 'editorFloatingPresence');
           
           presenceSyncInterval = setInterval(async () => {
             if (!itemId) return;
@@ -22838,29 +23021,70 @@ SOFTWARE.</div>
             
             if (res && res.active_users) {
               if (res.active_users.length > 0) {
-                avContainer.innerHTML = res.active_users.map(u => `<img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle border border-dark shadow-sm" style="width: 28px; height: 28px; margin-left: -8px; object-fit: cover;" title="${escapeHTML(u.artist)} is editing">`).join('');
+                avContainer.innerHTML = res.active_users.map(u => `
+                  <div class="floating-avatar">
+                    <img src="?action=get_profile_picture&id=${u.id}" alt="Avatar">
+                    <span>${escapeHTML(u.artist)} is editing...</span>
+                  </div>
+                `).join('');
               } else {
                 avContainer.innerHTML = '';
               }
               
               // Soft conflict detection
               if (res.latest_update && lastSyncContentTime && res.latest_update !== lastSyncContentTime) {
-                const indicator = document.getElementById(itemType === 'task' ? 'taskSaveStatus' : 'noteSaveStatus');
-                if (indicator && !indicator.textContent.includes('Remote Update')) {
-                   indicator.innerHTML = '<span class="text-warning"><i class="bi bi-exclamation-triangle"></i> Modified remotely</span>';
+                lastSyncContentTime = res.latest_update;
+                
+                // Real-time UI update logic
+                const isUserTyping = ['TEXTAREA', 'INPUT'].includes(document.activeElement?.tagName);
+                
+                if (itemType === 'note') {
+                   const titleEl = document.getElementById('editorTitle');
+                   const contentEl = document.getElementById('editorContent');
+                   
+                   if (document.activeElement !== titleEl && res.item_data && res.item_data.title) {
+                     titleEl.value = decodeHTML(res.item_data.title);
+                   }
+                   if (document.activeElement !== contentEl && res.item_data && res.item_data.content) {
+                     contentEl.value = decodeHTML(res.item_data.content);
+                   }
+                   
+                   const indicator = document.getElementById('noteSaveStatus');
+                   if (indicator) {
+                     indicator.innerHTML = '<span class="text-success"><i class="bi bi-arrow-repeat"></i> Updated in real-time</span>';
+                     setTimeout(() => { if (indicator.textContent.includes('real-time')) indicator.textContent = ""; }, 2000);
+                   }
+                } else if (itemType === 'task') {
+                   const titleEl = document.getElementById('taskEditorTitle');
+                   if (document.activeElement !== titleEl && res.item_data && res.item_data.title) {
+                     titleEl.value = decodeHTML(res.item_data.title);
+                   }
+                   
+                   if (!isUserTyping && res.item_data && res.item_data.items) {
+                     try {
+                       window.currentTaskItems = JSON.parse(res.item_data.items);
+                       window.renderTaskItems();
+                     } catch(e) {}
+                   }
+                   
+                   const indicator = document.getElementById('taskSaveStatus');
+                   if (indicator) {
+                     indicator.innerHTML = '<span class="text-success"><i class="bi bi-arrow-repeat"></i> Updated in real-time</span>';
+                     setTimeout(() => { if (indicator.textContent.includes('real-time')) indicator.textContent = ""; }, 2000);
+                   }
                 }
               }
               lastSyncContentTime = res.latest_update || lastSyncContentTime;
             }
-          }, 3000);
+          }, 800);
         };
         
         const stopPresenceSync = () => {
           if (presenceSyncInterval) clearInterval(presenceSyncInterval);
           presenceSyncInterval = null;
           lastSyncContentTime = null;
-          const noteAv = document.getElementById('editorPresenceAvatars');
-          const taskAv = document.getElementById('taskPresenceAvatars');
+          const noteAv = document.getElementById('editorFloatingPresence');
+          const taskAv = document.getElementById('taskFloatingPresence');
           if (noteAv) noteAv.innerHTML = '';
           if (taskAv) taskAv.innerHTML = '';
         };
@@ -22878,14 +23102,18 @@ SOFTWARE.</div>
 
         document.getElementById('confirm-move-project-btn')?.addEventListener('click', async () => {
           const destProjId = document.getElementById('project-move-select').value;
+          if (destProjId === "") {
+            if (!confirm("Moving this to your Personal workspace will instantly revoke access for all current project collaborators. Proceed?")) return;
+          }
+          
           let itemId, itemType;
           
           if (document.getElementById('editorOverlay').classList.contains('active')) {
-             itemId = document.getElementById('editorNoteId').value;
-             itemType = 'note';
+            itemId = document.getElementById('editorNoteId').value;
+            itemType = 'note';
           } else {
-             itemId = document.getElementById('taskEditorId').value;
-             itemType = 'task';
+            itemId = document.getElementById('taskEditorId').value;
+            itemType = 'task';
           }
           
           if (!itemId) return showToast("Save the item first before moving it.", "error");
@@ -22997,6 +23225,10 @@ SOFTWARE.</div>
             contentArea.classList.add('d-none');
             previewArea.classList.remove('d-none');
             
+            document.getElementById('findReplacePanel').classList.remove('active');
+            document.getElementById('editorFindBtn').disabled = true;
+            document.getElementById('editorFindBtn').style.opacity = '0.5';
+            
             // Render markdown using Marked.js (with Github Flavored Markdown for Tasks)
             if (typeof marked !== 'undefined') {
               marked.use({ gfm: true });
@@ -23029,6 +23261,9 @@ SOFTWARE.</div>
             previewArea.classList.add('d-none');
             contentArea.classList.remove('d-none');
             contentArea.focus();
+            
+            document.getElementById('editorFindBtn').disabled = false;
+            document.getElementById('editorFindBtn').style.opacity = '1';
           }
         });
 
@@ -23157,6 +23392,7 @@ SOFTWARE.</div>
           
           window.renderTaskItems();
 
+          document.getElementById('taskFindReplacePanel')?.classList.remove('active');
           document.getElementById('taskEditorMoreMenu').classList.remove('active');
           document.getElementById('taskEditorOverlay').classList.add('active');
           
@@ -23187,8 +23423,9 @@ SOFTWARE.</div>
             input.addEventListener('input', (e) => {
               autoResizeTaskInput(e.target);
               window.currentTaskItems[e.target.dataset.idx].text = e.target.value;
+              if (document.getElementById('taskFindReplacePanel').classList.contains('active')) executeTaskFind();
               clearTimeout(taskSaveTimeout);
-              taskSaveTimeout = setTimeout(() => window.saveCurrentTask(false), 800);
+              taskSaveTimeout = setTimeout(() => window.saveCurrentTask(false), 300);
             });
             input.addEventListener('keydown', (e) => {
               if (e.key === 'Enter') {
@@ -23288,7 +23525,7 @@ SOFTWARE.</div>
 
         document.getElementById('taskEditorTitle')?.addEventListener('input', () => {
           clearTimeout(taskSaveTimeout);
-          taskSaveTimeout = setTimeout(() => window.saveCurrentTask(false), 800);
+          taskSaveTimeout = setTimeout(() => window.saveCurrentTask(false), 300);
         });
 
         document.getElementById('taskEditorCategorySelect')?.addEventListener('change', () => window.saveCurrentTask(false));
@@ -23296,6 +23533,7 @@ SOFTWARE.</div>
         document.getElementById('closeTaskEditorBtn')?.addEventListener('click', async () => {
           await window.saveCurrentTask(true);
           stopPresenceSync();
+          document.getElementById('taskFindReplacePanel')?.classList.remove('active');
           document.getElementById('taskEditorOverlay').classList.remove('active');
           if (currentView.type === 'get_tasks') loadView(currentView);
         });
@@ -23345,7 +23583,7 @@ SOFTWARE.</div>
           clearTimeout(noteHistoryTimeout);
           updateEditorWordCount();
           if (document.getElementById('findReplacePanel').classList.contains('active')) executeNoteFind();
-          noteSaveTimeout = setTimeout(() => saveCurrentEditorNote(false), 1000);
+          noteSaveTimeout = setTimeout(() => saveCurrentEditorNote(false), 300);
           noteHistoryTimeout = setTimeout(() => {
             if (noteTextHistory[noteHistoryIdx] === e.target.value) return;
             noteTextHistory = noteTextHistory.slice(0, noteHistoryIdx + 1);
@@ -23360,7 +23598,7 @@ SOFTWARE.</div>
 
         document.getElementById('editorTitle').addEventListener('input', () => {
           clearTimeout(noteSaveTimeout);
-          noteSaveTimeout = setTimeout(() => saveCurrentEditorNote(false), 1000);
+          noteSaveTimeout = setTimeout(() => saveCurrentEditorNote(false), 300);
         });
         
         document.getElementById('editorCategorySelect').addEventListener('change', () => saveCurrentEditorNote(false));
@@ -23417,9 +23655,28 @@ SOFTWARE.</div>
 
         const downloadFile = (type) => {
           document.getElementById('editorMoreMenu').classList.remove('active');
-          const title = document.getElementById('editorTitle').value || 'Note';
-          const content = document.getElementById('editorContent').value;
+          document.getElementById('taskEditorMoreMenu').classList.remove('active');
+          
+          const isTask = document.getElementById('taskEditorOverlay').classList.contains('active');
+          
+          const title = isTask ? (document.getElementById('taskEditorTitle').value || 'Task List') : (document.getElementById('editorTitle').value || 'Note');
           const safeTitle = title.replace(/[^\w\s-]/gi, '_');
+          
+          let content = '';
+          let htmlContent = '';
+          
+          if (isTask) {
+             content = window.currentTaskItems.map(t => (t.completed ? '- [x] ' : '- [ ] ') + t.text).join('\n');
+             htmlContent = '<ul style="list-style-type: none; padding-left: 0; font-size: 16px;">' + window.currentTaskItems.map(t => `<li style="margin-bottom: 8px;">${t.completed ? '✅' : '⬜'} ${escapeHTML(t.text)}</li>`).join('') + '</ul>';
+          } else {
+             content = document.getElementById('editorContent').value;
+             if (typeof marked !== 'undefined') {
+               marked.use({ gfm: true });
+               htmlContent = marked.parse(content);
+             } else {
+               htmlContent = `<pre style="white-space: pre-wrap; font-family: sans-serif;">${escapeHTML(content)}</pre>`;
+             }
+          }
           
           if (type === 'txt' || type === 'md') {
             const blob = new Blob([content], { type: 'text/plain' });
@@ -23428,14 +23685,7 @@ SOFTWARE.</div>
             a.download = `${safeTitle}.${type}`;
             a.click();
           } else if (type === 'html') {
-            let htmlContent = content;
-            if (typeof marked !== 'undefined') {
-              marked.use({ gfm: true });
-              htmlContent = marked.parse(content);
-            } else {
-              htmlContent = `<pre>${escapeHTML(content)}</pre>`;
-            }
-            const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHTML(title)}</title></head><body style="font-family: sans-serif; padding: 20px; max-width: 800px; margin: auto;"><h1>${escapeHTML(title)}</h1><hr>${htmlContent}</body></html>`;
+            const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHTML(title)}</title></head><body style="font-family: sans-serif; padding: 20px; max-width: 800px; margin: auto; line-height: 1.6;"><h1>${escapeHTML(title)}</h1><hr style="border-bottom: 1px solid #ccc; margin-bottom: 20px;">${htmlContent}</body></html>`;
             const blob = new Blob([fullHtml], { type: 'text/html' });
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
@@ -23445,15 +23695,6 @@ SOFTWARE.</div>
             const div = document.createElement('div');
             div.style.padding = '30px';
             div.style.fontFamily = 'Roboto, sans-serif';
-            
-            let htmlContent = content;
-            if (typeof marked !== 'undefined') {
-              marked.use({ gfm: true });
-              htmlContent = marked.parse(content);
-            } else {
-              htmlContent = `<div style="white-space:pre-wrap; line-height: 1.6;">${escapeHTML(content)}</div>`;
-            }
-            
             div.innerHTML = `<h1 style="margin-bottom:10px;">${escapeHTML(title)}</h1><hr style="border-bottom:1px solid #ccc; margin-bottom: 20px;">${htmlContent}`;
             html2pdf().from(div).set({
               margin: 10,
@@ -23467,6 +23708,10 @@ SOFTWARE.</div>
 
         document.getElementById('editorDownloadModalBtn')?.addEventListener('click', () => {
           document.getElementById('editorMoreMenu').classList.remove('active');
+        });
+        
+        document.getElementById('taskEditorDownloadModalBtn')?.addEventListener('click', () => {
+          document.getElementById('taskEditorMoreMenu').classList.remove('active');
         });
 
         document.getElementById('confirm-download-note-btn')?.addEventListener('click', () => {
@@ -23537,6 +23782,7 @@ SOFTWARE.</div>
         };
 
         document.getElementById('editorFindBtn').addEventListener('click', () => {
+          if (isMarkdownPreview) return;
           const p = document.getElementById('findReplacePanel');
           p.classList.toggle('active');
           if (p.classList.contains('active')) {
@@ -23566,6 +23812,7 @@ SOFTWARE.</div>
           const ta = document.getElementById('editorContent');
           const match = findNoteMatches[currentNoteMatchIdx];
           ta.value = ta.value.substring(0, match.index) + rep + ta.value.substring(match.index + match.length);
+          ta.dispatchEvent(new Event('input'));
           executeNoteFind(false);
         });
         document.getElementById('replaceAllBtn').addEventListener('click', () => {
@@ -23575,7 +23822,121 @@ SOFTWARE.</div>
           const ta = document.getElementById('editorContent');
           const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
           ta.value = ta.value.replace(regex, rep);
+          ta.dispatchEvent(new Event('input'));
           executeNoteFind(false);
+        });
+
+        let findTaskMatches = [];
+        let currentTaskMatchIdx = -1;
+
+        const executeTaskFind = (fromInput = true) => {
+          const query = document.getElementById('taskFindInput').value;
+          findTaskMatches = [];
+          if (!query) { updateTaskFindUI(-1, false); return; }
+
+          const regex = new RegExp(query.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&'), 'gi');
+          
+          window.currentTaskItems.forEach((item, itemIdx) => {
+            let match;
+            regex.lastIndex = 0; 
+            while ((match = regex.exec(item.text)) !== null) {
+              findTaskMatches.push({ itemIndex: itemIdx, index: match.index, length: match[0].length });
+            }
+          });
+          
+          if (findTaskMatches.length > 0) {
+            if (fromInput) {
+              if (currentTaskMatchIdx < 0 || currentTaskMatchIdx >= findTaskMatches.length) currentTaskMatchIdx = 0;
+              updateTaskFindUI(currentTaskMatchIdx, false);
+            } else {
+              currentTaskMatchIdx = 0;
+              updateTaskFindUI(currentTaskMatchIdx, true);
+            }
+          } else {
+            updateTaskFindUI(-1, false);
+          }
+        };
+
+        const updateTaskFindUI = (idx, doFocusJump = true) => {
+          currentTaskMatchIdx = idx;
+          const counter = document.getElementById('taskFindCounter');
+          if (findTaskMatches.length === 0 || idx < 0) {
+            counter.innerText = '0/0'; return;
+          }
+          counter.innerText = `${idx + 1}/${findTaskMatches.length}`;
+          
+          if (doFocusJump) {
+            const match = findTaskMatches[idx];
+            const inputs = document.querySelectorAll('.task-item-input');
+            if (inputs.length > match.itemIndex) {
+              const targetInput = inputs[match.itemIndex];
+              targetInput.focus({ preventScroll: true });
+              targetInput.setSelectionRange(match.index, match.index + match.length);
+            }
+          }
+        };
+
+        document.getElementById('taskEditorFindBtn')?.addEventListener('click', () => {
+          const p = document.getElementById('taskFindReplacePanel');
+          p.classList.toggle('active');
+          if (p.classList.contains('active')) {
+            document.getElementById('taskFindInput').focus();
+            executeTaskFind();
+          }
+        });
+
+        document.getElementById('closeTaskFindBtn')?.addEventListener('click', () => {
+          document.getElementById('taskFindReplacePanel').classList.remove('active');
+        });
+
+        document.getElementById('taskFindInput')?.addEventListener('input', executeTaskFind);
+
+        document.getElementById('taskFindNextBtn')?.addEventListener('click', () => {
+          if (findTaskMatches.length === 0) return;
+          let next = currentTaskMatchIdx + 1;
+          if (next >= findTaskMatches.length) next = 0;
+          updateTaskFindUI(next, true);
+        });
+
+        document.getElementById('taskFindPrevBtn')?.addEventListener('click', () => {
+          if (findTaskMatches.length === 0) return;
+          let next = currentTaskMatchIdx - 1;
+          if (next < 0) next = findTaskMatches.length - 1;
+          updateTaskFindUI(next, true);
+        });
+
+        document.getElementById('taskReplaceBtn')?.addEventListener('click', () => {
+          if (currentTaskMatchIdx < 0 || findTaskMatches.length === 0) return;
+          const rep = document.getElementById('taskReplaceInput').value;
+          const match = findTaskMatches[currentTaskMatchIdx];
+          
+          const text = window.currentTaskItems[match.itemIndex].text;
+          window.currentTaskItems[match.itemIndex].text = text.substring(0, match.index) + rep + text.substring(match.index + match.length);
+          
+          window.renderTaskItems();
+          window.saveCurrentTask(false);
+          executeTaskFind(false);
+        });
+
+        document.getElementById('taskReplaceAllBtn')?.addEventListener('click', () => {
+          const query = document.getElementById('taskFindInput').value;
+          if (!query) return;
+          const rep = document.getElementById('taskReplaceInput').value;
+          const regex = new RegExp(query.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&'), 'gi');
+          
+          let changed = false;
+          window.currentTaskItems.forEach(item => {
+            if (regex.test(item.text)) {
+              item.text = item.text.replace(regex, rep);
+              changed = true;
+            }
+          });
+          
+          if (changed) {
+            window.renderTaskItems();
+            window.saveCurrentTask(false);
+            executeTaskFind(false);
+          }
         });
 
         document.getElementById('toggleSelectAllNotesBtn').addEventListener('click', () => {
@@ -23611,19 +23972,31 @@ SOFTWARE.</div>
 
         document.getElementById('bulkDownloadNotesBtn').addEventListener('click', async () => {
           const zip = new JSZip();
+          const isTask = currentView.type === 'get_tasks';
           window.selectedNoteIds.forEach(id => {
-            const n = window.currentNotesList.find(x => x.id.toString() === id.toString());
-            if (n) {
-              const cleanContent = n.content.replace(/<[^>]*>?/gm, '');
-              const displayTitle = (n.title && n.title.trim()) ? decodeHTML(n.title) : 
-                                   (cleanContent.trim() ? cleanContent.split(/\s+/).slice(0, 5).join(' ') : 'title');
-              zip.file(`${displayTitle.replace(/[^\w\s-]/gi, '_')}.txt`, decodeHTML(n.content) || '');
+            if (isTask) {
+              const t = window.currentTasksList.find(x => x.id.toString() === id.toString());
+              if (t) {
+                let items = [];
+                try { items = JSON.parse(t.items); } catch(e) {}
+                const content = items.map(i => (i.completed ? '[x] ' : '[ ] ') + decodeHTML(i.text)).join('\n');
+                const displayTitle = (t.title && t.title.trim()) ? decodeHTML(t.title) : 'task_list';
+                zip.file(`${displayTitle.replace(/[^\w\s-]/gi, '_')}.txt`, content);
+              }
+            } else {
+              const n = window.currentNotesList.find(x => x.id.toString() === id.toString());
+              if (n) {
+                const cleanContent = n.content.replace(/<[^>]*>?/gm, '');
+                const displayTitle = (n.title && n.title.trim()) ? decodeHTML(n.title) : 
+                                     (cleanContent.trim() ? cleanContent.split(/\s+/).slice(0, 5).join(' ') : 'title');
+                zip.file(`${displayTitle.replace(/[^\w\s-]/gi, '_')}.txt`, decodeHTML(n.content) || '');
+              }
             }
           });
           const blob = await zip.generateAsync({ type: 'blob' });
           const a = document.createElement('a');
           a.href = URL.createObjectURL(blob);
-          a.download = `Notes_Selection_${Date.now()}.zip`;
+          a.download = `${isTask ? 'Tasks' : 'Notes'}_Selection_${Date.now()}.zip`;
           a.click();
           
           window.selectedNoteIds.clear();
@@ -23809,7 +24182,10 @@ SOFTWARE.</div>
             history.replaceState({ viewConfig: window.initialView }, "");
             loadView(window.initialView, false);
           } else {
-            const defaultView = { type: 'get_songs', param: '', sort: 'random', filter_user_id: '' };
+            let savedViewStr = localStorage.getItem('ytm_lastView');
+            let savedView = null;
+            try { savedView = savedViewStr ? JSON.parse(savedViewStr) : null; } catch(e) {}
+            const defaultView = savedView || { type: 'get_songs', param: '', sort: 'random', filter_user_id: '' };
             history.replaceState({ viewConfig: defaultView }, "");
             loadView(defaultView, false);
           }
