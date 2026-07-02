@@ -354,7 +354,7 @@ set_time_limit(0);
 
 // ULTRA-SCALE CONCURRENCY: Release the PHP session write-lock early for read-only requests.
 // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
-$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification'];
+$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs'];
 $current_action = $_GET['action'] ?? '';
 
 if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
@@ -365,7 +365,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '4.6');
+define('APP_VERSION', '4.7');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', $admin_password ?? 'admin');
@@ -454,6 +454,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM tasks WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM blogs WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM note_categories WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM task_categories WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM blog_categories WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM play_counts WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM favorites WHERE user_id = ?")->execute([$del_uid]);
@@ -794,6 +798,18 @@ if (isset($_GET['share_type'])) {
   $view_config = null;
 
   switch ($share_type) {
+    case 'blog':
+      $share_id = $_GET['id'] ?? null;
+      $stmt = $db_for_share->prepare("SELECT title, user_id FROM blogs WHERE public_id = ? AND status = 'public'");
+      $stmt->execute([$share_id]);
+      $blog = $stmt->fetch();
+      if ($blog) {
+        $og_title = htmlspecialchars($blog['title']) . " - Blog";
+        $og_desc = "Read this blog post on PHP Music.";
+        $view_config = ['type' => 'view_blog', 'param' => $share_id];
+      }
+      break;
+
     case 'song':
       $share_id = (int)($_GET['id'] ?? 0);
       $stmt = $db_for_share->prepare("SELECT album, user_id FROM music WHERE id = ?");
@@ -1164,6 +1180,10 @@ function init_db($db) {
       id INTEGER PRIMARY KEY, sender_id INTEGER NOT NULL, receiver_id INTEGER NOT NULL, content TEXT, image BLOB, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, is_read INTEGER DEFAULT 0,
       FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS blogs (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT, content TEXT, status TEXT DEFAULT 'private', public_id TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
   ");
 
   // Force column checks to prevent Chat SQL crashes
@@ -1380,6 +1400,41 @@ if (isset($_GET['action'])) {
 
   // Run database schema updates ONLY ONCE per version/session to prevent massive write-lock congestion on concurrent AJAX requests
   if (!isset($_SESSION['db_initialized']) || $_SESSION['db_initialized'] !== APP_VERSION) {
+    
+    // Forcefully build blogs table here to ensure it creates immediately
+    try {
+      $db->exec("
+        CREATE TABLE IF NOT EXISTS blogs (
+          id INTEGER PRIMARY KEY, 
+          user_id INTEGER NOT NULL, 
+          title TEXT, 
+          content TEXT, 
+          status TEXT DEFAULT 'private', 
+          public_id TEXT UNIQUE NOT NULL, 
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+      ");
+    } catch(Exception $e) {}
+
+    // Build the blog_categories table
+    try {
+      $db->exec("
+        CREATE TABLE IF NOT EXISTS blog_categories (
+          id TEXT PRIMARY KEY, 
+          user_id INTEGER NOT NULL, 
+          name TEXT NOT NULL,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+      ");
+    } catch(Exception $e) {}
+
+    // Add category column safely to existing blogs tables
+    try {
+      $db->exec("ALTER TABLE blogs ADD COLUMN category TEXT DEFAULT 'all';");
+    } catch(Exception $e) {}
+
     try {
       $db->exec("CREATE TABLE IF NOT EXISTS activity_feed (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT, target_name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
     } catch(Exception $e) {}
@@ -2085,6 +2140,10 @@ HTML;
       $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM tasks WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM blogs WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM note_categories WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM task_categories WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM blog_categories WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM play_counts WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM favorites WHERE user_id = ?")->execute([$user_id]);
@@ -2384,11 +2443,25 @@ HTML;
             $update_fields[] = "image = ?";
             $update_params[] = $webp_data;
             
-            // Backup the cover to physical disk so it survives database deletions
-            if ($jpeg_data && file_exists($song['file'])) {
-                $file_info = pathinfo($song['file']);
-                $cover_path = $file_info['dirname'] . '/' . $file_info['filename'] . '.jpg';
-                @file_put_contents($cover_path, $jpeg_data);
+            // Save cover image to dedicated covers directories (covers/songs and covers/albums)
+            $covers_songs_dir = MUSIC_DIR . '/covers/songs';
+            $covers_albums_dir = MUSIC_DIR . '/covers/albums';
+            if (!is_dir($covers_songs_dir)) @mkdir($covers_songs_dir, 0755, true);
+            if (!is_dir($covers_albums_dir)) @mkdir($covers_albums_dir, 0755, true);
+
+            if ($jpeg_data) {
+              // 1. Save cover to covers/songs folder
+              $song_cover_path = $covers_songs_dir . '/' . $song_id . '.jpg';
+              @file_put_contents($song_cover_path, $jpeg_data);
+
+              // 2. Save cover to covers/albums folder if an album name is specified
+              if (!empty($new_album) && strtolower($new_album) !== 'unknown album') {
+                $album_slug = sanitize_for_path($new_album);
+                if ($album_slug !== '') {
+                  $album_cover_path = $covers_albums_dir . '/' . $album_slug . '.jpg';
+                  @file_put_contents($album_cover_path, $jpeg_data);
+                }
+              }
             }
           }
         }
@@ -2974,6 +3047,9 @@ HTML;
       } elseif ($action_type === 'remove_member') {
         $db->prepare("DELETE FROM project_members WHERE project_id = ? AND user_id = ? AND role != 'owner'")->execute([$data['project_id'], $data['user_id']]);
         send_json(['status' => 'success']);
+      } elseif ($action_type === 'leave') {
+        $db->prepare("DELETE FROM project_members WHERE project_id = ? AND user_id = ? AND role != 'owner'")->execute([$data['project_id'], $user_id]);
+        send_json(['status' => 'success']);
       } elseif ($action_type === 'join') {
         $token = $data['token'] ?? '';
         $stmt_inv = $db->prepare("SELECT project_id FROM project_invites WHERE token = ? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)");
@@ -2993,8 +3069,8 @@ HTML;
       } elseif ($action_type === 'move_item') {
         $table = $data['item_type'] === 'task' ? 'tasks' : 'personal_notes';
         $pid = $data['project_id'] ? (int)$data['project_id'] : null;
-        // Verify user owns the item OR is moving it out of a project they belong to
-        $db->prepare("UPDATE $table SET project_id = ? WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$pid, $data['item_id'], $user_id, $user_id]);
+        // Only owner can move notes or tasks
+        $db->prepare("UPDATE $table SET project_id = ? WHERE id = ? AND user_id = ?")->execute([$pid, $data['item_id'], $user_id]);
         send_json(['status' => 'success']);
       }
       break;
@@ -3030,6 +3106,8 @@ HTML;
       $type = $_GET['filter'] ?? $_GET['type'] ?? 'note';
       if ($type === 'task') {
         $stmt = $db->prepare("SELECT id, name FROM task_categories WHERE user_id = ?");
+      } elseif ($type === 'blog') {
+        $stmt = $db->prepare("SELECT id, name FROM blog_categories WHERE user_id = ?");
       } else {
         $stmt = $db->prepare("SELECT id, name FROM note_categories WHERE user_id = ?");
       }
@@ -3043,7 +3121,13 @@ HTML;
       $cat_id = $data['id'] ?? null;
       $name = trim(htmlspecialchars($data['name'] ?? '', ENT_QUOTES, 'UTF-8'));
       $type = $data['type'] ?? 'note';
-      $table = $type === 'task' ? 'task_categories' : 'note_categories';
+      if ($type === 'task') {
+        $table = 'task_categories';
+      } elseif ($type === 'blog') {
+        $table = 'blog_categories';
+      } else {
+        $table = 'note_categories';
+      }
       if ($cat_id) {
         $stmt = $db->prepare("SELECT id FROM $table WHERE id = ? AND user_id = ?");
         $stmt->execute([$cat_id, $user_id]);
@@ -3061,13 +3145,21 @@ HTML;
       $data = json_decode(file_get_contents('php://input'), true);
       $cat_id = $data['id'] ?? null;
       $type = $data['type'] ?? 'note';
-      $table = $type === 'task' ? 'task_categories' : 'note_categories';
+      if ($type === 'task') {
+        $table = 'task_categories';
+      } elseif ($type === 'blog') {
+        $table = 'blog_categories';
+      } else {
+        $table = 'note_categories';
+      }
       if ($cat_id) {
         $db->prepare("DELETE FROM $table WHERE id = ? AND user_id = ?")->execute([$cat_id, $user_id]);
         if ($type === 'task') {
-            $db->prepare("UPDATE tasks SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
+          $db->prepare("UPDATE tasks SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
+        } elseif ($type === 'blog') {
+          $db->prepare("UPDATE blogs SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
         } else {
-            $db->prepare("UPDATE personal_notes SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
+          $db->prepare("UPDATE personal_notes SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
         }
       }
       send_json(['status' => 'success']);
@@ -3087,8 +3179,8 @@ HTML;
         $where = "WHERE project_id = ? AND (project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))";
         $params = [$pid, $user_id];
       } else {
-        $where = "WHERE ((user_id = ? AND project_id IS NULL) OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))";
-        $params = [$user_id, $user_id];
+        $where = "WHERE user_id = ?";
+        $params = [$user_id];
       }
       
       if ($search !== '') {
@@ -3105,7 +3197,7 @@ HTML;
         $params[] = $filter;
       }
       
-      $stmt = $db->prepare("SELECT id, title, content, category, starred, note_type, created_at, updated_at FROM personal_notes $where $order_by $limit_clause");
+      $stmt = $db->prepare("SELECT id, user_id, title, content, category, starred, note_type, created_at, updated_at FROM personal_notes $where $order_by $limit_clause");
       $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
@@ -3124,8 +3216,8 @@ HTML;
         $where = "WHERE project_id = ? AND (project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))";
         $params = [$pid, $user_id];
       } else {
-        $where = "WHERE ((user_id = ? AND project_id IS NULL) OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))";
-        $params = [$user_id, $user_id];
+        $where = "WHERE user_id = ?";
+        $params = [$user_id];
       }
       
       if ($search !== '') {
@@ -3140,7 +3232,7 @@ HTML;
         $params[] = $filter;
       }
       
-      $stmt = $db->prepare("SELECT id, title, items, category, starred, created_at, updated_at FROM tasks $where $order_by $limit_clause");
+      $stmt = $db->prepare("SELECT id, user_id, title, items, category, starred, created_at, updated_at FROM tasks $where $order_by $limit_clause");
       $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
@@ -3157,6 +3249,10 @@ HTML;
       
       $proj_id = !empty($data['project_id']) ? (int)$data['project_id'] : null;
       if ($task_id) {
+        $stmt = $db->prepare("SELECT user_id, category FROM tasks WHERE id = ?");
+        $stmt->execute([$task_id]);
+        $existing = $stmt->fetch();
+        if ($existing && $existing['user_id'] != $user_id) { $category = $existing['category']; }
         $db->prepare("UPDATE tasks SET title = ?, items = ?, category = ?, starred = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$title, $items, $category, $starred, $task_id, $user_id, $user_id]);
       } else {
         $db->prepare("INSERT INTO tasks (user_id, title, items, category, starred, project_id) VALUES (?, ?, ?, ?, ?, ?)")->execute([$user_id, $title, $items, $category, $starred, $proj_id]);
@@ -3167,7 +3263,7 @@ HTML;
 
     case 'delete_task':
       if (!$user_id) { http_response_code(403); exit; }
-      $db->prepare("DELETE FROM tasks WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id, $user_id]);
+      $db->prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id]);
       send_json(['status' => 'success']);
       break;
 
@@ -3189,6 +3285,10 @@ HTML;
       
       $proj_id = !empty($data['project_id']) ? (int)$data['project_id'] : null;
       if ($note_id) {
+        $stmt = $db->prepare("SELECT user_id, category FROM personal_notes WHERE id = ?");
+        $stmt->execute([$note_id]);
+        $existing = $stmt->fetch();
+        if ($existing && $existing['user_id'] != $user_id) { $category = $existing['category']; }
         $db->prepare("UPDATE personal_notes SET title = ?, content = ?, category = ?, starred = ?, note_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$title, $content, $category, $starred, $note_type, $note_id, $user_id, $user_id]);
       } else {
         $db->prepare("INSERT INTO personal_notes (user_id, title, content, category, starred, note_type, project_id) VALUES (?, ?, ?, ?, ?, ?, ?)")->execute([$user_id, $title, $content, $category, $starred, $note_type, $proj_id]);
@@ -3199,7 +3299,7 @@ HTML;
 
     case 'delete_note':
       if (!$user_id) { http_response_code(403); exit; }
-      $db->prepare("DELETE FROM personal_notes WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id, $user_id]);
+      $db->prepare("DELETE FROM personal_notes WHERE id = ? AND user_id = ?")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id]);
       send_json(['status' => 'success']);
       break;
 
@@ -3322,6 +3422,137 @@ HTML;
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
       $db->prepare("DELETE FROM song_comments WHERE id = ? AND (user_id = ? OR {$is_super_admin} = 1)")->execute([intval($data['comment_id']), $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'get_blogs':
+      $sort_key = $_GET['sort'] ?? 'newest';
+      $search = $_GET['q'] ?? '';
+      $filter = $_GET['filter'] ?? 'all';
+      $artist_id = isset($_GET['artist_id']) ? (int)$_GET['artist_id'] : null;
+      $order_by = ['newest' => 'ORDER BY b.created_at DESC', 'oldest' => 'ORDER BY b.created_at ASC', 'modified' => 'ORDER BY b.updated_at DESC'][$sort_key] ?? 'ORDER BY b.updated_at DESC';
+      
+      if ($artist_id) {
+        $stmt = $db->prepare("SELECT b.id, b.user_id, b.title, b.content, b.status, b.public_id, b.created_at, b.updated_at, b.category, u.artist as author FROM blogs b JOIN users u ON b.user_id = u.id WHERE b.user_id = ? AND b.status = 'public' $order_by $limit_clause");
+        $stmt->execute([$artist_id]);
+      } else {
+        if (!$user_id) { send_json([]); }
+        $where = "WHERE b.user_id = ?";
+        $params = [$user_id];
+        if ($search !== '') {
+          $where .= " AND (b.title LIKE ? OR b.content LIKE ?)";
+          $params[] = "%$search%";
+          $params[] = "%$search%";
+        }
+        if ($filter === 'public') { 
+          $where .= " AND b.status = 'public'"; 
+        } elseif ($filter === 'private') { 
+          $where .= " AND b.status = 'private'"; 
+        } elseif ($filter !== 'all') {
+          $where .= " AND b.category = ?";
+          $params[] = $filter;
+        }
+        
+        $stmt = $db->prepare("SELECT b.id, b.user_id, b.title, b.content, b.status, b.public_id, b.created_at, b.updated_at, b.category, u.artist as author FROM blogs b JOIN users u ON b.user_id = u.id $where $order_by $limit_clause");
+        $stmt->execute($params);
+      }
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'export_blogs':
+      if (!$user_id) { http_response_code(403); exit; }
+      $stmt = $db->prepare("SELECT title, content, status, category, created_at, updated_at FROM blogs WHERE user_id = ? ORDER BY created_at ASC");
+      $stmt->execute([$user_id]);
+      $rows = $stmt->fetchAll();
+      if (empty($rows)) { http_response_code(404); exit; }
+
+      $export_data = [
+        'name' => 'My Blogs',
+        'blogs' => $rows
+      ];
+      
+      header('Content-Type: application/json');
+      header('Content-Disposition: attachment; filename="my_blogs.json"');
+      echo json_encode($export_data, JSON_PRETTY_PRINT);
+      exit;
+
+    case 'import_blogs':
+      if (!$user_id) { http_response_code(403); exit; }
+      $import_data = json_decode(file_get_contents('php://input'), true);
+      if (json_last_error() !== JSON_ERROR_NONE || !isset($import_data['blogs']) || !is_array($import_data['blogs'])) {
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or malformed JSON payload.']);
+      }
+
+      $db->beginTransaction();
+      try {
+        $stmt_insert = $db->prepare("INSERT INTO blogs (user_id, title, content, status, category, public_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        $count = 0;
+        foreach ($import_data['blogs'] as $blog) {
+          $title = isset($blog['title']) ? htmlspecialchars($blog['title']) : 'Imported Blog';
+          $content = isset($blog['content']) ? format_user_text($blog['content']) : ''; 
+          $status = isset($blog['status']) ? $blog['status'] : 'private';
+          $category = isset($blog['category']) ? $blog['category'] : 'all';
+          $created_at = isset($blog['created_at']) ? $blog['created_at'] : date('Y-m-d H:i:s');
+          $updated_at = isset($blog['updated_at']) ? $blog['updated_at'] : date('Y-m-d H:i:s');
+          $public_id = bin2hex(random_bytes(8));
+          
+          if ($content !== '' || $title !== 'Imported Blog') {
+            $stmt_insert->execute([$user_id, $title, $content, $status, $category, $public_id, $created_at, $updated_at]);
+            $count++;
+          }
+        }
+        $db->commit();
+        send_json(['status' => 'success', 'message' => "Successfully imported {$count} blogs."]);
+      } catch (Exception $e) {
+        $db->rollBack();
+        http_response_code(500); send_json(['status' => 'error', 'message' => 'Database error during import.']);
+      }
+      break;
+
+    case 'get_blog':
+      $public_id = $_GET['public_id'] ?? '';
+      $stmt = $db->prepare("SELECT b.*, u.artist as author FROM blogs b JOIN users u ON b.user_id = u.id WHERE b.public_id = ?");
+      $stmt->execute([$public_id]);
+      $blog = $stmt->fetch();
+      if ($blog) {
+        if ($blog['status'] === 'private' && $blog['user_id'] != $user_id && $is_super_admin == 0) {
+          http_response_code(403); send_json(['status' => 'error', 'message' => 'This blog is private.']);
+        }
+        send_json($blog);
+      } else {
+        http_response_code(404); send_json(['status' => 'error', 'message' => 'Blog not found.']);
+      }
+      break;
+
+    case 'save_blog':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $blog_id = $data['id'] ?? null;
+      $title = htmlspecialchars($data['title'] ?? 'Untitled Blog', ENT_QUOTES, 'UTF-8');
+      $content = htmlspecialchars($data['content'] ?? '', ENT_QUOTES, 'UTF-8');
+      $status = $data['status'] ?? 'private';
+      $category = $data['category'] ?? 'all';
+      
+      $title = str_replace(['&#039;', '&#39;', '&quot;'], ["'", "'", '"'], $title);
+      $content = str_replace(['&#039;', '&#39;', '&quot;'], ["'", "'", '"'], $content);
+      
+      if ($blog_id) {
+        $db->prepare("UPDATE blogs SET title = ?, content = ?, status = ?, category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")->execute([$title, $content, $status, $category, $blog_id, $user_id]);
+        $stmt = $db->prepare("SELECT public_id FROM blogs WHERE id = ?");
+        $stmt->execute([$blog_id]);
+        $public_id = $stmt->fetchColumn();
+      } else {
+        $public_id = bin2hex(random_bytes(8));
+        $db->prepare("INSERT INTO blogs (user_id, title, content, status, category, public_id) VALUES (?, ?, ?, ?, ?, ?)")->execute([$user_id, $title, $content, $status, $category, $public_id]);
+        $blog_id = $db->lastInsertId();
+      }
+      send_json(['status' => 'success', 'id' => $blog_id, 'public_id' => $public_id]);
+      break;
+
+    case 'delete_blog':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("DELETE FROM blogs WHERE id = ? AND (user_id = ? OR {$is_super_admin} = 1)")->execute([intval($data['id']), $user_id]);
       send_json(['status' => 'success']);
       break;
 
@@ -5801,11 +6032,13 @@ HTML;
       if (!$user_id) { send_json([]); }
       $type = $_GET['filter'] ?? $_GET['type'] ?? 'note';
       if ($type === 'task') {
-        $stmt = $db->prepare("SELECT id, name, 'task' as category_type, (SELECT COUNT(*) FROM tasks WHERE category = task_categories.id AND ((user_id = ? AND project_id IS NULL) OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))) as item_count FROM task_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
+        $stmt = $db->prepare("SELECT id, name, 'task' as category_type, (SELECT COUNT(*) FROM tasks WHERE category = task_categories.id AND user_id = ?) as item_count FROM task_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
+      } elseif ($type === 'blog') {
+        $stmt = $db->prepare("SELECT id, name, 'blog' as category_type, (SELECT COUNT(*) FROM blogs WHERE category = blog_categories.id AND user_id = ?) as item_count FROM blog_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
       } else {
-        $stmt = $db->prepare("SELECT id, name, 'note' as category_type, (SELECT COUNT(*) FROM personal_notes WHERE category = note_categories.id AND ((user_id = ? AND project_id IS NULL) OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))) as item_count FROM note_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
+        $stmt = $db->prepare("SELECT id, name, 'note' as category_type, (SELECT COUNT(*) FROM personal_notes WHERE category = note_categories.id AND user_id = ?) as item_count FROM note_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
       }
-      $stmt->execute([$user_id, $user_id, $user_id]);
+      $stmt->execute([$user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
 
@@ -7089,8 +7322,8 @@ function perform_full_scan($db) {
         background-color: #2a2a2a;
       }
       .note-card.selected {
-        background-color: rgba(255, 0, 0, 0.15);
-        border-color: var(--ytm-accent);
+        background-color: rgba(255, 0, 0, 0.15) !important;
+        border-color: var(--ytm-accent) !important;
       }
       .note-card-title {
         font-size: 1.15rem;
@@ -7174,6 +7407,59 @@ function perform_full_scan($db) {
         display: flex; align-items: center; gap: 10px; background: rgba(30, 30, 30, 0.85); backdrop-filter: blur(8px); padding: 4px 16px 4px 4px; border-radius: 50px; color: var(--ytm-primary-text); font-size: 0.85rem; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.15); transition: opacity 0.3s;
       }
       .floating-avatar img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
+      
+      .editor-meta-container {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        color: var(--ytm-secondary-text);
+        font-size: 0.85rem;
+        margin-top: 0.25rem;
+      }
+      .editor-meta-divider {
+        width: 1px;
+        height: 14px;
+        background: #404040;
+        display: inline-block;
+      }
+      .editor-meta-item {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: rgba(255, 255, 255, 0.05);
+        padding: 0.3rem 0.6rem;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        transition: background 0.2s, border-color 0.2s;
+      }
+      .editor-meta-item:hover {
+        background: rgba(255, 255, 255, 0.1);
+        border-color: rgba(255, 255, 255, 0.2);
+      }
+      .editor-meta-select {
+        background: transparent;
+        color: var(--ytm-primary-text);
+        border: none;
+        outline: none;
+        cursor: pointer;
+        appearance: none;
+        -webkit-appearance: none;
+        padding-right: 1.25rem;
+        font-weight: 500;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23aaaaaa'%3E%3Cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right center;
+        background-size: 10px 10px;
+      }
+      .editor-meta-select option {
+        background: var(--ytm-surface-2);
+        color: #fff;
+      }
+      @media (max-width: 576px) {
+        .editor-meta-divider { display: none; }
+      }
+      
       .find-replace-panel {
         position: absolute; top: 70px; right: 32px; background-color: var(--ytm-surface);
         border-radius: 12px; padding: 16px; width: 360px; box-shadow: 0 8px 24px rgba(0,0,0,0.8);
@@ -7603,6 +7889,24 @@ function perform_full_scan($db) {
               <span>Messages</span>
               <span class="badge bg-danger rounded-pill d-none ms-auto inbox-badge">0</span>
             </a>
+            <a href="#blogsSubmenu" data-bs-toggle="collapse" class="nav-link collapsed">
+              <i class="bi bi-journal-richtext" style="font-size:1.25rem;width:24px;text-align:center;"></i>
+              <span>My Blogs</span>
+              <i class="bi bi-chevron-down ms-auto" style="font-size: 0.8rem; transition: transform 0.2s;"></i>
+            </a>
+            <div class="collapse" id="blogsSubmenu">
+              <ul class="list-unstyled ms-4 mb-0 pb-2">
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 blog-filter-link" data-view="get_blogs" data-filter="all"><i class="bi bi-folder2"></i> All Blogs</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 blog-filter-link" data-view="get_blogs" data-filter="public"><i class="bi bi-globe"></i> Published</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 blog-filter-link" data-view="get_blogs" data-filter="private"><i class="bi bi-lock"></i> Drafts</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="get_categories" data-cat-type="blog"><i class="bi bi-grid-fill"></i> View Blog Categories</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="manage_note_categories" data-cat-type="blog"><i class="bi bi-tags"></i> Edit Blog Categories</a></li>
+                <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0" id="import-txt-btn-blogs"><i class="bi bi-file-earmark-text"></i> Upload TXT</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0" id="import-json-btn-blogs"><i class="bi bi-filetype-json"></i> Import JSON</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0" id="export-json-blogs-menu"><i class="bi bi-download"></i> Export JSON</a></li>
+              </ul>
+            </div>
             <a href="#notesSubmenu" data-bs-toggle="collapse" class="nav-link collapsed">
               <i class="bi bi-journal-text" style="font-size:1.25rem;width:24px;text-align:center;"></i>
               <span>Personal Notes</span>
@@ -9074,7 +9378,7 @@ function perform_full_scan($db) {
               <div class="editor-dropdown-item" id="editorUndoBtn"><i class="bi bi-arrow-counterclockwise"></i> Undo</div>
               <div class="editor-dropdown-item" id="editorRedoBtn"><i class="bi bi-arrow-clockwise"></i> Redo</div>
               <div class="editor-dropdown-item text-info fw-bold" id="editorMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</div>
-              <div class="editor-dropdown-item" id="editorMarkdownHelpBtn" data-bs-toggle="modal" data-bs-target="#markdown-info-modal"><i class="bi bi-markdown"></i> Markdown Guide</div>
+              <div class="editor-dropdown-item" id="editorMarkdownHelpBtn" data-bs-toggle="modal" data-bs-target="#markdown-info-modal"><i class="bi bi-info-circle"></i> Guide</div>
               <div class="editor-dropdown-item" id="editorDownloadModalBtn" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Note...</div>
               <div class="editor-dropdown-item text-danger" id="editorDeleteBtn"><i class="bi bi-trash"></i> Delete</div>
             </div>
@@ -9112,13 +9416,18 @@ function perform_full_scan($db) {
           <input type="hidden" id="editorNoteId">
           <input type="hidden" id="editorNoteType" value="note">
           <input type="text" class="editor-title" id="editorTitle" placeholder="Note Title" />
-          <div class="d-flex align-items-center gap-3 text-secondary small">
-            <span id="editorDate"></span><span id="noteSaveStatus" class="ms-1 fw-bold text-info"></span>
-            <div style="width:1px;height:14px;background:#404040;"></div>
-            <i class="bi bi-folder2"></i>
-            <select id="editorCategorySelect" style="background: transparent; color: var(--ytm-primary-text); border: none; outline: none; cursor: pointer;">
-              <option value="all" style="background: var(--ytm-surface-2);">Uncategorized</option>
-            </select>
+          <div class="editor-meta-container">
+            <div class="d-flex align-items-center gap-2">
+              <span id="editorDate" class="fw-medium"></span>
+              <span id="noteSaveStatus" class="fw-bold text-info"></span>
+            </div>
+            <div class="editor-meta-divider"></div>
+            <div class="editor-meta-item">
+              <i class="bi bi-folder2 text-secondary"></i>
+              <select id="editorCategorySelect" class="editor-meta-select">
+                <option value="all">Uncategorized</option>
+              </select>
+            </div>
           </div>
         </div>
         <div class="editor-toolbar d-flex flex-wrap gap-1">
@@ -9150,6 +9459,85 @@ function perform_full_scan($db) {
       <footer class="editor-footer">
         <span id="editorWordCount">0 words</span>
         <span id="editorCharCount">0 characters</span>
+      </footer>
+    </div>
+
+    <div class="editor-overlay" id="blogEditorOverlay">
+      <header class="editor-header">
+        <div class="d-flex align-items-center gap-2">
+          <button class="note-icon-btn" id="closeBlogEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
+        </div>
+        <div class="d-flex align-items-center gap-2 position-relative">
+          <button class="note-icon-btn" id="blogEditorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
+          <div style="position: relative;">
+            <button class="note-icon-btn" id="blogEditorMoreBtn" title="More Options" data-bs-toggle="dropdown" aria-expanded="false"><i class="bi bi-three-dots-vertical"></i></button>
+            <div class="dropdown-menu dropdown-menu-dark shadow-lg editor-dropdown-menu" style="right:0; left:auto; top:100%; border: 1px solid #404040;">
+              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorForceSaveBtn" style="cursor: pointer;"><i class="bi bi-floppy"></i> Save</div>
+              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorCopyBtn" style="cursor: pointer;"><i class="bi bi-copy"></i> Copy Content</div>
+              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorUndoBtn" style="cursor: pointer;"><i class="bi bi-arrow-counterclockwise"></i> Undo</div>
+              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorRedoBtn" style="cursor: pointer;"><i class="bi bi-arrow-clockwise"></i> Redo</div>
+              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" data-bs-toggle="modal" data-bs-target="#markdown-info-modal" style="cursor: pointer;"><i class="bi bi-info-circle"></i> Guide</div>
+              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" data-bs-toggle="modal" data-bs-target="#download-note-modal" style="cursor: pointer;"><i class="bi bi-download"></i> Download Blog...</div>
+              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger" id="blogEditorDeleteBtn" style="cursor: pointer;"><i class="bi bi-trash"></i> Delete</div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div class="editor-body position-relative">
+        <div class="flex-shrink-0 mb-4">
+          <input type="hidden" id="blogEditorId">
+          <input type="text" class="editor-title" id="blogEditorTitle" placeholder="Blog Title" />
+          <div class="editor-meta-container">
+            <div class="d-flex align-items-center gap-2">
+              <span id="blogEditorDate" class="fw-medium"></span>
+              <span id="blogSaveStatus" class="fw-bold text-info"></span>
+            </div>
+            <div class="editor-meta-divider"></div>
+            <div class="editor-meta-item">
+              <i class="bi bi-eye text-secondary"></i>
+              <select id="blogEditorStatusSelect" class="editor-meta-select">
+                <option value="private">Private / Unpublished</option>
+                <option value="public">Public / Published</option>
+              </select>
+            </div>
+            <div class="editor-meta-divider"></div>
+            <div class="editor-meta-item">
+              <i class="bi bi-folder2 text-secondary"></i>
+              <select id="blogEditorCategorySelect" class="editor-meta-select">
+                <option value="all">Uncategorized</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="editor-toolbar d-flex flex-wrap gap-1" id="blogEditorToolbar">
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="bold" title="Bold"><i class="bi bi-type-bold"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="italic" title="Italic"><i class="bi bi-type-italic"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="heading" title="Heading"><i class="bi bi-type-h1"></i></button>
+          <div class="vr bg-secondary mx-1 opacity-50"></div>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="ul" title="Bullet List"><i class="bi bi-list-ul"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="ol" title="Numbered List"><i class="bi bi-list-ol"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="task" title="Task List"><i class="bi bi-ui-checks"></i></button>
+          <div class="vr bg-secondary mx-1 opacity-50"></div>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="quote" title="Blockquote"><i class="bi bi-quote"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="code" title="Code Block"><i class="bi bi-code-slash"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="table" title="Table"><i class="bi bi-table"></i></button>
+          <div class="vr bg-secondary mx-1 opacity-50"></div>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-left" title="Align Left"><i class="bi bi-text-left"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-center" title="Align Center"><i class="bi bi-text-center"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-right" title="Align Right"><i class="bi bi-text-right"></i></button>
+          <div class="vr bg-secondary mx-1 opacity-50"></div>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="link" title="Link"><i class="bi bi-link-45deg"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="image" title="Image URL & Resize"><i class="bi bi-image"></i></button>
+          <button class="btn btn-sm btn-outline-secondary border-0" data-md="video" title="Video / YouTube URL"><i class="bi bi-camera-video"></i></button>
+        </div>
+        <textarea class="editor-content" id="blogEditorContent" placeholder="Write your amazing blog here... (Markdown supported)"></textarea>
+        <div class="editor-content d-none" id="blogEditorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
+      </div>
+      <footer class="editor-footer">
+        <span id="blogEditorWordCount">0 words</span>
+        <span id="blogEditorCharCount">0 characters</span>
       </footer>
     </div>
 
@@ -9203,13 +9591,18 @@ function perform_full_scan($db) {
         <div class="flex-shrink-0 mb-4">
           <input type="hidden" id="taskEditorId">
           <input type="text" class="editor-title" id="taskEditorTitle" placeholder="Task List Title" />
-          <div class="d-flex align-items-center gap-3 text-secondary small">
-            <span id="taskEditorDate"></span><span id="taskSaveStatus" class="ms-1 fw-bold text-info"></span>
-            <div style="width:1px;height:14px;background:#404040;"></div>
-            <i class="bi bi-folder2"></i>
-            <select id="taskEditorCategorySelect" style="background: transparent; color: var(--ytm-primary-text); border: none; outline: none; cursor: pointer;">
-              <option value="all" style="background: var(--ytm-surface-2);">Uncategorized</option>
-            </select>
+          <div class="editor-meta-container">
+            <div class="d-flex align-items-center gap-2">
+              <span id="taskEditorDate" class="fw-medium"></span>
+              <span id="taskSaveStatus" class="fw-bold text-info"></span>
+            </div>
+            <div class="editor-meta-divider"></div>
+            <div class="editor-meta-item">
+              <i class="bi bi-folder2 text-secondary"></i>
+              <select id="taskEditorCategorySelect" class="editor-meta-select">
+                <option value="all">Uncategorized</option>
+              </select>
+            </div>
           </div>
         </div>
         <div class="task-list-container flex-grow-1 overflow-auto pe-2" id="taskItemsContainer"></div>
@@ -9229,9 +9622,23 @@ function perform_full_scan($db) {
       </div>
     </div>
 
+    <div class="selection-bar" id="selectionBarBlogs">
+      <div class="d-flex align-items-center gap-2">
+        <button class="note-icon-btn" id="toggleSelectAllBlogsBtn" title="Select / Unselect All"><i class="bi bi-check-all fs-5"></i></button>
+        <span class="fw-bold fs-6 ms-2" id="selectionCountBlogs">0</span>
+      </div>
+      <div class="d-flex gap-2">
+        <button class="note-icon-btn" id="bulkDownloadBlogsBtn" title="Download ZIP"><i class="bi bi-download fs-5"></i></button>
+        <button class="note-icon-btn text-danger" id="bulkDeleteBlogsBtn" title="Delete Selected"><i class="bi bi-trash fs-5"></i></button>
+        <button class="note-icon-btn" id="cancelSelectBlogsBtn" title="Cancel"><i class="bi bi-x-lg fs-5"></i></button>
+      </div>
+    </div>
+
     <input type="file" id="fileImportTxt" accept=".txt" multiple style="display: none;" />
     <input type="file" id="fileImportJson" accept=".json" style="display: none;" />
     <input type="file" id="fileImportTasks" accept=".json" style="display: none;" />
+    <input type="file" id="fileImportTxtBlogs" accept=".txt" multiple style="display: none;" />
+    <input type="file" id="fileImportJsonBlogs" accept=".json" style="display: none;" />
 
     <div class="modal fade" id="bbcode-info-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
@@ -9269,7 +9676,7 @@ function perform_full_scan($db) {
       <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
-            <h5 class="modal-title text-white"><i class="bi bi-markdown-fill text-info me-2"></i> Markdown Guide</h5>
+            <h5 class="modal-title text-white"><i class="bi bi-info-circle-fill text-danger me-2"></i> Guide</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body text-light">
@@ -9398,7 +9805,7 @@ function perform_full_scan($db) {
       <div class="modal-dialog modal-dialog-centered modal-sm">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
-            <h5 class="modal-title text-white"><i class="bi bi-cloud-arrow-down-fill text-danger me-2"></i> Download Note</h5>
+            <h5 class="modal-title text-white"><i class="bi bi-cloud-arrow-down-fill text-danger me-2"></i> Download</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body p-4">
@@ -13153,6 +13560,10 @@ SOFTWARE.</div>
                 `<span class="text-truncate" style="max-width: 60vw; display: inline-block; vertical-align: middle;">${escapeHTML(name)}</span>`;
             }
              
+            const pipBtn = document.getElementById('chat-pip-btn');
+            if (pipBtn && 'documentPictureInPicture' in window && window.innerWidth >= 768) {
+              pipBtn.classList.remove('d-none');
+            }
             const infoBtn = document.getElementById('chat-info-btn');
             if (infoBtn) {
               infoBtn.classList.remove('d-none'); // Always show the info button
@@ -13199,8 +13610,9 @@ SOFTWARE.</div>
               
               if (fetchId !== window.currentChatFetchId || (window.isReacting && !forceSync)) return;
 
-              const listEl = document.getElementById('chat-messages-container');
-              if (!listEl) return; 
+              const doc = window.chatPipWindow ? window.chatPipWindow.document : document;
+              const listEl = doc.getElementById('chat-messages-container');
+              if (!listEl) return;
 
               if (messages && messages.status === 'error') {
                 listEl.innerHTML = `<div class="text-center text-danger p-4 mt-auto mb-auto">${escapeHTML(messages.message)}</div>`;
@@ -13323,15 +13735,17 @@ SOFTWARE.</div>
           };
 
           window.setChatReply = (id, sender, content) => {
-            document.getElementById('chat-reply-id').value = id;
-            const preview = document.getElementById('chat-reply-preview');
+            const doc = window.chatPipWindow ? window.chatPipWindow.document : document;
+            doc.getElementById('chat-reply-id').value = id;
+            const preview = doc.getElementById('chat-reply-preview');
             preview.innerHTML = `<strong>Replying to ${sender}:</strong><br><span class="text-secondary text-truncate d-block">${content.replace(/<[^>]*>?/gm, '')}</span>`;
-            document.getElementById('chat-reply-bar').classList.add('active');
-            document.getElementById('chat-input').focus();
+            doc.getElementById('chat-reply-bar').classList.add('active');
+            doc.getElementById('chat-input').focus();
           };
-          window.clearChatReply = () => {
-            document.getElementById('chat-reply-id').value = '';
-            document.getElementById('chat-reply-bar').classList.remove('active');
+          window.clearChatReply = (doc = document) => {
+            const getEl = id => doc.getElementById(id) || document.getElementById(id);
+            getEl('chat-reply-id').value = '';
+            getEl('chat-reply-bar').classList.remove('active');
           };
           
           window.toggleMsgReaction = async (msgId, emoji) => {
@@ -13456,11 +13870,12 @@ SOFTWARE.</div>
             }
           };
 
-          document.addEventListener('change', e => {
+          window.handleChatChangeGlob = e => {
             if (e.target.id === 'chat-image-input') {
               window.handleChatImageSelection(e.target.files[0]);
             }
-          });
+          };
+          document.addEventListener('change', window.handleChatChangeGlob);
 
           // Drag and Drop Images into Chat
           const chatMainArea = document.querySelector('.chat-main');
@@ -13485,12 +13900,13 @@ SOFTWARE.</div>
             });
           }
 
-          window.clearChatImage = () => {
-            document.getElementById('chat-image-input').value = '';
-            document.getElementById('chat-img-preview-bar').classList.remove('active');
-            document.getElementById('chat-img-preview-src').classList.add('d-none');
-            const vid = document.getElementById('chat-video-preview-src');
-            const aud = document.getElementById('chat-audio-preview-src');
+          window.clearChatImage = (doc = document) => {
+            const getEl = id => doc.getElementById(id) || document.getElementById(id);
+            getEl('chat-image-input').value = '';
+            getEl('chat-img-preview-bar').classList.remove('active');
+            getEl('chat-img-preview-src').classList.add('d-none');
+            const vid = getEl('chat-video-preview-src');
+            const aud = getEl('chat-audio-preview-src');
             vid.classList.add('d-none');
             aud.classList.add('d-none');
             vid.pause(); aud.pause();
@@ -13498,21 +13914,22 @@ SOFTWARE.</div>
             if (aud.src) URL.revokeObjectURL(aud.src);
           };
 
-          // Chat Input Auto-Resize & Enter to Send
-          document.addEventListener('input', (e) => {
+          window.handleChatInputGlob = (e) => {
             if (e.target.id === 'chat-input') {
               e.target.style.height = 'auto';
               e.target.style.height = (e.target.scrollHeight) + 'px';
             }
-          });
+          };
+          document.addEventListener('input', window.handleChatInputGlob);
 
-          document.addEventListener('keydown', (e) => {
+          window.handleChatKeydownGlob = (e) => {
             if (e.target.id === 'chat-input' && e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
-              const form = document.getElementById('chat-form-full');
+              const form = e.target.ownerDocument.getElementById('chat-form-full');
               if (form) form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
             }
-          });
+          };
+          document.addEventListener('keydown', window.handleChatKeydownGlob);
 
           // Group Chat Management
           window.showGroupInfo = async (id, page = 1) => {
@@ -13685,12 +14102,15 @@ SOFTWARE.</div>
                 processUpload();
               }
             }
+          });
              
+          window.handleChatSubmitGlob = async e => {
             if (e.target.id === 'chat-form-full') {
               e.preventDefault();
-              const input = document.getElementById('chat-input');
-              const imgInput = document.getElementById('chat-image-input');
-              const replyId = document.getElementById('chat-reply-id').value;
+              const doc = e.target.ownerDocument;
+              const input = doc.getElementById('chat-input');
+              const imgInput = doc.getElementById('chat-image-input');
+              const replyId = doc.getElementById('chat-reply-id').value;
                
               if (!input.value.trim() && imgInput.files.length === 0) return;
                
@@ -13701,58 +14121,124 @@ SOFTWARE.</div>
               if (replyId) formData.append('reply_to_id', replyId);
               if (imgInput.files.length > 0) formData.append('image', imgInput.files[0]);
 
-              const submitBtn = document.getElementById('chat-submit-btn');
+              const submitBtn = doc.getElementById('chat-submit-btn');
               const originalBtnHtml = submitBtn.innerHTML;
               submitBtn.disabled = true;
               submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm" style="width: 1.2rem; height: 1.2rem;"></span>';
               
-              const progContainer = document.getElementById('chat-upload-progress-container');
-              const progBar = document.getElementById('chat-upload-progress');
-              if (imgInput.files.length > 0) {
-                 progContainer.classList.remove('d-none');
-                 progBar.style.width = '0%';
-              }
+              const progContainer = doc.getElementById('chat-upload-progress-container');
+              const progBar = doc.getElementById('chat-upload-progress');
+            if (imgInput.files.length > 0) {
+               progContainer.classList.remove('d-none');
+               progBar.style.width = '0%';
+            }
 
-              const xhr = new XMLHttpRequest();
-              xhr.upload.onprogress = (evt) => {
-                if (evt.lengthComputable && imgInput.files.length > 0) {
-                  const pct = Math.round((evt.loaded / evt.total) * 100);
-                  progBar.style.width = pct + '%';
-                }
-              };
+            const xhr = new XMLHttpRequest();
+            xhr.upload.onprogress = (evt) => {
+              if (evt.lengthComputable && imgInput.files.length > 0) {
+                const pct = Math.round((evt.loaded / evt.total) * 100);
+                progBar.style.width = pct + '%';
+              }
+            };
+            
+            xhr.open('POST', '?action=send_message', true);
+            xhr.onload = async () => {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = originalBtnHtml;
+              progContainer.classList.add('d-none');
               
-              xhr.open('POST', '?action=send_message', true);
-              xhr.onload = async () => {
-                submitBtn.disabled = false;
-                submitBtn.innerHTML = originalBtnHtml;
-                progContainer.classList.add('d-none');
-                
-                if (xhr.status === 200) {
-                  try {
-                    const result = JSON.parse(xhr.responseText);
-                    if (result && result.status === 'success') {
-                      input.value = '';
-                      input.style.height = 'auto'; // Reset textarea height
-                      window.clearChatImage();
-                      window.clearChatReply();
-                      await window.refreshChatFull();
-                    } else {
-                      showToast(result.message || 'Failed to send', 'error');
-                    }
-                  } catch (err) {
-                    showToast('Invalid server response.', 'error');
+              if (xhr.status === 200) {
+                try {
+                  const result = JSON.parse(xhr.responseText);
+                  if (result && result.status === 'success') {
+                    input.value = '';
+                    input.style.height = 'auto'; // Reset textarea height
+                    window.clearChatImage(doc);
+                    window.clearChatReply(doc);
+                    await window.refreshChatFull();
+                  } else {
+                    showToast(result.message || 'Failed to send', 'error');
                   }
-                } else {
-                  showToast('Network error during upload', 'error');
+                } catch (err) {
+                  showToast('Invalid server response.', 'error');
                 }
-              };
-              xhr.onerror = () => {
-                submitBtn.disabled = false;
-                submitBtn.innerHTML = originalBtnHtml;
-                progContainer.classList.add('d-none');
+              } else {
                 showToast('Network error during upload', 'error');
-              };
-              xhr.send(formData);
+              }
+            };
+            xhr.onerror = () => {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = originalBtnHtml;
+              progContainer.classList.add('d-none');
+              showToast('Network error during upload', 'error');
+            };
+            xhr.send(formData);
+            }
+          };
+          document.addEventListener('submit', async e => {
+            if (e.target.id === 'chat-form-full') {
+              await window.handleChatSubmitGlob(e);
+            }
+          });
+          
+          window.chatPipWindow = null;
+          document.addEventListener('click', async (e) => {
+            const pipBtn = e.target.closest('#chat-pip-btn');
+            if (pipBtn) {
+              if (window.chatPipWindow) {
+                window.chatPipWindow.close();
+                return;
+              }
+              if (!('documentPictureInPicture' in window)) return;
+              
+              try {
+                window.chatPipWindow = await window.documentPictureInPicture.requestWindow({
+                  width: 450,
+                  height: 700
+                });
+
+                [...document.styleSheets].forEach(styleSheet => {
+                  try {
+                    const cssRules = [...styleSheet.cssRules].map(rule => rule.cssText).join('');
+                    const style = document.createElement('style');
+                    style.textContent = cssRules;
+                    window.chatPipWindow.document.head.appendChild(style);
+                  } catch (err) {
+                    if (styleSheet.href) {
+                      const link = document.createElement('link');
+                      link.rel = 'stylesheet';
+                      link.href = styleSheet.href;
+                      window.chatPipWindow.document.head.appendChild(link);
+                    }
+                  }
+                });
+
+                const iconLink = document.createElement('link');
+                iconLink.rel = 'stylesheet';
+                iconLink.href = 'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css';
+                window.chatPipWindow.document.head.appendChild(iconLink);
+
+                const chatMain = document.querySelector('.chat-main');
+                const chatWrapper = document.querySelector('.chat-wrapper');
+                
+                window.chatPipWindow.document.body.style.background = 'var(--ytm-bg)';
+                window.chatPipWindow.document.body.style.margin = '0';
+                window.chatPipWindow.document.body.appendChild(chatMain);
+
+                window.chatPipWindow.document.addEventListener('input', window.handleChatInputGlob);
+                window.chatPipWindow.document.addEventListener('change', window.handleChatChangeGlob);
+                window.chatPipWindow.document.addEventListener('keydown', window.handleChatKeydownGlob);
+                window.chatPipWindow.document.addEventListener('submit', window.handleChatSubmitGlob);
+
+                window.chatPipWindow.addEventListener('pagehide', () => {
+                  if (chatWrapper && chatMain) chatWrapper.appendChild(chatMain);
+                  window.chatPipWindow = null;
+                });
+              } catch (err) {
+                console.error(err);
+                showToast('Failed to open Chat PiP', 'error');
+              }
+              return;
             }
           });
           
@@ -15515,6 +16001,27 @@ SOFTWARE.</div>
 
           if (type === 'artist' || type === 'profile') {
             const isUser = details.is_user || type === 'profile';
+            if (isUser) {
+              setTimeout(async () => {
+                const bPane = document.getElementById('blogs-pane');
+                if (!bPane) return;
+                const bData = await fetchData(`?action=get_blogs&artist_id=${details.user_id}&sort=newest`);
+                if (bData && bData.length > 0) {
+                  bPane.innerHTML = `<div class="notes-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">` + bData.map(b => `
+                    <div class="note-card bg-dark text-white border-secondary hover-bg-dark blog-card-item" data-id="${b.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
+                      <div class="d-flex justify-content-between mb-2">
+                        <span class="badge bg-primary text-white">Public Blog</span>
+                        <span class="small text-secondary">${new Date(b.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()}</span>
+                      </div>
+                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
+                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                    </div>
+                  `).join('') + `</div>`;
+                } else {
+                  bPane.innerHTML = `<div class="text-center p-5 text-secondary">No public blogs found.</div>`;
+                }
+              }, 300);
+            }
             const hasPlaylists = details.playlists && details.playlists.length > 0;
             
             // Build the Desktop Sidebar for Recommended content
@@ -15563,6 +16070,9 @@ SOFTWARE.</div>
                     ${isUser ? `
                     <li class="nav-item" role="presentation">
                       <button class="nav-link" id="playlists-tab" data-bs-toggle="tab" data-bs-target="#playlists-pane" type="button" role="tab">Playlists</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                      <button class="nav-link" id="blogs-tab" data-bs-toggle="tab" data-bs-target="#blogs-pane" type="button" role="tab">Blogs</button>
                     </li>` : ''}
                   </ul>
                   <div class="tab-content" id="artistTabsContent">
@@ -15587,6 +16097,9 @@ SOFTWARE.</div>
                         `).join('')}
                       </div>
                       ` : `<div class="text-center p-5 text-secondary">No playlists found.</div>`}
+                    </div>
+                    <div class="tab-pane fade" id="blogs-pane" role="tabpanel">
+                       <div class="text-center p-5 text-secondary" id="artist-blogs-loader"><span class="spinner-border spinner-border-sm"></span> Loading blogs...</div>
                     </div>` : ''}
                   </div>
                 </div>
@@ -16173,7 +16686,7 @@ SOFTWARE.</div>
         };
         
         const setupSortOptions = (viewType) => {
-          const isSortable = ['get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists', 'get_collab_playlists'].includes(viewType);
+          const isSortable = ['get_favorites', 'get_listen_later', 'get_notes', 'get_blogs', 'get_community', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists', 'get_collab_playlists'].includes(viewType);
           
           if (isSortable) {
             let options = {};
@@ -16212,6 +16725,7 @@ SOFTWARE.</div>
                 };
                 break;
               case 'get_notes':
+              case 'get_blogs':
                 options = { 'newest': 'Newest', 'oldest': 'Oldest', 'modified': 'Recently Modified' };
                 break;
               case 'get_community':
@@ -16401,6 +16915,30 @@ SOFTWARE.</div>
                  }
               }
               break;
+            case 'get_blogs':
+              data = await fetchData(`?action=get_blogs&${params.toString()}`);
+              if (data && data.length > 0) {
+                const grid = document.getElementById('blogs-grid');
+                if (grid) {
+                  const html = data.map(b => `
+                    <div class="note-card bg-dark text-white border-secondary hover-bg-dark blog-card-owner" data-id="${b.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
+                      <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span class="badge ${b.status === 'public' ? 'bg-success' : 'bg-secondary'}">${b.status === 'public' ? 'Published' : 'Draft/Private'}</span>
+                        <span class="small text-secondary">${new Date(b.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()}</span>
+                      </div>
+                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
+                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                      <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
+                        ${b.category && b.category !== 'all' ? `<span class="note-chip">${escapeHTML(window.getCategoryName(b.category, 'blog'))}</span>` : '<span></span>'}
+                      </div>
+                    </div>
+                  `).join('');
+                  grid.insertAdjacentHTML('beforeend', html);
+                  window.currentBlogsList = window.currentBlogsList.concat(data);
+                  if (typeof window.bindBlogCardEvents === 'function') window.bindBlogCardEvents(grid);
+                }
+              }
+              break;
             case 'get_community':
               data = await fetchData(`?action=get_community&${params.toString()}`);
               if (data && data.length > 0) {
@@ -16465,7 +17003,21 @@ SOFTWARE.</div>
             case 'genre_songs': activeLink = document.querySelector('.nav-link[data-view="get_genres"]'); break;
             case 'year_songs': activeLink = document.querySelector('.nav-link[data-view="get_years"]'); break;
             case 'playlist_songs': activeLink = document.querySelector('.nav-link[data-view="get_user_playlists"]'); break;
-            case 'get_notes': 
+            case 'view_blog':
+            case 'get_blogs': 
+              const blogFilter = currentView.filter || 'all';
+              const bFilterLink = document.querySelector(`.blog-filter-link[data-view="get_blogs"][data-filter="${blogFilter}"]`) 
+                              || document.querySelector(`.blog-filter-link[data-filter="${blogFilter}"]`);
+              if (bFilterLink) {
+                bFilterLink.classList.add('active', 'text-white');
+                const collapseParent = bFilterLink.closest('.collapse');
+                if (collapseParent && !collapseParent.classList.contains('show')) {
+                   bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              }
+              activeLink = document.querySelector('a[href="#blogsSubmenu"]');
+              break;
+            case 'get_notes':
               const noteFilter = currentView.filter || 'all';
               const filterLink = document.querySelector(`.note-filter-link[data-view="${viewType}"][data-filter="${noteFilter}"]`) 
                               || document.querySelector(`.note-filter-link[data-filter="${noteFilter}"]`);
@@ -16478,7 +17030,35 @@ SOFTWARE.</div>
               }
               activeLink = document.querySelector('a[href="#notesSubmenu"]');
               break;
-            case 'get_tasks': 
+            case 'manage_note_categories':
+            case 'get_categories':
+              if (currentView.filter === 'task') {
+                activeLink = document.querySelector('a[href="#tasksSubmenu"]');
+                const catLink = document.querySelector(`.cat-nav-link[data-view="${viewType}"][data-cat-type="task"]`);
+                if (catLink) {
+                  catLink.classList.add('active', 'text-white');
+                  const collapseParent = catLink.closest('.collapse');
+                  if (collapseParent && !collapseParent.classList.contains('show')) bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              } else if (currentView.filter === 'blog') {
+                activeLink = document.querySelector('a[href="#blogsSubmenu"]');
+                const catLink = document.querySelector(`.cat-nav-link[data-view="${viewType}"][data-cat-type="blog"]`);
+                if (catLink) {
+                  catLink.classList.add('active', 'text-white');
+                  const collapseParent = catLink.closest('.collapse');
+                  if (collapseParent && !collapseParent.classList.contains('show')) bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              } else {
+                activeLink = document.querySelector('a[href="#notesSubmenu"]');
+                const catLink = document.querySelector(`.cat-nav-link[data-view="${viewType}"][data-cat-type="note"]`);
+                if (catLink) {
+                  catLink.classList.add('active', 'text-white');
+                  const collapseParent = catLink.closest('.collapse');
+                  if (collapseParent && !collapseParent.classList.contains('show')) bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              }
+              break;
+            case 'get_tasks':
               const taskFilter = currentView.filter || 'all';
               const tFilterLink = document.querySelector(`.task-filter-link[data-view="${viewType}"][data-filter="${taskFilter}"]`) 
                               || document.querySelector(`.task-filter-link[data-filter="${taskFilter}"]`);
@@ -16560,6 +17140,17 @@ SOFTWARE.</div>
 
           selectedSongs.clear();
           updateMultiSelectUI();
+          
+          if (window.selectedNoteIds) {
+            window.selectedNoteIds.clear();
+            window.multiSelectNoteMode = false;
+            if (typeof updateNoteSelectionUI === 'function') updateNoteSelectionUI();
+          }
+          if (window.selectedBlogIds) {
+            window.selectedBlogIds.clear();
+            window.multiSelectBlogMode = false;
+            if (typeof updateBlogSelectionUI === 'function') updateBlogSelectionUI();
+          }
           
           if (sortable) {
             sortable.destroy();
@@ -16645,7 +17236,10 @@ SOFTWARE.</div>
                            <button class="btn btn-link text-white p-0 d-md-none" onclick="document.querySelector('.chat-main').classList.remove('active'); document.querySelector('.chat-sidebar').classList.remove('hidden'); if(chatPollingInterval) clearInterval(chatPollingInterval);"><i class="bi bi-arrow-left fs-4"></i></button>
                            <h5 class="text-white fw-bold m-0 d-flex align-items-center" id="chat-header-title">Select a chat</h5>
                          </div>
-                         <button class="btn btn-outline-light rounded-circle d-none" id="chat-info-btn" style="width: 40px; height: 40px;"><i class="bi bi-info-lg fs-5"></i></button>
+                         <div class="d-flex align-items-center gap-2">
+                           <button class="btn btn-outline-light rounded-circle d-none" id="chat-pip-btn" style="width: 40px; height: 40px;" title="Pop Out Chat"><i class="bi bi-pip"></i></button>
+                           <button class="btn btn-outline-light rounded-circle d-none" id="chat-info-btn" style="width: 40px; height: 40px;"><i class="bi bi-info-lg fs-5"></i></button>
+                         </div>
                       </div>
                       
                       <div class="chat-messages" id="chat-messages-container">
@@ -16982,17 +17576,23 @@ SOFTWARE.</div>
 
             case 'manage_note_categories':
               const mCatType = currentView.filter || 'note';
-              updateContentTitle(mCatType === 'task' ? 'Manage Task Categories' : 'Manage Note Categories', !!currentUser);
+              let manageTitle = 'Manage Note Categories';
+              if (mCatType === 'task') manageTitle = 'Manage Task Categories';
+              else if (mCatType === 'blog') manageTitle = 'Manage Blog Categories';
+              updateContentTitle(manageTitle, !!currentUser);
+              
               if (currentUser) {
                 if (mCatType === 'task' && (!window.taskCategories || window.taskCategories.length === 0)) {
                    window.taskCategories = await fetchData('?action=get_note_categories&type=task') || [];
+                } else if (mCatType === 'blog' && (!window.blogCategories || window.blogCategories.length === 0)) {
+                   window.blogCategories = await fetchData('?action=get_note_categories&type=blog') || [];
                 } else if (mCatType === 'note' && (!window.noteCategories || window.noteCategories.length === 0)) {
                    window.noteCategories = await fetchData('?action=get_note_categories&type=note') || [];
                 }
                 
                 contentArea.innerHTML = `
                   <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3">
-                    <h4 class="text-white fw-bold m-0"><i class="bi bi-tags text-danger me-2"></i> Edit ${mCatType === 'task' ? 'Task' : 'Note'} Categories</h4>
+                    <h4 class="text-white fw-bold m-0"><i class="bi bi-tags text-danger me-2"></i> Edit ${mCatType === 'task' ? 'Task' : (mCatType === 'blog' ? 'Blog' : 'Note')} Categories</h4>
                   </div>
                   <div class="px-md-3 mb-5" style="max-width: 600px;">
                     <div class="d-flex gap-2 mb-4">
@@ -17005,6 +17605,135 @@ SOFTWARE.</div>
                 window.loadManageCategoriesPage(mCatType);
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to manage categories.</div>`;
+              }
+              break;
+
+            case 'view_blog':
+              updateContentTitle('', false);
+              const blogData = await fetchData(`?action=get_blog&public_id=${currentView.param}`);
+              if (blogData) {
+                document.title = `${decodeHTML(blogData.title)} - PHP Music Blog`;
+                
+                const isOwner = currentUser && (currentUser.id == blogData.user_id || currentUser.email === 'musiclibrary@mail.com');
+                let editButtonHTML = '';
+                if (isOwner) {
+                  editButtonHTML = `<button class="btn btn-warning text-dark rounded-pill px-3 fw-bold edit-blog-btn me-2" data-id="${blogData.public_id}" title="Edit Blog"><i class="bi bi-pencil-fill me-1"></i> Edit</button>`;
+                }
+
+                // Render with marked if available
+                let finalContent = decodeHTML(blogData.content);
+                if (typeof marked !== 'undefined') {
+                  marked.use({ gfm: true });
+                  finalContent = marked.parse(finalContent);
+                } else {
+                  finalContent = `<pre style="white-space: pre-wrap; font-family: sans-serif;">${escapeHTML(finalContent)}</pre>`;
+                }
+
+                contentArea.innerHTML = `
+                  <div class="container pb-5 mt-4" style="max-width: 900px;">
+                    <nav aria-label="breadcrumb" class="mb-4">
+                      <ol class="breadcrumb">
+                        <li class="breadcrumb-item"><a href="#" class="text-info text-decoration-none" onclick="document.querySelector('.user-profile-link[data-userid=\\'${blogData.user_id}\\']').click(); return false;">${escapeHTML(blogData.author)}</a></li>
+                        <li class="breadcrumb-item active text-secondary" aria-current="page">Blog Post</li>
+                      </ol>
+                    </nav>
+                    <h1 class="text-white fw-bold mb-4" style="font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.2;">${escapeHTML(decodeHTML(blogData.title))}</h1>
+                    <div class="d-flex justify-content-between align-items-center mb-5 border-bottom border-secondary pb-4 flex-wrap gap-3">
+                      <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${blogData.user_id}" data-artist="${encodeURIComponent(blogData.author)}" style="cursor: pointer;">
+                         <img src="?action=get_profile_picture&id=${blogData.user_id}" class="rounded-circle shadow-sm" style="width: 45px; height: 45px; object-fit: cover;">
+                         <div>
+                           <div class="fw-bold text-white hover-underline">${escapeHTML(blogData.author)}</div>
+                           <div class="text-secondary small">${new Date(blogData.created_at.replace(' ', 'T')+'Z').toLocaleDateString()} ${blogData.updated_at !== blogData.created_at ? `(Edited ${new Date(blogData.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()})` : ''}</div>
+                         </div>
+                      </div>
+                      <div class="d-flex align-items-center">
+                        ${editButtonHTML}
+                        <button class="btn btn-outline-light rounded-pill px-3 fw-bold share-view-btn" data-share-type="blog" data-share-id="${blogData.public_id}" data-share-name="${encodeURIComponent(blogData.title)}"><i class="bi bi-share-fill me-1"></i> Share</button>
+                      </div>
+                    </div>
+                    <div class="blog-content text-light" style="font-size: 1.15rem; line-height: 1.8; overflow-wrap: break-word;">
+                       ${finalContent}
+                    </div>
+                  </div>
+                `;
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-x-circle-fill text-danger fs-1 d-block mb-3"></i>Blog not found or is private.</div>`;
+              }
+              allContentloaded = true;
+              break;
+
+            case 'get_blogs':
+              if (currentUser && (!window.blogCategories || window.blogCategories.length === 0)) {
+                window.blogCategories = await fetchData('?action=get_note_categories&type=blog') || [];
+              }
+              
+              let blogFilter = currentView.filter || 'all';
+              let blogTitle = 'My Blogs';
+              if (blogFilter === 'public') blogTitle = 'Published Blogs';
+              else if (blogFilter === 'private') blogTitle = 'Drafts / Private';
+              else if (blogFilter !== 'all') {
+                blogTitle = window.getCategoryName(blogFilter, 'blog') + ' Blogs';
+              }
+              updateContentTitle(blogTitle, !!currentUser);
+              
+              if (currentUser) {
+                window.renderNoteCategories();
+                contentArea.innerHTML = `
+                  <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3 mt-2">
+                    <div class="position-relative" style="max-width: 400px; width: 100%;">
+                      <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                      <input type="text" id="blogs-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search blogs..." value="${escapeHTML(currentView.searchQuery || '')}">
+                    </div>
+                    <button class="btn btn-info text-dark rounded-pill px-4 shadow-sm fw-bold new-blog-btn ms-2 text-nowrap">
+                      <i class="bi bi-plus-lg me-1"></i> New
+                    </button>
+                  </div>
+                  <div id="blogs-grid" class="notes-grid px-md-3 mb-5" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px;"></div>
+                `;
+                
+                document.getElementById('blogs-search-input').addEventListener('input', (e) => {
+                  clearTimeout(window.notesSearchTimeout);
+                  window.notesSearchTimeout = setTimeout(() => {
+                    currentView.searchQuery = e.target.value;
+                    loadView(currentView);
+                  }, 400);
+                });
+
+                if (currentView.searchQuery) pageParams.set('q', currentView.searchQuery);
+                pageParams.set('filter', blogFilter);
+                
+                const blogs = await fetchData(`?action=get_blogs&${pageParams.toString()}`);
+                const grid = document.getElementById('blogs-grid');
+                window.currentBlogsList = blogs || [];
+                window.selectedBlogIds = new Set();
+                window.multiSelectBlogMode = false;
+                
+                if (blogs && blogs.length > 0) {
+                  grid.innerHTML = blogs.map(b => `
+                    <div class="note-card bg-dark text-white border-secondary hover-bg-dark blog-card-owner" data-id="${b.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
+                      <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span class="badge ${b.status === 'public' ? 'bg-success' : 'bg-secondary'}">${b.status === 'public' ? 'Published' : 'Draft/Private'}</span>
+                        <span class="small text-secondary">${new Date(b.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()}</span>
+                      </div>
+                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
+                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                      <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
+                        ${b.category && b.category !== 'all' ? `<span class="note-chip">${escapeHTML(window.getCategoryName(b.category, 'blog'))}</span>` : '<span></span>'}
+                      </div>
+                    </div>
+                  `).join('');
+                  
+                  window.bindBlogCardEvents(grid);
+                } else {
+                  grid.style.display = 'block';
+                  if (currentView.searchQuery) {
+                    grid.innerHTML = '<div class="text-center text-secondary py-5">No blogs found.</div>';
+                  } else {
+                    grid.innerHTML = '<div class="text-center text-secondary py-5">You haven\'t written any blogs yet. Click "New" to start!</div>';
+                  }
+                }
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to write and manage blogs.</div>`;
               }
               break;
 
@@ -17407,7 +18136,7 @@ SOFTWARE.</div>
                     <div class="card bg-dark border-secondary text-white p-3 shadow-sm hover-bg-dark" style="border-radius: 12px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
                       <div class="d-flex justify-content-between align-items-center mb-3">
                         <h5 class="fw-bold m-0"><i class="bi bi-briefcase text-info me-2"></i>${escapeHTML(p.name)}</h5>
-                        ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-outline-danger delete-project-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>` : `<span class="badge bg-secondary">Shared with you</span>`}
+                        ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-outline-danger delete-project-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>` : `<div class="d-flex align-items-center gap-2"><span class="badge bg-secondary">Shared with you</span> <button class="btn btn-sm btn-outline-warning leave-project-btn" data-id="${p.id}" title="Leave Project"><i class="bi bi-box-arrow-left"></i></button></div>`}
                       </div>
                       <div class="d-flex gap-4 small text-secondary">
                         <span><i class="bi bi-person-fill"></i> Owner: ${escapeHTML(p.owner_name)}</span>
@@ -18493,7 +19222,7 @@ SOFTWARE.</div>
         };
         
         allNavLinks.forEach(link => {
-          if (!link.hasAttribute('data-view') || link.classList.contains('cat-nav-link') || link.classList.contains('note-filter-link') || link.classList.contains('task-filter-link') || link.getAttribute('data-bs-toggle') === 'collapse' || link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'clear-cookies-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
+          if (!link.hasAttribute('data-view') || link.classList.contains('cat-nav-link') || link.classList.contains('note-filter-link') || link.classList.contains('task-filter-link') || link.classList.contains('blog-filter-link') || link.getAttribute('data-bs-toggle') === 'collapse' || link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'clear-cookies-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
@@ -19073,7 +19802,7 @@ SOFTWARE.</div>
 
         window.loadManageCategoriesPage = (type) => {
           const list = document.getElementById('cat-manage-list-page');
-          const catArray = type === 'task' ? window.taskCategories : window.noteCategories;
+          const catArray = type === 'task' ? window.taskCategories : (type === 'blog' ? window.blogCategories : window.noteCategories);
           if (list && catArray) {
             list.innerHTML = catArray.map(c => `
               <div class="cat-manage-item">
@@ -19097,7 +19826,9 @@ SOFTWARE.</div>
               if (!name) return;
               const id = 'cat_' + Date.now();
               await fetchData('?action=save_note_category', { method:'POST', body: JSON.stringify({id, name, type}) });
+              if (!window.blogCategories) window.blogCategories = [];
               if (type === 'task') window.taskCategories.push({id, name});
+              else if (type === 'blog') window.blogCategories.push({id, name});
               else window.noteCategories.push({id, name});
               input.value = '';
               window.loadManageCategoriesPage(type);
@@ -19111,7 +19842,8 @@ SOFTWARE.</div>
               const newName = prompt('Rename category:', decodeHTML(editBtn.dataset.name));
               if (newName && newName.trim()) {
                 await fetchData('?action=save_note_category', { method:'POST', body: JSON.stringify({id: editBtn.dataset.id, name: newName.trim(), type}) });
-                const catArray = type === 'task' ? window.taskCategories : window.noteCategories;
+                if (!window.blogCategories) window.blogCategories = [];
+                const catArray = type === 'task' ? window.taskCategories : (type === 'blog' ? window.blogCategories : window.noteCategories);
                 const cat = catArray.find(c => c.id === editBtn.dataset.id);
                 if (cat) cat.name = newName.trim();
                 window.loadManageCategoriesPage(type);
@@ -19125,7 +19857,9 @@ SOFTWARE.</div>
               const type = delBtn.dataset.type || 'note';
               if (confirm('Delete category? Items will become Uncategorized.')) {
                 await fetchData('?action=delete_note_category', { method:'POST', body: JSON.stringify({id: delBtn.dataset.id, type}) });
+                if (!window.blogCategories) window.blogCategories = [];
                 if (type === 'task') window.taskCategories = window.taskCategories.filter(c => c.id !== delBtn.dataset.id);
+                else if (type === 'blog') window.blogCategories = window.blogCategories.filter(c => c.id !== delBtn.dataset.id);
                 else window.noteCategories = window.noteCategories.filter(c => c.id !== delBtn.dataset.id);
                 window.loadManageCategoriesPage(type);
                 window.renderNoteCategories();
@@ -19154,6 +19888,17 @@ SOFTWARE.</div>
               document.querySelectorAll('.task-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
               taskFilterLink.classList.add('active', 'text-white');
               loadView({ type: 'get_tasks', param: '', sort: 'newest', filter: filter });
+              hideMobileSidebar();
+            }
+            
+            const blogFilterLink = e.target.closest('.blog-filter-link');
+            if (blogFilterLink) {
+              e.preventDefault();
+              e.stopPropagation();
+              const filter = blogFilterLink.dataset.filter;
+              document.querySelectorAll('.blog-filter-link').forEach(el => el.classList.remove('active', 'text-white'));
+              blogFilterLink.classList.add('active', 'text-white');
+              loadView({ type: 'get_blogs', param: '', sort: 'newest', filter: filter });
               hideMobileSidebar();
             }
 
@@ -19210,6 +19955,52 @@ SOFTWARE.</div>
                   }
                } else {
                  showToast('Invalid Task JSON format.', 'error');
+               }
+             } catch(err) { showToast('Invalid JSON file.', 'error'); }
+             e.target.value = '';
+          });
+
+          document.getElementById('import-txt-btn-blogs')?.addEventListener('click', (e) => { e.preventDefault(); document.getElementById('fileImportTxtBlogs').click(); });
+          document.getElementById('import-json-btn-blogs')?.addEventListener('click', (e) => { e.preventDefault(); document.getElementById('fileImportJsonBlogs').click(); });
+          document.getElementById('export-json-blogs-menu')?.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const blogs = await fetchData('?action=export_blogs');
+            const blob = new Blob([JSON.stringify(blogs, null, 2)], { type: 'application/json' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `BlogsBackup_${Date.now()}.json`;
+            a.click();
+          });
+          
+          document.getElementById('fileImportTxtBlogs')?.addEventListener('change', async (e) => {
+             const files = e.target.files;
+             if (!files.length) return;
+             for (let file of files) {
+               const text = await file.text();
+               await fetchData('?action=save_blog', { method:'POST', body: JSON.stringify({ id: null, title: file.name.replace(/\.txt$/i, ''), content: text, status: 'private' }) }, true);
+             }
+             showToast('Imported TXT files to Blogs', 'success');
+             e.target.value = '';
+             if (currentView.type === 'get_blogs') loadView(currentView);
+          });
+          
+          document.getElementById('fileImportJsonBlogs')?.addEventListener('change', async (e) => {
+             const file = e.target.files[0];
+             if (!file) return;
+             const text = await file.text();
+             try {
+               let importData = JSON.parse(text);
+               if (importData.name === "My Blogs" && importData.blogs) {
+                  const response = await fetch('?action=import_blogs', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(importData)
+                  });
+                  const result = await response.json();
+                  if (result) {
+                    showToast(result.message, result.status);
+                    if (currentView.type === 'get_blogs') loadView(currentView);
+                  }
+               } else {
+                 showToast('Invalid Blog JSON format.', 'error');
                }
              } catch(err) { showToast('Invalid JSON file.', 'error'); }
              e.target.value = '';
@@ -19709,6 +20500,68 @@ SOFTWARE.</div>
             return;
           }
 
+          const newBlogBtn = target.closest('.new-blog-btn');
+          if (newBlogBtn) {
+            e.stopPropagation();
+            window.openBlogEditor({ 
+              id: '', public_id: '', title: '', content: '', status: 'private',
+              category: currentView.filter && currentView.filter !== 'all' && currentView.filter !== 'public' && currentView.filter !== 'private' ? currentView.filter : 'all'
+            });
+            return;
+          }
+
+          const blogCardOwner = target.closest('.blog-card-owner');
+          if (blogCardOwner) {
+            e.stopPropagation();
+            const now = Date.now();
+            if (blogCardOwner.dataset.lastToggle && now - parseInt(blogCardOwner.dataset.lastToggle) < 800) {
+              return;
+            }
+            if (window.multiSelectBlogMode) {
+              toggleBlogMultiSelect(blogCardOwner.dataset.id);
+            } else {
+              const bId = blogCardOwner.dataset.id;
+              const bObj = window.currentBlogsList.find(x => x.public_id === bId);
+              if (bObj) {
+                window.openBlogEditor(bObj);
+              }
+            }
+            return;
+          }
+
+          const blogCardItem = target.closest('.blog-card-item');
+          if (blogCardItem) {
+            e.stopPropagation();
+            loadView({ type: 'view_blog', param: blogCardItem.dataset.id, sort: '', filter: '' });
+            hideMobileSidebar();
+            return;
+          }
+
+          const editBlogBtn = target.closest('.edit-blog-btn');
+          if (editBlogBtn) {
+            e.stopPropagation();
+            fetchData(`?action=get_blog&public_id=${editBlogBtn.dataset.id}`).then(b => {
+              if(b) window.openBlogEditor(b);
+            });
+            return;
+          }
+
+          const deleteBlogBtn = target.closest('.delete-blog-btn');
+          if (deleteBlogBtn) {
+            e.stopPropagation();
+            if (confirm("Delete this blog post permanently?")) {
+              fetchData('?action=delete_blog', { method: 'POST', body: JSON.stringify({ id: deleteBlogBtn.dataset.id }) }).then(() => {
+                showToast("Blog deleted.", "success");
+                if (currentView.type === 'view_blog') {
+                  loadView({ type: 'get_blogs', param: '', sort: 'newest', filter: '' });
+                } else {
+                  loadView(currentView);
+                }
+              });
+            }
+            return;
+          }
+
           const newTaskBtn = target.closest('.new-task-btn');
           if (newTaskBtn) {
             e.stopPropagation();
@@ -19787,6 +20640,22 @@ SOFTWARE.</div>
               }).then(res => {
                 if (res && res.status === 'success') {
                   showToast('Project created successfully!', 'success');
+                  loadView(currentView);
+                }
+              });
+            }
+            return;
+          }
+
+          const leaveProjectBtn = target.closest('.leave-project-btn');
+          if (leaveProjectBtn) {
+            e.stopPropagation();
+            if (confirm('Are you sure you want to leave this project and abandon access to all notes/tasks inside it?')) {
+              fetchData('?action=manage_project', {
+                method: 'POST', body: JSON.stringify({ action_type: 'leave', project_id: leaveProjectBtn.dataset.id })
+              }).then(res => {
+                if (res && res.status === 'success') {
+                  showToast('You have left the project.', 'success');
                   loadView(currentView);
                 }
               });
@@ -23313,11 +24182,6 @@ SOFTWARE.</div>
             if (uploadRemainingText) {
               uploadRemainingText.textContent = `Today's remaining uploads: ${currentUser.uploads_remaining}`;
             }
-            const offIds = await fetchData('?action=get_offline_ids');
-            if(offIds) offlineSongsSet = new Set(offIds.map(id => parseInt(id)));
-            const llIds = await fetchData('?action=get_listen_later_ids');
-            if(llIds) listenLaterSet = new Set(llIds.map(id => parseInt(id)));
-            updateNotifBadge();
           } else {
             currentUser = null;
           }
@@ -23326,10 +24190,12 @@ SOFTWARE.</div>
 
         window.noteCategories = [];
         window.taskCategories = [];
+        window.blogCategories = [];
         window.noteViewerStates = {}; // Holds markdown state
         
         window.getCategoryName = (id, type = 'note') => {
-          const arr = type === 'task' ? window.taskCategories : window.noteCategories;
+          const arr = type === 'task' ? window.taskCategories : (type === 'blog' ? window.blogCategories : window.noteCategories);
+          if (!arr) return 'Uncategorized';
           const c = arr.find(c => c.id === id);
           return c ? c.name : 'Uncategorized';
         };
@@ -23354,6 +24220,17 @@ SOFTWARE.</div>
               opt.value = c.id; opt.innerText = c.name;
               opt.style.background = 'var(--ytm-surface-2)';
               taskCatSelect.appendChild(opt);
+            });
+          }
+
+          const blogCatSelect = document.getElementById('blogEditorCategorySelect');
+          if (blogCatSelect) {
+            blogCatSelect.innerHTML = '<option value="all" style="background: var(--ytm-surface-2);">Uncategorized</option>';
+            (window.blogCategories || []).forEach(c => {
+              const opt = document.createElement('option');
+              opt.value = c.id; opt.innerText = c.name;
+              opt.style.background = 'var(--ytm-surface-2)';
+              blogCatSelect.appendChild(opt);
             });
           }
         };
@@ -23382,6 +24259,136 @@ SOFTWARE.</div>
           if (window.selectedNoteIds.size === 0) window.multiSelectNoteMode = false;
           updateNoteSelectionUI();
         };
+
+        const updateBlogSelectionUI = () => {
+          document.getElementById('selectionCountBlogs').innerText = window.selectedBlogIds.size;
+          document.querySelectorAll('.blog-card-owner').forEach(card => {
+            if (window.selectedBlogIds.has(card.dataset.id)) card.classList.add('selected');
+            else card.classList.remove('selected');
+          });
+          const bar = document.getElementById('selectionBarBlogs');
+          if (window.multiSelectBlogMode) bar.classList.add('active');
+          else bar.classList.remove('active');
+        };
+
+        const toggleBlogMultiSelect = (id) => {
+          if (!window.multiSelectBlogMode) {
+            window.multiSelectBlogMode = true;
+          }
+          if (window.selectedBlogIds.has(id)) window.selectedBlogIds.delete(id);
+          else window.selectedBlogIds.add(id);
+          
+          if (window.selectedBlogIds.size === 0) window.multiSelectBlogMode = false;
+          updateBlogSelectionUI();
+        };
+
+        window.bindBlogCardEvents = (container) => {
+          container.querySelectorAll('.blog-card-owner:not(.bound)').forEach(card => {
+            card.classList.add('bound');
+            let pressTimer;
+            let startX = 0, startY = 0;
+
+            const doToggle = () => {
+              const now = Date.now();
+              if (card.dataset.lastToggle && now - parseInt(card.dataset.lastToggle) < 800) return; 
+              card.dataset.lastToggle = now;
+              toggleBlogMultiSelect(card.dataset.id);
+            };
+            
+            const startTouch = (e) => { 
+              if (e.touches && e.touches.length > 0) {
+                startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+              }
+              pressTimer = setTimeout(() => { doToggle(); if (navigator.vibrate) navigator.vibrate(50); }, 400); 
+            };
+            const cancelTouch = () => clearTimeout(pressTimer);
+            const moveTouch = (e) => {
+              if (!e.touches) return;
+              const dx = Math.abs(e.touches[0].clientX - startX);
+              const dy = Math.abs(e.touches[0].clientY - startY);
+              if (dx > 10 || dy > 10) clearTimeout(pressTimer);
+            };
+            
+            card.addEventListener('touchstart', startTouch, { passive: true });
+            card.addEventListener('touchend', cancelTouch);
+            card.addEventListener('touchcancel', cancelTouch);
+            card.addEventListener('touchmove', moveTouch, { passive: true });
+            card.addEventListener('contextmenu', (e) => { e.preventDefault(); doToggle(); });
+          });
+        };
+
+        let blogWordCountTimeout = null;
+        const updateBlogEditorWordCount = () => {
+          const text = document.getElementById('blogEditorContent').value;
+          document.getElementById('blogEditorCharCount').innerText = `${new Intl.NumberFormat().format(text.length)} chars`;
+          
+          clearTimeout(blogWordCountTimeout);
+          blogWordCountTimeout = setTimeout(() => {
+            let words = 0;
+            if (text.length > 500000) {
+              document.getElementById('blogEditorWordCount').innerText = `Massive Document`;
+            } else if (text.trim()) {
+              const matches = text.match(/\S+/g);
+              words = matches ? matches.length : 0;
+              document.getElementById('blogEditorWordCount').innerText = `${new Intl.NumberFormat().format(words)} words`;
+            } else {
+              document.getElementById('blogEditorWordCount').innerText = `0 words`;
+            }
+          }, 600);
+        };
+
+        document.getElementById('toggleSelectAllBlogsBtn')?.addEventListener('click', () => {
+          const allSelected = window.currentBlogsList && window.currentBlogsList.length > 0 && window.currentBlogsList.every(b => window.selectedBlogIds.has(b.public_id));
+          if (allSelected) {
+            window.currentBlogsList.forEach(b => window.selectedBlogIds.delete(b.public_id));
+            if (window.selectedBlogIds.size === 0) window.multiSelectBlogMode = false;
+          } else {
+            window.currentBlogsList.forEach(b => window.selectedBlogIds.add(b.public_id));
+          }
+          updateBlogSelectionUI();
+        });
+
+        document.getElementById('cancelSelectBlogsBtn')?.addEventListener('click', () => {
+          window.multiSelectBlogMode = false; 
+          window.selectedBlogIds.clear();
+          updateBlogSelectionUI();
+        });
+
+        document.getElementById('bulkDownloadBlogsBtn')?.addEventListener('click', async () => {
+          const zip = new JSZip();
+          window.selectedBlogIds.forEach(public_id => {
+            const b = window.currentBlogsList.find(x => x.public_id === public_id);
+            if (b) {
+              const cleanContent = (b.content || '').replace(/<[^>]*>?/gm, '');
+              const displayTitle = (b.title && b.title.trim()) ? decodeHTML(b.title) : 'blog_post';
+              zip.file(`${displayTitle.replace(/[^\w\s-]/gi, '_')}.txt`, decodeHTML(b.content) || '');
+            }
+          });
+          const blob = await zip.generateAsync({ type: 'blob' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `Blogs_Selection_${Date.now()}.zip`;
+          a.click();
+          
+          window.selectedBlogIds.clear();
+          window.multiSelectBlogMode = false;
+          updateBlogSelectionUI();
+        }); 
+
+        document.getElementById('bulkDeleteBlogsBtn')?.addEventListener('click', async () => {
+          if (confirm(`Delete ${window.selectedBlogIds.size} blogs permanently?`)) {
+            for (let public_id of window.selectedBlogIds) {
+              const b = window.currentBlogsList.find(x => x.public_id === public_id);
+              if (b && b.id) {
+                await fetchData('?action=delete_blog', { method:'POST', body: JSON.stringify({id: b.id}) }, true);
+              }
+            }
+            window.selectedBlogIds.clear(); 
+            window.multiSelectBlogMode = false;
+            updateBlogSelectionUI();
+            loadView(currentView);
+          }
+        });
 
         let noteTextHistory = [];
         let noteHistoryIdx = -1;
@@ -23516,14 +24523,36 @@ SOFTWARE.</div>
         
         window.openEditorNote = (note) => {
           activeEditorNote = note;
-          document.getElementById('editorNoteId').value = note.id || '';
-          document.getElementById('editorNoteType').value = note.note_type || 'note';
-          document.getElementById('editorTitle').value = note.title ? decodeHTML(note.title) : '';
-          document.getElementById('editorContent').value = note.content ? decodeHTML(note.content) : '';
-          document.getElementById('editorDate').innerText = note.updated_at ? new Date(note.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString() : new Date().toLocaleDateString();
+          const isOwner = !note.id || note.user_id == (currentUser ? currentUser.id : null);
           
           const catSelect = document.getElementById('editorCategorySelect');
-          if (catSelect && note.category) catSelect.value = note.category;
+          if (catSelect) {
+            catSelect.disabled = !isOwner;
+            catSelect.style.opacity = isOwner ? '1' : '0.6';
+            catSelect.style.cursor = isOwner ? 'pointer' : 'default';
+            if (note.category) catSelect.value = note.category;
+          }
+          
+          const moveBtn = document.getElementById('editorMoveProjectBtn');
+          if (moveBtn) moveBtn.style.display = isOwner ? 'flex' : 'none';
+          
+          const delBtn = document.getElementById('editorDeleteBtn');
+          if (delBtn) delBtn.style.display = isOwner ? 'flex' : 'none';
+          
+          const noteIdEl = document.getElementById('editorNoteId');
+          if (noteIdEl) noteIdEl.value = note.id || '';
+          
+          const noteTypeEl = document.getElementById('editorNoteType');
+          if (noteTypeEl) noteTypeEl.value = note.note_type || 'note';
+          
+          const titleEl = document.getElementById('editorTitle');
+          if (titleEl) titleEl.value = note.title ? decodeHTML(note.title) : '';
+          
+          const contentEl = document.getElementById('editorContent');
+          if (contentEl) contentEl.value = note.content ? decodeHTML(note.content) : '';
+          
+          const dateEl = document.getElementById('editorDate');
+          if (dateEl) dateEl.innerText = note.updated_at ? new Date(note.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString() : new Date().toLocaleDateString();
           
           // History state implementation for back/forth
           if (!history.state || history.state.overlay !== 'note_' + note.id) {
@@ -23531,18 +24560,21 @@ SOFTWARE.</div>
           }
 
           isMarkdownPreview = false;
-          const mdIcon = document.getElementById('editorMarkdownBtn').querySelector('i');
-          
-          // Persist Markdown state if the user previously toggled it for this note
-          if (window.noteViewerStates[note.id] === 'markdown') {
-            document.getElementById('editorMarkdownBtn').click();
-          } else {
-            mdIcon.className = 'bi bi-markdown';
-            document.getElementById('editorContent').classList.remove('d-none');
-            document.getElementById('editorMarkdownPreview').classList.add('d-none');
+          const mdBtn = document.getElementById('editorMarkdownBtn');
+          if (mdBtn) {
+            const mdIcon = mdBtn.querySelector('i');
+            // Persist Markdown state if the user previously toggled it for this note
+            if (window.noteViewerStates[note.id] === 'markdown') {
+              mdBtn.click();
+            } else {
+              if (mdIcon) mdIcon.className = 'bi bi-markdown';
+              if (contentEl) contentEl.classList.remove('d-none');
+              const previewEl = document.getElementById('editorMarkdownPreview');
+              if (previewEl) previewEl.classList.add('d-none');
+            }
           }
           
-          noteTextHistory = [document.getElementById('editorContent').value];
+          if (contentEl) noteTextHistory = [contentEl.value];
           noteHistoryIdx = 0;
           
           const starIcon = document.getElementById('editorStarIcon');
@@ -23551,9 +24583,14 @@ SOFTWARE.</div>
           }
           
           updateEditorWordCount();
-          document.getElementById('findReplacePanel').classList.remove('active');
-          document.getElementById('editorMoreMenu').classList.remove('active');
-          document.getElementById('editorOverlay').classList.add('active');
+          const findPanel = document.getElementById('findReplacePanel');
+          if (findPanel) findPanel.classList.remove('active');
+          
+          const moreMenu = document.getElementById('editorMoreMenu');
+          if (moreMenu) moreMenu.classList.remove('active');
+          
+          const overlay = document.getElementById('editorOverlay');
+          if (overlay) overlay.classList.add('active');
           
           if (note.id) {
             lastSyncContentTime = note.updated_at;
@@ -23754,17 +24791,34 @@ SOFTWARE.</div>
         let taskSaveTimeout = null;
 
         window.openTaskEditor = (task) => {
-          if (!history.state || history.state.overlay !== 'task_' + task.id) {
-             history.pushState({ viewConfig: currentView, overlay: 'task_' + task.id }, '');
-          }
-          document.getElementById('taskEditorId').value = task.id || '';
-          document.getElementById('taskEditorTitle').value = task.title ? decodeHTML(task.title) : '';
-          document.getElementById('taskEditorDate').innerText = task.updated_at ? new Date(task.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString() : new Date().toLocaleDateString();
+          const isOwner = !task.id || task.user_id == (currentUser ? currentUser.id : null);
           
           const catSelect = document.getElementById('taskEditorCategorySelect');
           if (catSelect) {
+            catSelect.disabled = !isOwner;
+            catSelect.style.opacity = isOwner ? '1' : '0.6';
+            catSelect.style.cursor = isOwner ? 'pointer' : 'default';
             if (task.category) catSelect.value = task.category;
           }
+          
+          const moveBtn = document.getElementById('taskMoveProjectBtn');
+          if (moveBtn) moveBtn.style.display = isOwner ? 'flex' : 'none';
+          
+          const delBtn = document.getElementById('taskEditorDeleteBtn');
+          if (delBtn) delBtn.style.display = isOwner ? 'flex' : 'none';
+          
+          if (!history.state || history.state.overlay !== 'task_' + task.id) {
+            history.pushState({ viewConfig: currentView, overlay: 'task_' + task.id }, '');
+          }
+          
+          const idEl = document.getElementById('taskEditorId');
+          if (idEl) idEl.value = task.id || '';
+          
+          const titleEl = document.getElementById('taskEditorTitle');
+          if (titleEl) titleEl.value = task.title ? decodeHTML(task.title) : '';
+          
+          const dateEl = document.getElementById('taskEditorDate');
+          if (dateEl) dateEl.innerText = task.updated_at ? new Date(task.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString() : new Date().toLocaleDateString();
           
           const starIcon = document.getElementById('taskEditorStarIcon');
           if (starIcon) starIcon.className = task.starred == 1 ? 'bi bi-star-fill text-warning' : 'bi bi-star';
@@ -23775,9 +24829,14 @@ SOFTWARE.</div>
           
           window.renderTaskItems();
 
-          document.getElementById('taskFindReplacePanel')?.classList.remove('active');
-          document.getElementById('taskEditorMoreMenu').classList.remove('active');
-          document.getElementById('taskEditorOverlay').classList.add('active');
+          const findPanel = document.getElementById('taskFindReplacePanel');
+          if (findPanel) findPanel.classList.remove('active');
+          
+          const moreMenu = document.getElementById('taskEditorMoreMenu');
+          if (moreMenu) moreMenu.classList.remove('active');
+          
+          const overlay = document.getElementById('taskEditorOverlay');
+          if (overlay) overlay.classList.add('active');
           
           if (task.id) {
             lastSyncContentTime = task.updated_at;
@@ -23994,6 +25053,231 @@ SOFTWARE.</div>
           if (currentView.type === 'get_notes') loadView(currentView);
         });
 
+        let blogSaveTimeout = null;
+        let blogHistoryTimeout = null;
+        let blogTextHistory = [];
+        let blogHistoryIdx = -1;
+        let isBlogMarkdownPreview = false;
+
+        window.openBlogEditor = (blog) => {
+          const titleEl = document.getElementById('blogEditorTitle');
+          const contentEl = document.getElementById('blogEditorContent');
+          const idEl = document.getElementById('blogEditorId');
+          const statusSelect = document.getElementById('blogEditorStatusSelect');
+          const catSelect = document.getElementById('blogEditorCategorySelect');
+          const dateEl = document.getElementById('blogEditorDate');
+          
+          idEl.value = blog.id || '';
+          titleEl.value = blog.title ? decodeHTML(blog.title) : '';
+          contentEl.value = blog.content ? decodeHTML(blog.content) : '';
+          statusSelect.value = blog.status || 'private';
+          if (catSelect && blog.category) catSelect.value = blog.category;
+          dateEl.innerText = blog.updated_at ? new Date(blog.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString() : new Date().toLocaleDateString();
+
+          isBlogMarkdownPreview = false;
+          const mdIcon = document.getElementById('blogEditorMarkdownBtn').querySelector('i');
+          mdIcon.className = 'bi bi-markdown';
+          contentEl.classList.remove('d-none');
+          document.getElementById('blogEditorMarkdownPreview').classList.add('d-none');
+          
+          if (contentEl) blogTextHistory = [contentEl.value];
+          blogHistoryIdx = 0;
+          updateBlogEditorWordCount();
+
+          document.getElementById('blogEditorOverlay').classList.add('active');
+        };
+
+        const saveCurrentBlog = async (force = false) => {
+          const statusIndicator = document.getElementById('blogSaveStatus');
+          if (statusIndicator) statusIndicator.textContent = "Saving...";
+          const idInput = document.getElementById('blogEditorId');
+          const id = idInput.value;
+          const title = document.getElementById('blogEditorTitle').value.trim();
+          const content = document.getElementById('blogEditorContent').value;
+          const status = document.getElementById('blogEditorStatusSelect').value;
+          const category = document.getElementById('blogEditorCategorySelect').value;
+          
+          if (!title && !content) return;
+          if (!id && !force) return;
+          
+          const res = await fetchData('?action=save_blog', { 
+            method: 'POST', body: JSON.stringify({id: id || null, title, content, status, category}) 
+          }, true);
+
+          if (res && res.status === 'success' && res.id && !id) {
+            idInput.value = res.id;
+          }
+          if (statusIndicator && res && res.status === 'success') {
+            statusIndicator.textContent = "Saved";
+            setTimeout(() => { if (statusIndicator.textContent === "Saved") statusIndicator.textContent = ""; }, 2000);
+          }
+        };
+
+        document.getElementById('closeBlogEditorBtn')?.addEventListener('click', async () => {
+          await saveCurrentBlog(true);
+          document.getElementById('blogEditorOverlay').classList.remove('active');
+          if (currentView.type === 'get_blogs' || currentView.type === 'view_blog') loadView(currentView);
+        });
+
+        document.getElementById('blogEditorForceSaveBtn')?.addEventListener('click', async () => {
+          await saveCurrentBlog(true);
+          showToast('Blog saved!', 'success');
+        });
+
+        document.getElementById('blogEditorContent')?.addEventListener('input', (e) => {
+          clearTimeout(blogSaveTimeout);
+          clearTimeout(blogHistoryTimeout);
+          updateBlogEditorWordCount();
+          blogSaveTimeout = setTimeout(() => saveCurrentBlog(false), 500);
+          blogHistoryTimeout = setTimeout(() => {
+            if (blogTextHistory[blogHistoryIdx] === e.target.value) return;
+            blogTextHistory = blogTextHistory.slice(0, blogHistoryIdx + 1);
+            blogTextHistory.push(e.target.value);
+            const maxHistory = e.target.value.length > 200000 ? 5 : 50; 
+            if (blogTextHistory.length > maxHistory) blogTextHistory.shift();
+            else blogHistoryIdx++;
+          }, 600);
+        });
+
+        document.getElementById('blogEditorCopyBtn')?.addEventListener('click', () => {
+          const text = document.getElementById('blogEditorContent').value;
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(() => showToast('Copied to clipboard!', 'success'));
+          }
+        });
+
+        document.getElementById('blogEditorUndoBtn')?.addEventListener('click', () => {
+          if (blogHistoryIdx > 0) {
+            blogHistoryIdx--;
+            document.getElementById('blogEditorContent').value = blogTextHistory[blogHistoryIdx];
+            saveCurrentBlog(false);
+          }
+        });
+
+        document.getElementById('blogEditorRedoBtn')?.addEventListener('click', () => {
+          if (blogHistoryIdx < blogTextHistory.length - 1) {
+            blogHistoryIdx++;
+            document.getElementById('blogEditorContent').value = blogTextHistory[blogHistoryIdx];
+            saveCurrentBlog(false);
+          }
+        });
+
+        document.getElementById('blogEditorTitle')?.addEventListener('input', () => {
+          clearTimeout(blogSaveTimeout);
+          blogSaveTimeout = setTimeout(() => saveCurrentBlog(false), 500);
+        });
+        
+        document.getElementById('blogEditorStatusSelect')?.addEventListener('change', () => saveCurrentBlog(false));
+        document.getElementById('blogEditorCategorySelect')?.addEventListener('change', () => saveCurrentBlog(false));
+
+        document.getElementById('blogEditorDeleteBtn')?.addEventListener('click', async () => {
+          const id = document.getElementById('blogEditorId').value;
+          if (!id) {
+            document.getElementById('blogEditorOverlay').classList.remove('active');
+            return;
+          }
+          if (confirm('Delete this blog permanently?')) {
+            await fetchData('?action=delete_blog', { method:'POST', body: JSON.stringify({id}) });
+            document.getElementById('blogEditorOverlay').classList.remove('active');
+            if (currentView.type === 'get_blogs' || currentView.type === 'view_blog') {
+              loadView({ type: 'get_blogs', param: '', sort: 'newest', filter: '' });
+            }
+          }
+        });
+
+        document.getElementById('blogEditorMarkdownBtn')?.addEventListener('click', () => {
+          isBlogMarkdownPreview = !isBlogMarkdownPreview;
+          const contentArea = document.getElementById('blogEditorContent');
+          const previewArea = document.getElementById('blogEditorMarkdownPreview');
+          const icon = document.getElementById('blogEditorMarkdownBtn').querySelector('i');
+          
+          if (isBlogMarkdownPreview) {
+            icon.className = 'bi bi-pencil-square';
+            contentArea.classList.add('d-none');
+            previewArea.classList.remove('d-none');
+            if (typeof marked !== 'undefined') {
+              marked.use({ gfm: true });
+              previewArea.innerHTML = marked.parse(contentArea.value);
+            }
+          } else {
+            icon.className = 'bi bi-markdown';
+            previewArea.classList.add('d-none');
+            contentArea.classList.remove('d-none');
+            contentArea.focus();
+          }
+        });
+
+        document.querySelectorAll('#blogEditorToolbar button').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            const md = btn.dataset.md;
+            const ta = document.getElementById('blogEditorContent');
+            const start = ta.selectionStart;
+            const end = ta.selectionEnd;
+            const selectedText = ta.value.substring(start, end);
+            let pre = '', suf = '', def = '';
+
+            switch(md) {
+              case 'bold': pre = '**'; suf = '**'; def = 'bold text'; break;
+              case 'italic': pre = '*'; suf = '*'; def = 'italic text'; break;
+              case 'heading': pre = '### '; def = 'Heading'; break;
+              case 'strikethrough': pre = '~~'; suf = '~~'; def = 'strikethrough'; break;
+              case 'ul': pre = '- '; def = 'List item'; break;
+              case 'ol': pre = '1. '; def = 'List item'; break;
+              case 'task': pre = '- [ ] '; def = 'Task'; break;
+              case 'quote': pre = '> '; def = 'Quote'; break;
+              case 'code': pre = '```\n'; suf = '\n```'; def = 'code block'; break;
+              case 'table': pre = '| Header | Header |\n| --- | --- |\n| Cell | Cell |'; break;
+              case 'align-left': pre = '<div style="text-align: left;">\n'; suf = '\n</div>'; def = 'Left aligned text'; break;
+              case 'align-center': pre = '<div style="text-align: center;">\n'; suf = '\n</div>'; def = 'Center aligned text'; break;
+              case 'align-right': pre = '<div style="text-align: right;">\n'; suf = '\n</div>'; def = 'Right aligned text'; break;
+              case 'link': pre = '['; suf = '](url)'; def = 'link text'; break;
+              case 'image': 
+                const imgUrl = prompt("Enter image URL:", "https://example.com/image.jpg");
+                if (imgUrl) {
+                  const imgWidth = prompt("Enter width (e.g. 100%, 300px, auto):", "100%");
+                  const imgHeight = prompt("Enter height (e.g. auto, 300px):", "auto");
+                  pre = `<img src="${imgUrl}" width="${imgWidth || '100%'}" height="${imgHeight || 'auto'}" alt="`;
+                  suf = '">';
+                  def = 'image description';
+                } else {
+                  return;
+                }
+                break;
+              case 'video':
+                const vidUrl = prompt("Enter Video or YouTube URL:", "https://www.youtube.com/watch?v=...");
+                if (vidUrl) {
+                  const ytMatch = vidUrl.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+                  if (ytMatch && ytMatch[1]) {
+                    pre = `\n<iframe src="https://www.youtube.com/embed/${ytMatch[1]}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>\n`;
+                  } else {
+                    pre = `\n<video src="${vidUrl}" controls style="background: #000;"></video>\n`;
+                  }
+                  suf = '';
+                  def = '';
+                } else {
+                  return;
+                }
+                break;
+            }
+
+            const insertText = selectedText || def;
+            const finalInsert = md === 'table' ? pre : pre + insertText + suf;
+            ta.value = ta.value.substring(0, start) + finalInsert + ta.value.substring(end);
+            ta.focus();
+            
+            if (md === 'table') {
+              ta.setSelectionRange(start + 2, start + 8);
+            } else if (selectedText) {
+               ta.setSelectionRange(start, start + finalInsert.length);
+            } else {
+               ta.setSelectionRange(start + pre.length, start + pre.length + def.length);
+            }
+            
+            ta.dispatchEvent(new Event('input'));
+          });
+        });
+
         document.getElementById('editorForceSaveBtn').addEventListener('click', async () => {
           await saveCurrentEditorNote(true);
           showToast('Note saved!', 'success');
@@ -24041,24 +25325,29 @@ SOFTWARE.</div>
           document.getElementById('taskEditorMoreMenu').classList.remove('active');
           
           const isTask = document.getElementById('taskEditorOverlay').classList.contains('active');
+          const isBlog = document.getElementById('blogEditorOverlay').classList.contains('active');
           
-          const title = isTask ? (document.getElementById('taskEditorTitle').value || 'Task List') : (document.getElementById('editorTitle').value || 'Note');
+          let title = 'Note';
+          if (isTask) title = document.getElementById('taskEditorTitle').value || 'Task List';
+          else if (isBlog) title = document.getElementById('blogEditorTitle').value || 'Blog Post';
+          else title = document.getElementById('editorTitle').value || 'Note';
+          
           const safeTitle = title.replace(/[^\w\s-]/gi, '_');
           
           let content = '';
           let htmlContent = '';
           
           if (isTask) {
-             content = window.currentTaskItems.map(t => (t.completed ? '- [x] ' : '- [ ] ') + t.text).join('\n');
-             htmlContent = '<ul style="list-style-type: none; padding-left: 0; font-size: 16px;">' + window.currentTaskItems.map(t => `<li style="margin-bottom: 8px;">${t.completed ? '✅' : '⬜'} ${escapeHTML(t.text)}</li>`).join('') + '</ul>';
+            content = window.currentTaskItems.map(t => (t.completed ? '- [x] ' : '- [ ] ') + t.text).join('\n');
+            htmlContent = '<ul style="list-style-type: none; padding-left: 0; font-size: 16px;">' + window.currentTaskItems.map(t => `<li style="margin-bottom: 8px;">${t.completed ? '✅' : '⬜'} ${escapeHTML(t.text)}</li>`).join('') + '</ul>';
           } else {
-             content = document.getElementById('editorContent').value;
-             if (typeof marked !== 'undefined') {
-               marked.use({ gfm: true });
-               htmlContent = marked.parse(content);
-             } else {
-               htmlContent = `<pre style="white-space: pre-wrap; font-family: sans-serif;">${escapeHTML(content)}</pre>`;
-             }
+            content = isBlog ? document.getElementById('blogEditorContent').value : document.getElementById('editorContent').value;
+            if (typeof marked !== 'undefined') {
+              marked.use({ gfm: true });
+              htmlContent = marked.parse(content);
+            } else {
+              htmlContent = `<pre style="white-space: pre-wrap; font-family: sans-serif;">${escapeHTML(content)}</pre>`;
+            }
           }
           
           if (type === 'txt' || type === 'md') {
