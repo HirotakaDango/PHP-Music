@@ -354,7 +354,7 @@ set_time_limit(0);
 
 // ULTRA-SCALE CONCURRENCY: Release the PHP session write-lock early for read-only requests.
 // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
-$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs'];
+$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment'];
 $current_action = $_GET['action'] ?? '';
 
 if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
@@ -1183,6 +1183,18 @@ function init_db($db) {
     CREATE TABLE IF NOT EXISTS blogs (
       id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT, content TEXT, status TEXT DEFAULT 'private', public_id TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS blog_comments (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, blog_id INTEGER NOT NULL, parent_id INTEGER DEFAULT NULL, content TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (blog_id) REFERENCES blogs(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS blog_reactions (
+      user_id INTEGER NOT NULL, blog_id INTEGER NOT NULL, reaction TEXT,
+      PRIMARY KEY (user_id, blog_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (blog_id) REFERENCES blogs(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS blog_comment_reactions (
+      user_id INTEGER NOT NULL, comment_id INTEGER NOT NULL, reaction TEXT,
+      PRIMARY KEY (user_id, comment_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (comment_id) REFERENCES blog_comments(id) ON DELETE CASCADE
     );
   ");
 
@@ -3300,6 +3312,144 @@ HTML;
     case 'delete_note':
       if (!$user_id) { http_response_code(403); exit; }
       $db->prepare("DELETE FROM personal_notes WHERE id = ? AND user_id = ?")->execute([json_decode(file_get_contents('php://input'), true)['id'], $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'get_blog_comments':
+      $blog_public_id = $_GET['blog_id'] ?? $_POST['blog_id'] ?? '';
+      $stmt_b = $db->prepare("SELECT id FROM blogs WHERE public_id = ? OR id = ?");
+      $stmt_b->execute([$blog_public_id, is_numeric($blog_public_id) ? (int)$blog_public_id : 0]);
+      $blog_id = $stmt_b->fetchColumn();
+      if (!$blog_id) { send_json(['comments' => [], 'reactions' => ['like'=>0, 'dislike'=>0], 'my_reaction' => null]); }
+      
+      $sort = $_GET['sort'] ?? 'newest';
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * 25;
+      
+      $order_by = "ORDER BY c.created_at DESC";
+      if ($sort === 'oldest') $order_by = "ORDER BY c.created_at ASC";
+      if ($sort === 'most_liked') $order_by = "ORDER BY like_count DESC, c.created_at DESC";
+      if ($sort === 'most_replied') $order_by = "ORDER BY (SELECT COUNT(*) FROM blog_comments WHERE parent_id = c.id) DESC, c.created_at DESC";
+
+      $root_stmt = $db->prepare("
+        SELECT c.*, u.profile_picture_type, u.id as u_id,
+        CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as artist,
+        CASE WHEN u.banned = 1 OR u.email LIKE 'deleted_%' THEN 1 ELSE 0 END as is_disabled,
+        (SELECT COUNT(*) FROM blog_comment_reactions WHERE comment_id = c.id AND reaction = 'like') as like_count,
+        (SELECT COUNT(*) FROM blog_comment_reactions WHERE comment_id = c.id AND reaction = 'dislike') as dislike_count,
+        (SELECT reaction FROM blog_comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
+        FROM blog_comments c JOIN users u ON c.user_id = u.id 
+        WHERE c.blog_id = ? AND c.parent_id IS NULL $order_by LIMIT 25 OFFSET ?
+      ");
+      $root_stmt->execute([$user_id ?? 0, $blog_id, $offset]);
+      $roots = $root_stmt->fetchAll();
+
+      $root_ids = array_column($roots, 'id');
+      $replies_filtered = [];
+      if (!empty($root_ids)) {
+        $placeholders = implode(',', array_fill(0, count($root_ids), '?'));
+        $reply_stmt = $db->prepare("
+          SELECT c.*, u.profile_picture_type, u.id as u_id,
+          CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as artist,
+          CASE WHEN u.banned = 1 OR u.email LIKE 'deleted_%' THEN 1 ELSE 0 END as is_disabled,
+          (SELECT COUNT(*) FROM blog_comment_reactions WHERE comment_id = c.id AND reaction = 'like') as like_count,
+          (SELECT COUNT(*) FROM blog_comment_reactions WHERE comment_id = c.id AND reaction = 'dislike') as dislike_count,
+          (SELECT reaction FROM blog_comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
+          FROM blog_comments c JOIN users u ON c.user_id = u.id 
+          WHERE c.blog_id = ? AND c.parent_id IN ($placeholders)
+          ORDER BY c.created_at ASC
+        ");
+        $params = array_merge([$user_id ?? 0, $blog_id], $root_ids);
+        $reply_stmt->execute($params);
+        $all_replies = $reply_stmt->fetchAll();
+
+        $rcounts = [];
+        foreach ($all_replies as $r) {
+          $pid = $r['parent_id'];
+          if (!isset($rcounts[$pid])) $rcounts[$pid] = 0;
+          if ($rcounts[$pid] < 25) {
+            $replies_filtered[] = $r;
+            $rcounts[$pid]++;
+          }
+        }
+      }
+
+      $likes = $db->prepare("SELECT reaction, COUNT(*) as c FROM blog_reactions WHERE blog_id = ? GROUP BY reaction");
+      $likes->execute([$blog_id]);
+      $reaction_counts = ['like'=>0, 'dislike'=>0];
+      foreach($likes->fetchAll() as $r) { $reaction_counts[$r['reaction']] = $r['c']; }
+      
+      $my_reaction = null;
+      if ($user_id) {
+        $stmt = $db->prepare("SELECT reaction FROM blog_reactions WHERE user_id = ? AND blog_id = ?");
+        $stmt->execute([$user_id, $blog_id]);
+        $my_reaction = $stmt->fetchColumn();
+      }
+      send_json(['comments' => array_merge($roots, $replies_filtered), 'reactions' => $reaction_counts, 'my_reaction' => $my_reaction]);
+      break;
+
+    case 'toggle_blog_reaction':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $blog_public_id = $data['blog_id'] ?? '';
+      $stmt_b = $db->prepare("SELECT id FROM blogs WHERE public_id = ? OR id = ?");
+      $stmt_b->execute([$blog_public_id, is_numeric($blog_public_id) ? (int)$blog_public_id : 0]);
+      $blog_id = $stmt_b->fetchColumn();
+      if (!$blog_id) send_json(['status' => 'error', 'message' => 'Blog not found']);
+
+      $reaction = $data['reaction'] ?? ''; 
+      $existing = $db->prepare("SELECT reaction FROM blog_reactions WHERE user_id = ? AND blog_id = ?");
+      $existing->execute([$user_id, $blog_id]);
+      if ($existing->fetchColumn() === $reaction) {
+        $db->prepare("DELETE FROM blog_reactions WHERE user_id = ? AND blog_id = ?")->execute([$user_id, $blog_id]);
+      } else {
+        $db->prepare("REPLACE INTO blog_reactions (user_id, blog_id, reaction) VALUES (?, ?, ?)")->execute([$user_id, $blog_id, $reaction]);
+      }
+      send_json(['status' => 'success']);
+      break;
+
+    case 'toggle_blog_comment_reaction':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $comment_id = intval($data['comment_id'] ?? 0);
+      $reaction = $data['reaction'] ?? '';
+      $existing = $db->prepare("SELECT reaction FROM blog_comment_reactions WHERE user_id = ? AND comment_id = ?");
+      $existing->execute([$user_id, $comment_id]);
+      if ($existing->fetchColumn() === $reaction) {
+        $db->prepare("DELETE FROM blog_comment_reactions WHERE user_id = ? AND comment_id = ?")->execute([$user_id, $comment_id]);
+      } else {
+        $db->prepare("REPLACE INTO blog_comment_reactions (user_id, comment_id, reaction) VALUES (?, ?, ?)")->execute([$user_id, $comment_id, $reaction]);
+      }
+      send_json(['status' => 'success']);
+      break;
+
+    case 'add_blog_comment':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $blog_public_id = $data['blog_id'] ?? '';
+      $stmt_b = $db->prepare("SELECT id FROM blogs WHERE public_id = ? OR id = ?");
+      $stmt_b->execute([$blog_public_id, is_numeric($blog_public_id) ? (int)$blog_public_id : 0]);
+      $blog_id = $stmt_b->fetchColumn();
+      if (!$blog_id) send_json(['status' => 'error', 'message' => 'Blog not found']);
+
+      $content = format_user_text($data['content'] ?? '');
+      $parent_id = empty($data['parent_id']) ? null : intval($data['parent_id']);
+      $db->prepare("INSERT INTO blog_comments (user_id, blog_id, parent_id, content) VALUES (?, ?, ?, ?)")->execute([$user_id, $blog_id, $parent_id, $content]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'edit_blog_comment':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $content = format_user_text($data['content']);
+      $db->prepare("UPDATE blog_comments SET content = ? WHERE id = ? AND user_id = ?")->execute([$content, intval($data['comment_id']), $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'delete_blog_comment':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("DELETE FROM blog_comments WHERE id = ? AND (user_id = ? OR {$is_super_admin} = 1)")->execute([intval($data['comment_id']), $user_id]);
       send_json(['status' => 'success']);
       break;
 
@@ -9469,6 +9619,7 @@ function perform_full_scan($db) {
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
           <button class="note-icon-btn" id="blogEditorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
+          <button class="note-icon-btn" id="blogEditorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
           <div style="position: relative;">
             <button class="note-icon-btn" id="blogEditorMoreBtn" title="More Options" data-bs-toggle="dropdown" aria-expanded="false"><i class="bi bi-three-dots-vertical"></i></button>
             <div class="dropdown-menu dropdown-menu-dark shadow-lg editor-dropdown-menu" style="right:0; left:auto; top:100%; border: 1px solid #404040;">
@@ -9483,6 +9634,29 @@ function perform_full_scan($db) {
           </div>
         </div>
       </header>
+      <div class="find-replace-panel" id="blogFindReplacePanel">
+        <div class="d-flex justify-content-between align-items-center mb-2 fw-bold text-white">
+          <span>Find and Replace</span>
+          <button class="note-icon-btn py-0 px-1" id="closeBlogFindBtn"><i class="bi bi-x-lg"></i></button>
+        </div>
+        <div class="find-row pe-3">
+          <i class="bi bi-search text-secondary flex-shrink-0"></i>
+          <input type="text" id="blogFindInput" placeholder="Find in blog..." style="min-width: 0;" />
+          <span class="text-secondary small text-end flex-shrink-0" id="blogFindCounter" style="min-width: 45px;">0/0</span>
+          <div class="d-flex flex-shrink-0 ms-1 gap-1">
+            <button class="note-icon-btn py-0 px-1" id="blogFindPrevBtn" title="Previous"><i class="bi bi-chevron-up"></i></button>
+            <button class="note-icon-btn py-0 px-1" id="blogFindNextBtn" title="Next"><i class="bi bi-chevron-down"></i></button>
+          </div>
+        </div>
+        <div class="find-row pe-3">
+          <i class="bi bi-pencil text-secondary flex-shrink-0"></i>
+          <input type="text" id="blogReplaceInput" placeholder="Replace with..." style="min-width: 0;" />
+        </div>
+        <div class="d-flex gap-2 mt-1">
+          <button class="btn btn-sm btn-outline-light flex-grow-1" id="blogReplaceBtn">Replace</button>
+          <button class="btn btn-sm btn-outline-light flex-grow-1" id="blogReplaceAllBtn">Replace All</button>
+        </div>
+      </div>
 
       <div class="editor-body position-relative">
         <div class="flex-shrink-0 mb-4">
@@ -17651,11 +17825,42 @@ SOFTWARE.</div>
                         <button class="btn btn-outline-light rounded-pill px-3 fw-bold share-view-btn" data-share-type="blog" data-share-id="${blogData.public_id}" data-share-name="${encodeURIComponent(blogData.title)}"><i class="bi bi-share-fill me-1"></i> Share</button>
                       </div>
                     </div>
-                    <div class="blog-content text-light" style="font-size: 1.15rem; line-height: 1.8; overflow-wrap: break-word;">
+                    <div class="blog-content text-light mb-5" style="font-size: 1.15rem; line-height: 1.8; overflow-wrap: break-word;">
                        ${finalContent}
+                    </div>
+
+                    <div class="mt-5 pt-4 border-top border-secondary">
+                      ${currentUser ? `
+                      <div class="d-flex justify-content-center gap-4 mb-4">
+                        <button class="btn btn-outline-light d-flex align-items-center gap-2" id="blog-like-btn">
+                          <i class="bi bi-hand-thumbs-up"></i> <span id="blog-like-count">0</span>
+                        </button>
+                        <button class="btn btn-outline-light d-flex align-items-center gap-2" id="blog-dislike-btn">
+                          <i class="bi bi-hand-thumbs-down"></i> <span id="blog-dislike-count">0</span>
+                        </button>
+                      </div>
+                      ` : ''}
+                      <h4 class="text-white fw-bold mb-3"><i class="bi bi-chat-left-text-fill text-info me-2"></i> Comments</h4>
+                      ${currentUser ? `
+                      <form id="blog-comment-form" class="mb-2 d-flex gap-2">
+                        <input type="hidden" id="blog-comment-parent-id" value="">
+                        <input type="text" id="blog-comment-input" class="form-control bg-dark text-white border-secondary" placeholder="Add a comment... (use @ to mention)" maxlength="2000" required>
+                        <button type="submit" class="btn btn-info text-dark fw-bold px-4">Post</button>
+                      </form>
+                      <div class="d-flex justify-content-end mb-4">
+                        <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+                      </div>
+                      ` : '<p class="text-secondary mb-4 small"><i class="bi bi-lock-fill me-1"></i> Log in to post comments and react to this blog.</p>'}
+                      <div id="blog-comments-list" class="d-flex flex-column gap-3"></div>
+                      <div class="text-center mt-4 mb-2 d-none" id="load-more-blog-comments-container">
+                        <button class="btn btn-outline-light btn-sm px-4 rounded-pill" id="load-more-blog-comments-btn">Load More Comments</button>
+                      </div>
                     </div>
                   </div>
                 `;
+
+                window.activeBlogPublicId = blogData.public_id;
+                window.refreshBlogComments(true);
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-x-circle-fill text-danger fs-1 d-block mb-3"></i>Blog not found or is private.</div>`;
               }
@@ -24521,6 +24726,293 @@ SOFTWARE.</div>
         document.getElementById('editorMoveProjectBtn')?.addEventListener('click', () => { document.getElementById('editorMoreMenu').classList.remove('active'); populateProjectMoveSelect('note'); });
         document.getElementById('taskMoveProjectBtn')?.addEventListener('click', () => { document.getElementById('taskEditorMoreMenu').classList.remove('active'); populateProjectMoveSelect('task'); });
         
+        window.activeBlogPublicId = null;
+        let currentBlogCommentsPage = 1;
+
+        window.refreshBlogComments = async (reset = false) => {
+          if (!window.activeBlogPublicId) return;
+          if (reset === true || typeof reset !== 'boolean') currentBlogCommentsPage = 1;
+
+          const data = await fetchData(`?action=get_blog_comments&blog_id=${window.activeBlogPublicId}&page=${currentBlogCommentsPage}`);
+          if (!data) return;
+
+          const lCount = document.getElementById('blog-like-count');
+          const dCount = document.getElementById('blog-dislike-count');
+          if (lCount) lCount.textContent = data.reactions.like || 0;
+          if (dCount) dCount.textContent = data.reactions.dislike || 0;
+
+          const lBtn = document.getElementById('blog-like-btn');
+          const dBtn = document.getElementById('blog-dislike-btn');
+          if (lBtn) {
+            lBtn.classList.toggle('active', data.my_reaction === 'like');
+            lBtn.classList.toggle('text-info', data.my_reaction === 'like');
+          }
+          if (dBtn) {
+            dBtn.classList.toggle('active', data.my_reaction === 'dislike');
+            dBtn.classList.toggle('text-danger', data.my_reaction === 'dislike');
+          }
+
+          const buildTree = (comments, parent = null) => {
+            const children = comments.filter(c => c.parent_id == parent);
+            if (children.length === 0) return '';
+            
+            if (parent === null) {
+              return children.map(c => `
+                <div class="text-white p-2 border-start border-secondary mb-2">
+                  <div class="d-flex align-items-center gap-2 mb-1">
+                    <div class="d-flex align-items-center gap-2 ${c.is_disabled ? '' : 'user-profile-link'}" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="${c.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${c.is_disabled ? '' : 'title="View Profile"'}>
+                      <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
+                      <strong class="hover-underline">${escapeHTML(c.artist)}</strong>
+                    </div>
+                    <small class="text-secondary">${timeAgo(c.created_at)}</small>
+                  </div>
+                  <div style="font-size: 0.95rem; white-space: pre-wrap;" class="mb-1">${parseUserText(c.content)}</div>
+                  ${currentUser ? `
+                  <div class="d-flex align-items-center gap-3">
+                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none blog-comment-react-btn" data-id="${c.id}" data-reaction="like">
+                      <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-info' : 'bi-hand-thumbs-up'}"></i> ${c.like_count || 0}
+                    </button>
+                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none blog-comment-react-btn" data-id="${c.id}" data-reaction="dislike">
+                      <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
+                    </button>
+                    <button class="btn btn-link btn-sm text-secondary p-0 blog-reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
+                    ${(currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com') ? `
+                      <button class="btn btn-link btn-sm text-secondary p-0 edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
+                      <button class="btn btn-link btn-sm text-danger p-0 delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
+                    ` : ''}
+                  </div>
+                  ` : `
+                  <div class="d-flex align-items-center gap-3 text-secondary small">
+                    <span><i class="bi bi-hand-thumbs-up"></i> ${c.like_count || 0}</span>
+                    <span><i class="bi bi-hand-thumbs-down"></i> ${c.dislike_count || 0}</span>
+                  </div>
+                  `}
+                  <div class="mt-2">${buildTree(comments, c.id)}</div>
+                </div>
+              `).join('');
+            } else {
+              const repliesHtml = children.map(c => `
+                <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: 20px;">
+                  <div class="d-flex align-items-center gap-2 mb-1">
+                    <div class="d-flex align-items-center gap-2 ${c.is_disabled ? '' : 'user-profile-link'}" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="${c.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${c.is_disabled ? '' : 'title="View Profile"'}>
+                      <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
+                      <strong class="hover-underline">${escapeHTML(c.artist)}</strong>
+                    </div>
+                    <small class="text-secondary">${timeAgo(c.created_at)}</small>
+                  </div>
+                  <div style="font-size: 0.95rem; white-space: pre-wrap;" class="mb-1">${parseUserText(c.content)}</div>
+                  ${currentUser ? `
+                  <div class="d-flex align-items-center gap-3">
+                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none blog-comment-react-btn" data-id="${c.id}" data-reaction="like">
+                      <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-info' : 'bi-hand-thumbs-up'}"></i> ${c.like_count || 0}
+                    </button>
+                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none blog-comment-react-btn" data-id="${c.id}" data-reaction="dislike">
+                      <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
+                    </button>
+                    <button class="btn btn-link btn-sm text-secondary p-0 blog-reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
+                    ${(currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com') ? `
+                      <button class="btn btn-link btn-sm text-secondary p-0 edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
+                      <button class="btn btn-link btn-sm text-danger p-0 delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
+                    ` : ''}
+                  </div>
+                  ` : `
+                  <div class="d-flex align-items-center gap-3 text-secondary small">
+                    <span><i class="bi bi-hand-thumbs-up"></i> ${c.like_count || 0}</span>
+                    <span><i class="bi bi-hand-thumbs-down"></i> ${c.dislike_count || 0}</span>
+                  </div>
+                  `}
+                  <div class="mt-2">${buildTree(comments, c.id)}</div>
+                </div>
+              `).join('');
+
+              return `
+                <button class="btn btn-link btn-sm text-info p-0 text-decoration-none toggle-replies-btn mb-2" data-target="blog-comment-reply-container-${parent}">
+                  <i class="bi bi-chevron-down"></i> View ${children.length} replies
+                </button>
+                <div id="blog-comment-reply-container-${parent}" class="d-none">
+                  ${repliesHtml}
+                </div>
+              `;
+            }
+          };
+
+          const commentsList = document.getElementById('blog-comments-list');
+          if (commentsList) {
+            const newHtml = buildTree(data.comments) || (reset ? '<p class="text-secondary text-center mt-3">No comments yet. Be the first to comment!</p>' : '');
+            if (reset) commentsList.innerHTML = newHtml;
+            else commentsList.insertAdjacentHTML('beforeend', newHtml);
+
+            const btnContainer = document.getElementById('load-more-blog-comments-container');
+            if (btnContainer) {
+              const rootCount = data.comments.filter(c => c.parent_id == null).length;
+              if (rootCount >= 25) btnContainer.classList.remove('d-none');
+              else btnContainer.classList.add('d-none');
+            }
+          }
+        };
+
+        // Attach listeners for blog view comments & reactions
+        document.addEventListener('click', async (e) => {
+          const blogLikeBtn = e.target.closest('#blog-like-btn');
+          if (blogLikeBtn) {
+            if (!currentUser) return showToast('Please login', 'error');
+            await fetchData('?action=toggle_blog_reaction', { method: 'POST', body: JSON.stringify({ blog_id: window.activeBlogPublicId, reaction: 'like' }) });
+            window.refreshBlogComments(true);
+            return;
+          }
+          const blogDislikeBtn = e.target.closest('#blog-dislike-btn');
+          if (blogDislikeBtn) {
+            if (!currentUser) return showToast('Please login', 'error');
+            await fetchData('?action=toggle_blog_reaction', { method: 'POST', body: JSON.stringify({ blog_id: window.activeBlogPublicId, reaction: 'dislike' }) });
+            window.refreshBlogComments(true);
+            return;
+          }
+          const blogReplyBtn = e.target.closest('.blog-reply-btn');
+          if (blogReplyBtn) {
+            document.getElementById('blog-comment-parent-id').value = blogReplyBtn.dataset.id;
+            const input = document.getElementById('blog-comment-input');
+            input.placeholder = "Replying to comment...";
+            const username = blogReplyBtn.dataset.username;
+            if (username) {
+              input.value = `@${username.replace(/\s+/g, '')} `;
+            }
+            input.focus();
+            return;
+          }
+          const blogCommentReactBtn = e.target.closest('.blog-comment-react-btn');
+          if (blogCommentReactBtn) {
+            if (!currentUser) return showToast('Please login', 'error');
+            await fetchData('?action=toggle_blog_comment_reaction', { method: 'POST', body: JSON.stringify({ comment_id: blogCommentReactBtn.dataset.id, reaction: blogCommentReactBtn.dataset.reaction }) });
+            window.refreshBlogComments(true);
+            return;
+          }
+          const editBlogCommentBtn = e.target.closest('.edit-blog-comment-btn');
+          if (editBlogCommentBtn) {
+            const newContent = prompt('Edit your comment:', decodeHTML(editBlogCommentBtn.dataset.content));
+            if (newContent !== null && newContent.trim() !== '') {
+              await fetchData('?action=edit_blog_comment', { method: 'POST', body: JSON.stringify({ comment_id: editBlogCommentBtn.dataset.id, content: newContent }) });
+              window.refreshBlogComments(true);
+            }
+            return;
+          }
+          const deleteBlogCommentBtn = e.target.closest('.delete-blog-comment-btn');
+          if (deleteBlogCommentBtn) {
+            if (confirm('Delete this comment?')) {
+              await fetchData('?action=delete_blog_comment', { method: 'POST', body: JSON.stringify({ comment_id: deleteBlogCommentBtn.dataset.id }) });
+              window.refreshBlogComments(true);
+            }
+            return;
+          }
+        });
+
+        document.addEventListener('submit', async (e) => {
+          if (e.target.id === 'blog-comment-form') {
+            e.preventDefault();
+            if (!currentUser) return showToast('Please login', 'error');
+            const input = document.getElementById('blog-comment-input');
+            const parentId = document.getElementById('blog-comment-parent-id').value;
+            await fetchData('?action=add_blog_comment', { method: 'POST', body: JSON.stringify({ blog_id: window.activeBlogPublicId, parent_id: parentId || null, content: input.value }) });
+            input.value = '';
+            document.getElementById('blog-comment-parent-id').value = '';
+            input.placeholder = "Add a comment... (use @ to mention)";
+            window.refreshBlogComments(true);
+          }
+        });
+
+        let findBlogMatches = [];
+        let currentBlogMatchIdx = -1;
+
+        const executeBlogFind = (fromInput = true) => {
+          const text = document.getElementById('blogEditorContent').value;
+          const query = document.getElementById('blogFindInput').value;
+          findBlogMatches = [];
+          if (!query) { updateBlogFindUI(-1, false); return; }
+
+          const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+          let match;
+          while ((match = regex.exec(text)) !== null) {
+            findBlogMatches.push({ index: match.index, length: match[0].length });
+          }
+          
+          if (findBlogMatches.length > 0) {
+            if (fromInput) {
+              if (currentBlogMatchIdx < 0 || currentBlogMatchIdx >= findBlogMatches.length) currentBlogMatchIdx = 0;
+              updateBlogFindUI(currentBlogMatchIdx, false);
+            } else {
+              currentBlogMatchIdx = 0;
+              updateBlogFindUI(currentBlogMatchIdx, true);
+            }
+          } else {
+            updateBlogFindUI(-1, false);
+          }
+        };
+
+        const updateBlogFindUI = (idx, doFocusJump = true) => {
+          currentBlogMatchIdx = idx;
+          const counter = document.getElementById('blogFindCounter');
+          if (findBlogMatches.length === 0 || idx < 0) {
+            counter.innerText = '0/0'; return;
+          }
+          counter.innerText = `${idx + 1}/${findBlogMatches.length}`;
+          
+          if (doFocusJump) {
+            const ta = document.getElementById('blogEditorContent');
+            const match = findBlogMatches[idx];
+            ta.focus({ preventScroll: true });
+            ta.setSelectionRange(match.index, match.index + match.length);
+          }
+        };
+
+        document.getElementById('blogEditorFindBtn')?.addEventListener('click', () => {
+          if (isBlogMarkdownPreview) return;
+          const p = document.getElementById('blogFindReplacePanel');
+          p.classList.toggle('active');
+          if (p.classList.contains('active')) {
+            document.getElementById('blogFindInput').focus();
+            executeBlogFind();
+          } else {
+            document.getElementById('blogEditorContent').focus();
+          }
+        });
+
+        document.getElementById('closeBlogFindBtn')?.addEventListener('click', () => document.getElementById('blogFindReplacePanel').classList.remove('active'));
+        document.getElementById('blogFindInput')?.addEventListener('input', executeBlogFind);
+
+        document.getElementById('blogFindNextBtn')?.addEventListener('click', () => {
+          if (findBlogMatches.length === 0) return;
+          let next = currentBlogMatchIdx + 1;
+          if (next >= findBlogMatches.length) next = 0;
+          updateBlogFindUI(next, true);
+        });
+
+        document.getElementById('blogFindPrevBtn')?.addEventListener('click', () => {
+          if (findBlogMatches.length === 0) return;
+          let next = currentBlogMatchIdx - 1;
+          if (next < 0) next = findBlogMatches.length - 1;
+          updateBlogFindUI(next, true);
+        });
+
+        document.getElementById('blogReplaceBtn')?.addEventListener('click', () => {
+          if (currentBlogMatchIdx < 0 || findBlogMatches.length === 0) return;
+          const rep = document.getElementById('blogReplaceInput').value;
+          const ta = document.getElementById('blogEditorContent');
+          const match = findBlogMatches[currentBlogMatchIdx];
+          ta.value = ta.value.substring(0, match.index) + rep + ta.value.substring(match.index + match.length);
+          ta.dispatchEvent(new Event('input'));
+          executeBlogFind(false);
+        });
+
+        document.getElementById('blogReplaceAllBtn')?.addEventListener('click', () => {
+          const query = document.getElementById('blogFindInput').value;
+          if (!query) return;
+          const rep = document.getElementById('blogReplaceInput').value;
+          const ta = document.getElementById('blogEditorContent');
+          const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+          ta.value = ta.value.replace(regex, rep);
+          ta.dispatchEvent(new Event('input'));
+          executeBlogFind(false);
+        });
+        
         window.openEditorNote = (note) => {
           activeEditorNote = note;
           const isOwner = !note.id || note.user_id == (currentUser ? currentUser.id : null);
@@ -25098,13 +25590,12 @@ SOFTWARE.</div>
           const category = document.getElementById('blogEditorCategorySelect').value;
           
           if (!title && !content) return;
-          if (!id && !force) return;
           
           const res = await fetchData('?action=save_blog', { 
             method: 'POST', body: JSON.stringify({id: id || null, title, content, status, category}) 
           }, true);
 
-          if (res && res.status === 'success' && res.id && !id) {
+          if (res && res.status === 'success' && res.id) {
             idInput.value = res.id;
           }
           if (statusIndicator && res && res.status === 'success') {
