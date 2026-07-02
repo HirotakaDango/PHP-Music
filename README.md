@@ -1,6 +1,6 @@
 # PHP Music
 
-A simple, fast, and modern self-hosted music player built in PHP, with a clean UI, SQLite backend, and full PWA (Progressive Web App) features. Scan your music collection, play songs in your browser, manage favorites/playlists, download entire playlists, upload and edit your own songs, view lyrics, and more—all in one lightweight app.
+A simple, fast, and modern self-hosted music player built in PHP, with a clean UI, SQLite backend, and full PWA (Progressive Web App) features. Scan your music collection, play songs in your browser, manage favorites/playlists, download entire playlists, upload and edit your own songs, view lyrics, write and publish Markdown blogs, and more—all in one lightweight app.
 
 ![1](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/1.png)
 ![2](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/2.png) 
@@ -43,10 +43,11 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 | **Collaborative Playlists** | Invite users by username/email to co-edit. | Tracks contributions with an `added_by` column on the `playlist_songs` table and validates using a `playlist_collaborators` lookup. |
 | **Social Following & Blocking** | Build your network and curate interactions. | Tracks relationships using `follows` and `blocks` tables. Blocking a user automatically severs follows and prevents messaging. |
 | **Direct Messaging (Inbox)** | Real-time peer-to-peer chat system. | Operates on the `messages` table. Includes inbox user searching, image attachments, edit/delete controls, active status, and read/unread indicators. |
-| **Direct Deep-Linking** | Share exact deep-links to tracks, playlists, artists, and albums. | Emits direct sharing hooks to social platforms (Facebook, X, WhatsApp, Telegram) with direct query parameters. |
+| **Direct Deep-Linking** | Share exact deep-links to tracks, playlists, artists, albums, and blog posts. | Emits direct sharing hooks to social platforms (Facebook, X, WhatsApp, Telegram) with direct query parameters. |
 | **Playlists Portability** | Create, manage, import, export, and clone playlists. | Supports copying public playlists directly from other users, alongside JSON import/export handlers. |
 | **Community Social Feed** | Micro-blogging space for sharing status updates, announcements, or thoughts. | Operates on the `community_posts` and `community_reactions` tables. Allows full CRUD capabilities for post owners, with likes/dislikes and multi-sorting (Newest, Most Liked, Following Users). |
-| **Song Comments & Likes/Dislikes** | Dedicated discussion boards and reaction metrics on an individual track level. | Leverages `song_comments`, `song_reactions`, and `comment_reactions` tables. Features threaded reply trees, customizable edit/delete controls, likes, dislikes, and `@` username tag highlighting. |
+| **Song & Blog Discussions** | Threaded comments and reaction metrics for tracks and blog posts. | Leverages dedicated comment tables (`song_comments`, `blog_comments`, reactions). Features nested reply trees, edit/delete controls, likes, dislikes, and `@` username tag highlighting. Comments are read-only for non-logged-in guests. |
+| **Blogging & Markdown Platform** | Write, publish, or draft blogs with live Markdown preview, Find & Replace, and multi-format exports. | Uses `blogs` and `blog_categories` tables. Features auto-saving drafts, word/character counter, categories, status toggles (*Public* vs *Private*), multi-select bulk actions (download ZIP/delete), debounced search, and multi-format exports (PDF, HTML, MD, TXT, or ZIP). |
 
 ### 3. Personal Privacy Controls
 
@@ -54,6 +55,7 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 | :--- | :--- | :--- |
 | **Personal Private Playlists** | Hides chosen playlists completely from other users. | Filtered strictly via SQL checking. Private state disables collaboration options and purges all previous collaborators. |
 | **Personal Private Songs** | Restricts uploaded songs strictly to the owner. | Private songs are stripped from all public index views, search, and other users' public playlists. |
+| **Personal Private Blogs** | Restricts draft blog posts strictly to the author. | Draft/private blogs are visible only in the author's editor and management view. |
 | **Super Admin Global Override** | Grants master bypass privileges to the default `Music Library` user account. | Logging into the `musiclibrary@mail.com` account unlocks access to view, stream, and play all private assets system-wide. |
 
 ### 4. Cache, Offline & Download Management
@@ -74,12 +76,12 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 | **Interactive Calendar** | Built-in date planner and time referencing tool. | Accessible via the sidebar. Features a live clock, dynamic month/year navigation, and a quick date-picker input. |
 | **1:1 Image Cropper** | Crop profile pictures and song covers. | Integrated 1:1 aspect-ratio cropping canvas with panning/zoom to fill gaps, resizing and converting uploads to WebP/JPEG format. |
 | **Upload Progress Percentage** | Displays visual upload progress. | Tracks real-time upload progress using `XMLHttpRequest` upload listeners, mapping output percentages to a loading spinner. |
-| **Account Soft-Delete** | Soft-deletes user credentials while keeping upload logs. | Wipes personal emails and passwords and generates a physical backup key for secure restoration later. |
+| **Account Soft-Delete** | Soft-deletes user credentials while keeping upload logs, notes, tasks, and blogs intact. | Wipes personal emails and passwords and generates a physical backup key for secure restoration later. |
 | **Long-Lasting Persistent Sessions** | Keep sessions logged-in persistently. | Persists sessions safely for up to 1 year using custom garbage collection and cookie lifetimes. |
-| **ID3 Metadata & Lyrics Editor** | Overwrite metadata and LRC lyrics directly. | Modifies DB records and writes tags physically back into files using getID3 write functions. |
+| **ID3 Metadata & Lyrics Editor** | Overwrite metadata and LRC lyrics directly. | Modifies DB records and writes tags physically back into files using getID3 write functions. Automatically mirrors artwork in dedicated `covers/songs` and `covers/albums` folders. |
 | **Upload Quotas** | Multi-file uploads with quota tracking. | Restricts uploads to verified users with a daily limit of 10 songs/day (resetting at midnight). |
 | **PWA Cache Cleansing** | Force PWA and Service Worker hard-resets. | Offers a manual "Clear PWA Cache" option to wipe IndexedDB version tracking and unregister the service worker. |
-| **Administrative Dashboard** | Full-scale administrative manager (`?access=admin`). | Paginated user table, search filters, account verification toggles, ban managers, and complete file-purging tools. |
+| **Administrative Dashboard** | Full-scale administrative manager (`?access=admin`). | Paginated user table, search filters, account verification toggles, ban managers, and complete file/account purging tools. |
 | **SQLite Backend Zero-Setup** | Completely self-hosted, lightweight architecture. | Auto-initializes SQLite database schemas on first run, with zero complex database setup required. |
 
 ---
@@ -172,7 +174,14 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite, follow
 ## Usage Guide
 
 * **Account Portability**: Change your email or reset credentials safely using the "Delete Account but Keep Data" button in Settings. You will receive a backup key to input on the "Restore Account" modal.
-* **Navigation Sidebar**: The navigation hierarchy places dynamic directories like *Listen Later*, *Community*, and *Personal Notes* directly beneath the **Following** tab for quick transition.
+* **Navigation Sidebar**: The navigation hierarchy places dynamic directories like *Listen Later*, *Community*, *Personal Notes*, and *My Blogs* directly beneath the **Following** tab for quick transition.
+* **Blogging Platform & Markdown Editor**: Access *My Blogs* from the sidebar to write articles and announcements.
+  * **Markdown Support:** Full GFM support (headings, lists, code blocks, tables, images, video embeds). Click the Markdown icon to toggle live split-preview mode.
+  * **Find & Replace:** Search and replace text across your draft with real-time match counters.
+  * **Auto-Save & Drafts:** First drafts automatically save as you type (`status = private`). Unsaved/empty drafts can be discarded cleanly.
+  * **Multi-Format Export:** Export individual blogs to PDF (via `html2pdf.js`), HTML, Markdown (`.md`), or Plain Text (`.txt`).
+  * **Multi-Select & Bulk Actions:** Long-press or right-click blog cards to enter multi-select mode (highlighted with red borders). Bulk-delete or download selected blogs as a `.zip` archive.
+  * **Blog Comments & Reactions:** Public blogs feature like/dislike reactions and threaded comment trees with nested replies, comment reactions, and `@username` tag highlights. Unauthenticated guests can read blogs and comments in read-only mode (comment forms and reaction buttons are hidden until logged in).
 * **Listen Later Bookmarking**: Click the three vertical dots `...` on any song and tap `Listen Later` to bookmark it. In your *Listen Later* library, you can drag and drop tracks to configure a customized listening queue. Bookmark icons automatically alternate between empty and solid states.
 * **Song Community & Inline CRUD**: From a song's context menu, select `View Comments & Likes` to access the discussions. You can like or dislike the track, start threaded conversations, reply directly to previous responses, or update/delete your own submissions. Adding `@username` to comments automatically formats and highlights the handle for visibility.
 * **Community Social Feed**: Use the *Community* feed to post general updates. Posts support reactions (likes and dislikes) and full edit/deletion controls. Filters allow you to sort posts by *Newest*, *Most Liked*, or exclusively from *Following Users*.
@@ -182,7 +191,7 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite, follow
 * **Synchronized LRC Lyrics**: Right-click (or tap "..." on mobile) a song and choose "Edit Info" to modify tags and paste synchronized `.lrc` text. Ensure that each timestamp is followed by a space so the parser reads it correctly:
     * ✅ **Correct:** `[00:15.30] Never gonna give you up`
     - ❌ **Incorrect:** `[00:15.30]Never gonna give you up`
-* **Private Items**: Toggle private mode when uploading tracks or editing playlists. These items are strictly invisible to other users. Private songs added to public collaborative playlists are filtered out and remain invisible to everyone except you (and the `musiclibrary@mail.com` super admin).
+* **Private Items**: Toggle private mode when uploading tracks, editing playlists, or writing blogs. These items are strictly invisible to other users. Private songs added to public collaborative playlists are filtered out and remain invisible to everyone except you (and the `musiclibrary@mail.com` super admin).
 * **Downloader**: Open the "Downloader" tool from the sidebar, enter a Playlist ID, and sequentially batch-download every track in that playlist directly to your local drive.
 * **Offline Management**: Drag-and-drop to manually reorder offline lists. Standalone JSON import/export functions let you keep physical backups of your lists.
 
@@ -197,7 +206,7 @@ Access the administrative dashboard by appending `?access=admin` to your URL. Lo
 | **User Listing** | View registered users in a paginated table (20 users per page), searchable by ID, Email, or Artist name. |
 | **Verification** | Approve or revoke user upload rights. Unverified users cannot upload tracks. |
 | **Suspending** | Ban or unban malicious accounts. Suspended users are locked out of the application. |
-| **Purging** | Permanently delete user profiles and purge all of their uploaded physical files from the server. |
+| **Purging** | Permanently delete user profiles and purge all of their uploaded physical files, playlists, notes, tasks, blogs, and categories from the server database. |
 | **System Library** | Files scanned directly from disk are assigned to the virtual "Music Library" administrator account. |
 
 ---
@@ -209,15 +218,15 @@ Access the administrative dashboard by appending `?access=admin` to your URL. Lo
 * User uploads are separated—each user can only manage and edit their own uploads.
 * Playback runs via an advanced dual HTML5 `<audio>` engine and Web Audio API routing `(Source -> Gain Node -> 5-Band EQ Filters -> Dynamics Compressor -> Destination)` for gapless crossfading and real-time audio enhancements, utilizing the Media Session API.
 * Scanning uses getID3 for database indexing, storing everything in `music.db` (SQLite).
-* Album art and profile pictures are extracted, resized, and converted to `.webp` on the fly to save space and bandwidth.
+* Album art and profile pictures are extracted, resized, and converted to `.webp` on the fly to save space and bandwidth. Custom edited cover images are mirrored in `covers/songs` and `covers/albums` folders.
 * PWA support includes a web manifest and a customized service worker (`?pwa=manifest`, `?pwa=sw`) to handle offline caching. 
 * **Offline Audio Handling**: The Service Worker intercepts audio stream requests (`?action=get_stream`) and seamlessly constructs `206 Partial Content` range slices from cached file buffers, enabling background media seeking even when fully offline.
 * Uploads are safely stored in `/uploads/{artist_slug}/` directories.
-* Complete metadata modification is supported via the `edit_metadata` action which updates the database, and writes ID3 tags back into the file using getID3's writetags function.
+* Complete metadata modification is supported via the `edit_metadata` action which updates the database, writes ID3 tags back into the file using getID3's writetags function, and mirrors covers in dedicated folders.
 * Playlists, offline lists, and favorites support fluid drag-and-drop ordering powered by SortableJS, pushing positional arrays back to the server.
 * Collaborative playlists track individual song contributions via an `added_by` column on the `playlist_songs` table, and authenticate editor permissions securely using a `playlist_collaborators` lookup.
 * Play histories and view counts are continuously logged locally (after 30 seconds of playback) to generate personalized "For You" shelves and track statistics.
-* Secure transactional storage models like `personal_notes`, `song_comments`, `community_posts`, `listen_later`, and `messages` are safely indexed with Foreign Key constraints referencing the user session state.
+* Secure transactional storage models like `personal_notes`, `tasks`, `blogs`, `blog_comments`, `song_comments`, `community_posts`, `listen_later`, and `messages` are safely indexed with Foreign Key constraints referencing the user session state.
 * The `follows` and `blocks` tables tightly control user-to-user social networking and privacy boundaries.
 
 ---
@@ -234,7 +243,7 @@ Access the administrative dashboard by appending `?access=admin` to your URL. Lo
 ## Security
 
 * **Warning:** Intended for personal use on your own server or LAN, though robust enough for small community instances.
-* Each user is securely sandboxed to their own uploads, favorites, playlists, and profile.
+* Each user is securely sandboxed to their own uploads, favorites, playlists, notes, tasks, blogs, and profile.
 * Users must be explicitly verified by an admin before they are allowed to upload music.
 * File types, image processing (only accepts standard images and converts to WebP/JPEG), and tag decoding use sanitized structures to mitigate basic injection attacks.
 * The Admin panel is strictly protected by a securely hashed password. Banned accounts are checked upon every login attempt.
