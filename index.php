@@ -440,7 +440,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     }
 
     $baseDir = __DIR__;
-    $allowedExtensions = ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf', 'mp3', 'wav', 'ogg', 'mp4', 'webm'];
+    $allowedExtensions = ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf', 'mp3', 'wav', 'ogg', 'mp4', 'webm', 'zip'];
 
     function isAllowedExtension($filename) {
       global $allowedExtensions;
@@ -924,7 +924,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               if (!class_exists('ZipArchive')) throw new Exception('ZipArchive extension is missing');
               $zip = new ZipArchive;
               if ($zip->open($src) === TRUE) {
-                $extractTarget = dirname($src) . '/' . pathinfo($src, PATHINFO_FILENAME);
+                $folderName = pathinfo($src, PATHINFO_FILENAME);
+                $parentDir = dirname($src);
+                $extractTarget = $parentDir . '/' . $folderName;
+                
+                // Solve folder naming conflicts by keeping the extension at the end
+                if (file_exists($extractTarget)) {
+                  $base = pathinfo($folderName, PATHINFO_FILENAME);
+                  $ext = pathinfo($folderName, PATHINFO_EXTENSION);
+                  if ($ext !== '') {
+                    $counter = 1;
+                    while (file_exists($parentDir . '/' . $base . '_' . $counter . '.' . $ext)) {
+                      $counter++;
+                    }
+                    $extractTarget = $parentDir . '/' . $base . '_' . $counter . '.' . $ext;
+                  } else {
+                    $extractTarget = $parentDir . '/' . generateUniqueFolderName($parentDir, $folderName);
+                  }
+                }
+                
                 if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
                 $zip->extractTo($extractTarget);
                 $zip->close();
@@ -1314,6 +1332,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Panel - PHP Music</title>
+    <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
@@ -1391,18 +1410,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <?php else: ?>
     <div class="app-container">
       <div class="d-lg-none d-flex align-items-center justify-content-between p-3 border-bottom" style="border-color: var(--ytm-surface-2) !important; background-color: var(--ytm-bg);">
-        <div class="logo" style="font-size: 1.25rem; font-weight: 700;">Admin<span style="color: var(--ytm-accent);">Panel</span></div>
+        <div class="logo d-flex align-items-center" style="font-size: 1.25rem; font-weight: 700;">
+          <img src="?action=get_app_icon&size=32" alt="Logo" style="height: 28px; width: 28px; margin-right: 8px; border-radius: 6px;">
+          Admin<span style="color: var(--ytm-accent);">Panel</span>
+        </div>
         <button class="btn text-white" type="button" data-bs-toggle="offcanvas" data-bs-target="#admin-sidebar">
           <i class="bi bi-list fs-2"></i>
         </button>
       </div>
       <nav class="sidebar offcanvas-lg offcanvas-start" tabindex="-1" id="admin-sidebar" style="background-color: var(--ytm-bg);">
         <div class="offcanvas-header border-bottom" style="border-color: var(--ytm-surface-2) !important;">
-          <h5 class="offcanvas-title logo m-0" style="font-size: 1.25rem; font-weight: 700;">Admin<span style="color: var(--ytm-accent);">Panel</span></h5>
+          <h5 class="offcanvas-title logo m-0 d-flex align-items-center" style="font-size: 1.25rem; font-weight: 700;">
+            <img src="?action=get_app_icon&size=32" alt="Logo" style="height: 28px; width: 28px; margin-right: 8px; border-radius: 6px;">
+            Admin<span style="color: var(--ytm-accent);">Panel</span>
+          </h5>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#admin-sidebar"></button>
         </div>
         <div class="offcanvas-body d-flex flex-column p-0 py-lg-4">
-          <div class="logo d-none d-lg-block">Admin<span>Panel</span></div>
+          <div class="logo d-none d-lg-flex align-items-center" style="padding: 0 1.5rem 1.5rem 1.5rem;">
+            <img src="?action=get_app_icon&size=32" alt="Logo" style="height: 28px; width: 28px; margin-right: 8px; border-radius: 6px;">
+            Admin<span>Panel</span>
+          </div>
           <a href="?access=admin" class="nav-link <?php echo (empty($_GET['page']) || $_GET['page'] === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill d-none d-lg-inline-block"></i><span>User Management</span></a>
           <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill d-none d-lg-inline-block"></i><span>Drive Manager</span></a>
           <a href="./" class="nav-link"><i class="bi bi-arrow-left-circle-fill d-none d-lg-inline-block"></i><span>Back to Player</span></a>
@@ -2059,7 +2087,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               filterByType(files) {
                 if (this.currentFilter === 'all') return files;
                 const map = {
-                  documents: ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'pdf'],
+                  documents: ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'pdf', 'zip'],
                   images: ['png', 'jpg', 'jpeg', 'gif', 'svg'],
                   audio: ['mp3', 'wav', 'ogg'],
                   video: ['mp4', 'webm']
@@ -2226,6 +2254,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 
                 let icon = isFolder ? 'folder' : 'description';
                 if (!isFolder) {
+                  if (item.ext === 'zip') icon = 'folder_zip';
                   if (['js','json','ts'].includes(item.ext)) icon = 'javascript';
                   if (['html','xml'].includes(item.ext)) icon = 'html';
                   if (['css','scss'].includes(item.ext)) icon = 'css';
@@ -2778,6 +2807,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               async openPreviewOrEditor(item) {
+                if (item.ext === 'zip') {
+                  this.showToast('ZIP files cannot be viewed. Use the context menu to extract or download.');
+                  return;
+                }
+                
                 this.currentEditFile = item.path;
                 const streamUrl = `${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`;
 
@@ -10782,6 +10816,10 @@ function perform_full_scan($db) {
             <a href="#" class="nav-link logged-in-only" id="nav-scan-all" data-bs-toggle="modal" data-bs-target="#full-scan-modal" style="display: none !important;">
               <i class="bi bi-hdd-stack-fill"></i>
               <span>Scan All</span>
+            </a>
+            <a href="?access=admin" class="nav-link logged-in-only" id="nav-admin-panel" style="display: none !important;">
+              <i class="bi bi-shield-lock-fill"></i>
+              <span>Admin Panel</span>
             </a>
             <a href="#" class="nav-link d-none" id="install-pwa-btn">
               <i class="bi bi-cloud-arrow-down-fill"></i>
@@ -27115,11 +27153,21 @@ SOFTWARE.</div>
             document.querySelectorAll('.phpmusic-profile-subtext').forEach(el => el.textContent = currentUser.email || 'Verified Artist');
 
             const scanAllBtn = document.getElementById('nav-scan-all');
+            const adminPanelBtn = document.getElementById('nav-admin-panel');
+            const isSuperAdmin = currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com';
+            
             if (scanAllBtn) {
-              if (currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com') {
+              if (isSuperAdmin) {
                 scanAllBtn.style.setProperty('display', 'flex', 'important');
               } else {
                 scanAllBtn.style.setProperty('display', 'none', 'important');
+              }
+            }
+            if (adminPanelBtn) {
+              if (isSuperAdmin) {
+                adminPanelBtn.style.setProperty('display', 'flex', 'important');
+              } else {
+                adminPanelBtn.style.setProperty('display', 'none', 'important');
               }
             }
           } else {
