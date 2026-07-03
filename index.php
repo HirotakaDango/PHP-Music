@@ -507,6 +507,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       return round($bytes, $precision) . ' ' . $units[$pow];
     }
 
+    function logDriveActivity($fileName, $filePath, $action) {
+      try {
+        $db = get_db();
+        $stmt = $db->prepare("INSERT INTO drive_activity (file_name, file_path, action, timestamp) VALUES (?, ?, ?, ?)");
+        $stmt->execute([$fileName, $filePath, $action, time()]);
+      } catch (Exception $e) {}
+    }
+
     $db = get_db();
     $db->exec("
       CREATE TABLE IF NOT EXISTS drive_starred (
@@ -521,6 +529,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       CREATE TABLE IF NOT EXISTS drive_shares (
         token TEXT PRIMARY KEY,
         path TEXT
+      );
+      CREATE TABLE IF NOT EXISTS drive_activity (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_name TEXT,
+        file_path TEXT,
+        action TEXT,
+        timestamp INTEGER
       );
     ");
 
@@ -735,6 +750,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $full = $absPath . '/' . $name;
               if (file_exists($full)) $full = $absPath . '/' . generateUniqueFileName($absPath, $name);
               file_put_contents($full, '');
+              $relPath = ltrim(str_replace($baseDir, '', $full), '/');
+              logDriveActivity($name, $relPath, 'created');
               echo json_encode(['success' => true]);
               break;
 
@@ -743,6 +760,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $full = $absPath . '/' . $name;
               if (file_exists($full)) $full = $absPath . '/' . generateUniqueFolderName($absPath, $name);
               mkdir($full);
+              $relPath = ltrim(str_replace($baseDir, '', $full), '/');
+              logDriveActivity($name, $relPath, 'created');
               echo json_encode(['success' => true]);
               break;
 
@@ -753,7 +772,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (isAllowedExtension($name)) {
                   $dest = $absPath . '/' . $name;
                   if (file_exists($dest)) $dest = $absPath . '/' . generateUniqueFileName($absPath, $name);
-                  if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) $uploaded++;
+                  if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
+                    $uploaded++;
+                    $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
+                    logDriveActivity($name, $relPath, 'uploaded');
+                  }
                 }
               }
               echo json_encode(['success' => true, 'uploaded' => $uploaded]);
@@ -779,6 +802,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       ltrim(str_replace($baseDir, '', dirname($full)), '/'),
                       time()
                     ]);
+                    logDriveActivity($itemName, $itemPath, 'deleted');
                   }
                 }
               }
@@ -804,9 +828,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   }
                   if (rename($trashBin . '/' . $uniq, $dest)) {
                     $delStmt->execute([$uniq]);
+                    $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
+                    logDriveActivity(basename($dest), $relPath, 'restored');
                   }
                 }
               }
+              saveMetadata($meta);
               echo json_encode(['success' => true]);
               break;
 
@@ -843,6 +870,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               if (is_file($oldFull) && !isAllowedExtension($new)) throw new Exception('Extension not allowed');
               if (file_exists($newFull)) throw new Exception('Target exists');
               rename($oldFull, $newFull);
+              logDriveActivity($new, $old, 'renamed');
               echo json_encode(['success' => true]);
               break;
 
@@ -852,6 +880,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $full = $baseDir . '/' . $file;
               if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) throw new Exception('Invalid file');
               file_put_contents($full, $content);
+              logDriveActivity(basename($file), $file, 'modified');
               echo json_encode(['success' => true]);
               break;
 
@@ -946,6 +975,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
                 $zip->extractTo($extractTarget);
                 $zip->close();
+                $relPath = ltrim(str_replace($baseDir, '', $extractTarget), '/');
+                logDriveActivity(basename($extractTarget), $relPath, 'extracted');
                 echo json_encode(['success' => true]);
               } else {
                 throw new Exception('Failed to extract ZIP archive');
@@ -1099,8 +1130,40 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               echo json_encode(['success' => true, 'starred' => $starredList]);
               break;
 
+            case 'activity':
+              $db = get_db();
+              // Housekeeping: purge activity records older than 90 days to keep the database fast
+              $ninetyDaysAgo = time() - (90 * 24 * 60 * 60);
+              $db->prepare("DELETE FROM drive_activity WHERE timestamp < ?")->execute([$ninetyDaysAgo]);
+
+              $stmt = $db->prepare("SELECT file_name, file_path, action, timestamp FROM drive_activity ORDER BY timestamp DESC LIMIT 50");
+              $stmt->execute();
+              $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+              
+              $grouped = [];
+              $today = strtotime("today");
+              $yesterday = strtotime("yesterday");
+              $week = strtotime("-1 week");
+              
+              foreach ($rows as $row) {
+                if ($row['timestamp'] >= $today) $group = 'Today';
+                elseif ($row['timestamp'] >= $yesterday) $group = 'Yesterday';
+                elseif ($row['timestamp'] >= $week) $group = 'Previous 7 Days';
+                else $group = date('F Y', $row['timestamp']);
+                
+                $grouped[$group][] = [
+                  'name' => $row['file_name'],
+                  'path' => $row['file_path'],
+                  'action' => $row['action'],
+                  'mtime' => $row['timestamp']
+                ];
+              }
+              echo json_encode(['success' => true, 'activity' => $grouped]);
+              break;
+
             case 'recents':
               $db = get_db();
+              $limit = isset($_GET['all']) ? 100 : 15;
               $recentFiles = [];
               $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS));
               foreach ($iter as $file) {
@@ -1120,7 +1183,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
               }
               usort($recentFiles, function($a, $b) { return $b['mtime'] - $a['mtime']; });
-              echo json_encode(['success' => true, 'recents' => array_slice($recentFiles, 0, 15)]);
+              echo json_encode(['success' => true, 'recents' => array_slice($recentFiles, 0, $limit)]);
               break;
 
             case 'read':
@@ -1651,6 +1714,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </div>
               <div class="header-actions">
                 <button class="icon-btn mobile-only" onclick="driveApp.toggleMobileSearch(true)" title="Search"><span class="material-symbols-rounded">search</span></button>
+                <button class="icon-btn" onclick="driveApp.toggleActivity()" title="Activity"><span class="material-symbols-rounded">notifications</span></button>
                 <button class="icon-btn" onclick="driveApp.showMoreMenu(event)" title="More options"><span class="material-symbols-rounded">more_vert</span></button>
               </div>
             </div>
@@ -1705,7 +1769,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 <div class="file-list-container" id="fileListContainer" onclick="driveApp.clearSelection(event)">
                   <div class="recents-container" id="recentsSection" style="display: none;">
-                    <div class="section-title" style="margin: 0 0 8px 0;">Recent files</div>
+                    <div class="section-title" style="margin: 0 0 8px 0; display: flex; justify-content: space-between; align-items: center;">
+                      <span>Recent files</span>
+                      <button class="btn-drive btn-text-drive" style="height: 24px; font-size: 12px; padding: 0 8px;" onclick="driveApp.setViewMode('recents_all')">View all</button>
+                    </div>
                     <div class="recents-tray" id="recentsTray"></div>
                   </div>
                   <div class="section-title hidden" id="foldersTitle">Folders</div>
@@ -1721,6 +1788,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <button class="icon-btn" onclick="driveApp.toggleProperties()"><span class="material-symbols-rounded">close</span></button>
                 </div>
                 <div class="properties-content" id="propertiesContent"></div>
+              </aside>
+
+              <aside class="properties-pane" id="activityPane">
+                <div class="properties-header">
+                  <span style="font-family: var(--font-title); font-size: 16px; font-weight: 500;">Activity</span>
+                  <button class="icon-btn" onclick="driveApp.toggleActivity()"><span class="material-symbols-rounded">close</span></button>
+                </div>
+                <div class="properties-content" id="activityContent" style="padding: 0;"></div>
               </aside>
             </div>
 
@@ -1761,10 +1836,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </div>
             </div>
 
+            <!-- Dedicated Image Preview Overlay (Auto-fits Image Scale) -->
+            <div class="modal-overlay" id="imageOverlay" style="z-index: 3500; display: none;" onclick="if(event.target===this) driveApp.closeImage()">
+              <div style="max-width: 95%; max-height: 95%; width: auto; background: transparent; box-shadow: none; padding: 0; display: flex; align-items: center; justify-content: center; position: relative;">
+                <button class="icon-btn" onclick="driveApp.closeImage()" style="position: absolute; top: -16px; right: -16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.5);"><span class="material-symbols-rounded">close</span></button>
+                <div id="imageModalContent" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; max-height: 90vh;"></div>
+              </div>
+            </div>
+
+            <!-- Structured Media Preview Overlay (Spacious Modal Container) -->
             <div class="modal-overlay" id="mediaOverlay" style="z-index: 3500; display: none;" onclick="if(event.target===this) driveApp.closeMedia()">
-              <div class="modal-drive" style="max-width: 90%; max-height: 90%; width: auto; background: transparent; box-shadow: none; padding: 0; align-items: center; justify-content: center; position: relative;">
-                <button class="icon-btn" onclick="driveApp.closeMedia()" style="position: absolute; top: -16px; right: -16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.5);"><span class="material-symbols-rounded">close</span></button>
-                <div id="mediaModalContent" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; max-height: 80vh;"></div>
+              <div class="modal-drive" id="mediaModalContainer" style="max-width: 550px; width: 90%; position: relative; background: var(--theme-surface-container); border-radius: 20px; padding: 24px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.5); border: 1px solid var(--theme-outline-variant); display: flex; flex-direction: column;">
+                <button class="icon-btn" onclick="driveApp.closeMedia()" style="position: absolute; top: 16px; right: 16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.5);"><span class="material-symbols-rounded">close</span></button>
+                <div id="mediaModalContent" style="width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; max-height: 80vh;"></div>
               </div>
             </div>
 
@@ -1834,6 +1918,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.currentEditFile = null;
                 this.searchQuery = '';
                 this.isPropertiesOpen = false;
+                this.isActivityOpen = false;
                 this.clipboard = null;
                 this.isSelectMode = false;
                 this.visibleFoldersCount = 25;
@@ -2010,7 +2095,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (navStarred) navStarred.classList.toggle('active', mode === 'starred');
                 if (navTrash) navTrash.classList.toggle('active', mode === 'trash');
                 
-                document.getElementById('chipsContainer').style.display = mode === 'home' ? 'flex' : 'none';
+                document.getElementById('chipsContainer').style.display = (mode === 'home' || mode === 'recents_all') ? 'flex' : 'none';
                 document.getElementById('recentsSection').style.display = mode === 'home' ? 'block' : 'none';
                 document.getElementById('trashActions').style.display = mode === 'trash' ? 'flex' : 'none';
 
@@ -2045,6 +2130,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const data = await this.fetchAPI('list_trash');
                   if (data) {
                     this.renderTrash(data.trash);
+                  }
+                } else if (this.currentViewMode === 'recents_all') {
+                  const data = await this.fetchAPI('recents&all=1');
+                  if (data) {
+                    this.data = { folders: [], files: data.recents, breadcrumbs: [] };
+                    this.render();
                   }
                 }
               }
@@ -2226,7 +2317,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 
                 const root = document.createElement('div');
                 root.className = 'breadcrumb-item';
-                root.textContent = this.searchQuery ? `Search: "${this.searchQuery}"` : (this.currentViewMode === 'trash' ? 'Trash' : (this.currentViewMode === 'starred' ? 'Starred' : 'Drive'));
+                root.textContent = this.searchQuery ? `Search: "${this.searchQuery}"` : (this.currentViewMode === 'trash' ? 'Trash' : (this.currentViewMode === 'starred' ? 'Starred' : (this.currentViewMode === 'recents_all' ? 'Recent Files' : 'Drive')));
                 root.onclick = () => this.navigate('');
                 container.appendChild(root);
 
@@ -2271,31 +2362,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const nameWithHighlight = this.highlightMatch(item.name);
 
                 if (this.viewMode === 'grid') {
-                  if (isFolder) {
-                    el.className = `item-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
-                    el.innerHTML = `
-                      ${checkboxHtml}
-                      <div class="item-icon folder-icon"><span class="material-symbols-rounded">folder</span></div>
-                      <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
-                      ${starHtml}
-                    `;
-                  } else {
-                    el.className = `item-card file-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
-                    let previewHtml = `<span class="material-symbols-rounded">${icon}</span>`;
-                    if (item.isImage || ['mp4', 'webm'].includes(item.ext)) {
-                      const streamUrl = `${this.apiPrefix}api=true&action=thumb&file=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
-                      previewHtml = `<img src="${streamUrl}" loading="lazy" alt="${item.name}">`;
-                    }
-                    el.innerHTML = `
-                      ${checkboxHtml}
-                      <div class="file-preview">${previewHtml}</div>
-                      <div class="file-info-bar">
-                        <div class="item-icon"><span class="material-symbols-rounded">${icon}</span></div>
-                        <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
-                      </div>
-                      ${starHtml}
-                    `;
+                  el.className = `item-card file-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
+                  let previewHtml = `<span class="material-symbols-rounded">${icon}</span>`;
+                  if (!isFolder && (item.isImage || ['mp4', 'webm'].includes(item.ext))) {
+                    const streamUrl = `${this.apiPrefix}api=true&action=thumb&file=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
+                    previewHtml = `<img src="${streamUrl}" loading="lazy" alt="${item.name}">`;
                   }
+                  el.innerHTML = `
+                    ${checkboxHtml}
+                    <div class="file-preview">${previewHtml}</div>
+                    <div class="file-info-bar">
+                      <div class="item-icon ${fIconClass}"><span class="material-symbols-rounded">${icon}</span></div>
+                      <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
+                    </div>
+                    ${starHtml}
+                  `;
                 } else {
                   el.className = `item-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
                   const date = new Date(item.mtime * 1000).toLocaleDateString();
@@ -2447,10 +2528,81 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               toggleProperties() {
                 this.isPropertiesOpen = !this.isPropertiesOpen;
                 document.getElementById('propertiesPane').style.display = this.isPropertiesOpen ? 'flex' : 'none';
-                if (this.isPropertiesOpen && this.selectedItems.size === 1) {
-                  this.loadProperties([...this.selectedItems][0]);
-                } else {
-                  this.renderPropertiesEmpty();
+                if (this.isPropertiesOpen) {
+                  this.isActivityOpen = false;
+                  document.getElementById('activityPane').style.display = 'none';
+                  if (this.selectedItems.size === 1) {
+                    this.loadProperties([...this.selectedItems][0]);
+                  } else {
+                    this.renderPropertiesEmpty();
+                  }
+                }
+              }
+
+              toggleActivity() {
+                this.isActivityOpen = !this.isActivityOpen;
+                document.getElementById('activityPane').style.display = this.isActivityOpen ? 'flex' : 'none';
+                if (this.isActivityOpen) {
+                  this.isPropertiesOpen = false;
+                  document.getElementById('propertiesPane').style.display = 'none';
+                  this.loadActivity();
+                }
+              }
+
+              async loadActivity() {
+                const content = document.getElementById('activityContent');
+                content.innerHTML = '<div style="padding: 32px 16px; text-align: center; color: var(--theme-on-surface-variant);"><span class="material-symbols-rounded" style="font-size:32px; animation: rotate 2s linear infinite;">sync</span><br>Loading timeline...</div>';
+                const data = await this.fetchAPI('activity');
+                if (data && data.success) {
+                  let html = '';
+                  
+                  const verbMap = {
+                    created: 'created',
+                    uploaded: 'uploaded',
+                    deleted: 'moved to trash',
+                    restored: 'restored',
+                    renamed: 'renamed',
+                    modified: 'modified',
+                    extracted: 'extracted'
+                  };
+
+                  const iconMap = {
+                    created: 'add_circle',
+                    uploaded: 'upload_file',
+                    deleted: 'delete',
+                    restored: 'restore_from_trash',
+                    renamed: 'edit_square',
+                    modified: 'edit',
+                    extracted: 'folder_zip'
+                  };
+
+                  if (Object.keys(data.activity).length === 0) {
+                    html = '<div style="padding: 32px 16px; text-align: center; color: var(--theme-on-surface-variant);">No recent activity</div>';
+                  } else {
+                    for (const [group, items] of Object.entries(data.activity)) {
+                      html += `<div style="padding: 16px 20px 8px 20px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--theme-on-surface-variant);">${group}</div>`;
+                      items.forEach(item => {
+                        const date = new Date(item.mtime * 1000);
+                        const timeStr = date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        const verb = verbMap[item.action] || 'modified';
+                        const icon = iconMap[item.action] || 'edit';
+                        const folderPath = item.path.includes('/') ? item.path.split('/').slice(0, -1).join('/') : '';
+                        
+                        html += `
+                          <div style="display: flex; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--theme-outline-variant); align-items: center; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--theme-surface-container)'" onmouseout="this.style.backgroundColor='transparent'" onclick="driveApp.navigate('${folderPath}')">
+                            <div style="width: 40px; height: 40px; border-radius: 50%; background: var(--theme-surface-container-high); display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 2px 6px rgba(0,0,0,0.4);">
+                              <span class="material-symbols-rounded" style="font-size: 20px; color: var(--theme-on-surface);">${icon}</span>
+                            </div>
+                            <div style="display: flex; flex-direction: column; overflow: hidden;">
+                              <span style="font-size: 14px; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">You ${verb} <b>${item.name}</b></span>
+                              <span style="font-size: 12px; color: var(--theme-on-surface-variant);">${timeStr}</span>
+                            </div>
+                          </div>
+                        `;
+                      });
+                    }
+                  }
+                  content.innerHTML = html;
                 }
               }
 
@@ -2811,39 +2963,54 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   this.showToast('ZIP files cannot be viewed. Use the context menu to extract or download.');
                   return;
                 }
-                
                 this.currentEditFile = item.path;
-                const streamUrl = `${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`;
+                
+                let qs = '?';
+                if (this.currentPath) qs += `path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}&`;
+                qs += `edit=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
+                window.history.pushState({}, '', qs);
+                
+                const streamUrl = `?api=true&action=stream&file=${encodeURIComponent(item.path)}`;
 
-                if (item.isImage || ['mp4','webm','mp3','wav','ogg','pdf'].includes(item.ext)) {
+                if (item.isImage) {
+                  const imageOverlay = document.getElementById('imageOverlay');
+                  const imageContent = document.getElementById('imageModalContent');
+                  imageOverlay.style.display = 'flex';
+                  imageContent.innerHTML = `<img src="${streamUrl}" style="max-width: 100%; max-height: 85vh; object-fit: contain; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">`;
+                } else if (['mp4','webm','mp3','wav','ogg','pdf'].includes(item.ext)) {
                   const mediaOverlay = document.getElementById('mediaOverlay');
-                  const modalContent = document.getElementById('mediaModalContent');
-                  mediaOverlay.style.display = 'flex';
+                  const mediaContent = document.getElementById('mediaModalContent');
+                  const mediaContainer = document.getElementById('mediaModalContainer');
                   
-                  const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '') + `&edit=${encodeURIComponent(item.name)}`;
-                  window.history.pushState({ path: this.currentPath, edit: item.name }, '', newUrl);
-                  
-                  if (item.isImage) {
-                    modalContent.innerHTML = `<img src="${streamUrl}" style="max-width: 100%; max-height: 80vh; object-fit: contain; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">`;
-                  } else if (['mp4','webm'].includes(item.ext)) {
-                    modalContent.innerHTML = `<video controls autoplay preload="metadata" style="max-width: 100%; max-height: 80vh; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); background: #000;"><source src="${streamUrl}" type="video/${item.ext}"></video>`;
-                  } else if (['mp3','wav','ogg'].includes(item.ext)) {
-                    modalContent.innerHTML = `
-                      <div style="background: var(--theme-surface-container-low); padding: 24px; border-radius: 24px; display: flex; flex-direction: column; align-items: center; gap: 24px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
-                        <div style="width: 120px; height: 120px; border-radius: 24px; background: #ff0000; color: #ffffff; display: flex; align-items: center; justify-content: center;"><span class="material-symbols-rounded" style="font-size: 64px; color: #ffffff;">audiotrack</span></div>
-                        <div style="font-family: var(--font-title); font-size: 16px; color: var(--theme-on-surface); text-align: center; word-break: break-all; max-width: 300px;">${item.name}</div>
-                        <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
-                      </div>`;
-                  } else if (item.ext === 'pdf') {
-                    modalContent.innerHTML = `
-                      <div style="width: 90vw; height: 85vh; max-width: 1000px; background: var(--theme-surface); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                  if (item.ext === 'pdf') {
+                    mediaContainer.style.maxWidth = '1000px';
+                    mediaContainer.style.width = '95%';
+                    mediaContainer.style.padding = '0';
+                    mediaContent.innerHTML = `
+                      <div style="width: 100%; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
                         <div style="padding: 12px 16px; background: var(--theme-surface-container-high); border-bottom: 1px solid var(--theme-outline-variant); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;">
                           <span style="font-family: var(--font-title); font-size: 14px; font-weight: 500; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 12px;">${item.name}</span>
-                          <button class="btn-drive btn-filled-drive" style="height: 32px; padding: 0 16px; font-size: 12px; flex-shrink: 0;" onclick="window.open('${streamUrl}', '_blank')">Open / Download Native</button>
+                          <button class="btn btn-filled" style="height: 32px; padding: 0 16px; font-size: 12px; flex-shrink: 0; background-color: var(--theme-primary); color: var(--theme-on-primary); border-radius: 16px; border: none; cursor: pointer;" onclick="window.open('${streamUrl}', '_blank')">Open / Download Native</button>
                         </div>
                         <iframe src="${streamUrl}" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>
                       </div>`;
+                  } else if (['mp4','webm'].includes(item.ext)) {
+                    mediaContainer.style.maxWidth = '550px';
+                    mediaContainer.style.width = '90%';
+                    mediaContainer.style.padding = '24px';
+                    mediaContent.innerHTML = `<video controls autoplay preload="metadata" style="width: 100%; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); background: #000;"><source src="${streamUrl}" type="video/${item.ext}"></video>`;
+                  } else if (['mp3','wav','ogg'].includes(item.ext)) {
+                    mediaContainer.style.maxWidth = '550px';
+                    mediaContainer.style.width = '90%';
+                    mediaContainer.style.padding = '24px';
+                    mediaContent.innerHTML = `
+                      <div style="display: flex; flex-direction: column; align-items: center; gap: 24px; width: 100%;">
+                        <div style="width: 120px; height: 120px; border-radius: 24px; background: var(--theme-primary-container); color: var(--theme-on-primary-container); display: flex; align-items: center; justify-content: center;"><span class="material-symbols-rounded" style="font-size: 64px; color: var(--theme-primary);">audiotrack</span></div>
+                        <div style="font-family: var(--font-title); font-size: 16px; color: var(--theme-on-surface); text-align: center; word-break: break-all; max-width: 300px;">${item.name}</div>
+                        <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
+                      </div>`;
                   }
+                  mediaOverlay.style.display = 'flex';
                 } else {
                   const overlay = document.getElementById('editorOverlay');
                   const actions = document.getElementById('editorActions');
@@ -2891,6 +3058,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
               }
               
+              closeImage() {
+                const overlay = document.getElementById('imageOverlay');
+                if (overlay) {
+                  overlay.style.display = 'none';
+                  document.getElementById('imageModalContent').innerHTML = '';
+                }
+                this.currentEditFile = null;
+                
+                // Revert URL Bar
+                const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '');
+                window.history.pushState({ path: this.currentPath }, '', newUrl);
+              }
+
               closeMedia() {
                 const overlay = document.getElementById('mediaOverlay');
                 if (overlay) {
@@ -2899,6 +3079,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
                 this.currentEditFile = null;
                 
+                // Revert URL Bar
                 const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '');
                 window.history.pushState({ path: this.currentPath }, '', newUrl);
               }
