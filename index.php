@@ -365,7 +365,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '4.8');
+define('APP_VERSION', '4.9');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', $admin_password ?? 'admin');
@@ -768,14 +768,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             case 'upload':
               if (!isset($_FILES['files'])) throw new Exception('No files uploaded');
               $uploaded = 0;
+              $paths = $_POST['paths'] ?? [];
               foreach ($_FILES['files']['name'] as $i => $name) {
                 if (isAllowedExtension($name)) {
-                  $dest = $absPath . '/' . $name;
-                  if (file_exists($dest)) $dest = $absPath . '/' . generateUniqueFileName($absPath, $name);
+                  if (!empty($paths[$i])) {
+                    // Sanitize path traversals and rebuild directory tree structure recursively
+                    $relPathClean = ltrim(str_replace(['..', '\\'], ['', '/'], $paths[$i]), '/');
+                    $dest = $absPath . '/' . $relPathClean;
+                    $targetDir = dirname($dest);
+                    if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
+                  } else {
+                    $dest = $absPath . '/' . $name;
+                    if (file_exists($dest)) $dest = $absPath . '/' . generateUniqueFileName($absPath, $name);
+                  }
                   if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
                     $uploaded++;
                     $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
-                    logDriveActivity($name, $relPath, 'uploaded');
+                    logDriveActivity(basename($dest), $relPath, 'uploaded');
                   }
                 }
               }
@@ -1400,6 +1409,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/theme/material-darker.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/dialog/dialog.min.css">
     <style>
       :root { --ytm-bg: #030303; --ytm-surface: #121212; --ytm-surface-2: #282828; --ytm-primary-text: #ffffff; --ytm-secondary-text: #aaaaaa; --ytm-accent: #ff0000; }
@@ -1532,8 +1543,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .drive-app-container .icon-filled { font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
 
             .drive-app-container .drive-header { height: 64px; display: flex; align-items: center; padding: 0 16px; gap: 12px; background-color: var(--theme-surface); flex-shrink: 0; border-bottom: 1px solid var(--theme-outline-variant); }
-            .drive-app-container .drive-menu-btn { display: none; }
-            @media (max-width: 768px) { .drive-app-container .drive-menu-btn { display: flex !important; } }
+            .drive-app-container .drive-menu-btn { display: flex; }
             .drive-app-container .logo-container { display: flex; align-items: center; gap: 8px; width: auto; cursor: pointer; flex-shrink: 0; }
             .drive-app-container .logo-img { width: 36px; height: 36px; border-radius: 8px; background: #ff0000; color: #ffffff; display: flex; align-items: center; justify-content: center; }
             .drive-app-container .logo-img .material-symbols-rounded { color: #ffffff; }
@@ -1554,7 +1564,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             .drive-app-container .main-wrapper { display: flex; flex: 1; overflow: hidden; position: relative; }
 
-            .drive-app-container .sidebar-drive { width: 240px; display: flex; flex-direction: column; padding: 16px 12px; gap: 16px; flex-shrink: 0; background: var(--theme-surface); z-index: 100; transition: left 0.3s ease; border-right: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .sidebar-drive { width: 240px; display: flex; flex-direction: column; padding: 16px 12px; gap: 16px; flex-shrink: 0; background: var(--theme-surface); z-index: 100; transition: width 0.3s ease, padding 0.3s ease, left 0.3s ease; border-right: 1px solid var(--theme-outline-variant); overflow: hidden; white-space: nowrap; }
+            @media (min-width: 769px) { .drive-app-container .sidebar-drive.collapsed { width: 0; padding-left: 0; padding-right: 0; border-right-color: transparent; } }
             .drive-app-container .sidebar-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 99; display: none; opacity: 0; transition: opacity 0.3s; }
 
             .drive-app-container .fab { height: 52px; border-radius: 16px; background-color: #ff0000; color: #ffffff; border: none; display: inline-flex; align-items: center; padding: 0 20px 0 16px; gap: 12px; font-family: var(--font-title); font-size: 14px; font-weight: 700; cursor: pointer; box-shadow: 0 4px 12px rgba(255,0,0,0.3); transition: transform var(--transition), background-color var(--transition); width: fit-content; }
@@ -1647,6 +1658,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .drive-app-container .editor-header-drive { height: 60px; display: flex; align-items: center; padding: 0 16px; gap: 16px; border-bottom: 1px solid var(--theme-outline-variant); background-color: var(--theme-surface-container-low); flex-shrink: 0; }
             .drive-app-container .editor-title-drive { flex: 1; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .drive-app-container .CodeMirror { flex: 1; height: 100% !important; font-family: monospace; font-size: 14px; }
+            .drive-app-container .CodeMirror-scroll { padding-bottom: 120px !important; }
 
             .drive-app-container .snackbar-container-drive { position: fixed; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); z-index: 4000; display: flex; flex-direction: column; gap: 8px; align-items: center; }
             .drive-app-container .snackbar-drive { background-color: var(--theme-on-surface); color: var(--theme-surface); padding: 12px 20px; border-radius: 8px; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: space-between; min-width: 280px; max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); opacity: 0; margin-bottom: -20px; transition: opacity 0.3s, margin-bottom 0.3s; }
@@ -1801,10 +1813,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             <div class="floating-menu" id="newMenu">
               <div class="menu-item" onclick="driveApp.showModal('addFolder')"><span class="material-symbols-rounded">create_new_folder</span>New folder</div>
-              <div class="menu-divider"></div>
               <div class="menu-item" onclick="driveApp.showModal('addFile')"><span class="material-symbols-rounded">note_add</span>New file</div>
+              <div class="menu-divider"></div>
               <div class="menu-item" onclick="document.getElementById('fileUploadInput').click()"><span class="material-symbols-rounded">upload_file</span>File upload</div>
+              <div class="menu-item" onclick="document.getElementById('folderUploadInput').click()"><span class="material-symbols-rounded">drive_folder_upload</span>Folder upload</div>
               <input type="file" id="fileUploadInput" multiple class="hidden" onchange="driveApp.handleFilesSelect(event)">
+              <input type="file" id="folderUploadInput" webkitdirectory directory multiple class="hidden" onchange="driveApp.handleFolderSelect(event)">
             </div>
 
             <div class="floating-menu" id="moreMenu">
@@ -1896,6 +1910,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </div>
             </div>
 
+            <!-- Google Drive-Style Upload Progress Widget -->
+            <div id="uploadWidget" style="position: fixed; bottom: 16px; right: 16px; width: calc(100% - 32px); max-width: 360px; background: var(--theme-surface-container-high); border: 1px solid var(--theme-outline-variant); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 5000; display: none; flex-direction: column; overflow: hidden; border-bottom: 2px solid var(--theme-primary);">
+              <div id="uploadWidgetHeader" style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--theme-surface-container); border-bottom: 1px solid var(--theme-outline-variant); cursor: pointer; user-select: none;" onclick="driveApp.uploadQueue.toggleCollapse()">
+                <span id="uploadWidgetTitle" style="font-family: var(--font-title); font-size: 14px; font-weight: 500; color: var(--theme-on-surface);">Uploading files...</span>
+                <div style="display: flex; align-items: center; gap: 4px;" onclick="event.stopPropagation()">
+                  <button class="icon-btn" id="uploadWidgetToggleBtn" style="width: 28px; height: 28px;" onclick="driveApp.uploadQueue.toggleCollapse()" title="Show more/less"><span class="material-symbols-rounded">expand_more</span></button>
+                  <button class="icon-btn" id="uploadWidgetCloseBtn" style="width: 28px; height: 28px;" onclick="driveApp.uploadQueue.cancelAll()" title="Cancel all"><span class="material-symbols-rounded">close</span></button>
+                </div>
+              </div>
+              <div id="uploadWidgetList" style="max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; padding: 4px 0; background: var(--theme-surface);"></div>
+            </div>
+
             <div class="snackbar-container-drive" id="snackbarContainer"></div>
           </div>
 
@@ -1928,6 +1954,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.editorWrap = localStorage.getItem('drive_editorWrap') !== 'false';
                 this.frBound = false;
                 this.initEditFile = new URLSearchParams(window.location.search).get('edit') || null;
+                this.uploadQueue = new UploadQueue(this);
 
                 this.init();
               }
@@ -2005,11 +2032,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   dropZone.classList.add('drag-over'); 
                 });
                 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-                dropZone.addEventListener('drop', (e) => {
+                dropZone.addEventListener('drop', async (e) => {
                   if (window.innerWidth <= 768) return;
                   e.preventDefault();
                   dropZone.classList.remove('drag-over');
-                  if (e.dataTransfer.files.length) this.uploadFiles(e.dataTransfer.files);
+                  
+                  if (e.dataTransfer.items && e.dataTransfer.items.length) {
+                    this.showToast('Scanning dropped items...');
+                    const { files, paths } = await this.scanDroppedItems(e.dataTransfer.items);
+                    if (files.length > 0) {
+                      this.uploadFiles(files, paths);
+                    }
+                  } else if (e.dataTransfer.files.length) {
+                    this.uploadFiles(e.dataTransfer.files);
+                  }
                 });
 
                 document.getElementById('searchInput').addEventListener('input', (e) => {
@@ -2514,8 +2550,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               toggleSidebar() {
                 const sb = document.getElementById('sidebarDrive');
                 const ov = document.getElementById('sidebarOverlay');
-                sb.classList.toggle('open');
-                ov.classList.toggle('open');
+                if (window.innerWidth <= 768) {
+                  sb.classList.toggle('open');
+                  ov.classList.toggle('open');
+                } else {
+                  sb.classList.toggle('collapsed');
+                }
               }
 
               closeSidebarOnMobile() {
@@ -2923,39 +2963,63 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 e.target.value = '';
               }
 
-              uploadFiles(files) {
-                const formData = new FormData();
-                formData.append('action', 'upload');
-                for (let i = 0; i < files.length; i++) formData.append('files[]', files[i]);
+              handleFolderSelect(e) {
+                if (e.target.files.length) {
+                  const files = e.target.files;
+                  const paths = [];
+                  for (let i = 0; i < files.length; i++) {
+                    paths.push(files[i].webkitRelativePath || '');
+                  }
+                  this.uploadFiles(files, paths);
+                }
+                e.target.value = '';
+              }
+
+              async scanDroppedItems(items) {
+                const files = [];
+                const paths = [];
                 
-                const toast = document.createElement('div');
-                toast.className = 'snackbar-drive show';
-                toast.innerHTML = `Uploading... <span id="up-progress" style="font-weight:bold;margin-left:8px;">0%</span>`;
-                document.getElementById('snackbarContainer').appendChild(toast);
-                
-                const xhr = new XMLHttpRequest();
-                xhr.open('POST', `${this.apiPrefix}api=true&action=upload&path=${encodeURIComponent(this.currentPath)}`);
-                xhr.upload.onprogress = (e) => {
-                  if (e.lengthComputable) {
-                    const percent = Math.round((e.loaded / e.total) * 100);
-                    const progressEl = document.getElementById('up-progress');
-                    if (progressEl) progressEl.textContent = percent + '%';
+                const readAllEntries = async (dirReader) => {
+                  let allEntries = [];
+                  const read = async () => {
+                    const entries = await new Promise((resolve) => dirReader.readEntries(resolve));
+                    if (entries && entries.length > 0) {
+                      allEntries = allEntries.concat(entries);
+                      await read();
+                    }
+                  };
+                  await read();
+                  return allEntries;
+                };
+
+                const traverseEntry = async (entry, path = '') => {
+                  if (entry.isFile) {
+                    const file = await new Promise((resolve) => entry.file(resolve));
+                    files.push(file);
+                    paths.push(path + file.name);
+                  } else if (entry.isDirectory) {
+                    const dirReader = entry.createReader();
+                    const entries = await readAllEntries(dirReader);
+                    for (const childEntry of entries) {
+                      await traverseEntry(childEntry, path + entry.name + '/');
+                    }
                   }
                 };
-                xhr.onload = () => {
-                  toast.remove();
-                  try {
-                    const res = JSON.parse(xhr.responseText);
-                    if (res.success) {
-                      this.showToast(`${res.uploaded} file(s) uploaded`);
-                      this.loadDirectory(this.currentPath);
-                    } else throw new Error(res.error || 'Upload error');
-                  } catch (err) {
-                    this.showToast(err.message || 'Upload failed');
+
+                for (let i = 0; i < items.length; i++) {
+                  const entry = items[i].webkitGetAsEntry();
+                  if (entry) {
+                    await traverseEntry(entry);
                   }
-                };
-                xhr.onerror = () => { toast.remove(); this.showToast('Upload request failed'); };
-                xhr.send(formData);
+                }
+
+                return { files, paths };
+              }
+
+              uploadFiles(files, paths = []) {
+                for (let i = 0; i < files.length; i++) {
+                  this.uploadQueue.add(files[i], paths[i] || '');
+                }
               }
 
               async openPreviewOrEditor(item) {
@@ -3290,6 +3354,203 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
             }
 
+            class UploadQueue {
+              constructor(fileManager) {
+                this.fm = fileManager;
+                this.queue = [];
+                this.activeCount = 0;
+                this.maxConcurrent = 3;
+                this.isCollapsed = false;
+              }
+
+              add(file, path = '') {
+                const id = 'up_' + Math.random().toString(36).substring(2, 9);
+                const item = {
+                  id,
+                  file,
+                  path,
+                  status: 'queued',
+                  progress: 0,
+                  xhr: null
+                };
+                this.queue.push(item);
+                this.renderItem(item);
+                this.updateHeader();
+                this.process();
+              }
+
+              process() {
+                if (this.activeCount >= this.maxConcurrent) return;
+                const nextItem = this.queue.find(item => item.status === 'queued');
+                if (!nextItem) return;
+
+                nextItem.status = 'uploading';
+                this.activeCount++;
+                this.updateItemUI(nextItem);
+                this.updateHeader();
+
+                const formData = new FormData();
+                formData.append('action', 'upload');
+                formData.append('files[]', nextItem.file);
+                formData.append('paths[]', nextItem.path || '');
+
+                const xhr = new XMLHttpRequest();
+                nextItem.xhr = xhr;
+
+                // FIXED: Now correctly routes via the authenticated `this.fm.apiPrefix` URL
+                xhr.open('POST', `${this.fm.apiPrefix}api=true&action=upload&path=${encodeURIComponent(this.fm.currentPath)}`);
+
+                xhr.upload.onprogress = (e) => {
+                  if (e.lengthComputable) {
+                    nextItem.progress = Math.round((e.loaded / e.total) * 100);
+                    this.updateItemUI(nextItem);
+                  }
+                };
+
+                xhr.onload = () => {
+                  this.activeCount--;
+                  try {
+                    const res = JSON.parse(xhr.responseText);
+                    if (res && res.success) {
+                      nextItem.status = 'success';
+                      nextItem.progress = 100;
+                    } else {
+                      nextItem.status = 'failed';
+                    }
+                  } catch (err) {
+                    nextItem.status = 'failed';
+                  }
+                  this.updateItemUI(nextItem);
+                  this.updateHeader();
+                  this.fm.loadDirectory(this.fm.currentPath);
+                  this.process();
+                };
+
+                xhr.onerror = () => {
+                  this.activeCount--;
+                  nextItem.status = 'failed';
+                  this.updateItemUI(nextItem);
+                  this.updateHeader();
+                  this.process();
+                };
+
+                xhr.send(formData);
+                this.process();
+              }
+
+              cancel(id) {
+                const item = this.queue.find(i => i.id === id);
+                if (!item) return;
+                if (item.status === 'uploading' && item.xhr) {
+                  item.xhr.abort();
+                  this.activeCount--;
+                }
+                item.status = 'cancelled';
+                this.updateItemUI(item);
+                this.updateHeader();
+                this.process();
+              }
+
+              cancelAll() {
+                this.queue.forEach(item => {
+                  if (item.status === 'uploading' && item.xhr) {
+                    item.xhr.abort();
+                  }
+                  if (item.status === 'queued' || item.status === 'uploading') {
+                    item.status = 'cancelled';
+                  }
+                });
+                this.activeCount = 0;
+                this.queue = [];
+                document.getElementById('uploadWidgetList').innerHTML = '';
+                document.getElementById('uploadWidget').style.display = 'none';
+              }
+
+              renderItem(item) {
+                const list = document.getElementById('uploadWidgetList');
+                const itemEl = document.createElement('div');
+                itemEl.id = `widget_item_${item.id}`;
+                itemEl.style.cssText = "display: flex; flex-direction: column; padding: 8px 16px; border-bottom: 1px solid var(--theme-outline-variant); background: var(--theme-surface);";
+                
+                itemEl.innerHTML = `
+                  <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px;">
+                    <div style="display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;">
+                      <span class="material-symbols-rounded" id="icon_${item.id}" style="font-size: 20px; color: var(--theme-on-surface-variant); flex-shrink: 0;">upload_file</span>
+                      <span style="font-size: 13px; font-weight: 500; color: var(--theme-on-surface); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; min-width: 0;">${item.file.name}</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+                      <span id="status_${item.id}" style="font-size: 11px; color: var(--theme-on-surface-variant);">Queued</span>
+                      <button class="icon-btn" id="cancel_btn_${item.id}" style="width: 24px; height: 24px;" onclick="driveApp.uploadQueue.cancel('${item.id}')"><span class="material-symbols-rounded" style="font-size: 16px;">close</span></button>
+                    </div>
+                  </div>
+                  <div style="width: 100%; height: 4px; background: var(--theme-surface-container-high); border-radius: 2px; overflow: hidden;">
+                    <div id="progress_${item.id}" style="width: 0%; height: 100%; background: var(--theme-primary); transition: width 0.1s;"></div>
+                  </div>
+                `;
+                list.appendChild(itemEl);
+                document.getElementById('uploadWidget').style.display = 'flex';
+              }
+
+              updateItemUI(item) {
+                const progressEl = document.getElementById(`progress_${item.id}`);
+                const statusEl = document.getElementById(`status_${item.id}`);
+                const cancelBtn = document.getElementById(`cancel_btn_${item.id}`);
+                const iconEl = document.getElementById(`icon_${item.id}`);
+
+                if (progressEl) progressEl.style.width = `${item.progress}%`;
+                if (statusEl) {
+                  if (item.status === 'uploading') statusEl.textContent = `${item.progress}%`;
+                  else if (item.status === 'queued') statusEl.textContent = 'Queued';
+                  else if (item.status === 'success') {
+                    statusEl.textContent = 'Completed';
+                    statusEl.style.color = '#4caf50';
+                    if (cancelBtn) cancelBtn.style.display = 'none';
+                    if (iconEl) iconEl.textContent = 'check_circle';
+                  } else if (item.status === 'failed') {
+                    statusEl.textContent = 'Failed';
+                    statusEl.style.color = '#f44336';
+                    if (cancelBtn) cancelBtn.style.display = 'none';
+                    if (iconEl) iconEl.textContent = 'error';
+                  } else if (item.status === 'cancelled') {
+                    statusEl.textContent = 'Cancelled';
+                    statusEl.style.color = 'var(--theme-on-surface-variant)';
+                    if (cancelBtn) cancelBtn.style.display = 'none';
+                    if (iconEl) iconEl.textContent = 'cancel';
+                  }
+                }
+              }
+
+              updateHeader() {
+                const active = this.queue.filter(i => i.status === 'uploading' || i.status === 'queued');
+                const title = document.getElementById('uploadWidgetTitle');
+                if (title) {
+                  if (active.length > 0) {
+                    title.textContent = `Uploading ${active.length} item(s)...`;
+                  } else {
+                    const succeeded = this.queue.filter(i => i.status === 'success').length;
+                    title.textContent = `Uploaded ${succeeded} item(s)`;
+                  }
+                }
+              }
+
+              toggleCollapse() {
+                this.isCollapsed = !this.isCollapsed;
+                const widget = document.getElementById('uploadWidget');
+                const list = document.getElementById('uploadWidgetList');
+                const toggleBtn = document.getElementById('uploadWidgetToggleBtn');
+                if (toggleBtn) {
+                  const icon = toggleBtn.querySelector('span');
+                  if (icon) icon.textContent = this.isCollapsed ? 'expand_less' : 'expand_more';
+                }
+                if (this.isCollapsed) {
+                  list.style.display = 'none';
+                  widget.style.height = 'auto';
+                } else {
+                  list.style.display = 'flex';
+                }
+              }
+            }
+
             const driveApp = new DriveFileManager();
           </script>
         <?php else: ?>
@@ -3457,6 +3718,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       </main>
     </div>
     <?php endif; ?>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/search.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/searchcursor.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/jump-to-line.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/dialog/dialog.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/xml/xml.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/javascript/javascript.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/css/css.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/htmlmixed/htmlmixed.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/php/php.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/clike/clike.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   </body>
 </html>
