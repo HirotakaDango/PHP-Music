@@ -77,11 +77,12 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 | **1:1 Image Cropper** | Crop profile pictures and song covers. | Integrated 1:1 aspect-ratio cropping canvas with panning/zoom to fill gaps, resizing and converting uploads to WebP/JPEG format. |
 | **Upload Progress Percentage** | Displays visual upload progress. | Tracks real-time upload progress using `XMLHttpRequest` upload listeners, mapping output percentages to a loading spinner. |
 | **Account Soft-Delete** | Soft-deletes user credentials while keeping upload logs, notes, tasks, and blogs intact. | Wipes personal emails and passwords and generates a physical backup key for secure restoration later. |
-| **Long-Lasting Persistent Sessions** | Keep sessions logged-in persistently. | Persists sessions safely for up to 1 year using custom garbage collection and cookie lifetimes. |
+| **Long-Lasting Persistent Sessions** | Keep sessions logged-in persistently. | Persists sessions safely for up to 1 year using custom garbage collection and cookie lifetimes (now including 1-year cookies for the Admin panel). |
 | **ID3 Metadata & Lyrics Editor** | Overwrite metadata and LRC lyrics directly. | Modifies DB records and writes tags physically back into files using getID3 write functions. Automatically mirrors artwork in dedicated `covers/songs` and `covers/albums` folders. |
 | **Upload Quotas** | Multi-file uploads with quota tracking. | Restricts uploads to verified users with a daily limit of 10 songs/day (resetting at midnight). |
 | **PWA Cache Cleansing** | Force PWA and Service Worker hard-resets. | Offers a manual "Clear PWA Cache" option to wipe IndexedDB version tracking and unregister the service worker. |
 | **Administrative Dashboard** | Full-scale administrative manager (`?access=admin`). | Paginated user table, search filters, account verification toggles, ban managers, and complete file/account purging tools. |
+| **Integrated Drive Manager** | Built-in file management backend for server assets. | Features native `.zip` archive extraction, dynamic deep-linking URLs, recursive folder property calculations, and a responsive 2-column mobile grid. |
 | **SQLite Backend Zero-Setup** | Completely self-hosted, lightweight architecture. | Auto-initializes SQLite database schemas on first run, with zero complex database setup required. |
 
 ---
@@ -199,7 +200,7 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite, follow
 
 ## Admin Panel
 
-Access the administrative dashboard by appending `?access=admin` to your URL. Log in using the admin password (default: `admin`).
+Access the administrative dashboard by appending `?access=admin` to your URL. Log in using the admin password (default: `admin`). Admin sessions are highly persistent and securely cached in the browser via a 1-year cookie.
 
 | Admin Module | Functionality |
 | :--- | :--- |
@@ -208,6 +209,7 @@ Access the administrative dashboard by appending `?access=admin` to your URL. Lo
 | **Suspending** | Ban or unban malicious accounts. Suspended users are locked out of the application. |
 | **Purging** | Permanently delete user profiles and purge all of their uploaded physical files, playlists, notes, tasks, blogs, and categories from the server database. |
 | **System Library** | Files scanned directly from disk are assigned to the virtual "Music Library" administrator account. |
+| **Drive Manager** | An integrated file manager for server assets (`?access=admin&page=drive`). Features include native `.zip` extraction via context menus, dynamic URL deep linking for active files, an optimized 2-column mobile grid, and recursive folder property calculations (displaying total files, subdirectories, and byte size). |
 
 ---
 
