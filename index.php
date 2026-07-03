@@ -365,7 +365,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '4.7');
+define('APP_VERSION', '4.8');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('ADMIN_PASSWORD', $admin_password ?? 'admin');
@@ -418,6 +418,809 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   if (empty($_SESSION['admin_csrf_token'])) {
     $_SESSION['admin_csrf_token'] = bin2hex(random_bytes(32));
   }
+
+  // 1-Year Admin Session Persistence Check
+  if (!isset($_SESSION['admin_logged_in']) && isset($_COOKIE['admin_session_token'])) {
+    if (hash_equals(hash('sha256', ADMIN_PASSWORD_HASH . ($_SERVER['HTTP_USER_AGENT'] ?? '')), $_COOKIE['admin_session_token'])) {
+      $_SESSION['admin_logged_in'] = true;
+    }
+  }
+
+  $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
+
+  // ==========================================
+  // PHP DRIVE BACKEND CONTROLLER
+  // ==========================================
+  if (isset($_GET['page']) && $_GET['page'] === 'drive') {
+    if (!$is_admin_logged_in && (isset($_GET['api']) || isset($_GET['download']) || isset($_GET['batch']))) {
+      header('Content-Type: application/json');
+      http_response_code(401);
+      echo json_encode(['success' => false, 'error' => 'auth_required']);
+      exit;
+    }
+
+    $baseDir = __DIR__;
+    $allowedExtensions = ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf', 'mp3', 'wav', 'ogg', 'mp4', 'webm'];
+
+    function isAllowedExtension($filename) {
+      global $allowedExtensions;
+      return in_array(strtolower(pathinfo($filename, PATHINFO_EXTENSION)), $allowedExtensions);
+    }
+
+    function generateUniqueFileName($dir, $filename) {
+      $baseName = pathinfo($filename, PATHINFO_FILENAME);
+      $extension = pathinfo($filename, PATHINFO_EXTENSION);
+      $counter = 1;
+      while (file_exists($dir . '/' . $baseName . '_' . $counter . '.' . $extension)) {
+        $counter++;
+      }
+      return $baseName . '_' . $counter . '.' . $extension;
+    }
+
+    function generateUniqueFolderName($dir, $foldername) {
+      $counter = 1;
+      while (is_dir($dir . '/' . $foldername . '_' . $counter)) {
+        $counter++;
+      }
+      return $foldername . '_' . $counter;
+    }
+
+    function recursiveCopy($src, $dst) {
+      if (is_dir($src)) {
+        @mkdir($dst);
+        $items = scandir($src);
+        foreach ($items as $item) {
+          if ($item === '.' || $item === '..') continue;
+          recursiveCopy($src . '/' . $item, $dst . '/' . $item);
+        }
+      } else if (file_exists($src)) {
+        copy($src, $dst);
+      }
+    }
+
+    function isValidPath($base, $path) {
+      $realBase = realpath($base);
+      $realPath = realpath($path);
+      if ($realPath === false) return false;
+      return strpos($realPath, $realBase) === 0;
+    }
+
+    function recursiveDelete($dir) {
+      global $baseDir;
+      if (!isValidPath($baseDir, $dir)) return false;
+      if (is_file($dir)) return unlink($dir);
+      if (!is_dir($dir)) return false;
+      $items = array_diff(scandir($dir), ['.', '..']);
+      foreach ($items as $item) {
+        $path = $dir . '/' . $item;
+        is_dir($path) ? recursiveDelete($path) : unlink($path);
+      }
+      return rmdir($dir);
+    }
+
+    function formatBytes($bytes, $precision = 2) {
+      $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      $bytes = max($bytes, 0);
+      $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+      $pow = min($pow, count($units) - 1);
+      $bytes /= (1 << (10 * $pow));
+      return round($bytes, $precision) . ' ' . $units[$pow];
+    }
+
+    $db = get_db();
+    $db->exec("
+      CREATE TABLE IF NOT EXISTS drive_starred (
+        path TEXT PRIMARY KEY
+      );
+      CREATE TABLE IF NOT EXISTS drive_trash (
+        uniq TEXT PRIMARY KEY,
+        original_name TEXT,
+        original_parent TEXT,
+        deleted_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS drive_shares (
+        token TEXT PRIMARY KEY,
+        path TEXT
+      );
+    ");
+
+    function cleanupExpiredTrash() {
+      global $baseDir;
+      $db = get_db();
+      $thirtyDays = 30 * 24 * 60 * 60;
+      $now = time();
+      $trashBin = $baseDir . '/.drive_trash_bin';
+
+      $stmt = $db->prepare("SELECT uniq FROM drive_trash WHERE (? - deleted_at) > ?");
+      $stmt->execute([$now, $thirtyDays]);
+      $expired = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+      $delStmt = $db->prepare("DELETE FROM drive_trash WHERE uniq = ?");
+      foreach ($expired as $uniq) {
+        $full = $trashBin . '/' . $uniq;
+        if (file_exists($full)) {
+          recursiveDelete($full);
+        }
+        $delStmt->execute([$uniq]);
+      }
+    }
+
+    function streamFileRange($filePath) {
+      $size = filesize($filePath);
+      $length = $size;
+      $start = 0;
+      $end = $size - 1;
+      $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+      $mimeTypes = [
+        'mp3' => 'audio/mpeg', 'wav' => 'audio/wav', 'ogg' => 'audio/ogg',
+        'mp4' => 'video/mp4', 'webm' => 'video/webm', 'pdf' => 'application/pdf',
+        'png' => 'image/png', 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'gif' => 'image/gif'
+      ];
+      $mime = $mimeTypes[$ext] ?? 'application/octet-stream';
+      
+      header("Accept-Ranges: bytes");
+      if (isset($_SERVER['HTTP_RANGE'])) {
+        $c_start = $start;
+        $c_end = $end;
+        list(, $range) = explode('=', $_SERVER['HTTP_RANGE'], 2);
+        if (strpos($range, ',') !== false) {
+          header('HTTP/1.1 416 Requested Range Not Satisfiable');
+          header("Content-Range: bytes $start-$end/$size");
+          exit;
+        }
+        if ($range == '-') {
+          $c_start = $size - substr($range, 1);
+        } else {
+          $range = explode('-', $range);
+          $c_start = $range[0];
+          $c_end = (isset($range[1]) && is_numeric($range[1])) ? $range[1] : $size - 1;
+        }
+        $c_end = ($c_end > $end) ? $end : $c_end;
+        if ($c_start > $c_end || $c_start > $size - 1 || $c_end >= $size) {
+          header('HTTP/1.1 416 Requested Range Not Satisfiable');
+          header("Content-Range: bytes $start-$end/$size");
+          exit;
+        }
+        $start = $c_start;
+        $end = $c_end;
+        $length = $end - $start + 1;
+        header('HTTP/1.1 206 Partial Content');
+        header("Content-Range: bytes $start-$end/$size");
+      }
+      header("Content-Length: " . $length);
+      header("Content-Type: " . $mime);
+      
+      $fp = fopen($filePath, 'rb');
+      fseek($fp, $start);
+      $buffer = 1024 * 8;
+      while (!feof($fp) && ($p = ftell($fp)) <= $end) {
+        if ($p + $buffer > $end) {
+          $buffer = $end - $p + 1;
+        }
+        echo fread($fp, $buffer);
+        flush();
+      }
+      fclose($fp);
+    }
+
+    if (isset($_GET['share'])) {
+      $token = $_GET['share'];
+      $db = get_db();
+      $stmt = $db->prepare("SELECT path FROM drive_shares WHERE token = ?");
+      $stmt->execute([$token]);
+      $relFile = $stmt->fetchColumn();
+      if ($relFile) {
+        $fullFile = $baseDir . '/' . $relFile;
+        if (file_exists($fullFile) && isAllowedExtension($fullFile)) {
+          streamFileRange($fullFile);
+          exit;
+        }
+      }
+      http_response_code(404);
+      echo "<h1>Link Expired or Invalid</h1>";
+      exit;
+    }
+
+    $api = $_GET['api'] ?? null;
+    $action = $_GET['action'] ?? null;
+    $reqPath = $_GET['path'] ?? '';
+    $absPath = $baseDir;
+
+    if ($reqPath) {
+      $propPath = $baseDir . '/' . $reqPath;
+      if (isValidPath($baseDir, $propPath)) {
+        $absPath = $propPath;
+      } else {
+        if ($api) {
+          header('Content-Type: application/json');
+          echo json_encode(['success' => false, 'error' => 'Invalid path access']);
+          exit;
+        }
+      }
+    }
+
+    if ($api) {
+      cleanupExpiredTrash();
+
+      if ($action === 'thumb') {
+        while (ob_get_level()) ob_end_clean();
+        $file = $_GET['file'] ?? '';
+        $full = $baseDir . '/' . $file;
+        if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) {
+          http_response_code(404);
+          exit;
+        }
+        
+        $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+        $isImage = in_array($ext, ['png', 'jpg', 'jpeg', 'gif']);
+        $isVideo = in_array($ext, ['mp4', 'webm']);
+        
+        if ($ext === 'svg') {
+          header('Content-Type: image/svg+xml');
+          readfile($full);
+          exit;
+        }
+        
+        if ($isImage || $isVideo) {
+          $thumbDir = $baseDir . '/.drive_thumbnails';
+          if (!is_dir($thumbDir)) @mkdir($thumbDir, 0755, true);
+          $hash = md5($full . filemtime($full));
+          $thumbPath = $thumbDir . '/' . $hash . '.webp';
+          
+          if (!file_exists($thumbPath)) {
+            if ($isImage && function_exists('imagecreatefromstring')) {
+              @ini_set('memory_limit', '256M');
+              $content = @file_get_contents($full);
+              if ($content) {
+                $img = @imagecreatefromstring($content);
+                if ($img) {
+                  $width = imagesx($img);
+                  $height = imagesy($img);
+                  $newWidth = 320;
+                  $newHeight = floor($height * ($newWidth / $width));
+                  $tmp = imagecreatetruecolor($newWidth, $newHeight);
+                  if ($ext === 'png' || $ext === 'gif') {
+                    imagealphablending($tmp, false);
+                    imagesavealpha($tmp, true);
+                    $transparent = imagecolorallocatealpha($tmp, 255, 255, 255, 127);
+                    imagefilledrectangle($tmp, 0, 0, $newWidth, $newHeight, $transparent);
+                  }
+                  imagecopyresampled($tmp, $img, 0, 0, 0, 0, $newWidth, $newHeight, $width, $height);
+                  @imagewebp($tmp, $thumbPath, 50);
+                  imagedestroy($img);
+                  imagedestroy($tmp);
+                }
+              }
+            } elseif ($isVideo && function_exists('exec')) {
+              @exec("ffmpeg -y -i " . escapeshellarg($full) . " -ss 00:00:01 -vframes 1 -vf scale=320:-1 -c:v libwebp -q:v 50 " . escapeshellarg($thumbPath) . " 2>/dev/null");
+            }
+          }
+          
+          if (file_exists($thumbPath)) {
+            header('Content-Type: image/webp');
+            header('Content-Length: ' . filesize($thumbPath));
+            readfile($thumbPath);
+            exit;
+          }
+        }
+        
+        streamFileRange($full);
+        exit;
+      }
+
+      if ($action === 'stream') {
+        while (ob_get_level()) ob_end_clean();
+        $file = $_GET['file'] ?? '';
+        $full = $baseDir . '/' . $file;
+        if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) {
+          http_response_code(404);
+          exit;
+        }
+        streamFileRange($full);
+        exit;
+      }
+
+      header('Content-Type: application/json');
+      ob_start();
+
+      try {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+          $input = json_decode(file_get_contents('php://input'), true) ?? $_POST;
+          $postAction = $input['action'] ?? $_POST['action'] ?? '';
+
+          switch ($postAction) {
+            case 'add_file':
+              $name = $input['name'] ?? '';
+              if (!isAllowedExtension($name)) throw new Exception('Extension not allowed');
+              $full = $absPath . '/' . $name;
+              if (file_exists($full)) $full = $absPath . '/' . generateUniqueFileName($absPath, $name);
+              file_put_contents($full, '');
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'add_folder':
+              $name = $input['name'] ?? '';
+              $full = $absPath . '/' . $name;
+              if (file_exists($full)) $full = $absPath . '/' . generateUniqueFolderName($absPath, $name);
+              mkdir($full);
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'upload':
+              if (!isset($_FILES['files'])) throw new Exception('No files uploaded');
+              $uploaded = 0;
+              foreach ($_FILES['files']['name'] as $i => $name) {
+                if (isAllowedExtension($name)) {
+                  $dest = $absPath . '/' . $name;
+                  if (file_exists($dest)) $dest = $absPath . '/' . generateUniqueFileName($absPath, $name);
+                  if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) $uploaded++;
+                }
+              }
+              echo json_encode(['success' => true, 'uploaded' => $uploaded]);
+              break;
+
+            case 'trash':
+              $items = $input['items'] ?? [];
+              $db = get_db();
+              $trashBin = $baseDir . '/.drive_trash_bin';
+              if (!is_dir($trashBin)) mkdir($trashBin, 0755, true);
+              
+              $insStmt = $db->prepare("INSERT INTO drive_trash (uniq, original_name, original_parent, deleted_at) VALUES (?, ?, ?, ?)");
+              foreach ($items as $itemPath) {
+                $full = $baseDir . '/' . $itemPath;
+                if (isValidPath($baseDir, $full) && file_exists($full)) {
+                  $itemName = basename($itemPath);
+                  $uniq = uniqid() . '_' . $itemName;
+                  $trashPath = $trashBin . '/' . $uniq;
+                  if (rename($full, $trashPath)) {
+                    $insStmt->execute([
+                      $uniq,
+                      $itemName,
+                      ltrim(str_replace($baseDir, '', dirname($full)), '/'),
+                      time()
+                    ]);
+                  }
+                }
+              }
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'restore_trash':
+              $items = $input['items'] ?? [];
+              $db = get_db();
+              $trashBin = $baseDir . '/.drive_trash_bin';
+              
+              $selectStmt = $db->prepare("SELECT original_name, original_parent FROM drive_trash WHERE uniq = ?");
+              $delStmt = $db->prepare("DELETE FROM drive_trash WHERE uniq = ?");
+              foreach ($items as $uniq) {
+                $selectStmt->execute([$uniq]);
+                $info = $selectStmt->fetch(PDO::FETCH_ASSOC);
+                if ($info) {
+                  $targetDir = $baseDir . '/' . $info['original_parent'];
+                  if (!is_dir($targetDir)) $targetDir = $baseDir;
+                  $dest = $targetDir . '/' . $info['original_name'];
+                  if (file_exists($dest)) {
+                    $dest = generateUniqueFileName($targetDir, $info['original_name']);
+                  }
+                  if (rename($trashBin . '/' . $uniq, $dest)) {
+                    $delStmt->execute([$uniq]);
+                  }
+                }
+              }
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'delete_perm':
+              $items = $input['items'] ?? [];
+              $db = get_db();
+              $trashBin = $baseDir . '/.drive_trash_bin';
+              $delStmt = $db->prepare("DELETE FROM drive_trash WHERE uniq = ?");
+              foreach ($items as $uniq) {
+                $full = $trashBin . '/' . $uniq;
+                if (file_exists($full)) {
+                  recursiveDelete($full);
+                  $delStmt->execute([$uniq]);
+                }
+              }
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'empty_trash':
+              $db = get_db();
+              $trashBin = $baseDir . '/.drive_trash_bin';
+              recursiveDelete($trashBin);
+              mkdir($trashBin, 0755, true);
+              $db->exec("DELETE FROM drive_trash");
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'rename':
+              $old = $input['old'] ?? '';
+              $new = $input['new'] ?? '';
+              $oldFull = $baseDir . '/' . $old;
+              $newFull = dirname($oldFull) . '/' . $new;
+              if (!isValidPath($baseDir, $oldFull) || !file_exists($oldFull)) throw new Exception('Invalid source');
+              if (is_file($oldFull) && !isAllowedExtension($new)) throw new Exception('Extension not allowed');
+              if (file_exists($newFull)) throw new Exception('Target exists');
+              rename($oldFull, $newFull);
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'write':
+              $file = $input['file'] ?? '';
+              $content = $input['content'] ?? '';
+              $full = $baseDir . '/' . $file;
+              if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) throw new Exception('Invalid file');
+              file_put_contents($full, $content);
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'toggle_star':
+              $item = $input['item'] ?? '';
+              $db = get_db();
+              $stmt = $db->prepare("SELECT path FROM drive_starred WHERE path = ?");
+              $stmt->execute([$item]);
+              if ($stmt->fetch()) {
+                $db->prepare("DELETE FROM drive_starred WHERE path = ?")->execute([$item]);
+                $starred = false;
+              } else {
+                $db->prepare("INSERT OR IGNORE INTO drive_starred (path) VALUES (?)")->execute([$item]);
+                $starred = true;
+              }
+              echo json_encode(['success' => true, 'starred' => $starred]);
+              break;
+
+            case 'copy_items':
+            case 'move_items':
+              $items = $input['items'] ?? [];
+              $target = $input['target'] ?? '';
+              $targetDir = rtrim($baseDir . '/' . $target, '/');
+              if (!isValidPath($baseDir, $targetDir)) throw new Exception('Invalid target');
+              foreach ($items as $item) {
+                $src = $baseDir . '/' . $item;
+                if (!isValidPath($baseDir, $src) || !file_exists($src)) continue;
+                $dest = $targetDir . '/' . basename($item);
+                if (file_exists($dest)) {
+                  $dest = is_dir($src) ? $targetDir . '/' . generateUniqueFolderName($targetDir, basename($item)) : $targetDir . '/' . generateUniqueFileName($targetDir, basename($item));
+                }
+                if ($postAction === 'move_items') {
+                  if ($src !== $dest) rename($src, $dest);
+                } else {
+                  recursiveCopy($src, $dest);
+                }
+              }
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'move':
+              $item = $input['item'] ?? '';
+              $targetFolder = $input['target'] ?? '';
+              $src = $baseDir . '/' . $item;
+              $targetDir = rtrim($baseDir . '/' . $targetFolder, '/');
+              $dest = $targetDir . '/' . basename($item);
+              if (!isValidPath($baseDir, $src) || !isValidPath($baseDir, $targetDir)) throw new Exception('Invalid route path');
+              if (file_exists($dest)) throw new Exception('Item already exists in destination');
+              if (rename($src, $dest)) {
+                echo json_encode(['success' => true]);
+              } else {
+                throw new Exception('Failed to move item');
+              }
+              break;
+
+            case 'create_share':
+              $item = $input['item'] ?? '';
+              $db = get_db();
+              $token = md5($item . time());
+              $db->prepare("INSERT INTO drive_shares (token, path) VALUES (?, ?)")->execute([$token, $item]);
+              echo json_encode(['success' => true, 'token' => $token]);
+              break;
+
+            case 'unzip':
+              $item = $input['item'] ?? '';
+              $src = $baseDir . '/' . $item;
+              if (!isValidPath($baseDir, $src) || !file_exists($src) || strtolower(pathinfo($src, PATHINFO_EXTENSION)) !== 'zip') {
+                throw new Exception('Invalid zip file');
+              }
+              if (!class_exists('ZipArchive')) throw new Exception('ZipArchive extension is missing');
+              $zip = new ZipArchive;
+              if ($zip->open($src) === TRUE) {
+                $extractTarget = dirname($src) . '/' . pathinfo($src, PATHINFO_FILENAME);
+                if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
+                $zip->extractTo($extractTarget);
+                $zip->close();
+                echo json_encode(['success' => true]);
+              } else {
+                throw new Exception('Failed to extract ZIP archive');
+              }
+              break;
+
+            default:
+              throw new Exception('Unknown POST action');
+          }
+        } else {
+          switch ($action) {
+            case 'search_drive':
+              $q = strtolower($_GET['q'] ?? '');
+              $db = get_db();
+              $starredPaths = $db->query("SELECT path FROM drive_starred")->fetchAll(PDO::FETCH_COLUMN);
+              $folders = [];
+              $files = [];
+              if ($q !== '') {
+                $iter = new RecursiveIteratorIterator(
+                  new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS),
+                  RecursiveIteratorIterator::SELF_FIRST
+                );
+                foreach ($iter as $item) {
+                  $pathName = $item->getPathname();
+                  if (strpos($pathName, '.drive_trash_bin') !== false || strpos($pathName, '.drive_thumbnails') !== false) {
+                    continue;
+                  }
+                  $filename = $item->getFilename();
+                  if (stripos($filename, $q) !== false) {
+                    $rel = ltrim(str_replace($baseDir, '', $pathName), '/');
+                    $rel = str_replace('\\', '/', $rel);
+                    $stat = stat($pathName);
+                    $starred = in_array($rel, $starredPaths);
+                    if ($item->isDir()) {
+                      $folders[] = [
+                        'name' => $filename,
+                        'path' => $rel,
+                        'mtime' => $stat['mtime'],
+                        'size' => 0,
+                        'formatSize' => '-',
+                        'ext' => '',
+                        'isImage' => false,
+                        'starred' => $starred
+                      ];
+                    } elseif ($item->isFile() && isAllowedExtension($filename)) {
+                      $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+                      $files[] = [
+                        'name' => $filename,
+                        'path' => $rel,
+                        'mtime' => $stat['mtime'],
+                        'size' => $stat['size'],
+                        'formatSize' => formatBytes($stat['size']),
+                        'ext' => $ext,
+                        'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
+                        'starred' => $starred
+                      ];
+                    }
+                  }
+                }
+              }
+              echo json_encode(['success' => true, 'folders' => array_slice($folders, 0, 50), 'files' => array_slice($files, 0, 100)]);
+              break;
+
+            case 'list':
+              $db = get_db();
+              $starredPaths = $db->query("SELECT path FROM drive_starred")->fetchAll(PDO::FETCH_COLUMN);
+              $files = [];
+              $folders = [];
+              $items = array_diff(scandir($absPath), ['.', '..', '.drive_trash_bin', '.drive_thumbnails']);
+              foreach ($items as $item) {
+                $path = $absPath . '/' . $item;
+                $stat = stat($path);
+                $ext = strtolower(pathinfo($item, PATHINFO_EXTENSION));
+                $rel = ltrim(str_replace($baseDir, '', $path), '/');
+                $starred = in_array($rel, $starredPaths);
+                
+                $itemMeta = [
+                  'name' => $item,
+                  'path' => $rel,
+                  'mtime' => $stat['mtime'],
+                  'size' => $stat['size'],
+                  'formatSize' => formatBytes($stat['size']),
+                  'ext' => $ext,
+                  'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
+                  'starred' => $starred
+                ];
+                if (is_dir($path)) {
+                  $folders[] = $itemMeta;
+                } elseif (is_file($path) && isAllowedExtension($item)) {
+                  $files[] = $itemMeta;
+                }
+              }
+              
+              $pathDisplay = ltrim(str_replace($baseDir, '', $absPath), '/');
+              $breadcrumbs = [];
+              if (!empty($pathDisplay)) {
+                $segments = explode('/', $pathDisplay);
+                $curr = '';
+                foreach ($segments as $seg) {
+                  if (empty($seg)) continue;
+                  $curr .= $seg . '/';
+                  $breadcrumbs[] = ['name' => $seg, 'path' => rtrim($curr, '/')];
+                }
+              }
+              
+              echo json_encode([
+                'success' => true, 
+                'folders' => $folders, 
+                'files' => $files, 
+                'breadcrumbs' => $breadcrumbs
+              ]);
+              break;
+
+            case 'list_trash':
+              $db = get_db();
+              $trashList = [];
+              $rows = $db->query("SELECT uniq, original_name, original_parent, deleted_at FROM drive_trash ORDER BY deleted_at DESC")->fetchAll(PDO::FETCH_ASSOC);
+              foreach ($rows as $info) {
+                $trashList[] = [
+                  'uniq' => $info['uniq'],
+                  'name' => $info['original_name'],
+                  'original_parent' => $info['original_parent'],
+                  'deleted_at' => date("Y-m-d H:i:s", $info['deleted_at'])
+                ];
+              }
+              echo json_encode(['success' => true, 'trash' => $trashList]);
+              break;
+
+            case 'list_starred':
+              $db = get_db();
+              $starredPaths = $db->query("SELECT path FROM drive_starred")->fetchAll(PDO::FETCH_COLUMN);
+              $starredList = [];
+              foreach ($starredPaths as $rel) {
+                $full = $baseDir . '/' . $rel;
+                if (file_exists($full)) {
+                  $stat = stat($full);
+                  $ext = strtolower(pathinfo($rel, PATHINFO_EXTENSION));
+                  $starredList[] = [
+                    'name' => basename($rel),
+                    'path' => $rel,
+                    'parent' => dirname($rel) === '.' ? '' : dirname($rel),
+                    'isDir' => is_dir($full),
+                    'mtime' => $stat['mtime'],
+                    'size' => $stat['size'],
+                    'formatSize' => formatBytes($stat['size']),
+                    'ext' => $ext,
+                    'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg'])
+                  ];
+                }
+              }
+              echo json_encode(['success' => true, 'starred' => $starredList]);
+              break;
+
+            case 'recents':
+              $db = get_db();
+              $recentFiles = [];
+              $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS));
+              foreach ($iter as $file) {
+                if ($file->isFile() && isAllowedExtension($file->getFilename())) {
+                  $path = $file->getPathname();
+                  if (strpos($path, '.drive_trash_bin') === false && strpos($path, '.drive_thumbnails') === false) {
+                    $recentFiles[] = [
+                      'name' => $file->getFilename(),
+                      'path' => ltrim(str_replace($baseDir, '', $path), '/'),
+                      'mtime' => $file->getMTime(),
+                      'size' => $file->getSize(),
+                      'formatSize' => formatBytes($file->getSize()),
+                      'ext' => strtolower($file->getExtension()),
+                      'isImage' => in_array(strtolower($file->getExtension()), ['png', 'jpg', 'jpeg', 'gif', 'svg'])
+                    ];
+                  }
+                }
+              }
+              usort($recentFiles, function($a, $b) { return $b['mtime'] - $a['mtime']; });
+              echo json_encode(['success' => true, 'recents' => array_slice($recentFiles, 0, 15)]);
+              break;
+
+            case 'read':
+              $file = $_GET['file'] ?? '';
+              $full = $baseDir . '/' . $file;
+              if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) throw new Exception('Invalid file');
+              echo json_encode(['success' => true, 'content' => file_get_contents($full)]);
+              break;
+
+            case 'properties':
+              $file = $_GET['file'] ?? '';
+              $full = $baseDir . '/' . $file;
+              if (!isValidPath($baseDir, $full) || !file_exists($full)) throw new Exception('Invalid item');
+              $stat = stat($full);
+              $is_dir = is_dir($full);
+              $size = $stat['size'];
+              $typeStr = $is_dir ? 'Folder' : 'File (' . strtoupper(pathinfo($file, PATHINFO_EXTENSION)) . ')';
+              $contentStr = '';
+              
+              if ($is_dir) {
+                $total_files = 0;
+                $total_folders = 0;
+                $total_size = 0;
+                // Calculate folder bulk size and recursive contents
+                $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+                foreach ($iter as $f) {
+                  if ($f->isDir()) {
+                    $total_folders++;
+                  } else {
+                    $total_files++;
+                    $total_size += $f->getSize();
+                  }
+                }
+                $size = $total_size;
+                $contentStr = $total_files . ' files, ' . $total_folders . ' folders';
+              }
+
+              echo json_encode([
+                'success' => true,
+                'data' => [
+                  'name' => basename($file),
+                  'type' => $typeStr,
+                  'size' => formatBytes($size),
+                  'contents' => $contentStr,
+                  'modified' => date("Y-m-d H:i:s", $stat['mtime']),
+                  'created' => date("Y-m-d H:i:s", $stat['ctime']),
+                  'permissions' => substr(sprintf('%o', fileperms($full)), -4)
+                ]
+              ]);
+              break;
+
+            default:
+              throw new Exception('Unknown GET action');
+          }
+        }
+      } catch (Exception $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+      }
+      ob_end_flush();
+      exit;
+    }
+
+    if (isset($_GET['download'])) {
+      $file = $_GET['download'];
+      $full = $baseDir . '/' . $file;
+      if (isValidPath($baseDir, $full) && is_file($full) && isAllowedExtension($file)) {
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . basename($full) . '"');
+        header('Content-Length: ' . filesize($full));
+        readfile($full);
+      }
+      exit;
+    }
+
+    if (isset($_GET['batch'])) {
+      $type = $_GET['batch'];
+      $zip = new ZipArchive();
+      $zipName = 'download_' . date('Ymd_His') . '.zip';
+      
+      if ($zip->open($zipName, ZipArchive::CREATE) === TRUE) {
+        if ($type === 'context') {
+          $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($absPath, FilesystemIterator::SKIP_DOTS));
+          foreach ($iter as $file) {
+            if ($file->isFile() && isAllowedExtension($file->getFilename())) {
+              $localPath = ltrim(str_replace($absPath, '', $file->getPathname()), '/');
+              $zip->addFile($file->getPathname(), $localPath);
+            }
+          }
+        } elseif ($type === 'selected' && isset($_GET['items'])) {
+          $items = explode(',', $_GET['items']);
+          foreach ($items as $item) {
+            $full = $baseDir . '/' . $item;
+            if (isValidPath($baseDir, $full) && file_exists($full)) {
+              if (is_file($full) && isAllowedExtension($item)) {
+                $zip->addFile($full, basename($item));
+              } elseif (is_dir($full)) {
+                $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS));
+                foreach ($iter as $f) {
+                  if ($f->isFile() && isAllowedExtension($f->getFilename())) {
+                    $localPath = ltrim(str_replace($baseDir, '', $f->getPathname()), '/');
+                    $zip->addFile($f->getPathname(), $localPath);
+                  }
+                }
+              }
+            }
+          }
+        }
+        $zip->close();
+        header('Content-Type: application/zip');
+        header('Content-Disposition: attachment; filename=' . $zipName);
+        header('Content-Length: ' . filesize($zipName));
+        readfile($zipName);
+        unlink($zipName);
+      }
+      exit;
+    }
+  }
+
   if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true) {
     if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['admin_csrf_token'], $_POST['csrf_token'])) {
       die("Security violation: CSRF token mismatch.");
@@ -489,6 +1292,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
     if (password_verify($_POST['password'], ADMIN_PASSWORD_HASH)) {
       $_SESSION['admin_logged_in'] = true;
+      // Set 1-Year Persistent Cookie for Admin
+      setcookie('admin_session_token', hash('sha256', ADMIN_PASSWORD_HASH . ($_SERVER['HTTP_USER_AGENT'] ?? '')), time() + 31536000, '/');
       header('Location: ?access=admin');
       exit;
     }
@@ -496,6 +1301,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
   if (isset($_GET['logout'])) {
     unset($_SESSION['admin_logged_in']);
+    setcookie('admin_session_token', '', time() - 3600, '/');
     header('Location: ?access=admin');
     exit;
   }
@@ -510,7 +1316,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <title>Admin Panel - PHP Music</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/dialog/dialog.min.css">
     <style>
       :root { --ytm-bg: #030303; --ytm-surface: #121212; --ytm-surface-2: #282828; --ytm-primary-text: #ffffff; --ytm-secondary-text: #aaaaaa; --ytm-accent: #ff0000; }
       body { background-color: var(--ytm-bg); color: var(--ytm-primary-text); font-family: 'Roboto', sans-serif; }
@@ -595,170 +1403,1842 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         </div>
         <div class="offcanvas-body d-flex flex-column p-0 py-lg-4">
           <div class="logo d-none d-lg-block">Admin<span>Panel</span></div>
+          <a href="?access=admin" class="nav-link <?php echo (empty($_GET['page']) || $_GET['page'] === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill d-none d-lg-inline-block"></i><span>User Management</span></a>
+          <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill d-none d-lg-inline-block"></i><span>Drive Manager</span></a>
           <a href="./" class="nav-link"><i class="bi bi-arrow-left-circle-fill d-none d-lg-inline-block"></i><span>Back to Player</span></a>
           <a href="?access=admin&logout=1" class="nav-link"><i class="bi bi-box-arrow-left d-none d-lg-inline-block"></i><span>Logout</span></a>
         </div>
       </nav>
-      <main class="main-content">
-        <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
-          <div class="d-flex align-items-center gap-3">
-            <h1 class="content-title m-0">User Management</h1>
-            <form method="POST" action="" class="m-0">
-              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-              <button type="submit" name="reset_opcache" class="btn btn-sm btn-outline-warning" title="Clear PHP OPcache"><i class="bi bi-lightning-charge-fill"></i> Reset OPcache</button>
+            <main class="main-content">
+        <?php if (($_GET['page'] ?? '') === 'drive'): ?>
+          <!-- PHPDrive UI -->
+                    <style>
+            .drive-app-container {
+              --theme-primary: #ff3333;
+              --theme-on-primary: #ffffff;
+              --theme-primary-container: #4a0000;
+              --theme-on-primary-container: #ffc2c2;
+              --theme-surface: #0a0a0a;
+              --theme-surface-container-low: #121212;
+              --theme-surface-container: #1a1a1a;
+              --theme-surface-container-high: #262626;
+              --theme-on-surface: #e3e3e3;
+              --theme-on-surface-variant: #aaaaaa;
+              --theme-outline: #555555;
+              --theme-outline-variant: #2d2d2d;
+              --theme-secondary-container: #ff0000;
+              --theme-on-secondary-container: #ffffff;
+
+              --font-body: 'Roboto', sans-serif;
+              --font-title: 'Google Sans', sans-serif;
+              --transition: 0.2s cubic-bezier(0.2, 0, 0, 1);
+            }
+
+            .drive-app-container * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+            .drive-app-container { font-family: var(--font-body); background-color: var(--theme-surface); color: var(--theme-on-surface); height: calc(100dvh - 40px); overflow: hidden; display: flex; flex-direction: column; width: 100%; position: relative; }
+
+            .drive-app-container .material-symbols-rounded { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; user-select: none; color: var(--theme-on-surface); }
+            .drive-app-container .icon-filled { font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+
+            .drive-app-container .drive-header { height: 64px; display: flex; align-items: center; padding: 0 16px; gap: 12px; background-color: var(--theme-surface); flex-shrink: 0; border-bottom: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .drive-menu-btn { display: none; }
+            @media (max-width: 768px) { .drive-app-container .drive-menu-btn { display: flex !important; } }
+            .drive-app-container .logo-container { display: flex; align-items: center; gap: 8px; width: auto; cursor: pointer; flex-shrink: 0; }
+            .drive-app-container .logo-img { width: 36px; height: 36px; border-radius: 8px; background: #ff0000; color: #ffffff; display: flex; align-items: center; justify-content: center; }
+            .drive-app-container .logo-img .material-symbols-rounded { color: #ffffff; }
+            .drive-app-container .logo-text { font-family: var(--font-title); font-size: 20px; font-weight: 700; color: var(--theme-on-surface); }
+
+            .drive-app-container .search-bar { flex: 1; max-width: 600px; height: 44px; background-color: var(--theme-surface-container-high); border-radius: 22px; display: flex; align-items: center; padding: 0 16px; gap: 10px; transition: background-color var(--transition); margin: 0 12px; border: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .search-bar:focus-within { background-color: var(--theme-surface-container-low); border-color: #ff3333; }
+            .drive-app-container .search-bar input { flex: 1; border: none; background: none; outline: none; font-size: 15px; color: var(--theme-on-surface); font-family: var(--font-body); width: 100%; }
+            .drive-app-container .search-bar input::placeholder { color: var(--theme-on-surface-variant); }
+            .drive-app-container .search-icon { color: var(--theme-on-surface-variant); }
+
+            .drive-app-container .header-actions { display: flex; gap: 4px; align-items: center; margin-left: auto; }
+            .drive-app-container .icon-btn { width: 40px; height: 40px; border-radius: 50%; border: none; background: transparent; color: var(--theme-on-surface-variant); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background-color var(--transition); position: relative; }
+            .drive-app-container .icon-btn:hover { background-color: var(--theme-surface-container-high); }
+            .drive-app-container .icon-btn.active { background-color: #ff0000; color: #ffffff; }
+            .drive-app-container .icon-btn .material-symbols-rounded { color: var(--theme-on-surface-variant); }
+            .drive-app-container .icon-btn:hover .material-symbols-rounded { color: var(--theme-on-surface); }
+
+            .drive-app-container .main-wrapper { display: flex; flex: 1; overflow: hidden; position: relative; }
+
+            .drive-app-container .sidebar-drive { width: 240px; display: flex; flex-direction: column; padding: 16px 12px; gap: 16px; flex-shrink: 0; background: var(--theme-surface); z-index: 100; transition: left 0.3s ease; border-right: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .sidebar-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 99; display: none; opacity: 0; transition: opacity 0.3s; }
+
+            .drive-app-container .fab { height: 52px; border-radius: 16px; background-color: #ff0000; color: #ffffff; border: none; display: inline-flex; align-items: center; padding: 0 20px 0 16px; gap: 12px; font-family: var(--font-title); font-size: 14px; font-weight: 700; cursor: pointer; box-shadow: 0 4px 12px rgba(255,0,0,0.3); transition: transform var(--transition), background-color var(--transition); width: fit-content; }
+            .drive-app-container .fab:hover { transform: scale(1.03); background-color: #ff1a1a; }
+            .drive-app-container .fab .material-symbols-rounded { color: #ffffff; }
+
+            .drive-app-container .nav-list { display: flex; flex-direction: column; gap: 4px; }
+            .drive-app-container .nav-item-drive { display: flex; align-items: center; gap: 12px; height: 44px; padding: 0 16px; border-radius: 22px; color: var(--theme-on-surface-variant); cursor: pointer; font-size: 14px; font-weight: 500; transition: background-color var(--transition); text-decoration: none; }
+            .drive-app-container .nav-item-drive:hover { background-color: var(--theme-surface-container-low); color: var(--theme-on-surface); }
+            .drive-app-container .nav-item-drive.active { background-color: #ff0000; color: #ffffff; font-weight: 700; }
+            .drive-app-container .nav-item-drive .material-symbols-rounded { color: var(--theme-on-surface-variant); }
+            .drive-app-container .nav-item-drive.active .material-symbols-rounded { color: #ffffff; font-variation-settings: 'FILL' 1; }
+
+            .drive-app-container .content-area-drive { flex: 1; display: flex; flex-direction: column; background-color: var(--theme-surface); margin: 0; overflow: hidden; position: relative; }
+            .drive-app-container .content-header-drive { height: 52px; display: flex; align-items: center; padding: 0 20px; border-bottom: 1px solid var(--theme-outline-variant); justify-content: space-between; }
+            .drive-app-container .breadcrumbs { display: flex; align-items: center; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); gap: 4px; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+            .drive-app-container .breadcrumb-item { cursor: pointer; border-radius: 8px; padding: 4px 8px; transition: background-color var(--transition); color: var(--theme-on-surface); }
+            .drive-app-container .breadcrumb-item:hover { background-color: var(--theme-surface-container); }
+            .drive-app-container .breadcrumb-sep { color: var(--theme-on-surface-variant); font-size: 18px; }
+
+            .drive-app-container .chips-container { display: flex; gap: 8px; padding: 12px 20px; overflow-x: auto; scrollbar-width: none; flex-shrink: 0; }
+            .drive-app-container .chip { border: 1px solid var(--theme-outline-variant); padding: 6px 16px; border-radius: 16px; font-size: 13px; cursor: pointer; background: transparent; transition: background var(--transition); display: flex; align-items: center; gap: 6px; color: var(--theme-on-surface); }
+            .drive-app-container .chip.active { background: #ff0000; color: #ffffff; border-color: transparent; font-weight: 700; }
+            .drive-app-container .chip .material-symbols-rounded { color: inherit; }
+
+            .drive-app-container .recents-container { margin-bottom: 16px; flex-shrink: 0; }
+            .drive-app-container .recents-tray { display: flex; gap: 12px; overflow-x: auto; padding: 8px 0; scrollbar-width: none; }
+            .drive-app-container .recent-card { width: 140px; background: var(--theme-surface-container-low); border-radius: 12px; padding: 12px; flex-shrink: 0; cursor: pointer; user-select: none; border: 1px solid var(--theme-outline-variant); transition: background var(--transition); color: var(--theme-on-surface); }
+            .drive-app-container .recent-card:hover { background: var(--theme-surface-container-high); border-color: #ff3333; }
+            .drive-app-container .recent-card .material-symbols-rounded { color: #ff3333; }
+            .drive-app-container .recent-name { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 8px; }
+
+            /* Mobile Bottom Area Padding Fix */
+            .drive-app-container .file-list-container { flex: 1; overflow-y: auto; padding: 0 20px calc(180px + env(safe-area-inset-bottom, 20px)); position: relative; }
+            .drive-app-container .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--theme-on-surface-variant); margin: 16px 0 12px 4px; }
+
+            .drive-app-container .grid-view { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+            .drive-app-container .list-view { display: flex; flex-direction: column; gap: 4px; }
+
+            .drive-app-container .item-card { background-color: var(--theme-surface-container-low); border-radius: 12px; border: 1px solid var(--theme-outline-variant); cursor: pointer; user-select: none; transition: background-color var(--transition), border-color var(--transition); display: flex; flex-direction: column; position: relative; overflow: hidden; color: var(--theme-on-surface); }
+            .drive-app-container .item-card:hover { background-color: var(--theme-surface-container-high); border-color: #ff3333; }
+            .drive-app-container .item-card.selected { background-color: rgba(255, 0, 0, 0.2); border-color: #ff0000; color: #ffffff; }
+
+            .drive-app-container .card-checkbox { position: absolute; top: 8px; left: 8px; width: 24px; height: 24px; color: var(--theme-on-surface-variant); z-index: 10; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity var(--transition); }
+            .drive-app-container .item-card:hover .card-checkbox, .drive-app-container .item-card.selected .card-checkbox { opacity: 1; }
+            .drive-app-container .item-card.selected .card-checkbox { color: #ff0000; font-variation-settings: 'FILL' 1; }
+            .drive-app-container .card-checkbox .material-symbols-rounded { color: inherit; }
+
+            .drive-app-container .card-star { position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; color: var(--theme-on-surface-variant); z-index: 10; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity var(--transition); }
+            .drive-app-container .item-card:hover .card-star, .drive-app-container .item-card.starred .card-star { opacity: 1; }
+            .drive-app-container .item-card.starred .card-star { color: #f5b041; font-variation-settings: 'FILL' 1; }
+            .drive-app-container .card-star .material-symbols-rounded { color: inherit; }
+
+            .drive-app-container .grid-view .item-card { height: 60px; padding: 0 36px; flex-direction: row; align-items: center; gap: 10px; }
+            .drive-app-container .grid-view .file-card { height: 180px; flex-direction: column; align-items: stretch; gap: 0; padding: 0; }
+            .drive-app-container .grid-view .file-card .file-preview { flex: 1; background-color: #000000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
+            .drive-app-container .grid-view .file-card .file-preview img { width: 100%; height: 100%; object-fit: cover; }
+            .drive-app-container .grid-view .file-card .file-preview .material-symbols-rounded { font-size: 56px; color: #ff3333; }
+            .drive-app-container .grid-view .file-card .file-info-bar { height: 50px; display: flex; align-items: center; padding: 0 36px; gap: 10px; border-top: 1px solid var(--theme-outline-variant); }
+
+            .drive-app-container .list-view .item-card { height: 46px; border-radius: 8px; border: 1px solid transparent; flex-direction: row; align-items: center; padding: 0 36px; gap: 12px; background: transparent; }
+            .drive-app-container .list-view .item-card:hover { background-color: var(--theme-surface-container-low); border-color: var(--theme-outline-variant); }
+            .drive-app-container .list-view .item-card.selected { background-color: rgba(255, 0, 0, 0.2); border-color: #ff0000; }
+
+            .drive-app-container .item-icon { color: #ff3333; display: flex; align-items: center; justify-content: center; }
+            .drive-app-container .folder-icon { color: #ff3333; font-variation-settings: 'FILL' 1; }
+            .drive-app-container .item-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; font-weight: 500; }
+            .drive-app-container .item-meta { display: none; font-size: 12px; color: var(--theme-on-surface-variant); width: 100px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .drive-app-container .list-view .item-meta { display: block; }
+
+            .drive-app-container .context-menu, .drive-app-container .floating-menu, .drive-app-container .sort-menu { position: fixed; background-color: var(--theme-surface-container-high); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); padding: 8px 0; z-index: 1000; min-width: 200px; display: none; flex-direction: column; border: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .menu-item { display: flex; align-items: center; gap: 12px; padding: 10px 16px; font-size: 14px; color: var(--theme-on-surface); cursor: pointer; transition: background-color var(--transition); }
+            .drive-app-container .menu-item:hover { background-color: var(--theme-surface-container); color: #ffffff; }
+            .drive-app-container .menu-item .material-symbols-rounded { font-size: 20px; color: var(--theme-on-surface-variant); }
+            .drive-app-container .menu-item:hover .material-symbols-rounded { color: #ff3333; }
+            .drive-app-container .menu-item.active { background-color: #ff0000; color: #ffffff; }
+            .drive-app-container .menu-divider { height: 1px; background-color: var(--theme-outline-variant); margin: 4px 0; }
+
+            .drive-app-container .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 2000; display: none; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
+            .drive-app-container .modal-drive { background-color: var(--theme-surface-container); border-radius: 20px; width: 90%; max-width: 400px; padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.5); border: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .modal-title-drive { font-family: var(--font-title); font-size: 20px; font-weight: 700; color: var(--theme-on-surface); }
+            .drive-app-container .modal-input-drive { background-color: var(--theme-surface-container-high); border: 1px solid var(--theme-outline); border-radius: 8px; padding: 12px 16px; font-size: 15px; color: var(--theme-on-surface); outline: none; border-bottom: 2px solid #ff0000; width: 100%; }
+
+            .drive-app-container .btn-drive { padding: 0 20px; height: 38px; border-radius: 19px; font-weight: 600; font-size: 14px; cursor: pointer; border: none; transition: background-color var(--transition); display: inline-flex; align-items: center; gap: 8px; }
+            .drive-app-container .btn-text-drive { background: transparent; color: #ff3333; }
+            .drive-app-container .btn-text-drive:hover { background-color: rgba(255,0,0,0.1); }
+            .drive-app-container .btn-filled-drive { background-color: #ff0000; color: #ffffff; }
+
+            .drive-app-container .editor-overlay-drive { position: fixed; inset: 0; background-color: var(--theme-surface); z-index: 3000; display: none; flex-direction: column; }
+            .drive-app-container .editor-header-drive { height: 60px; display: flex; align-items: center; padding: 0 16px; gap: 16px; border-bottom: 1px solid var(--theme-outline-variant); background-color: var(--theme-surface-container-low); flex-shrink: 0; }
+            .drive-app-container .editor-title-drive { flex: 1; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .drive-app-container .CodeMirror { flex: 1; height: 100% !important; font-family: monospace; font-size: 14px; }
+
+            .drive-app-container .snackbar-container-drive { position: fixed; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); z-index: 4000; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+            .drive-app-container .snackbar-drive { background-color: var(--theme-on-surface); color: var(--theme-surface); padding: 12px 20px; border-radius: 8px; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: space-between; min-width: 280px; max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); opacity: 0; margin-bottom: -20px; transition: opacity 0.3s, margin-bottom 0.3s; }
+            .drive-app-container .snackbar-drive.show { opacity: 1; margin-bottom: 0; }
+
+            .drive-app-container .properties-pane { width: 300px; background-color: var(--theme-surface); border-left: 1px solid var(--theme-outline-variant); flex-direction: column; display: none; color: var(--theme-on-surface); }
+            .drive-app-container .properties-header { height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .properties-content { padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+            .drive-app-container .prop-row { display: flex; flex-direction: column; gap: 4px; }
+            .drive-app-container .prop-label { font-size: 12px; color: var(--theme-on-surface-variant); }
+            .drive-app-container .prop-val { font-size: 14px; color: var(--theme-on-surface); word-break: break-all; }
+
+            .drive-app-container .hidden { display: none !important; }
+
+            .drive-app-container .mobile-only { display: none; }
+
+            @media (max-width: 768px) {
+              .drive-app-container .mobile-only { display: flex; }
+              
+              /* Force 2 columns on mobile and fix the excessive padding that squishes filenames */
+              .drive-app-container .grid-view { grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important; }
+              .drive-app-container .grid-view .item-card { height: 50px; padding: 0 12px !important; }
+              .drive-app-container .grid-view .file-card { height: 160px; padding: 0 !important; }
+              .drive-app-container .grid-view .file-card .file-info-bar { padding: 0 10px !important; gap: 6px !important; }
+              .drive-app-container .grid-view { grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important; }
+              .drive-app-container .grid-view .item-card { height: 50px; padding: 0 16px; }
+              .drive-app-container .grid-view .file-card { height: 160px; }
+              .drive-app-container .search-bar { display: none; }
+              .drive-app-container .search-bar.mobile-active {
+                display: flex;
+                position: absolute;
+                left: 0; right: 0; top: 0; bottom: 0;
+                height: 64px;
+                margin: 0;
+                border-radius: 0;
+                background: var(--theme-surface);
+                z-index: 10;
+                padding: 0 8px;
+                max-width: 100%;
+                border: none;
+              }
+              .drive-app-container .search-bar.mobile-active #searchIcon { display: none; }
+              .drive-app-container .search-bar.mobile-active #closeSearchBtn { display: flex; }
+
+              .drive-app-container .sidebar-drive { position: fixed; left: -280px; top: 0; bottom: 0; width: 280px; padding-top: 64px; }
+              .drive-app-container .sidebar-drive.open { left: 0; }
+              .drive-app-container .sidebar-overlay.open { display: block; opacity: 1; }
+              .drive-app-container .content-area-drive { margin: 0; border-radius: 0; }
+              .drive-app-container .fab { position: fixed; bottom: calc(28px + env(safe-area-inset-bottom, 20px)) !important; right: 20px; z-index: 90; width: 52px; height: 52px; padding: 0; justify-content: center; border-radius: 26px; }
+              .drive-app-container .fab .text { display: none; }
+            }
+          </style>
+
+          <div class="drive-app-container" id="driveAppContainer" data-theme="dark">
+            <div class="drive-header">
+              <button class="icon-btn drive-menu-btn" onclick="driveApp.toggleSidebar()"><span class="material-symbols-rounded">menu</span></button>
+              <div class="logo-container" onclick="driveApp.navigate('')">
+                <div class="logo-img"><span class="material-symbols-rounded">folder_zip</span></div>
+                <div class="logo-text">Drive</div>
+              </div>
+              <div class="search-bar" id="topSearchBar">
+                <button class="icon-btn mobile-only" onclick="driveApp.toggleMobileSearch(false)" id="closeSearchBtn" style="display: none;"><span class="material-symbols-rounded">arrow_back</span></button>
+                <span class="material-symbols-rounded search-icon" id="searchIcon">search</span>
+                <input type="text" id="searchInput" placeholder="Search all files and folders...">
+              </div>
+              <div class="header-actions">
+                <button class="icon-btn mobile-only" onclick="driveApp.toggleMobileSearch(true)" title="Search"><span class="material-symbols-rounded">search</span></button>
+                <button class="icon-btn" onclick="driveApp.showMoreMenu(event)" title="More options"><span class="material-symbols-rounded">more_vert</span></button>
+              </div>
+            </div>
+
+            <div class="main-wrapper">
+              <div class="sidebar-overlay" id="sidebarOverlay" onclick="driveApp.toggleSidebar()"></div>
+              <aside class="sidebar-drive" id="sidebarDrive">
+                <button class="fab" onclick="driveApp.showNewMenu(event)">
+                  <span class="material-symbols-rounded">add</span>
+                  <span class="text">New</span>
+                </button>
+                <nav class="nav-list" style="margin-top: 16px;">
+                  <a class="nav-item-drive active" id="navHome" onclick="driveApp.setViewMode('home')">
+                    <span class="material-symbols-rounded">home</span> Home
+                  </a>
+                  <a class="nav-item-drive" id="navStarred" onclick="driveApp.setViewMode('starred')">
+                    <span class="material-symbols-rounded">star</span> Starred
+                  </a>
+                  <a class="nav-item-drive" id="navTrash" onclick="driveApp.setViewMode('trash')">
+                    <span class="material-symbols-rounded">delete</span> Trash
+                  </a>
+                  <div class="menu-divider" style="margin: 8px 16px;"></div>
+                  <a class="nav-item-drive" onclick="driveApp.showSortMenu(event)">
+                    <span class="material-symbols-rounded">sort</span> Sort by
+                  </a>
+                  <a class="nav-item-drive" onclick="driveApp.toggleView()">
+                    <span class="material-symbols-rounded" id="viewIconMenuSide">view_list</span> View mode
+                  </a>
+                </nav>
+              </aside>
+
+              <main class="content-area-drive" id="dropZone">
+                <div class="content-header-drive">
+                  <div class="breadcrumbs" id="breadcrumbs"></div>
+                  <div class="header-actions" id="multiSelectActions" style="display: none;">
+                    <button class="icon-btn" onclick="driveApp.batchDownload('selected')" title="Download Selected"><span class="material-symbols-rounded">download</span></button>
+                    <button class="icon-btn" onclick="driveApp.deleteSelected()" title="Move to Trash"><span class="material-symbols-rounded">delete</span></button>
+                    <button class="icon-btn" onclick="driveApp.clearSelection(null, true)" title="Clear Selection"><span class="material-symbols-rounded">close</span></button>
+                  </div>
+                  <div class="header-actions" id="trashActions" style="display: none; gap: 8px;">
+                    <button class="btn-drive btn-text-drive" onclick="driveApp.emptyTrash()"><span class="material-symbols-rounded">delete_forever</span> Empty Trash</button>
+                  </div>
+                </div>
+
+                <div class="chips-container" id="chipsContainer">
+                  <button class="chip active" onclick="driveApp.setFilter('all')"><span class="material-symbols-rounded">all_inclusive</span> All</button>
+                  <button class="chip" onclick="driveApp.setFilter('documents')"><span class="material-symbols-rounded">article</span> Documents</button>
+                  <button class="chip" onclick="driveApp.setFilter('images')"><span class="material-symbols-rounded">image</span> Images</button>
+                  <button class="chip" onclick="driveApp.setFilter('audio')"><span class="material-symbols-rounded">audiotrack</span> Audio</button>
+                  <button class="chip" onclick="driveApp.setFilter('video')"><span class="material-symbols-rounded">movie</span> Video</button>
+                </div>
+
+                <div class="file-list-container" id="fileListContainer" onclick="driveApp.clearSelection(event)">
+                  <div class="recents-container" id="recentsSection" style="display: none;">
+                    <div class="section-title" style="margin: 0 0 8px 0;">Recent files</div>
+                    <div class="recents-tray" id="recentsTray"></div>
+                  </div>
+                  <div class="section-title hidden" id="foldersTitle">Folders</div>
+                  <div id="foldersList" class="grid-view"></div>
+                  <div class="section-title hidden" id="filesTitle">Files</div>
+                  <div id="filesList" class="grid-view"></div>
+                </div>
+              </main>
+
+              <aside class="properties-pane" id="propertiesPane">
+                <div class="properties-header">
+                  <span style="font-family: var(--font-title); font-size: 16px; font-weight: 500;">Details</span>
+                  <button class="icon-btn" onclick="driveApp.toggleProperties()"><span class="material-symbols-rounded">close</span></button>
+                </div>
+                <div class="properties-content" id="propertiesContent"></div>
+              </aside>
+            </div>
+
+            <div class="floating-menu" id="newMenu">
+              <div class="menu-item" onclick="driveApp.showModal('addFolder')"><span class="material-symbols-rounded">create_new_folder</span>New folder</div>
+              <div class="menu-divider"></div>
+              <div class="menu-item" onclick="driveApp.showModal('addFile')"><span class="material-symbols-rounded">note_add</span>New file</div>
+              <div class="menu-item" onclick="document.getElementById('fileUploadInput').click()"><span class="material-symbols-rounded">upload_file</span>File upload</div>
+              <input type="file" id="fileUploadInput" multiple class="hidden" onchange="driveApp.handleFilesSelect(event)">
+            </div>
+
+            <div class="floating-menu" id="moreMenu">
+              <div class="menu-item" onclick="driveApp.toggleSelectMode()"><span class="material-symbols-rounded">checklist</span>Select</div>
+              <div class="menu-item" onclick="driveApp.selectAll()"><span class="material-symbols-rounded">done_all</span>Select all</div>
+              <div class="menu-item" onclick="driveApp.clearSelection(null, true)"><span class="material-symbols-rounded">deselect</span>Unselect all</div>
+              <div class="menu-divider"></div>
+              <div class="menu-item" onclick="driveApp.pasteClipboard()"><span class="material-symbols-rounded">content_paste</span>Paste</div>
+            </div>
+
+            <div class="sort-menu" id="sortMenu">
+              <div class="menu-item" onclick="driveApp.setSort('name')" id="sort_name"><span class="material-symbols-rounded">sort_by_alpha</span>Name</div>
+              <div class="menu-item" onclick="driveApp.setSort('mtime')" id="sort_mtime"><span class="material-symbols-rounded">calendar_today</span>Last modified</div>
+              <div class="menu-item" onclick="driveApp.setSort('size')" id="sort_size"><span class="material-symbols-rounded">storage</span>Size</div>
+              <div class="menu-divider"></div>
+              <div class="menu-item" onclick="driveApp.toggleSortDirection()"><span class="material-symbols-rounded" id="sortDirIcon">arrow_downward</span>Direction</div>
+            </div>
+
+            <div class="context-menu" id="contextMenu"></div>
+
+            <div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this) driveApp.closeModal()">
+              <div class="modal-drive">
+                <div class="modal-title-drive" id="modalTitle">Title</div>
+                <input type="text" class="modal-input-drive" id="modalInput" autocomplete="off">
+                <div class="modal-actions" style="display:flex; justify-content:flex-end; gap:8px;">
+                  <button class="btn-drive btn-text-drive" onclick="driveApp.closeModal()">Cancel</button>
+                  <button class="btn-drive btn-filled-drive" id="modalSubmit">Create</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="modal-overlay" id="mediaOverlay" style="z-index: 3500; display: none;" onclick="if(event.target===this) driveApp.closeMedia()">
+              <div class="modal-drive" style="max-width: 90%; max-height: 90%; width: auto; background: transparent; box-shadow: none; padding: 0; align-items: center; justify-content: center; position: relative;">
+                <button class="icon-btn" onclick="driveApp.closeMedia()" style="position: absolute; top: -16px; right: -16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.5);"><span class="material-symbols-rounded">close</span></button>
+                <div id="mediaModalContent" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; max-height: 80vh;"></div>
+              </div>
+            </div>
+
+            <div id="frOverlay" style="position: fixed; top: 16px; right: 24px; z-index: 4000; display: none; pointer-events: none;">
+              <div style="width: 320px; display: flex; flex-direction: column; background-color: var(--theme-surface-container-high); border: 1px solid var(--theme-outline-variant); border-radius: 8px; pointer-events: auto; box-shadow: 0 4px 16px rgba(0,0,0,0.5); overflow: hidden;">
+                <div style="display: flex; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--theme-outline-variant);">
+                  <span class="material-symbols-rounded" style="font-size: 18px; color: var(--theme-on-surface-variant); margin-right: 8px;">search</span>
+                  <input type="text" id="frFindInput" placeholder="Find" style="flex: 1; background: none; border: none; color: var(--theme-on-surface); outline: none; font-size: 14px; width: 100%;">
+                  <span id="frMatchCount" style="color: var(--theme-on-surface-variant); font-size: 12px; margin: 0 8px; white-space: nowrap;">0/0</span>
+                  <button class="icon-btn" style="width: 28px; height: 28px;" onclick="driveApp.frNext(true)" title="Previous"><span class="material-symbols-rounded" style="font-size: 18px;">expand_less</span></button>
+                  <button class="icon-btn" style="width: 28px; height: 28px;" onclick="driveApp.frNext(false)" title="Next"><span class="material-symbols-rounded" style="font-size: 18px;">expand_more</span></button>
+                  <button class="icon-btn" style="width: 28px; height: 28px; margin-left: 4px;" onclick="driveApp.closeFindReplace()" title="Close"><span class="material-symbols-rounded" style="font-size: 18px;">close</span></button>
+                </div>
+                <div style="display: flex; align-items: center; padding: 6px 12px; background-color: var(--theme-surface-container-low);">
+                  <span class="material-symbols-rounded" style="font-size: 18px; color: var(--theme-on-surface-variant); margin-right: 8px;">edit</span>
+                  <input type="text" id="frReplaceInput" placeholder="Replace" style="flex: 1; background: none; border: none; color: var(--theme-on-surface); outline: none; font-size: 14px; width: 100%;">
+                  <button style="background: transparent; border: 1px solid var(--theme-outline); color: var(--theme-on-surface); border-radius: 4px; padding: 4px 8px; font-size: 12px; cursor: pointer; margin-right: 4px;" onmouseover="this.style.backgroundColor='var(--theme-surface-container-high)'" onmouseout="this.style.backgroundColor='transparent'" onclick="driveApp.frReplaceAction(false)">Replace</button>
+                  <button style="background: transparent; border: 1px solid var(--theme-outline); color: var(--theme-on-surface); border-radius: 4px; padding: 4px 8px; font-size: 12px; cursor: pointer;" onmouseover="this.style.backgroundColor='var(--theme-surface-container-high)'" onmouseout="this.style.backgroundColor='transparent'" onclick="driveApp.frReplaceAction(true)">All</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="editor-overlay-drive" id="editorOverlay">
+              <div class="editor-header-drive">
+                <button class="icon-btn" onclick="driveApp.closeEditor()"><span class="material-symbols-rounded">arrow_back</span></button>
+                <div class="editor-title-drive" id="editorTitle">filename.txt</div>
+                <div class="header-actions" id="editorActions">
+                  <button class="icon-btn" onclick="driveApp.toggleEditorWrap()" id="editorWrapBtn" title="Toggle Word Wrap"><span class="material-symbols-rounded">wrap_text</span></button>
+                  <button class="icon-btn" onclick="driveApp.editorFind()" title="Find and Replace"><span class="material-symbols-rounded">search</span></button>
+                  <button class="icon-btn" onclick="driveApp.editorUndo()" title="Undo"><span class="material-symbols-rounded">undo</span></button>
+                  <button class="icon-btn" onclick="driveApp.editorRedo()" title="Redo"><span class="material-symbols-rounded">redo</span></button>
+                  <button class="btn-drive btn-filled-drive" onclick="driveApp.saveFile()">
+                    <span class="material-symbols-rounded" style="font-size:18px;">save</span>
+                    <span>Save</span>
+                  </button>
+                </div>
+              </div>
+              <div style="flex:1; overflow:hidden; display:flex; flex-direction:column;">
+                <div id="desktopEditorContainer" style="flex: 1; display: flex; flex-direction: column;">
+                  <textarea id="editorTextarea"></textarea>
+                </div>
+                <div id="mobileEditorContainer" style="flex: 1; display: none; flex-direction: column;">
+                  <textarea style="flex:1; border:none; outline:none; background:transparent; padding:16px 16px 120px 16px; font-family:monospace; font-size:16px; color:var(--theme-on-surface); resize:none; width:100%; line-height:1.5; height:100%;" id="mobileTextarea" spellcheck="false"></textarea>
+                </div>
+              </div>
+            </div>
+
+            <div class="snackbar-container-drive" id="snackbarContainer"></div>
+          </div>
+
+          <script>
+            class DriveFileManager {
+              constructor() {
+                this.currentPath = new URLSearchParams(window.location.search).get('path') || '';
+                this.viewMode = localStorage.getItem('drive_viewMode') || 'grid';
+                this.sortBy = localStorage.getItem('drive_sortBy') || 'name';
+                this.sortDesc = localStorage.getItem('drive_sortDesc') === 'true';
+                this.currentViewMode = 'home';
+                this.currentFilter = 'all';
+                this.apiPrefix = '?access=admin&page=drive&';
+                
+                this.selectedItems = new Set();
+                this.data = { folders: [], files: [], breadcrumbs: [] };
+                this.searchResults = null;
+                this.searchDebounce = null;
+                this.editor = null;
+                this.currentEditFile = null;
+                this.searchQuery = '';
+                this.isPropertiesOpen = false;
+                this.clipboard = null;
+                this.isSelectMode = false;
+                this.visibleFoldersCount = 25;
+                this.visibleFilesCount = 25;
+                this.filteredFolders = [];
+                this.filteredFiles = [];
+                this.editorWrap = localStorage.getItem('drive_editorWrap') !== 'false';
+                this.frBound = false;
+                this.initEditFile = new URLSearchParams(window.location.search).get('edit') || null;
+
+                this.init();
+              }
+
+              init() {
+                this.updateViewIcon();
+                this.bindEvents();
+                this.loadDirectory(this.currentPath);
+              }
+
+              bindItemEvents(el, item, isFolder) {
+                let touchTimer;
+                let isLongPress = false;
+                let touchStartX = 0;
+                let touchStartY = 0;
+
+                el.addEventListener('touchstart', (e) => {
+                  if (e.target.closest('.card-checkbox') || e.target.closest('.card-star')) return;
+                  isLongPress = false;
+                  touchStartX = e.touches[0].clientX;
+                  touchStartY = e.touches[0].clientY;
+                  
+                  touchTimer = setTimeout(() => {
+                    isLongPress = true;
+                    if (navigator.vibrate) navigator.vibrate([100]);
+                    this.showContextMenu({
+                      preventDefault: () => {},
+                      stopPropagation: () => {},
+                      clientX: touchStartX,
+                      clientY: touchStartY
+                    }, item, isFolder);
+                  }, 500);
+                });
+                
+                el.addEventListener('touchend', (e) => {
+                  clearTimeout(touchTimer);
+                  if (isLongPress) {
+                    if (e.cancelable) e.preventDefault();
+                    e.stopPropagation();
+                  }
+                });
+
+                el.addEventListener('touchmove', (e) => {
+                  if (Math.abs(e.touches[0].clientX - touchStartX) > 10 || Math.abs(e.touches[0].clientY - touchStartY) > 10) {
+                    clearTimeout(touchTimer);
+                  }
+                });
+
+                el.onclick = (e) => {
+                  if (isLongPress) {
+                    isLongPress = false;
+                    return;
+                  }
+                  this.handleItemClick(e, item, isFolder);
+                };
+
+                el.oncontextmenu = (e) => {
+                  e.preventDefault();
+                  this.showContextMenu(e, item, isFolder);
+                };
+              }
+
+              bindEvents() {
+                document.addEventListener('click', () => {
+                  document.getElementById('newMenu').style.display = 'none';
+                  document.getElementById('contextMenu').style.display = 'none';
+                  document.getElementById('sortMenu').style.display = 'none';
+                  document.getElementById('moreMenu').style.display = 'none';
+                });
+
+                const dropZone = document.getElementById('dropZone');
+                dropZone.addEventListener('dragover', (e) => { 
+                  if (window.innerWidth <= 768) return;
+                  e.preventDefault(); 
+                  dropZone.classList.add('drag-over'); 
+                });
+                dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+                dropZone.addEventListener('drop', (e) => {
+                  if (window.innerWidth <= 768) return;
+                  e.preventDefault();
+                  dropZone.classList.remove('drag-over');
+                  if (e.dataTransfer.files.length) this.uploadFiles(e.dataTransfer.files);
+                });
+
+                document.getElementById('searchInput').addEventListener('input', (e) => {
+                  this.handleSearchInput(e.target.value);
+                });
+
+                const scrollContainer = document.getElementById('fileListContainer');
+                if (scrollContainer) {
+                  scrollContainer.addEventListener('scroll', () => {
+                    if (scrollContainer.scrollTop + scrollContainer.clientHeight >= scrollContainer.scrollHeight - 100) {
+                      this.loadMoreItems();
+                    }
+                  });
+                }
+              }
+
+              async handleSearchInput(value) {
+                this.searchQuery = value.trim().toLowerCase();
+                if (!this.searchQuery) {
+                  this.searchResults = null;
+                  this.render();
+                  return;
+                }
+
+                clearTimeout(this.searchDebounce);
+                this.searchDebounce = setTimeout(async () => {
+                  const res = await this.fetchAPI(`search_drive&q=${encodeURIComponent(this.searchQuery)}`);
+                  if (res && res.success) {
+                    this.searchResults = res;
+                    this.render();
+                  }
+                }, 300);
+              }
+
+              async fetchAPI(action, method = 'GET', body = null) {
+                const url = `${this.apiPrefix}api=true&action=${action}&path=${encodeURIComponent(this.currentPath)}`;
+                const options = { method };
+                if (body) {
+                  if (body instanceof FormData) {
+                    options.body = body;
+                  } else {
+                    options.headers = { 'Content-Type': 'application/json' };
+                    options.body = JSON.stringify(body);
+                  }
+                }
+                try {
+                  const res = await fetch(url, options);
+                  const text = await res.text();
+                  let data;
+                  try { data = JSON.parse(text); } catch (e) { throw new Error('Invalid response from server'); }
+                  if (!data.success) throw new Error(data.error || 'Unknown error');
+                  return data;
+                } catch (err) {
+                  this.showToast(err.message);
+                  return null;
+                }
+              }
+
+              navigate(path, pushState = true) {
+                this.currentPath = path;
+                this.searchQuery = '';
+                this.searchResults = null;
+                const searchInp = document.getElementById('searchInput');
+                if (searchInp) searchInp.value = '';
+                
+                if (pushState) {
+                  const url = `?access=admin&page=drive` + (path ? `&path=${encodeURIComponent(path).replace(/%2F/g, '/')}` : '');
+                  window.history.pushState({ path }, '', url);
+                }
+                this.clearSelection(null, true);
+                this.setViewMode('home');
+              }
+
+              async setViewMode(mode) {
+                this.currentViewMode = mode;
+                this.clearSelection(null, true);
+                
+                const navHome = document.getElementById('navHome');
+                const navStarred = document.getElementById('navStarred');
+                const navTrash = document.getElementById('navTrash');
+                
+                if (navHome) navHome.classList.toggle('active', mode === 'home');
+                if (navStarred) navStarred.classList.toggle('active', mode === 'starred');
+                if (navTrash) navTrash.classList.toggle('active', mode === 'trash');
+                
+                document.getElementById('chipsContainer').style.display = mode === 'home' ? 'flex' : 'none';
+                document.getElementById('recentsSection').style.display = mode === 'home' ? 'block' : 'none';
+                document.getElementById('trashActions').style.display = mode === 'trash' ? 'flex' : 'none';
+
+                this.closeSidebarOnMobile();
+                this.loadDirectory(this.currentPath);
+              }
+
+              setFilter(filter) {
+                this.currentFilter = filter;
+                const chips = document.querySelectorAll('.chip');
+                chips.forEach(c => {
+                  c.classList.toggle('active', c.textContent.toLowerCase().includes(filter));
+                });
+                this.render();
+              }
+
+              async loadDirectory(path) {
+                if (this.currentViewMode === 'home') {
+                  const data = await this.fetchAPI('list');
+                  if (data) {
+                    this.data = data;
+                    this.render();
+                    this.loadRecents();
+                  }
+                } else if (this.currentViewMode === 'starred') {
+                  const data = await this.fetchAPI('list_starred');
+                  if (data) {
+                    this.data = { folders: data.starred.filter(i => i.isDir), files: data.starred.filter(i => !i.isDir), breadcrumbs: [] };
+                    this.render();
+                  }
+                } else if (this.currentViewMode === 'trash') {
+                  const data = await this.fetchAPI('list_trash');
+                  if (data) {
+                    this.renderTrash(data.trash);
+                  }
+                }
+              }
+
+              async loadRecents() {
+                const data = await this.fetchAPI('recents');
+                const tray = document.getElementById('recentsTray');
+                tray.innerHTML = '';
+                if (data && data.recents.length > 0 && this.currentViewMode === 'home') {
+                  document.getElementById('recentsSection').style.display = 'block';
+                  data.recents.forEach(item => {
+                    const el = document.createElement('div');
+                    el.className = 'recent-card';
+                    let icon = 'description';
+                    if (item.isImage) icon = 'image';
+                    if (['mp4','webm'].includes(item.ext)) icon = 'movie';
+                    if (['mp3','wav','ogg'].includes(item.ext)) icon = 'audiotrack';
+                    el.innerHTML = `
+                      <div style="display:flex; justify-content:center;"><span class="material-symbols-rounded" style="font-size:36px;">${icon}</span></div>
+                      <div class="recent-name" title="${item.name}">${item.name}</div>
+                    `;
+                    this.bindItemEvents(el, item, false);
+                    tray.appendChild(el);
+                  });
+                } else {
+                  document.getElementById('recentsSection').style.display = 'none';
+                }
+              }
+
+              sortData(arr) {
+                const m = this.sortDesc ? -1 : 1;
+                return arr.sort((a, b) => {
+                  if (this.sortBy === 'name') return a.name.localeCompare(b.name) * m;
+                  if (this.sortBy === 'mtime') return (a.mtime - b.mtime) * m;
+                  if (this.sortBy === 'size') return (a.size - b.size) * m;
+                  return 0;
+                });
+              }
+
+              filterByType(files) {
+                if (this.currentFilter === 'all') return files;
+                const map = {
+                  documents: ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'pdf'],
+                  images: ['png', 'jpg', 'jpeg', 'gif', 'svg'],
+                  audio: ['mp3', 'wav', 'ogg'],
+                  video: ['mp4', 'webm']
+                };
+                return files.filter(f => map[this.currentFilter].includes(f.ext));
+              }
+
+              highlightMatch(name) {
+                if (!this.searchQuery) return name;
+                const index = name.toLowerCase().indexOf(this.searchQuery);
+                if (index === -1) return name;
+                return name.substring(0, index) + `<mark style="background:#ff0000;color:#ffffff;border-radius:2px;">${name.substring(index, index + this.searchQuery.length)}</mark>` + name.substring(index + this.searchQuery.length);
+              }
+
+              loadMoreItems() {
+                let changed = false;
+                const fList = document.getElementById('foldersList');
+                const fiList = document.getElementById('filesList');
+
+                if (this.currentFilter === 'all' && this.visibleFoldersCount < this.filteredFolders.length) {
+                  const nextFolders = this.filteredFolders.slice(this.visibleFoldersCount, this.visibleFoldersCount + 25);
+                  nextFolders.forEach(f => fList.appendChild(this.createItemNode(f, true)));
+                  this.visibleFoldersCount += 25;
+                  changed = true;
+                } else if (this.visibleFilesCount < this.filteredFiles.length) {
+                  const nextFiles = this.filteredFiles.slice(this.visibleFilesCount, this.visibleFilesCount + 25);
+                  nextFiles.forEach(f => fiList.appendChild(this.createItemNode(f, false)));
+                  this.visibleFilesCount += 25;
+                  changed = true;
+                }
+                if (changed) this.syncSelectionUI();
+              }
+
+              render() {
+                const scrollContainer = document.getElementById('fileListContainer');
+                const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+
+                this.renderBreadcrumbs();
+                
+                const viewClass = this.viewMode === 'grid' ? 'grid-view' : 'list-view';
+                const fList = document.getElementById('foldersList');
+                const fiList = document.getElementById('filesList');
+                
+                fList.className = viewClass;
+                fiList.className = viewClass;
+                fList.innerHTML = '';
+                fiList.innerHTML = '';
+
+                this.visibleFoldersCount = 25;
+                this.visibleFilesCount = 25;
+
+                let sourceFolders = this.data.folders;
+                let sourceFiles = this.data.files;
+
+                if (this.searchQuery && this.searchResults) {
+                  sourceFolders = this.searchResults.folders || [];
+                  sourceFiles = this.searchResults.files || [];
+                }
+
+                const filterFn = (i) => i.name.toLowerCase().includes(this.searchQuery);
+                this.filteredFolders = this.sortData(sourceFolders.filter(filterFn));
+                this.filteredFiles = this.sortData(this.filterByType(sourceFiles.filter(filterFn)));
+
+                document.getElementById('foldersTitle').classList.toggle('hidden', this.filteredFolders.length === 0 || this.currentFilter !== 'all');
+                document.getElementById('filesTitle').classList.toggle('hidden', this.filteredFiles.length === 0);
+
+                if (this.currentFilter === 'all') {
+                  this.filteredFolders.slice(0, this.visibleFoldersCount).forEach(f => fList.appendChild(this.createItemNode(f, true)));
+                }
+                this.filteredFiles.slice(0, this.visibleFilesCount).forEach(f => fiList.appendChild(this.createItemNode(f, false)));
+                
+                document.getElementById('multiSelectActions').style.display = this.selectedItems.size > 0 ? 'flex' : 'none';
+                
+                if (scrollContainer) scrollContainer.scrollTop = savedScrollTop;
+
+                // Execute deep link directly on initial load
+                if (this.initEditFile) {
+                  const fileToOpen = sourceFiles.find(f => f.name === this.initEditFile);
+                  if (fileToOpen) {
+                    this.openPreviewOrEditor(fileToOpen);
+                  }
+                  this.initEditFile = null; 
+                }
+              }
+
+              renderTrash(trashItems) {
+                const scrollContainer = document.getElementById('fileListContainer');
+                const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+
+                this.renderBreadcrumbs();
+                document.getElementById('foldersTitle').classList.add('hidden');
+                document.getElementById('filesTitle').classList.remove('hidden');
+                document.getElementById('foldersList').innerHTML = '';
+                
+                const container = document.getElementById('filesList');
+                container.className = this.viewMode === 'grid' ? 'grid-view' : 'list-view';
+                container.innerHTML = '';
+
+                if (trashItems.length === 0) {
+                  container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--theme-on-surface-variant); padding: 32px;">Trash is empty</div>`;
+                  return;
+                }
+
+                trashItems.forEach(item => {
+                  const el = document.createElement('div');
+                  const isSelected = this.selectedItems.has(item.uniq);
+                  el.className = `item-card ${isSelected ? 'selected' : ''}`;
+                  el.dataset.uniq = item.uniq;
+                  
+                  el.innerHTML = `
+                    <div class="card-checkbox" onclick="driveApp.toggleSelect(event, '${item.uniq}')"><span class="material-symbols-rounded">check_circle</span></div>
+                    <div class="item-icon"><span class="material-symbols-rounded">delete</span></div>
+                    <div class="item-name">${item.name} <span style="font-size:11px;color:var(--theme-on-surface-variant);">(${item.original_parent || 'root'})</span></div>
+                    <div class="item-meta">${item.deleted_at}</div>
+                  `;
+                  
+                  el.onclick = () => this.toggleSelect(null, item.uniq);
+                  el.oncontextmenu = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.selectedItems.clear();
+                    this.selectedItems.add(item.uniq);
+                    this.syncSelectionUI();
+                    this.showTrashContextMenu(e, item);
+                  };
+                  
+                  container.appendChild(el);
+                });
+                
+                if (scrollContainer) scrollContainer.scrollTop = savedScrollTop;
+              }
+
+              renderBreadcrumbs() {
+                const container = document.getElementById('breadcrumbs');
+                container.innerHTML = '';
+                
+                const root = document.createElement('div');
+                root.className = 'breadcrumb-item';
+                root.textContent = this.searchQuery ? `Search: "${this.searchQuery}"` : (this.currentViewMode === 'trash' ? 'Trash' : (this.currentViewMode === 'starred' ? 'Starred' : 'Drive'));
+                root.onclick = () => this.navigate('');
+                container.appendChild(root);
+
+                if (this.currentViewMode === 'home' && !this.searchQuery) {
+                  this.data.breadcrumbs.forEach(bc => {
+                    const sep = document.createElement('span');
+                    sep.className = 'material-symbols-rounded breadcrumb-sep';
+                    sep.textContent = 'chevron_right';
+                    container.appendChild(sep);
+                    
+                    const item = document.createElement('div');
+                    item.className = 'breadcrumb-item';
+                    item.textContent = bc.name;
+                    item.onclick = () => this.navigate(bc.path);
+                    container.appendChild(item);
+                  });
+                }
+              }
+
+              createItemNode(item, isFolder) {
+                const el = document.createElement('div');
+                const isSelected = this.selectedItems.has(item.path);
+                el.dataset.path = item.path;
+                if (item.uniq) el.dataset.uniq = item.uniq;
+                
+                let icon = isFolder ? 'folder' : 'description';
+                if (!isFolder) {
+                  if (['js','json','ts'].includes(item.ext)) icon = 'javascript';
+                  if (['html','xml'].includes(item.ext)) icon = 'html';
+                  if (['css','scss'].includes(item.ext)) icon = 'css';
+                  if (['php'].includes(item.ext)) icon = 'php';
+                  if (item.isImage) icon = 'image';
+                  if (item.ext === 'pdf') icon = 'picture_as_pdf';
+                  if (['mp4','webm'].includes(item.ext)) icon = 'movie';
+                  if (['mp3','wav','ogg'].includes(item.ext)) icon = 'audiotrack';
+                }
+
+                const checkboxHtml = `<div class="card-checkbox" onclick="driveApp.toggleSelect(event, '${item.path}')"><span class="material-symbols-rounded">check_circle</span></div>`;
+                const starHtml = `<div class="card-star" onclick="driveApp.toggleStar(event, '${item.path}')"><span class="material-symbols-rounded">star</span></div>`;
+                const fIconClass = isFolder ? 'folder-icon' : '';
+                const nameWithHighlight = this.highlightMatch(item.name);
+
+                if (this.viewMode === 'grid') {
+                  if (isFolder) {
+                    el.className = `item-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
+                    el.innerHTML = `
+                      ${checkboxHtml}
+                      <div class="item-icon folder-icon"><span class="material-symbols-rounded">folder</span></div>
+                      <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
+                      ${starHtml}
+                    `;
+                  } else {
+                    el.className = `item-card file-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
+                    let previewHtml = `<span class="material-symbols-rounded">${icon}</span>`;
+                    if (item.isImage || ['mp4', 'webm'].includes(item.ext)) {
+                      const streamUrl = `${this.apiPrefix}api=true&action=thumb&file=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
+                      previewHtml = `<img src="${streamUrl}" loading="lazy" alt="${item.name}">`;
+                    }
+                    el.innerHTML = `
+                      ${checkboxHtml}
+                      <div class="file-preview">${previewHtml}</div>
+                      <div class="file-info-bar">
+                        <div class="item-icon"><span class="material-symbols-rounded">${icon}</span></div>
+                        <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
+                      </div>
+                      ${starHtml}
+                    `;
+                  }
+                } else {
+                  el.className = `item-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
+                  const date = new Date(item.mtime * 1000).toLocaleDateString();
+                  el.innerHTML = `
+                    ${checkboxHtml}
+                    <div class="item-icon ${fIconClass}"><span class="material-symbols-rounded">${icon}</span></div>
+                    <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
+                    <div class="item-meta">${date}</div>
+                    <div class="item-meta">${isFolder ? '-' : item.formatSize}</div>
+                    ${starHtml}
+                  `;
+                }
+
+                this.bindItemEvents(el, item, isFolder);
+                return el;
+              }
+
+              syncSelectionUI() {
+                document.querySelectorAll('.item-card').forEach(card => {
+                  const p = card.dataset.path || card.dataset.uniq;
+                  if (p) card.classList.toggle('selected', this.selectedItems.has(p));
+                });
+                document.getElementById('multiSelectActions').style.display = this.selectedItems.size > 0 ? 'flex' : 'none';
+              }
+
+              toggleSelect(e, path) {
+                if (e) e.stopPropagation();
+                this.selectedItems.has(path) ? this.selectedItems.delete(path) : this.selectedItems.add(path);
+                this.syncSelectionUI();
+                if (this.selectedItems.size === 1) this.loadProperties([...this.selectedItems][0]);
+                else this.renderPropertiesEmpty();
+              }
+
+              async toggleStar(e, path) {
+                e.stopPropagation();
+                const res = await this.fetchAPI('toggle_star', 'POST', { action: 'toggle_star', item: path });
+                if (res) {
+                  this.showToast(res.starred ? 'Starred item' : 'Unstarred item');
+                  this.loadDirectory(this.currentPath);
+                }
+              }
+
+              handleItemClick(e, item, isFolder) {
+                if (e.target.closest('.card-checkbox') || e.target.closest('.card-star')) return;
+                
+                if (this.isSelectMode || e.ctrlKey || e.metaKey || this.selectedItems.size > 0) {
+                  this.toggleSelect(null, item.path);
+                } else {
+                  if (isFolder) {
+                    this.navigate(item.path);
+                  } else {
+                    this.openPreviewOrEditor(item);
+                  }
+                }
+              }
+
+              clearSelection(e, force = false) {
+                if (!force && e && e.target.closest('.item-card')) return;
+                this.selectedItems.clear();
+                this.isSelectMode = false;
+                this.syncSelectionUI();
+                this.renderPropertiesEmpty();
+              }
+
+              toggleSelectMode() {
+                this.isSelectMode = !this.isSelectMode;
+                if (this.isSelectMode) this.showToast('Select mode enabled. Tap items to select.');
+                else this.clearSelection(null, true);
+              }
+
+              selectAll() {
+                this.isSelectMode = true;
+                this.selectedItems.clear();
+                const filterFn = (i) => i.name.toLowerCase().includes(this.searchQuery);
+                const allItems = [
+                  ...(this.currentFilter === 'all' ? this.data.folders.filter(filterFn) : []),
+                  ...this.filterByType(this.data.files.filter(filterFn))
+                ];
+                allItems.forEach(i => this.selectedItems.add(i.path));
+                this.syncSelectionUI();
+              }
+
+              copyToClipboard(action) {
+                if (this.selectedItems.size === 0) return;
+                this.clipboard = { action, items: Array.from(this.selectedItems) };
+                this.showToast(`${this.selectedItems.size} item(s) copied to clipboard`);
+                this.clearSelection(null, true);
+              }
+
+              async pasteClipboard() {
+                if (!this.clipboard || this.clipboard.items.length === 0) {
+                  this.showToast('Clipboard is empty');
+                  return;
+                }
+                const action = this.clipboard.action === 'cut' ? 'move_items' : 'copy_items';
+                this.showToast(action === 'move_items' ? 'Moving items...' : 'Copying items...');
+                const res = await this.fetchAPI(action, 'POST', { action, items: this.clipboard.items, target: this.currentPath });
+                if (res) {
+                  this.showToast('Paste successful');
+                  if (action === 'move_items') this.clipboard = null;
+                  this.loadDirectory(this.currentPath);
+                }
+              }
+
+              toggleMobileSearch(show) {
+                const sb = document.getElementById('topSearchBar');
+                const closeBtn = document.getElementById('closeSearchBtn');
+                const searchIcon = document.getElementById('searchIcon');
+                if (show) {
+                  sb.classList.add('mobile-active');
+                  if (closeBtn) closeBtn.style.display = 'flex';
+                  if (searchIcon) searchIcon.style.display = 'none';
+                  document.getElementById('searchInput').focus();
+                } else {
+                  sb.classList.remove('mobile-active');
+                  if (closeBtn) closeBtn.style.display = 'none';
+                  if (searchIcon) searchIcon.style.display = 'block';
+                  document.getElementById('searchInput').value = '';
+                  this.handleSearchInput('');
+                }
+              }
+
+              toggleView() {
+                this.viewMode = this.viewMode === 'grid' ? 'list' : 'grid';
+                localStorage.setItem('drive_viewMode', this.viewMode);
+                this.updateViewIcon();
+                this.render();
+              }
+
+              updateViewIcon() {
+                const el1 = document.getElementById('viewIconMenuSide');
+                if (el1) el1.textContent = this.viewMode === 'grid' ? 'view_list' : 'grid_view';
+              }
+
+              toggleSidebar() {
+                const sb = document.getElementById('sidebarDrive');
+                const ov = document.getElementById('sidebarOverlay');
+                sb.classList.toggle('open');
+                ov.classList.toggle('open');
+              }
+
+              closeSidebarOnMobile() {
+                if (window.innerWidth <= 768) {
+                  document.getElementById('sidebarDrive').classList.remove('open');
+                  document.getElementById('sidebarOverlay').classList.remove('open');
+                }
+              }
+
+              toggleProperties() {
+                this.isPropertiesOpen = !this.isPropertiesOpen;
+                document.getElementById('propertiesPane').style.display = this.isPropertiesOpen ? 'flex' : 'none';
+                if (this.isPropertiesOpen && this.selectedItems.size === 1) {
+                  this.loadProperties([...this.selectedItems][0]);
+                } else {
+                  this.renderPropertiesEmpty();
+                }
+              }
+
+              async loadProperties(path) {
+                if (!this.isPropertiesOpen) return;
+                const data = await this.fetchAPI('properties&file=' + encodeURIComponent(path));
+                if (data && data.success) {
+                  const p = data.data;
+                  const html = `
+                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                      <span class="material-symbols-rounded" style="font-size:32px;color:var(--theme-primary);">${p.type.includes('Folder') ? 'folder' : 'description'}</span>
+                      <span style="font-family:var(--font-title);font-size:16px;word-break:break-all;">${p.name}</span>
+                    </div>
+                    <div class="prop-row"><span class="prop-label">Type</span><span class="prop-val">${p.type}</span></div>
+                    <div class="prop-row"><span class="prop-label">Size</span><span class="prop-val">${p.size}</span></div>
+                    ${p.contents ? `<div class="prop-row"><span class="prop-label">Contents</span><span class="prop-val">${p.contents}</span></div>` : ''}
+                    <div class="prop-row"><span class="prop-label">Modified</span><span class="prop-val">${p.modified}</span></div>
+                    <div class="prop-row"><span class="prop-label">Created</span><span class="prop-val">${p.created}</span></div>
+                    <div class="prop-row"><span class="prop-label">Permissions</span><span class="prop-val">${p.permissions}</span></div>
+                  `;
+                  document.getElementById('propertiesContent').innerHTML = html;
+                }
+              }
+
+              renderPropertiesEmpty() {
+                if (!this.isPropertiesOpen) return;
+                document.getElementById('propertiesContent').innerHTML = `<div style="color:var(--theme-on-surface-variant);font-size:14px;text-align:center;margin-top:32px;">Select an item to view details</div>`;
+              }
+
+              showMoreMenu(e) {
+                e.stopPropagation();
+                const menu = document.getElementById('moreMenu');
+                document.getElementById('sortMenu').style.display = 'none';
+                document.getElementById('newMenu').style.display = 'none';
+                document.getElementById('contextMenu').style.display = 'none';
+                
+                if (menu.style.display === 'flex') {
+                  menu.style.display = 'none';
+                } else {
+                  menu.style.display = 'flex';
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  menu.style.top = `${rect.bottom + 8}px`;
+                  menu.style.right = '16px';
+                  menu.style.left = 'auto';
+                }
+              }
+
+              showNewMenu(e) {
+                e.stopPropagation();
+                const menu = document.getElementById('newMenu');
+                
+                if (menu.style.display === 'flex') {
+                  menu.style.display = 'none';
+                } else {
+                  menu.style.display = 'flex';
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  if (window.innerWidth <= 768) {
+                    menu.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+                    menu.style.right = '24px';
+                    menu.style.top = 'auto';
+                    menu.style.left = 'auto';
+                  } else {
+                    menu.style.top = `${rect.bottom + 8}px`;
+                    menu.style.left = `${rect.left}px`;
+                    menu.style.bottom = 'auto';
+                    menu.style.right = 'auto';
+                  }
+                }
+              }
+
+              showSortMenu(e) {
+                e.stopPropagation();
+                document.getElementById('moreMenu').style.display = 'none';
+                const menu = document.getElementById('sortMenu');
+                menu.style.display = 'flex';
+                const rect = e.currentTarget.getBoundingClientRect();
+                menu.style.top = `${rect.bottom + 8}px`;
+                menu.style.right = '16px';
+                menu.style.left = 'auto';
+                
+                ['name','mtime','size'].forEach(k => {
+                  document.getElementById('sort_'+k).classList.toggle('active', this.sortBy === k);
+                });
+                document.getElementById('sortDirIcon').textContent = this.sortDesc ? 'arrow_downward' : 'arrow_upward';
+              }
+
+              setSort(by) {
+                this.sortBy = by;
+                localStorage.setItem('drive_sortBy', by);
+                this.render();
+              }
+
+              toggleSortDirection() {
+                this.sortDesc = !this.sortDesc;
+                localStorage.setItem('drive_sortDesc', this.sortDesc);
+                this.render();
+              }
+
+              showContextMenu(e, item, isFolder) {
+                e.preventDefault();
+                e.stopPropagation();
+                
+                if (!this.selectedItems.has(item.path)) {
+                  if (!e.ctrlKey && !e.metaKey) this.selectedItems.clear();
+                  this.selectedItems.add(item.path);
+                  this.syncSelectionUI();
+                }
+                
+                const menu = document.getElementById('contextMenu');
+                menu.innerHTML = '';
+                
+                const addMenuItem = (icon, text, action) => {
+                  const div = document.createElement('div');
+                  div.className = 'menu-item';
+                  div.innerHTML = `<span class="material-symbols-rounded">${icon}</span>${text}`;
+                  div.onclick = (ev) => { ev.stopPropagation(); menu.style.display = 'none'; action(); };
+                  menu.appendChild(div);
+                };
+
+                if (this.selectedItems.size === 1) {
+                  if (isFolder) {
+                    addMenuItem('folder_open', 'Open', () => this.navigate(item.path));
+                    addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
+                  } else {
+                    addMenuItem('visibility', 'Preview / Edit', () => this.openPreviewOrEditor(item));
+                    addMenuItem('download', 'Download', () => window.location.href = `${this.apiPrefix}download=${encodeURIComponent(item.path)}`);
+                    addMenuItem('share', 'Public File Link', () => this.shareFile(item.path));
+                    if (item.ext === 'zip') {
+                      addMenuItem('folder_zip', 'Extract Zip', () => this.extractZip(item.path));
+                    }
+                  }
+                  addMenuItem('link', 'Copy Direct URL', () => {
+                    const url = window.location.origin + window.location.pathname + `${this.apiPrefix}download=${encodeURIComponent(item.path)}`;
+                    navigator.clipboard.writeText(url);
+                    this.showToast('URL copied to clipboard!');
+                  });
+                  addMenuItem('edit_square', 'Rename', () => this.showModal('rename', item.path));
+                  addMenuItem('info', 'Info', () => {
+                    this.isPropertiesOpen = false;
+                    this.toggleProperties();
+                  });
+                  const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
+                } else {
+                  addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
+                  const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
+                }
+                
+                addMenuItem('content_copy', 'Copy', () => this.copyToClipboard('copy'));
+                addMenuItem('content_cut', 'Cut (Move)', () => this.copyToClipboard('cut'));
+                addMenuItem('delete', 'Move to Trash', () => this.deleteSelected());
+                
+                menu.style.display = 'flex';
+                
+                let x = e.clientX || (e.touches && e.touches[0].clientX);
+                let y = e.clientY || (e.touches && e.touches[0].clientY);
+                const rect = menu.getBoundingClientRect();
+                if (x + rect.width > window.innerWidth) x -= rect.width;
+                if (y + rect.height > window.innerHeight) y -= rect.height;
+                
+                menu.style.left = `${x}px`;
+                menu.style.top = `${y}px`;
+              }
+
+              showTrashContextMenu(e, item) {
+                const menu = document.getElementById('contextMenu');
+                menu.innerHTML = '';
+                
+                const addMenuItem = (icon, text, action) => {
+                  const div = document.createElement('div');
+                  div.className = 'menu-item';
+                  div.innerHTML = `<span class="material-symbols-rounded">${icon}</span>${text}`;
+                  div.onclick = (ev) => { ev.stopPropagation(); menu.style.display = 'none'; action(); };
+                  menu.appendChild(div);
+                };
+
+                addMenuItem('restore_from_trash', 'Restore', () => this.restoreTrash(item.uniq));
+                addMenuItem('delete_forever', 'Delete Permanently', () => this.deleteTrashPermanent(item.uniq));
+                
+                menu.style.display = 'flex';
+                
+                let x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
+                let y = e.clientY || (e.touches && e.touches[0].clientY) || 0;
+                
+                const rect = menu.getBoundingClientRect();
+                if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+                if (y + rect.height > window.innerHeight) y -= rect.height;
+                if (x < 0) x = 8;
+                
+                menu.style.left = `${x}px`;
+                menu.style.top = `${y}px`;
+              }
+
+              showModal(action, oldPath = '') {
+                const overlay = document.getElementById('modalOverlay');
+                const title = document.getElementById('modalTitle');
+                const input = document.getElementById('modalInput');
+                const submit = document.getElementById('modalSubmit');
+                
+                overlay.style.display = 'flex';
+                input.value = '';
+                input.focus();
+
+                submit.onclick = async () => {
+                  const val = input.value.trim();
+                  if (!val) return;
+                  this.closeModal();
+                  
+                  if (action === 'addFolder') {
+                    const res = await this.fetchAPI('add_folder', 'POST', { action: 'add_folder', name: val });
+                    if (res) { this.showToast('Folder created'); this.loadDirectory(this.currentPath); }
+                  } else if (action === 'addFile') {
+                    const res = await this.fetchAPI('add_file', 'POST', { action: 'add_file', name: val });
+                    if (res) { this.showToast('File created'); this.loadDirectory(this.currentPath); }
+                  } else if (action === 'rename') {
+                    const oldName = oldPath.split('/').pop();
+                    const extOld = oldName.split('.').pop();
+                    const extNew = val.split('.').pop();
+                    let targetName = val;
+                    if (oldName.includes('.') && extOld !== extNew) {
+                      if (confirm('Changing extension might break the file. Keep original extension?')) {
+                        targetName = val.split('.')[0] + '.' + extOld;
+                      }
+                    }
+                    const res = await this.fetchAPI('rename', 'POST', { action: 'rename', old: oldPath, new: targetName });
+                    if (res) { this.showToast('Renamed successfully'); this.loadDirectory(this.currentPath); }
+                  }
+                };
+
+                if (action === 'addFolder') {
+                  title.textContent = 'New folder';
+                  input.placeholder = 'Folder name';
+                  submit.textContent = 'Create';
+                } else if (action === 'addFile') {
+                  title.textContent = 'New file';
+                  input.placeholder = 'File name (e.g., script.js)';
+                  submit.textContent = 'Create';
+                } else if (action === 'rename') {
+                  title.textContent = 'Rename';
+                  input.value = oldPath.split('/').pop();
+                  submit.textContent = 'OK';
+                }
+              }
+
+              closeModal() {
+                document.getElementById('modalOverlay').style.display = 'none';
+              }
+
+              async deleteSelected() {
+                if (this.selectedItems.size === 0) return;
+                
+                if (this.currentViewMode === 'trash') {
+                  if (!confirm('Permanently delete selected items?')) return;
+                  const res = await this.fetchAPI('delete_perm', 'POST', { action: 'delete_perm', items: Array.from(this.selectedItems) });
+                  if (res) {
+                    this.showToast(`${this.selectedItems.size} item(s) permanently deleted`);
+                    this.selectedItems.clear();
+                    this.loadDirectory(this.currentPath);
+                    this.renderPropertiesEmpty();
+                  }
+                  return;
+                }
+
+                const res = await this.fetchAPI('trash', 'POST', { action: 'trash', items: Array.from(this.selectedItems) });
+                if (res) {
+                  this.showToast(`${this.selectedItems.size} item(s) moved to Trash`);
+                  this.selectedItems.clear();
+                  this.loadDirectory(this.currentPath);
+                  this.renderPropertiesEmpty();
+                }
+              }
+
+              async restoreTrash(uniq) {
+                const res = await this.fetchAPI('restore_trash', 'POST', { action: 'restore_trash', items: [uniq] });
+                if (res) {
+                  this.showToast('Item restored');
+                  this.loadDirectory(this.currentPath);
+                }
+              }
+
+              async deleteTrashPermanent(uniq) {
+                if (!confirm('This action is irreversible. Delete permanently?')) return;
+                const res = await this.fetchAPI('delete_perm', 'POST', { action: 'delete_perm', items: [uniq] });
+                if (res) {
+                  this.showToast('Item deleted forever');
+                  this.loadDirectory(this.currentPath);
+                }
+              }
+
+              async emptyTrash() {
+                if (!confirm('Empty entire Trash forever?')) return;
+                const res = await this.fetchAPI('empty_trash', 'POST', { action: 'empty_trash' });
+                if (res) {
+                  this.showToast('Trash cleared');
+                  this.loadDirectory(this.currentPath);
+                }
+              }
+
+              async extractZip(path) {
+                this.showToast('Extracting ZIP...');
+                const res = await this.fetchAPI('unzip', 'POST', { action: 'unzip', item: path });
+                if (res) {
+                  this.showToast('ZIP extracted successfully!');
+                  this.loadDirectory(this.currentPath);
+                }
+              }
+
+              async shareFile(path) {
+                const res = await this.fetchAPI('create_share', 'POST', { action: 'create_share', item: path });
+                if (res && res.token) {
+                  const shareUrl = `${window.location.origin}${window.location.pathname}${this.apiPrefix}share=${res.token}`;
+                  navigator.clipboard.writeText(shareUrl);
+                  this.showToast('Link copied to clipboard!');
+                }
+              }
+
+              handleFilesSelect(e) {
+                if (e.target.files.length) this.uploadFiles(e.target.files);
+                e.target.value = '';
+              }
+
+              uploadFiles(files) {
+                const formData = new FormData();
+                formData.append('action', 'upload');
+                for (let i = 0; i < files.length; i++) formData.append('files[]', files[i]);
+                
+                const toast = document.createElement('div');
+                toast.className = 'snackbar-drive show';
+                toast.innerHTML = `Uploading... <span id="up-progress" style="font-weight:bold;margin-left:8px;">0%</span>`;
+                document.getElementById('snackbarContainer').appendChild(toast);
+                
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', `${this.apiPrefix}api=true&action=upload&path=${encodeURIComponent(this.currentPath)}`);
+                xhr.upload.onprogress = (e) => {
+                  if (e.lengthComputable) {
+                    const percent = Math.round((e.loaded / e.total) * 100);
+                    const progressEl = document.getElementById('up-progress');
+                    if (progressEl) progressEl.textContent = percent + '%';
+                  }
+                };
+                xhr.onload = () => {
+                  toast.remove();
+                  try {
+                    const res = JSON.parse(xhr.responseText);
+                    if (res.success) {
+                      this.showToast(`${res.uploaded} file(s) uploaded`);
+                      this.loadDirectory(this.currentPath);
+                    } else throw new Error(res.error || 'Upload error');
+                  } catch (err) {
+                    this.showToast(err.message || 'Upload failed');
+                  }
+                };
+                xhr.onerror = () => { toast.remove(); this.showToast('Upload request failed'); };
+                xhr.send(formData);
+              }
+
+              async openPreviewOrEditor(item) {
+                this.currentEditFile = item.path;
+                const streamUrl = `${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`;
+
+                if (item.isImage || ['mp4','webm','mp3','wav','ogg','pdf'].includes(item.ext)) {
+                  const mediaOverlay = document.getElementById('mediaOverlay');
+                  const modalContent = document.getElementById('mediaModalContent');
+                  mediaOverlay.style.display = 'flex';
+                  
+                  const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '') + `&edit=${encodeURIComponent(item.name)}`;
+                  window.history.pushState({ path: this.currentPath, edit: item.name }, '', newUrl);
+                  
+                  if (item.isImage) {
+                    modalContent.innerHTML = `<img src="${streamUrl}" style="max-width: 100%; max-height: 80vh; object-fit: contain; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">`;
+                  } else if (['mp4','webm'].includes(item.ext)) {
+                    modalContent.innerHTML = `<video controls autoplay preload="metadata" style="max-width: 100%; max-height: 80vh; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); background: #000;"><source src="${streamUrl}" type="video/${item.ext}"></video>`;
+                  } else if (['mp3','wav','ogg'].includes(item.ext)) {
+                    modalContent.innerHTML = `
+                      <div style="background: var(--theme-surface-container-low); padding: 24px; border-radius: 24px; display: flex; flex-direction: column; align-items: center; gap: 24px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                        <div style="width: 120px; height: 120px; border-radius: 24px; background: #ff0000; color: #ffffff; display: flex; align-items: center; justify-content: center;"><span class="material-symbols-rounded" style="font-size: 64px; color: #ffffff;">audiotrack</span></div>
+                        <div style="font-family: var(--font-title); font-size: 16px; color: var(--theme-on-surface); text-align: center; word-break: break-all; max-width: 300px;">${item.name}</div>
+                        <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
+                      </div>`;
+                  } else if (item.ext === 'pdf') {
+                    modalContent.innerHTML = `
+                      <div style="width: 90vw; height: 85vh; max-width: 1000px; background: var(--theme-surface); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                        <div style="padding: 12px 16px; background: var(--theme-surface-container-high); border-bottom: 1px solid var(--theme-outline-variant); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;">
+                          <span style="font-family: var(--font-title); font-size: 14px; font-weight: 500; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 12px;">${item.name}</span>
+                          <button class="btn-drive btn-filled-drive" style="height: 32px; padding: 0 16px; font-size: 12px; flex-shrink: 0;" onclick="window.open('${streamUrl}', '_blank')">Open / Download Native</button>
+                        </div>
+                        <iframe src="${streamUrl}" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>
+                      </div>`;
+                  }
+                } else {
+                  const overlay = document.getElementById('editorOverlay');
+                  const actions = document.getElementById('editorActions');
+                  const desktopContainer = document.getElementById('desktopEditorContainer');
+                  const mobileContainer = document.getElementById('mobileEditorContainer');
+                  
+                  document.getElementById('editorTitle').textContent = item.name;
+                  overlay.style.display = 'flex';
+                  
+                  const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '') + `&edit=${encodeURIComponent(item.name)}`;
+                  window.history.pushState({ path: this.currentPath, edit: item.name }, '', newUrl);
+                  
+                  desktopContainer.style.display = 'none';
+                  mobileContainer.style.display = 'none';
+                  actions.style.display = 'flex';
+
+                  this.updateEditorWrapUI();
+                  const res = await this.fetchAPI(`read&file=${encodeURIComponent(item.path)}`);
+                  if (res && res.success) {
+                    if (window.innerWidth <= 768) {
+                      mobileContainer.style.display = 'flex';
+                      const textEl = document.getElementById('mobileTextarea');
+                      textEl.value = res.content;
+                    } else {
+                      desktopContainer.style.display = 'flex';
+                      let mode = 'text/plain';
+                      if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
+                      if (item.ext === 'html') mode = 'text/html';
+                      if (item.ext === 'css') mode = 'text/css';
+                      if (item.ext === 'php') mode = 'application/x-httpd-php';
+
+                      this.editor = CodeMirror.fromTextArea(document.getElementById('editorTextarea'), {
+                        lineNumbers: true,
+                        theme: 'material-darker',
+                        mode: mode,
+                        indentUnit: 2,
+                        tabSize: 2,
+                        lineWrapping: this.editorWrap,
+                        viewportMargin: 10
+                      });
+                      this.editor.setValue(res.content);
+                      setTimeout(() => this.editor.refresh(), 50);
+                    }
+                  }
+                }
+              }
+              
+              closeMedia() {
+                const overlay = document.getElementById('mediaOverlay');
+                if (overlay) {
+                  overlay.style.display = 'none';
+                  document.getElementById('mediaModalContent').innerHTML = '';
+                }
+                this.currentEditFile = null;
+                
+                const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '');
+                window.history.pushState({ path: this.currentPath }, '', newUrl);
+              }
+
+              editorUndo() {
+                if (this.editor) {
+                  this.editor.undo();
+                } else if (window.innerWidth <= 768) {
+                  document.execCommand('undo');
+                }
+              }
+
+              editorRedo() {
+                if (this.editor) {
+                  this.editor.redo();
+                } else if (window.innerWidth <= 768) {
+                  document.execCommand('redo');
+                }
+              }
+
+              editorFind() {
+                this.openFindReplace();
+              }
+
+              openFindReplace() {
+                document.getElementById('frOverlay').style.display = 'flex';
+                const input = document.getElementById('frFindInput');
+                input.focus();
+                if (!this.frBound) {
+                  input.addEventListener('input', () => this.frSearch());
+                  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); this.frNext(e.shiftKey); } });
+                  document.getElementById('frReplaceInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); this.frReplaceAction(false); } });
+                  this.frBound = true;
+                }
+                this.frSearch();
+              }
+
+              closeFindReplace() {
+                document.getElementById('frOverlay').style.display = 'none';
+                if (this.editor) this.editor.getAllMarks().forEach(m => m.clear());
+                document.getElementById('frMatchCount').textContent = '0/0';
+              }
+
+              frSearch() {
+                const term = document.getElementById('frFindInput').value;
+                this.frMatches = [];
+                this.frCurrent = -1;
+                const countEl = document.getElementById('frMatchCount');
+                
+                if (!term) {
+                  countEl.textContent = '0/0';
+                  if (this.editor) this.editor.getAllMarks().forEach(m => m.clear());
+                  return;
+                }
+
+                if (this.editor) {
+                  this.editor.getAllMarks().forEach(m => m.clear());
+                  const cursor = this.editor.getSearchCursor(term);
+                  while (cursor.findNext()) {
+                    this.frMatches.push({from: cursor.from(), to: cursor.to()});
+                    this.editor.markText(cursor.from(), cursor.to(), {className: 'search-highlight'});
+                  }
+                } else {
+                  const text = document.getElementById('mobileTextarea').value;
+                  let idx = text.indexOf(term);
+                  while (idx !== -1) {
+                    this.frMatches.push({start: idx, end: idx + term.length});
+                    idx = text.indexOf(term, idx + term.length);
+                  }
+                }
+                
+                countEl.textContent = `0/${this.frMatches.length}`;
+              }
+
+              frNext(reverse = false) {
+                if (this.frMatches.length === 0) return;
+                if (reverse) {
+                  this.frCurrent = this.frCurrent <= 0 ? this.frMatches.length - 1 : this.frCurrent - 1;
+                } else {
+                  this.frCurrent = this.frCurrent >= this.frMatches.length - 1 ? 0 : this.frCurrent + 1;
+                }
+                
+                document.getElementById('frMatchCount').textContent = `${this.frCurrent + 1}/${this.frMatches.length}`;
+                
+                if (this.editor) {
+                  const m = this.frMatches[this.frCurrent];
+                  this.editor.setSelection(m.from, m.to);
+                  this.editor.scrollIntoView(m.from, 100);
+                } else {
+                  const ta = document.getElementById('mobileTextarea');
+                  const m = this.frMatches[this.frCurrent];
+                  ta.setSelectionRange(m.start, m.end);
+                  ta.focus();
+                }
+              }
+
+              frReplaceAction(all = false) {
+                const term = document.getElementById('frFindInput').value;
+                const rep = document.getElementById('frReplaceInput').value;
+                if (!term) return;
+
+                if (this.editor) {
+                  if (all) {
+                    this.editor.operation(() => {
+                      const cursor = this.editor.getSearchCursor(term);
+                      while (cursor.findNext()) cursor.replace(rep);
+                    });
+                  } else {
+                    if (this.frCurrent > -1 && this.frMatches[this.frCurrent]) {
+                      const m = this.frMatches[this.frCurrent];
+                      if (this.editor.getRange(m.from, m.to) === term) this.editor.replaceRange(rep, m.from, m.to);
+                    }
+                  }
+                } else {
+                  const ta = document.getElementById('mobileTextarea');
+                  ta.focus();
+                  if (all) {
+                    for (let i = this.frMatches.length - 1; i >= 0; i--) {
+                      const m = this.frMatches[i];
+                      if (ta.value.substring(m.start, m.end) === term) {
+                        ta.setSelectionRange(m.start, m.end);
+                        document.execCommand('insertText', false, rep);
+                      }
+                    }
+                  } else {
+                    if (this.frCurrent > -1 && this.frMatches[this.frCurrent]) {
+                      const m = this.frMatches[this.frCurrent];
+                      if (ta.value.substring(m.start, m.end) === term) {
+                        ta.setSelectionRange(m.start, m.end);
+                        document.execCommand('insertText', false, rep);
+                      }
+                    }
+                  }
+                }
+                this.frSearch();
+              }
+
+              toggleEditorWrap() {
+                this.editorWrap = !this.editorWrap;
+                localStorage.setItem('drive_editorWrap', this.editorWrap);
+                this.updateEditorWrapUI();
+                if (this.editor) {
+                  this.editor.setOption('lineWrapping', this.editorWrap);
+                }
+              }
+
+              updateEditorWrapUI() {
+                const btn = document.getElementById('editorWrapBtn');
+                if (btn) {
+                  const icon = btn.querySelector('.material-symbols-rounded');
+                  if (icon) {
+                    icon.textContent = this.editorWrap ? 'wrap_text' : 'segment';
+                    btn.style.color = this.editorWrap ? '#ff3333' : 'var(--theme-on-surface-variant)';
+                  }
+                }
+                const mobileTa = document.getElementById('mobileTextarea');
+                if (mobileTa) {
+                  mobileTa.setAttribute('wrap', this.editorWrap ? 'soft' : 'off');
+                  mobileTa.style.whiteSpace = this.editorWrap ? 'pre-wrap' : 'pre';
+                  mobileTa.style.overflowX = this.editorWrap ? 'hidden' : 'auto';
+                }
+              }
+
+              closeEditor() {
+                this.closeFindReplace();
+                document.getElementById('editorOverlay').style.display = 'none';
+                this.currentEditFile = null;
+                this.editor = null;
+                
+                const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '');
+                window.history.pushState({ path: this.currentPath }, '', newUrl);
+              }
+
+              async saveFile() {
+                if (!this.currentEditFile) return;
+                let content = '';
+                if (window.innerWidth <= 768) {
+                  content = document.getElementById('mobileTextarea').value;
+                } else if (this.editor) {
+                  content = this.editor.getValue();
+                }
+                const res = await this.fetchAPI('write', 'POST', { action: 'write', file: this.currentEditFile, content });
+                if (res) this.showToast('File saved');
+              }
+
+              batchDownload(type) {
+                if (type === 'selected' && this.selectedItems.size === 0) return;
+                let url = `${this.apiPrefix}batch=${type}&path=${encodeURIComponent(this.currentPath)}`;
+                if (type === 'selected') url += `&items=${encodeURIComponent(Array.from(this.selectedItems).join(','))}`;
+                window.location.href = url;
+                this.clearSelection(null, true);
+              }
+
+              showToast(msg) {
+                const container = document.getElementById('snackbarContainer');
+                const toast = document.createElement('div');
+                toast.className = 'snackbar-drive';
+                toast.textContent = msg;
+                container.appendChild(toast);
+                
+                requestAnimationFrame(() => {
+                  toast.classList.add('show');
+                  setTimeout(() => {
+                    toast.classList.remove('show');
+                    setTimeout(() => toast.remove(), 300);
+                  }, 3000);
+                });
+              }
+            }
+
+            const driveApp = new DriveFileManager();
+          </script>
+        <?php else: ?>
+          <!-- Standard User Management UI -->
+          <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
+            <div class="d-flex align-items-center gap-3">
+              <h1 class="content-title m-0">User Management</h1>
+              <form method="POST" action="" class="m-0">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <button type="submit" name="reset_opcache" class="btn btn-sm btn-outline-warning" title="Clear PHP OPcache"><i class="bi bi-lightning-charge-fill"></i> Reset OPcache</button>
+              </form>
+            </div>
+            <?php $search = $_GET['search'] ?? ''; ?>
+            <?php $sort_admin = $_GET['sort'] ?? 'newest'; ?>
+            <form method="GET" action="" class="d-flex w-100" style="max-width: 450px;">
+              <input type="hidden" name="access" value="admin">
+              <select name="sort" class="form-select me-2" style="width: auto;" onchange="this.form.submit()">
+                <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                <option value="pending" <?php echo $sort_admin === 'pending' ? 'selected' : ''; ?>>Pending Requests</option>
+                <option value="verified" <?php echo $sort_admin === 'verified' ? 'selected' : ''; ?>>Verified</option>
+                <option value="unverified" <?php echo $sort_admin === 'unverified' ? 'selected' : ''; ?>>Unverified</option>
+                <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned</option>
+                <option value="not_banned" <?php echo $sort_admin === 'not_banned' ? 'selected' : ''; ?>>Not Banned</option>
+              </select>
+              <input type="text" name="search" class="form-control me-2" placeholder="Search user..." value="<?php echo htmlspecialchars($search); ?>">
+              <button type="submit" class="btn btn-danger"><i class="bi bi-search"></i></button>
             </form>
           </div>
-          <?php $search = $_GET['search'] ?? ''; ?>
-          <?php $sort_admin = $_GET['sort'] ?? 'newest'; ?>
-          <form method="GET" action="" class="d-flex w-100" style="max-width: 450px;">
-            <input type="hidden" name="access" value="admin">
-            <select name="sort" class="form-select me-2" style="width: auto;" onchange="this.form.submit()">
-              <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest</option>
-              <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
-              <option value="pending" <?php echo $sort_admin === 'pending' ? 'selected' : ''; ?>>Pending Requests</option>
-              <option value="verified" <?php echo $sort_admin === 'verified' ? 'selected' : ''; ?>>Verified</option>
-              <option value="unverified" <?php echo $sort_admin === 'unverified' ? 'selected' : ''; ?>>Unverified</option>
-              <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned</option>
-              <option value="not_banned" <?php echo $sort_admin === 'not_banned' ? 'selected' : ''; ?>>Not Banned</option>
-            </select>
-            <input type="text" name="search" class="form-control me-2" placeholder="Search user..." value="<?php echo htmlspecialchars($search); ?>">
-            <button type="submit" class="btn btn-danger"><i class="bi bi-search"></i></button>
-          </form>
-        </div>
-        <div class="content-area-wrapper">
-          <div class="user-list">
-            <div class="user-list-header">
-              <div>ID</div><div>Email</div><div>Artist</div><div>Status</div><div>Last Up</div><div>Count</div><div>Action</div>
-            </div>
-            <?php
-              $db = get_db();
-              $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
-              $offset = ($page - 1) * ADMIN_PAGE_SIZE;
-              
-              $where_clauses = [];
-              $params = [];
-              if ($search !== '') {
-                $where_clauses[] = "(id = ? OR email LIKE ? OR artist LIKE ?)";
-                $params = [$search, "%$search%", "%$search%"];
-              }
-              if ($sort_admin === 'pending') {
-                $where_clauses[] = "verified = 'pending'";
-              }
-              
-              $where = '';
-              if (count($where_clauses) > 0) {
-                $where = "WHERE " . implode(' AND ', $where_clauses);
-              }
-              
-              $total_users_stmt = $db->prepare("SELECT COUNT(id) FROM users $where");
-              $total_users_stmt->execute($params);
-              $total_users = $total_users_stmt->fetchColumn();
-              $total_pages = ceil($total_users / ADMIN_PAGE_SIZE);
-              
-              $admin_sort_map = [
-                'newest' => 'ORDER BY id DESC',
-                'oldest' => 'ORDER BY id ASC',
-                'pending' => "ORDER BY id DESC",
-                'verified' => "ORDER BY verified DESC, id ASC",
-                'unverified' => "ORDER BY verified ASC, id ASC",
-                'banned' => "ORDER BY banned DESC, id ASC",
-                'not_banned' => "ORDER BY banned ASC, id ASC",
-              ];
-              $admin_order_by = $admin_sort_map[$sort_admin] ?? 'ORDER BY id DESC';
-              
-              $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned FROM users $where $admin_order_by LIMIT ? OFFSET ?";
-              $stmt = $db->prepare($sql);
-              $param_index = 1;
-              if ($search !== '') {
-                $stmt->bindValue($param_index++, $search);
-                $stmt->bindValue($param_index++, "%$search%");
-                $stmt->bindValue($param_index++, "%$search%");
-              }
-              $stmt->bindValue($param_index++, (int)ADMIN_PAGE_SIZE, PDO::PARAM_INT);
-              $stmt->bindValue($param_index++, (int)$offset, PDO::PARAM_INT);
-              $stmt->execute();
-              
-              $users = $stmt->fetchAll();
-              foreach ($users as $user):
-            ?>
-            <div class="user-item">
-              <div class="user-item-id"><?php echo htmlspecialchars($user['id']); ?></div>
-              <div class="user-item-email-desktop text-truncate"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
-              <div class="user-item-artist-desktop text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
-              <div class="user-item-verified-desktop">
-                <?php if ($user['verified'] === 'yes'): ?>
-                  <span class="badge bg-success">YES</span>
-                <?php elseif ($user['verified'] === 'pending'): ?>
-                  <span class="badge bg-info text-dark">PENDING</span>
-                <?php else: ?>
-                  <span class="badge bg-secondary">NO</span>
-                <?php endif; ?>
-                <?php if ($user['banned']): ?>
-                <span class="badge bg-danger">BANNED</span>
-                <?php endif; ?>
+          <div class="content-area-wrapper">
+            <div class="user-list">
+              <div class="user-list-header">
+                <div>ID</div><div>Email</div><div>Artist</div><div>Status</div><div>Last Up</div><div>Count</div><div>Action</div>
               </div>
-              <div class="user-item-last-up-desktop"><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></div>
-              <div class="user-item-count-desktop"><?php echo htmlspecialchars($user['daily_upload_count'] ?? '0'); ?></div>
-              <div class="user-item-main">
-                <div class="user-id-mobile">ID: <?php echo htmlspecialchars($user['id']); ?></div>
-                <div class="user-email text-truncate"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
-                <div class="user-artist text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
-              </div>
-              <div class="user-item-action">
-                <form method="POST" action="?access=admin&page=<?php echo $page; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>" class="d-inline">
-                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                  <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
-                  <button type="submit" name="toggle_verify" class="btn <?php echo $user['verified'] === 'yes' ? 'btn-warning' : ($user['verified'] === 'pending' ? 'btn-info text-dark fw-bold' : 'btn-success'); ?>">
-                    <?php echo $user['verified'] === 'yes' ? 'Un-verify' : ($user['verified'] === 'pending' ? 'Approve Request' : 'Verify'); ?>
-                  </button>
-                  <button type="submit" name="toggle_ban" class="btn <?php echo $user['banned'] ? 'btn-secondary' : 'btn-warning'; ?>">
-                    <?php echo $user['banned'] ? 'Unban' : 'Ban'; ?>
-                  </button>
-                  <button type="submit" name="delete_user" class="btn btn-danger" onclick="return confirm('Permanently delete this user and all their data?');">Delete</button>
-                </form>
-              </div>
-              <div class="user-item-stats">
-                <div>
-                  <span class="label">Status</span>
-                  <span class="badge <?php echo $user['banned'] ? 'bg-danger' : 'bg-success'; ?>"><?php echo $user['banned'] ? 'BANNED' : 'ACTIVE'; ?></span>
-                </div>
-                <div>
-                  <span class="label">Verified</span>
-                  <span class="badge <?php echo $user['verified'] === 'yes' ? 'bg-success' : ($user['verified'] === 'pending' ? 'bg-info text-dark' : 'bg-secondary'); ?>"><?php echo htmlspecialchars(strtoupper($user['verified'])); ?></span>
-                </div>
-                <div>
-                  <span class="label">Last Upload</span>
-                  <span><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></span>
-                </div>
-              </div>
-            </div>
-            <?php endforeach; ?>
-          </div>
-          <?php if ($total_pages > 1): ?>
-          <nav class="mt-4" aria-label="User pagination">
-            <ul class="pagination justify-content-center">
-              <li class="page-item <?php echo ($page <= 1) ? 'disabled' : ''; ?>">
-                <a class="page-link" href="?access=admin&page=<?php echo $page - 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">Previous</a>
-              </li>
               <?php
-                $start_page = max(1, $page - 1);
-                $end_page = min($total_pages, $start_page + 2);
-                if ($end_page - $start_page < 2) {
-                  $start_page = max(1, $end_page - 2);
+                $db = get_db();
+                $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+                $offset = ($page - 1) * ADMIN_PAGE_SIZE;
+                
+                $where_clauses = [];
+                $params = [];
+                if ($search !== '') {
+                  $where_clauses[] = "(id = ? OR email LIKE ? OR artist LIKE ?)";
+                  $params = [$search, "%$search%", "%$search%"];
                 }
+                if ($sort_admin === 'pending') {
+                  $where_clauses[] = "verified = 'pending'";
+                }
+                
+                $where = '';
+                if (count($where_clauses) > 0) {
+                  $where = "WHERE " . implode(' AND ', $where_clauses);
+                }
+                
+                $total_users_stmt = $db->prepare("SELECT COUNT(id) FROM users $where");
+                $total_users_stmt->execute($params);
+                $total_users = $total_users_stmt->fetchColumn();
+                $total_pages = ceil($total_users / ADMIN_PAGE_SIZE);
+                
+                $admin_sort_map = [
+                  'newest' => 'ORDER BY id DESC',
+                  'oldest' => 'ORDER BY id ASC',
+                  'pending' => "ORDER BY id DESC",
+                  'verified' => "ORDER BY verified DESC, id ASC",
+                  'unverified' => "ORDER BY verified ASC, id ASC",
+                  'banned' => "ORDER BY banned DESC, id ASC",
+                  'not_banned' => "ORDER BY banned ASC, id ASC",
+                ];
+                $admin_order_by = $admin_sort_map[$sort_admin] ?? 'ORDER BY id DESC';
+                
+                $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned FROM users $where $admin_order_by LIMIT ? OFFSET ?";
+                $stmt = $db->prepare($sql);
+                $param_index = 1;
+                if ($search !== '') {
+                  $stmt->bindValue($param_index++, $search);
+                  $stmt->bindValue($param_index++, "%$search%");
+                  $stmt->bindValue($param_index++, "%$search%");
+                }
+                $stmt->bindValue($param_index++, (int)ADMIN_PAGE_SIZE, PDO::PARAM_INT);
+                $stmt->bindValue($param_index++, (int)$offset, PDO::PARAM_INT);
+                $stmt->execute();
+                
+                $users = $stmt->fetchAll();
+                foreach ($users as $user):
               ?>
-              <?php for ($i = $start_page; $i <= $end_page; $i++): ?>
-              <li class="page-item <?php echo ($page == $i) ? 'active' : ''; ?>">
-                <a class="page-link" href="?access=admin&page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>"><?php echo $i; ?></a>
-              </li>
-              <?php endfor; ?>
-              <li class="page-item <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>">
-                <a class="page-link" href="?access=admin&page=<?php echo $page + 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">Next</a>
-              </li>
-            </ul>
-          </nav>
-          <?php endif; ?>
-        </div>
+              <div class="user-item">
+                <div class="user-item-id"><?php echo htmlspecialchars($user['id']); ?></div>
+                <div class="user-item-email-desktop text-truncate"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
+                <div class="user-item-artist-desktop text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
+                <div class="user-item-verified-desktop">
+                  <?php if ($user['verified'] === 'yes'): ?>
+                    <span class="badge bg-success">YES</span>
+                  <?php elseif ($user['verified'] === 'pending'): ?>
+                    <span class="badge bg-info text-dark">PENDING</span>
+                  <?php else: ?>
+                    <span class="badge bg-secondary">NO</span>
+                  <?php endif; ?>
+                  <?php if ($user['banned']): ?>
+                  <span class="badge bg-danger">BANNED</span>
+                  <?php endif; ?>
+                </div>
+                <div class="user-item-last-up-desktop"><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></div>
+                <div class="user-item-count-desktop"><?php echo htmlspecialchars($user['daily_upload_count'] ?? '0'); ?></div>
+                <div class="user-item-main">
+                  <div class="user-id-mobile">ID: <?php echo htmlspecialchars($user['id']); ?></div>
+                  <div class="user-email text-truncate"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
+                  <div class="user-artist text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
+                </div>
+                <div class="user-item-action">
+                  <form method="POST" action="?access=admin&page=<?php echo $page; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>" class="d-inline">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                    <button type="submit" name="toggle_verify" class="btn <?php echo $user['verified'] === 'yes' ? 'btn-warning' : ($user['verified'] === 'pending' ? 'btn-info text-dark fw-bold' : 'btn-success'); ?>">
+                      <?php echo $user['verified'] === 'yes' ? 'Un-verify' : ($user['verified'] === 'pending' ? 'Approve Request' : 'Verify'); ?>
+                    </button>
+                    <button type="submit" name="toggle_ban" class="btn <?php echo $user['banned'] ? 'btn-secondary' : 'btn-warning'; ?>">
+                      <?php echo $user['banned'] ? 'Unban' : 'Ban'; ?>
+                    </button>
+                    <button type="submit" name="delete_user" class="btn btn-danger" onclick="return confirm('Permanently delete this user and all their data?');">Delete</button>
+                  </form>
+                </div>
+                <div class="user-item-stats">
+                  <div>
+                    <span class="label">Status</span>
+                    <span class="badge <?php echo $user['banned'] ? 'bg-danger' : 'bg-success'; ?>"><?php echo $user['banned'] ? 'BANNED' : 'ACTIVE'; ?></span>
+                  </div>
+                  <div>
+                    <span class="label">Verified</span>
+                    <span class="badge <?php echo $user['verified'] === 'yes' ? 'bg-success' : ($user['verified'] === 'pending' ? 'bg-info text-dark' : 'bg-secondary'); ?>"><?php echo htmlspecialchars(strtoupper($user['verified'])); ?></span>
+                  </div>
+                  <div>
+                    <span class="label">Last Upload</span>
+                    <span><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></span>
+                  </div>
+                </div>
+              </div>
+              <?php endforeach; ?>
+            </div>
+            <?php if ($total_pages > 1): ?>
+            <nav class="mt-4" aria-label="User pagination">
+              <ul class="pagination justify-content-center">
+                <li class="page-item <?php echo ($page <= 1) ? 'disabled' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=<?php echo $page - 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">Previous</a>
+                </li>
+                <?php
+                  $start_page = max(1, $page - 1);
+                  $end_page = min($total_pages, $start_page + 2);
+                  if ($end_page - $start_page < 2) {
+                    $start_page = max(1, $end_page - 2);
+                  }
+                ?>
+                <?php for ($i = $start_page; $i <= $end_page; $i++): ?>
+                <li class="page-item <?php echo ($page == $i) ? 'active' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>"><?php echo $i; ?></a>
+                </li>
+                <?php endfor; ?>
+                <li class="page-item <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=<?php echo $page + 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">Next</a>
+                </li>
+              </ul>
+            </nav>
+            <?php endif; ?>
+          </div>
+        <?php endif; ?>
       </main>
     </div>
     <?php endif; ?>
@@ -1241,24 +3721,47 @@ function get_upload_limit() {
   return "Max file size: " . min($max_upload, $max_post);
 }
 
-function process_image_to_webp($imageData, $target_width = 640, $quality = 78) {
+function process_image_to_webp($imageData, $target_width = 640, $quality = 78, $crop = true) {
   if (!$imageData || !function_exists('imagecreatefromstring') || !function_exists('imagewebp')) return null;
   $sourceImage = @imagecreatefromstring($imageData);
   if (!$sourceImage) return null;
 
   $src_w = imagesx($sourceImage);
   $src_h = imagesy($sourceImage);
-  $min_dim = min($src_w, $src_h);
-  $src_x = (int)(($src_w - $min_dim) / 2);
-  $src_y = (int)(($src_h - $min_dim) / 2);
+  
+  if ($crop) {
+    $min_dim = min($src_w, $src_h);
+    $src_x = (int)(($src_w - $min_dim) / 2);
+    $src_y = (int)(($src_h - $min_dim) / 2);
+    $final_width = min($min_dim, $target_width);
+    $final_height = $final_width;
+    $copy_w = $min_dim;
+    $copy_h = $min_dim;
+  } else {
+    $src_x = 0; $src_y = 0;
+    $copy_w = $src_w; $copy_h = $src_h;
+    if ($src_w > $target_width || $src_h > $target_width) {
+      $ratio = $src_w / $src_h;
+      if ($ratio > 1) {
+        $final_width = $target_width;
+        $final_height = (int)($target_width / $ratio);
+      } else {
+        $final_height = $target_width;
+        $final_width = (int)($target_width * $ratio);
+      }
+    } else {
+      $final_width = $src_w; $final_height = $src_h;
+    }
+  }
 
-  // Prevent upscaling small images to retain pristine quality
-  $final_width = min($min_dim, $target_width);
-
-  $resizedImage = imagecreatetruecolor($final_width, $final_width);
+  $resizedImage = imagecreatetruecolor($final_width, $final_height);
   imagealphablending($resizedImage, false);
   imagesavealpha($resizedImage, true);
-  imagecopyresampled($resizedImage, $sourceImage, 0, 0, $src_x, $src_y, $final_width, $final_width, $min_dim, $min_dim);
+  
+  $transparent = imagecolorallocatealpha($resizedImage, 255, 255, 255, 127);
+  imagefilledrectangle($resizedImage, 0, 0, $final_width, $final_height, $transparent);
+
+  imagecopyresampled($resizedImage, $sourceImage, 0, 0, $src_x, $src_y, $final_width, $final_height, $copy_w, $copy_h);
 
   ob_start();
   imagewebp($resizedImage, null, $quality);
@@ -1276,21 +3779,41 @@ function process_image_to_webp($imageData, $target_width = 640, $quality = 78) {
   return $webpData;
 }
 
-function process_image_to_jpeg($imageData, $target_width = 640, $quality = 82) {
+function process_image_to_jpeg($imageData, $target_width = 640, $quality = 82, $crop = true) {
   if (!$imageData || !function_exists('imagecreatefromstring') || !function_exists('imagejpeg')) return null;
   $sourceImage = @imagecreatefromstring($imageData);
   if (!$sourceImage) return null;
 
   $src_w = imagesx($sourceImage);
   $src_h = imagesy($sourceImage);
-  $min_dim = min($src_w, $src_h);
-  $src_x = (int)(($src_w - $min_dim) / 2);
-  $src_y = (int)(($src_h - $min_dim) / 2);
+  
+  if ($crop) {
+    $min_dim = min($src_w, $src_h);
+    $src_x = (int)(($src_w - $min_dim) / 2);
+    $src_y = (int)(($src_h - $min_dim) / 2);
+    $final_width = min($min_dim, $target_width);
+    $final_height = $final_width;
+    $copy_w = $min_dim;
+    $copy_h = $min_dim;
+  } else {
+    $src_x = 0; $src_y = 0;
+    $copy_w = $src_w; $copy_h = $src_h;
+    if ($src_w > $target_width || $src_h > $target_width) {
+      $ratio = $src_w / $src_h;
+      if ($ratio > 1) {
+        $final_width = $target_width;
+        $final_height = (int)($target_width / $ratio);
+      } else {
+        $final_height = $target_width;
+        $final_width = (int)($target_width * $ratio);
+      }
+    } else {
+      $final_width = $src_w; $final_height = $src_h;
+    }
+  }
 
-  $final_width = min($min_dim, $target_width);
-
-  $resizedImage = imagecreatetruecolor($final_width, $final_width);
-  imagecopyresampled($resizedImage, $sourceImage, 0, 0, $src_x, $src_y, $final_width, $final_width, $min_dim, $min_dim);
+  $resizedImage = imagecreatetruecolor($final_width, $final_height);
+  imagecopyresampled($resizedImage, $sourceImage, 0, 0, $src_x, $src_y, $final_width, $final_height, $copy_w, $copy_h);
 
   ob_start();
   imagejpeg($resizedImage, null, $quality);
@@ -2614,7 +5137,7 @@ HTML;
         WHERE m.artist != 'Unknown Artist' AND m.artist != '' AND m.artist IS NOT NULL
         " . ($user_id ? "AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)" : "") . "
         GROUP BY m.artist
-        ORDER BY RANDOM() LIMIT 10
+        ORDER BY RANDOM() LIMIT 50
       ");
       $artist_params = [];
       if ($user_id) {
@@ -2623,15 +5146,27 @@ HTML;
       $rec_artists_stmt->execute($artist_params);
       $rec_artists_rows = $rec_artists_stmt->fetchAll();
       $rec_artists = [];
+      $seen_artists = [];
       $stmt_is_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
-      foreach ($rec_artists_rows as $da) {
-        $stmt_is_user->execute([$da['name']]);
-        $uid = $stmt_is_user->fetchColumn();
-        $rec_artists[] = [
-          'name' => $da['name'],
-          'id' => $uid ? $uid : $da['id'],
-          'is_user' => (bool)$uid
-        ];
+      
+      foreach ($rec_artists_rows as $row) {
+        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['name']);
+        if (!is_array($parts)) $parts = [$row['name']];
+        foreach ($parts as $part) {
+          $p = trim($part);
+          $key = strtolower($p);
+          if ($p !== '' && !isset($seen_artists[$key])) {
+            $seen_artists[$key] = true;
+            $stmt_is_user->execute([$p]);
+            $uid = $stmt_is_user->fetchColumn();
+            $rec_artists[] = [
+              'name' => $p,
+              'id' => $uid ? $uid : $row['id'],
+              'is_user' => (bool)$uid
+            ];
+            if (count($rec_artists) >= 10) break 2;
+          }
+        }
       }
       if (count($rec_artists) > 0) {
         $shelves[] = ['title' => 'Discover Artists', 'type' => 'artists', 'items' => $rec_artists];
@@ -4002,12 +6537,37 @@ HTML;
           $mime = strtolower(mime_content_type($_FILES['image']['tmp_name']));
         }
         
-        if (strpos($mime, 'image/') === 0) {
-          $mediaData = process_image_to_webp(file_get_contents($_FILES['image']['tmp_name']), 800, 80);
-          $mediaType = 'image/webp';
-        } elseif (strpos($mime, 'video/') === 0 || strpos($mime, 'audio/') === 0) {
-          $mediaData = file_get_contents($_FILES['image']['tmp_name']);
+        if (strpos($mime, 'image/') === 0 || strpos($mime, 'video/') === 0 || strpos($mime, 'audio/') === 0) {
           $mediaType = $mime;
+          $ext = 'bin';
+          if (strpos($mime, 'image/') === 0) $ext = 'jpg';
+          if (strpos($mime, 'video/mp4') !== false) $ext = 'mp4';
+          if (strpos($mime, 'video/webm') !== false) $ext = 'webm';
+          if (strpos($mime, 'audio/') === 0) $ext = 'mp3';
+
+          $shard = substr(md5(uniqid()), 0, 2);
+          $media_dir = MUSIC_DIR . '/uploads/media/' . $shard;
+          $thumb_dir = MUSIC_DIR . '/thumbnails/' . $shard;
+          if (!is_dir($media_dir)) @mkdir($media_dir, 0755, true);
+          if (!is_dir($thumb_dir)) @mkdir($thumb_dir, 0755, true);
+
+          $filename = uniqid('msg_') . '.' . $ext;
+          $dest_path = $media_dir . '/' . $filename;
+          $rel_path = 'uploads/media/' . $shard . '/' . $filename;
+
+          if (move_uploaded_file($_FILES['image']['tmp_name'], $dest_path)) {
+            $mediaData = $rel_path;
+            
+            // Generate Thumbnail for Images to optimize (Setting $crop to false maintains aspect ratio)
+            if (strpos($mime, 'image/') === 0) {
+              $thumb_data = process_image_to_webp(file_get_contents($dest_path), 400, 70, false);
+              if ($thumb_data) {
+                file_put_contents($thumb_dir . '/' . $filename . '.webp', $thumb_data);
+              }
+            }
+          } else {
+            send_json(['status' => 'error', 'message' => 'Failed to save media file.']);
+          }
         } else {
           send_json(['status' => 'error', 'message' => 'Invalid file format. Only Images, Audio, and Video are allowed.']);
         }
@@ -4242,6 +6802,7 @@ HTML;
     case 'get_message_image':
       header('Cache-Control: public, max-age=31536000, immutable');
       $msg_id = intval($_GET['id'] ?? 0);
+      $is_thumb = isset($_GET['thumb']) && $_GET['thumb'] == '1';
       
       try {
         $stmt = $db->prepare("SELECT image, sender_id, receiver_id, media_type FROM messages WHERE id = ?");
@@ -4267,11 +6828,27 @@ HTML;
         
         if ($has_access) {
           $mime = $msg['media_type'] ?? 'image/webp';
-          header('Content-Type: ' . $mime);
-          
-          if (strpos($mime, 'video/') === 0 || strpos($mime, 'audio/') === 0) {
+          $is_filepath = (strpos($msg['image'], 'uploads/media/') === 0);
+
+          if ($is_filepath) {
+            $file_path = MUSIC_DIR . '/' . $msg['image'];
+            
+            if ($is_thumb && strpos($mime, 'image/') === 0) {
+              $thumb_path = str_replace('uploads/media/', 'thumbnails/', $file_path) . '.webp';
+              if (file_exists($thumb_path)) {
+                $file_path = $thumb_path;
+                $mime = 'image/webp';
+              }
+            }
+
+            if (!file_exists($file_path)) {
+              http_response_code(404); exit;
+            }
+
+            header('Content-Type: ' . $mime);
             header('Accept-Ranges: bytes');
-            $filesize = strlen($msg['image']);
+            
+            $filesize = filesize($file_path);
             $start = 0;
             $end = $filesize - 1;
             $length = $filesize;
@@ -4295,11 +6872,59 @@ HTML;
               header('HTTP/1.1 200 OK');
             }
             header('Content-Length: ' . $length);
-            echo substr($msg['image'], $start, $length);
+
+            $f = @fopen($file_path, 'rb');
+            if ($f) {
+              fseek($f, $start);
+              $chunk_size = 1024 * 8;
+              $bytes_left = $length;
+              while ($bytes_left > 0 && !feof($f)) {
+                if (connection_aborted()) break;
+                $read_size = min($chunk_size, $bytes_left);
+                $data = fread($f, $read_size);
+                if ($data === false) break;
+                echo $data;
+                @flush();
+                $bytes_left -= strlen($data);
+              }
+              fclose($f);
+            }
+            exit;
           } else {
-            echo $msg['image'];
+            // Legacy BLOB handler
+            header('Content-Type: ' . $mime);
+            if (strpos($mime, 'video/') === 0 || strpos($mime, 'audio/') === 0) {
+              header('Accept-Ranges: bytes');
+              $filesize = strlen($msg['image']);
+              $start = 0;
+              $end = $filesize - 1;
+              $length = $filesize;
+
+              if (isset($_SERVER['HTTP_RANGE'])) {
+                $range = str_replace('bytes=', '', $_SERVER['HTTP_RANGE']);
+                $parts = explode('-', $range, 2);
+                $start = intval($parts[0]);
+                if (isset($parts[1]) && $parts[1] !== '') {
+                  $end = intval($parts[1]);
+                }
+                if ($start > $end || $start >= $filesize) {
+                  header('HTTP/1.1 416 Range Not Satisfiable');
+                  header("Content-Range: bytes */$filesize");
+                  exit;
+                }
+                $length = $end - $start + 1;
+                header('HTTP/1.1 206 Partial Content');
+                header("Content-Range: bytes $start-$end/$filesize");
+              } else {
+                header('HTTP/1.1 200 OK');
+              }
+              header('Content-Length: ' . $length);
+              echo substr($msg['image'], $start, $length);
+            } else {
+              echo $msg['image'];
+            }
+            exit;
           }
-          exit;
         }
       }
       http_response_code(404); exit;
@@ -5992,20 +8617,32 @@ HTML;
         WHERE m.artist != 'Unknown Artist' AND m.artist != '' AND m.artist IS NOT NULL
         AND m.id NOT IN (SELECT song_id FROM history WHERE user_id = :user_id)
         GROUP BY m.artist
-        LIMIT 10
+        LIMIT 50
       ");
       $rec_artists_stmt->execute([':user_id' => $user_id]);
       $rec_artists_rows = $rec_artists_stmt->fetchAll();
       $rec_artists = [];
+      $seen_artists = [];
       $stmt_is_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
-      foreach ($rec_artists_rows as $da) {
-        $stmt_is_user->execute([$da['name']]);
-        $uid = $stmt_is_user->fetchColumn();
-        $rec_artists[] = [
-          'name' => $da['name'],
-          'id' => $uid ? $uid : $da['id'],
-          'is_user' => (bool)$uid
-        ];
+      
+      foreach ($rec_artists_rows as $row) {
+        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['name']);
+        if (!is_array($parts)) $parts = [$row['name']];
+        foreach ($parts as $part) {
+          $p = trim($part);
+          $key = strtolower($p);
+          if ($p !== '' && !isset($seen_artists[$key])) {
+            $seen_artists[$key] = true;
+            $stmt_is_user->execute([$p]);
+            $uid = $stmt_is_user->fetchColumn();
+            $rec_artists[] = [
+              'name' => $p,
+              'id' => $uid ? $uid : $row['id'],
+              'is_user' => (bool)$uid
+            ];
+            if (count($rec_artists) >= 10) break 2;
+          }
+        }
       }
       if (count($rec_artists) > 0) {
         $shelves[] = ['title' => 'Discover Artists', 'type' => 'artists', 'items' => $rec_artists];
@@ -7944,6 +10581,16 @@ function perform_full_scan($db) {
       .chat-img-upload-preview img, .chat-img-upload-preview video { max-height: 150px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
       .chat-img-remove { position: absolute; top: 16px; right: 24px; background: rgba(0,0,0,0.8); color: #fff; border: none; border-radius: 50%; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 10; }
 
+      .lazy-media-wrapper { transition: all 0.3s ease; }
+      .lazy-media-placeholder:hover { filter: brightness(1.2); }
+      .lazy-media-wrapper { position: relative; display: inline-block; max-width: 100%; border-radius: 8px; overflow: hidden; background: #222; }
+      .lazy-blur { filter: blur(15px); transition: filter 0.3s; width: 100%; height: auto; display: block; opacity: 0.6; }
+      .lazy-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.3); cursor: pointer; z-index: 2; flex-direction: column; }
+      .lazy-overlay i { font-size: 2rem; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.5); }
+      .lazy-overlay span { color: #fff; font-size: 0.8rem; font-weight: bold; margin-top: 8px; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+      .lazy-media-wrapper.loaded .lazy-blur { filter: blur(0); opacity: 1; }
+      .lazy-media-wrapper.loaded .lazy-overlay { display: none; }
+      .lazy-video-icon { position: absolute; top: 10px; left: 10px; color: #fff; background: rgba(0,0,0,0.5); border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; z-index: 3; pointer-events: none; }
       @media (max-width: 767.98px) {
         .chat-wrapper { position: relative; height: 100% !important; border-radius: 0; border: none; overflow: hidden; display: flex; flex-direction: row; }
         .chat-sidebar { width: 100%; position: absolute; height: 100%; top: 0; left: 0; z-index: 5; background: var(--ytm-surface); }
@@ -9511,6 +12158,20 @@ function perform_full_scan($db) {
       </div>
     </div>
 
+    <!-- Media Preview Modal -->
+    <div class="modal fade" id="media-preview-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-fullscreen bg-black bg-opacity-75">
+        <div class="modal-content bg-transparent border-0 h-100">
+          <div class="modal-header border-0 justify-content-end p-3 position-absolute w-100 z-3" style="top: 0;">
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" style="background-color: rgba(0,0,0,0.6); border-radius: 50%; padding: 12px;"></button>
+          </div>
+          <div class="modal-body text-center p-0 d-flex align-items-center justify-content-center h-100 overflow-auto" id="media-preview-body">
+            <!-- Media dynamically injected here -->
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="editor-overlay" id="editorOverlay">
       <header class="editor-header">
         <div class="d-flex align-items-center gap-2">
@@ -9831,6 +12492,10 @@ function perform_full_scan($db) {
               <li class="list-group-item bg-dark text-white border-secondary">
                 <strong>Manual Links:</strong><br>
                 <span class="text-secondary small">Use <code>[url] yourlink.com [/url]</code> to explicitly create a clickable link.</span>
+              </li>
+              <li class="list-group-item bg-dark text-white border-secondary">
+                <strong>Images:</strong><br>
+                <span class="text-secondary small">Use <code>[img] yourimage.jpg [/img]</code> to embed images safely without immediate bandwidth drain.</span>
               </li>
               <li class="list-group-item bg-dark text-white border-secondary">
                 <strong>Mentions:</strong><br>
@@ -13710,6 +16375,7 @@ SOFTWARE.</div>
           window.openChatFull = async (targetId, type, name) => {
             requestNotificationPermission(); // Ask OS permission to send Push Notifications
             activeChatConfig = { id: targetId, type: type, name: name };
+            window.lastMessagesString = null; // Reset comparison state
             const mainArea = document.querySelector('.chat-main');
             const sidebarArea = document.querySelector('.chat-sidebar');
             
@@ -13735,8 +16401,13 @@ SOFTWARE.</div>
             }
              
             const pipBtn = document.getElementById('chat-pip-btn');
-            if (pipBtn && 'documentPictureInPicture' in window && window.innerWidth >= 768) {
-              pipBtn.classList.remove('d-none');
+            if (pipBtn) {
+              if ('documentPictureInPicture' in window && window.innerWidth >= 768) {
+                pipBtn.classList.remove('d-none');
+              } else {
+                pipBtn.classList.add('d-none');
+                pipBtn.classList.remove('d-md-flex');
+              }
             }
             const infoBtn = document.getElementById('chat-info-btn');
             if (infoBtn) {
@@ -13780,9 +16451,17 @@ SOFTWARE.</div>
             const fetchId = window.currentChatFetchId;
             
             try {
-              const messages = await fetchData(`?action=get_chat&target_id=${activeChatConfig.id}&chat_type=${activeChatConfig.type}`);
+              // Add silent fetch (true) to prevent global error toasts blocking UI during rapid polls
+              const messages = await fetchData(`?action=get_chat&target_id=${activeChatConfig.id}&chat_type=${activeChatConfig.type}`, {}, true);
               
               if (fetchId !== window.currentChatFetchId || (window.isReacting && !forceSync)) return;
+
+              // Prevent DOM flickering: Compare raw JSON state and skip if identical
+              const newMessagesString = JSON.stringify(messages);
+              if (!forceSync && window.lastMessagesString === newMessagesString) {
+                return; // Nothing changed, skip DOM re-render!
+              }
+              window.lastMessagesString = newMessagesString;
 
               const doc = window.chatPipWindow ? window.chatPipWindow.document : document;
               const listEl = doc.getElementById('chat-messages-container');
@@ -13803,11 +16482,9 @@ SOFTWARE.</div>
                 let mediaHtml = '';
                 if (m.has_image) {
                   const mediaUrl = `?action=get_message_image&id=${m.id}`;
+                  const thumbUrl = `?action=get_message_image&id=${m.id}&thumb=1`;
                   if (m.media_type && m.media_type.startsWith('video/')) {
-                    mediaHtml = `
-                      <div class="position-relative mb-2 rounded overflow-hidden shadow-sm" style="max-height: 250px; max-width: 100%; background: #000;">
-                        <video src="${mediaUrl}" controls preload="metadata" style="max-height: 250px; width: 100%; display: block;"></video>
-                      </div>`;
+                    mediaHtml = window.buildLazyMediaHtml(mediaUrl, m.media_type, thumbUrl, false);
                   } else if (m.media_type && m.media_type.startsWith('audio/')) {
                     // Injecting data-msg-id into the container and passing the ID cleanly to the click functions!
                     mediaHtml = `
@@ -13823,7 +16500,7 @@ SOFTWARE.</div>
                         </span>
                       </div>`;
                   } else {
-                    mediaHtml = `<img src="${mediaUrl}" class="img-fluid rounded mb-2 shadow-sm" style="max-height: 250px; cursor:zoom-in;" onclick="window.open(this.src)">`;
+                    mediaHtml = window.buildLazyMediaHtml(mediaUrl, m.media_type || 'image/webp', thumbUrl, false);
                   }
                 }
                 
@@ -13902,6 +16579,7 @@ SOFTWARE.</div>
               listEl.innerHTML = '<div class="text-center text-secondary p-4 mt-auto mb-auto">Start the conversation!</div>';
               }
               updateNotifBadge();
+              window.checkMediaCache();
             } catch (err) {
               const listEl = document.getElementById('chat-messages-container');
               if (listEl) listEl.innerHTML = '<div class="text-center text-danger p-4 mt-auto mb-auto">Failed to load messages.</div>';
@@ -15506,6 +18184,123 @@ SOFTWARE.</div>
           return str.replace(/[&<>'"]/g, tag => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[tag]));
         };
         
+        window.openMediaPreview = (url, type) => {
+          const body = document.getElementById('media-preview-body');
+          if (type && type.startsWith('video/')) {
+            body.innerHTML = `<video src="${url}" controls autoplay style="max-width: 100%; max-height: 100%; object-fit: contain;"></video>`;
+          } else {
+            body.innerHTML = `<img src="${url}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
+          }
+          bootstrap.Modal.getOrCreateInstance(document.getElementById('media-preview-modal')).show();
+        };
+
+        document.getElementById('media-preview-modal')?.addEventListener('hidden.bs.modal', () => {
+          document.getElementById('media-preview-body').innerHTML = '';
+        });
+
+        window.buildLazyMediaHtml = (url, type, thumbUrl, isExternal) => {
+          let displayThumb = thumbUrl || url;
+          if (isExternal && type.startsWith('video/')) {
+            displayThumb = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+          }
+          
+          let hash = 0;
+          for (let i = 0; i < url.length; i++) hash = url.charCodeAt(i) + ((hash << 5) - hash);
+          const h1 = Math.abs(hash % 360);
+          const bgStyle = `background: hsl(${h1}, 20%, 30%);`;
+          
+          const isVideo = type.startsWith('video/');
+          const videoIcon = isVideo ? `<div class="lazy-video-icon"><i class="bi bi-camera-video-fill"></i></div>` : '';
+
+          return `
+            <div class="lazy-media-wrapper mt-1 mb-2 shadow-sm w-100" data-media-src="${url}" data-media-type="${type}" style="${bgStyle} max-width: 400px; display: inline-block;">
+              ${videoIcon}
+              <img src="${displayThumb}" class="lazy-blur" alt="Media" loading="lazy" style="width: 100%; height: auto; max-height: 400px; object-fit: contain; display: block; margin: 0 auto;">
+              <div class="lazy-overlay" onclick="window.downloadLazyMedia(this)">
+                 <i class="bi bi-download lazy-download-icon"></i>
+                 <div class="spinner-border text-light d-none lazy-download-spinner" style="width: 1.5rem; height: 1.5rem; border-width: 0.2em;"></div>
+                 <span class="lazy-download-text">Download</span>
+              </div>
+            </div>`;
+        };
+
+        window.downloadLazyMedia = async (overlayEl) => {
+          const wrapper = overlayEl.closest('.lazy-media-wrapper');
+          if (wrapper.dataset.loading === "true") return;
+          wrapper.dataset.loading = "true";
+          
+          const url = wrapper.dataset.mediaSrc;
+          const type = wrapper.dataset.mediaType;
+          
+          const icon = overlayEl.querySelector('.lazy-download-icon');
+          const text = overlayEl.querySelector('.lazy-download-text');
+          const spinner = overlayEl.querySelector('.lazy-download-spinner');
+          
+          if (icon) icon.classList.add('d-none');
+          if (text) text.classList.add('d-none');
+          if (spinner) spinner.classList.remove('d-none');
+          
+          try {
+            const cache = await caches.open('php-music-media-cache');
+            let res = await cache.match(url);
+            
+            if (!res) {
+              res = await fetch(url);
+              if (res.ok) {
+                await cache.put(url, res.clone());
+              } else {
+                throw new Error('Download failed');
+              }
+            }
+            
+            const blob = await res.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            
+            if (type.startsWith('video/')) {
+              wrapper.innerHTML = `<video src="${blobUrl}" controls class="w-100 h-100 rounded" style="max-height: 400px; display: block; object-fit: contain; cursor: pointer;" onclick="window.openMediaPreview('${blobUrl}', '${type}')"></video>`;
+            } else {
+              wrapper.innerHTML = `<img src="${blobUrl}" class="w-100 h-100 rounded" style="max-height: 400px; display: block; object-fit: contain; cursor: zoom-in;" onclick="window.openMediaPreview('${blobUrl}', '${type}')">`;
+            }
+            wrapper.classList.add('loaded');
+            wrapper.style.background = 'transparent';
+          } catch (err) {
+            console.error(err);
+            if (icon) icon.classList.remove('d-none');
+            if (text) {
+              text.classList.remove('d-none');
+              text.textContent = 'Retry';
+            }
+            if (spinner) spinner.classList.add('d-none');
+            wrapper.dataset.loading = "false";
+          }
+        };
+
+        window.checkMediaCache = async () => {
+          if (!('caches' in window)) return;
+          const cache = await caches.open('php-music-media-cache');
+          const wrappers = document.querySelectorAll('.lazy-media-wrapper:not(.cache-checked)');
+          
+          for (let wrapper of wrappers) {
+            wrapper.classList.add('cache-checked');
+            const url = wrapper.dataset.mediaSrc;
+            const type = wrapper.dataset.mediaType || 'image/webp';
+            try {
+              const res = await cache.match(url);
+              if (res) {
+                const blob = await res.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                if (type.startsWith('video/')) {
+                  wrapper.innerHTML = `<video src="${blobUrl}" controls class="w-100 h-100 rounded" style="max-height: 400px; display: block; object-fit: contain; cursor: pointer;" onclick="window.openMediaPreview('${blobUrl}', '${type}')"></video>`;
+                } else {
+                  wrapper.innerHTML = `<img src="${blobUrl}" class="w-100 h-100 rounded" style="max-height: 400px; display: block; object-fit: contain; cursor: zoom-in;" onclick="window.openMediaPreview('${blobUrl}', '${type}')">`;
+                }
+                wrapper.classList.add('loaded');
+                wrapper.style.background = 'transparent';
+              }
+            } catch (e) {}
+          }
+        };
+
         // Safely decodes HTML entities back into symbols (like I&#039;m -> I'm) before pasting them into Input fields.
         const decodeHTML = (html) => {
           if (!html) return '';
@@ -15519,13 +18314,18 @@ SOFTWARE.</div>
           if (!text) return '';
           let parsed = text;
           
+          // Safely transform explicit [img] tags
+          parsed = parsed.replace(/\[img\]\s*([^\s<>\[\]]+)\s*\[\/img\]/gi, function(match, url) {
+            return window.buildLazyMediaHtml(url, 'image/jpeg', '', true);
+          });
+
           // Safely transform explicit [video] tags into responsive YouTube or Native Video players
           parsed = parsed.replace(/\[video\]\s*([^\s<>\[\]]+)\s*\[\/video\]/gi, function(match, url) {
             const ytMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
             if (ytMatch && ytMatch[1]) {
               return `<div class="position-relative w-100 mb-2 mt-1 rounded overflow-hidden shadow-sm" style="padding-top: 56.25%; max-width: 500px;"><iframe src="https://www.youtube.com/embed/${ytMatch[1]}" class="position-absolute top-0 start-0 w-100 h-100" frameborder="0" allowfullscreen></iframe></div>`;
             }
-            return `<video src="${url}" controls preload="metadata" class="w-100 mb-2 mt-1 rounded shadow-sm" style="max-height: 250px; background: #000; max-width: 500px; display: block;"></video>`;
+            return window.buildLazyMediaHtml(url, 'video/mp4', '', true);
           });
           
           // Safely transform explicit [url] tags into active clickable links, auto-appending https:// if missing!
@@ -17406,22 +20206,22 @@ SOFTWARE.</div>
                     
                     <div class="chat-main">
                       <div class="chat-header">
-                         <div class="d-flex align-items-center gap-3">
-                           <button class="btn btn-link text-white p-0 d-md-none" onclick="document.querySelector('.chat-main').classList.remove('active'); document.querySelector('.chat-sidebar').classList.remove('hidden'); if(chatPollingInterval) clearInterval(chatPollingInterval);"><i class="bi bi-arrow-left fs-4"></i></button>
-                           <h5 class="text-white fw-bold m-0 d-flex align-items-center" id="chat-header-title">Select a chat</h5>
-                         </div>
-                         <div class="d-flex align-items-center gap-2">
-                           <button class="btn btn-outline-light rounded-circle d-none" id="chat-pip-btn" style="width: 40px; height: 40px;" title="Pop Out Chat"><i class="bi bi-pip"></i></button>
-                           <button class="btn btn-outline-light rounded-circle d-none" id="chat-info-btn" style="width: 40px; height: 40px;"><i class="bi bi-info-lg fs-5"></i></button>
-                         </div>
+                        <div class="d-flex align-items-center gap-3">
+                          <button class="btn btn-link text-white p-0 d-md-none" onclick="document.querySelector('.chat-main').classList.remove('active'); document.querySelector('.chat-sidebar').classList.remove('hidden'); if(chatPollingInterval) clearInterval(chatPollingInterval);"><i class="bi bi-arrow-left fs-4"></i></button>
+                          <h5 class="text-white fw-bold m-0 d-flex align-items-center" id="chat-header-title">Select a chat</h5>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                          <button class="btn btn-outline-light rounded-circle d-none" id="chat-info-btn" style="width: 40px; height: 40px;"><i class="bi bi-info-lg fs-5"></i></button>
+                          <button class="btn btn-outline-light rounded-circle d-none d-md-flex align-items-center justify-content-center" id="chat-pip-btn" style="width: 40px; height: 40px;" title="Pop Out Chat"><i class="bi bi-pip"></i></button>
+                        </div>
                       </div>
                       
                       <div class="chat-messages" id="chat-messages-container">
-                         <div class="d-flex flex-column align-items-center justify-content-center h-100 text-secondary opacity-50">
-                           <i class="bi bi-chat-heart" style="font-size: 5rem;"></i>
-                           <h4 class="mt-3">Your Messages</h4>
-                           <p>Send private photos and messages to a friend or group.</p>
-                         </div>
+                        <div class="d-flex flex-column align-items-center justify-content-center h-100 text-secondary opacity-50">
+                          <i class="bi bi-chat-heart" style="font-size: 5rem;"></i>
+                          <h4 class="mt-3">Your Messages</h4>
+                          <p>Send private photos and messages to a friend or group.</p>
+                        </div>
                       </div>
                       
                       <div class="chat-input-area">
@@ -18289,6 +21089,7 @@ SOFTWARE.</div>
                   };
                   
                   feed.innerHTML = buildCommunityTree(posts);
+                  setTimeout(window.checkMediaCache, 100);
                 } else {
                   feed.innerHTML = '<div class="text-center text-secondary py-5">No posts found. Be the first!</div>';
                 }
@@ -19862,6 +22663,7 @@ SOFTWARE.</div>
                 btnContainer.classList.add('d-none');
               }
             }
+            window.checkMediaCache();
           }
         };
 
@@ -24848,6 +27650,7 @@ SOFTWARE.</div>
               if (rootCount >= 25) btnContainer.classList.remove('d-none');
               else btnContainer.classList.add('d-none');
             }
+            window.checkMediaCache();
           }
         };
 
