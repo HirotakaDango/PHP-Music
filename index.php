@@ -569,10 +569,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $mimeTypes = [
         'mp3' => 'audio/mpeg', 'wav' => 'audio/wav', 'ogg' => 'audio/ogg',
         'mp4' => 'video/mp4', 'webm' => 'video/webm', 'pdf' => 'application/pdf',
-        'png' => 'image/png', 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'gif' => 'image/gif'
+        'png' => 'image/png', 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'gif' => 'image/gif',
+        'txt' => 'text/plain', 'html' => 'text/plain', 'css' => 'text/plain',
+        'js' => 'text/plain', 'json' => 'text/plain', 'xml' => 'text/plain',
+        'php' => 'text/plain'
       ];
       $mime = $mimeTypes[$ext] ?? 'application/octet-stream';
       
+      header("Content-Disposition: inline; filename=\"" . basename($filePath) . "\"");
       header("Accept-Ranges: bytes");
       if (isset($_SERVER['HTTP_RANGE'])) {
         $c_start = $start;
@@ -1677,12 +1681,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             @media (max-width: 768px) {
               .drive-app-container .mobile-only { display: flex; }
-              
-              /* Force 2 columns on mobile and fix the excessive padding that squishes filenames */
               .drive-app-container .grid-view { grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important; }
               .drive-app-container .grid-view .item-card { height: 50px; padding: 0 12px !important; }
               .drive-app-container .grid-view .file-card { height: 160px; padding: 0 !important; }
               .drive-app-container .grid-view .file-card .file-info-bar { padding: 0 10px !important; gap: 6px !important; }
+              .drive-app-container .properties-pane { position: fixed; top: 0; bottom: 0; left: 0; right: 0; width: 100% !important; height: 100% !important; z-index: 3100 !important; border: none; }
               .drive-app-container .grid-view { grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important; }
               .drive-app-container .grid-view .item-card { height: 50px; padding: 0 16px; }
               .drive-app-container .grid-view .file-card { height: 160px; }
@@ -2275,11 +2278,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
 
                 const filterFn = (i) => i.name.toLowerCase().includes(this.searchQuery);
-                this.filteredFolders = this.sortData(sourceFolders.filter(filterFn));
-                this.filteredFiles = this.sortData(this.filterByType(sourceFiles.filter(filterFn)));
+          this.filteredFolders = this.sortData(this.data.folders.filter(filterFn));
+          this.filteredFiles = this.sortData(this.filterByType(this.data.files.filter(filterFn)));
 
-                document.getElementById('foldersTitle').classList.toggle('hidden', this.filteredFolders.length === 0 || this.currentFilter !== 'all');
-                document.getElementById('filesTitle').classList.toggle('hidden', this.filteredFiles.length === 0);
+          // Update dynamic title with path and files indicator
+          const totalItems = this.filteredFolders.length + this.filteredFiles.length;
+          document.title = (this.currentPath ? `/${this.currentPath}` : 'Drive') + ` (${totalItems} items) - Admin Panel`;
+
+          document.getElementById('foldersTitle').classList.toggle('hidden', this.filteredFolders.length === 0 || this.currentFilter !== 'all');
+          document.getElementById('filesTitle').classList.toggle('hidden', this.filteredFiles.length === 0);
 
                 if (this.currentFilter === 'all') {
                   this.filteredFolders.slice(0, this.visibleFoldersCount).forEach(f => fList.appendChild(this.createItemNode(f, true)));
@@ -2768,6 +2775,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
                   } else {
                     addMenuItem('visibility', 'Preview / Edit', () => this.openPreviewOrEditor(item));
+                    addMenuItem('open_in_new', 'Open in a new tab', () => window.open(`${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`, '_blank'));
                     addMenuItem('download', 'Download', () => window.location.href = `${this.apiPrefix}download=${encodeURIComponent(item.path)}`);
                     addMenuItem('share', 'Public File Link', () => this.shareFile(item.path));
                     if (item.ext === 'zip') {
@@ -2796,11 +2804,45 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 
                 menu.style.display = 'flex';
                 
-                let x = e.clientX || (e.touches && e.touches[0].clientX);
-                let y = e.clientY || (e.touches && e.touches[0].clientY);
+                let x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
+                let y = e.clientY || (e.touches && e.touches[0].clientY) || 0;
                 const rect = menu.getBoundingClientRect();
-                if (x + rect.width > window.innerWidth) x -= rect.width;
-                if (y + rect.height > window.innerHeight) y -= rect.height;
+                
+                // Keep context menu 8px bounded from all edges of the screen
+                if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+                if (x < 8) x = 8;
+                if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
+                if (y < 8) y = 8;
+                
+                menu.style.left = `${x}px`;
+                menu.style.top = `${y}px`;
+              }
+
+              showTrashContextMenu(e, item) {
+                const menu = document.getElementById('contextMenu');
+                menu.innerHTML = '';
+                
+                const addMenuItem = (icon, text, action) => {
+                  const div = document.createElement('div');
+                  div.className = 'menu-item';
+                  div.innerHTML = `<span class="material-symbols-rounded">${icon}</span>${text}`;
+                  div.onclick = (ev) => { ev.stopPropagation(); menu.style.display = 'none'; action(); };
+                  menu.appendChild(div);
+                };
+
+                addMenuItem('restore_from_trash', 'Restore', () => this.restoreTrash(item.uniq));
+                addMenuItem('delete_forever', 'Delete Permanently', () => this.deleteTrashPermanent(item.uniq));
+                
+                menu.style.display = 'flex';
+                
+                let x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
+                let y = e.clientY || (e.touches && e.touches[0].clientY) || 0;
+                const rect = menu.getBoundingClientRect();
+                
+                if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+                if (x < 8) x = 8;
+                if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
+                if (y < 8) y = 8;
                 
                 menu.style.left = `${x}px`;
                 menu.style.top = `${y}px`;
