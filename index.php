@@ -367,7 +367,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '5.0');
+define('APP_VERSION', '5.1');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -438,7 +438,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   // 1-Year Admin Session Persistence Check
   if (!isset($_SESSION['admin_logged_in']) && isset($_COOKIE['admin_session_token']) && isset($_COOKIE['admin_email'])) {
     $db = get_db();
-    $stmt = $db->prepare("SELECT id, password_hash, is_admin FROM users WHERE email = ?");
+    $stmt = $db->prepare("SELECT id, password_hash, is_admin, artist FROM users WHERE email = ?");
     $stmt->execute([$_COOKIE['admin_email']]);
     $user = $stmt->fetch();
     if ($user && ($user['is_admin'] == 1 || $_COOKIE['admin_email'] === 'musiclibrary@mail.com')) {
@@ -446,6 +446,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         $_SESSION['admin_logged_in'] = true;
         $_SESSION['admin_email'] = $_COOKIE['admin_email'];
         $_SESSION['admin_id'] = $user['id'];
+        $_SESSION['user_artist'] = $user['artist'];
       }
     }
   }
@@ -473,11 +474,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     }
 
     $baseDir = __DIR__;
-    $allowedExtensions = ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'pdf', 'mp3', 'wav', 'ogg', 'mp4', 'webm', 'zip'];
 
     function isAllowedExtension($filename) {
-      global $allowedExtensions;
-      return in_array(strtolower(pathinfo($filename, PATHINFO_EXTENSION)), $allowedExtensions);
+      return true; // All file extensions allowed
+    }
+
+    function save_file_version($filepath) {
+      global $baseDir;
+      if (!file_exists($filepath) || is_dir($filepath)) return;
+      $filename = basename($filepath);
+      $verDir = $baseDir . '/.file_version/' . $filename;
+      if (!is_dir($verDir)) @mkdir($verDir, 0755, true);
+      $date = date('Y-m-d_H-i-s');
+      @copy($filepath, $verDir . '/' . $filename . '_' . $date);
     }
 
     function generateUniqueFileName($dir, $filename) {
@@ -783,22 +792,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           switch ($postAction) {
             case 'add_file':
               $name = $input['name'] ?? '';
-              if (!isAllowedExtension($name)) throw new Exception('Extension not allowed');
               $full = $absPath . '/' . $name;
-              if (file_exists($full)) $full = $absPath . '/' . generateUniqueFileName($absPath, $name);
+              if (file_exists($full)) throw new Exception('CONFLICT|' . basename($full));
               file_put_contents($full, '');
-              $relPath = ltrim(str_replace($baseDir, '', $full), '/');
-              logDriveActivity($name, $relPath, 'created');
+              logDriveActivity($name, ltrim(str_replace($baseDir, '', $full), '/'), 'created');
               echo json_encode(['success' => true]);
               break;
 
             case 'add_folder':
               $name = $input['name'] ?? '';
               $full = $absPath . '/' . $name;
-              if (file_exists($full)) $full = $absPath . '/' . generateUniqueFolderName($absPath, $name);
+              if (file_exists($full)) throw new Exception('CONFLICT|' . basename($full));
               mkdir($full);
-              $relPath = ltrim(str_replace($baseDir, '', $full), '/');
-              logDriveActivity($name, $relPath, 'created');
+              logDriveActivity($name, ltrim(str_replace($baseDir, '', $full), '/'), 'created');
               echo json_encode(['success' => true]);
               break;
 
@@ -809,48 +815,140 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $chunk = isset($_POST['chunk']) ? (int)$_POST['chunk'] : 0;
               $chunks = isset($_POST['chunks']) ? (int)$_POST['chunks'] : 1;
               $fileId = $_POST['file_id'] ?? 'unknown';
+              $override = !empty($_POST['override']);
 
               foreach ($_FILES['files']['name'] as $i => $name) {
-                if (isAllowedExtension($name)) {
-                  if (!empty($paths[$i])) {
-                    $relPathClean = ltrim(str_replace(['..', '\\'], ['', '/'], $paths[$i]), '/');
-                    $dest = $absPath . '/' . $relPathClean;
-                    $targetDir = dirname($dest);
-                    if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
-                  } else {
-                    $dest = $absPath . '/' . $name;
-                    $targetDir = $absPath;
-                  }
+                $relPathClean = !empty($paths[$i]) ? ltrim(str_replace(['..', '\\'], ['', '/'], $paths[$i]), '/') : $name;
+                $dest = $absPath . '/' . $relPathClean;
+                $targetDir = dirname($dest);
+                if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
 
-                  if ($chunks > 1) {
-                    $tempDest = $targetDir . '/.temp_upload_' . md5($fileId . $name);
-                    $out = @fopen($tempDest, $chunk === 0 ? 'wb' : 'ab');
-                    if ($out) {
-                      $in = @fopen($_FILES['files']['tmp_name'][$i], 'rb');
-                      if ($in) {
-                        stream_copy_to_stream($in, $out);
-                        fclose($in);
-                      }
-                      fclose($out);
-                    }
-                    if ($chunk == $chunks - 1) {
-                      if (file_exists($dest)) $dest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($dest));
-                      rename($tempDest, $dest);
-                      $uploaded++;
-                      $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
-                      if (function_exists('logDriveActivity')) logDriveActivity(basename($dest), $relPath, 'uploaded');
-                    }
-                  } else {
-                    if (file_exists($dest)) $dest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($dest));
-                    if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
-                      $uploaded++;
-                      $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
-                      if (function_exists('logDriveActivity')) logDriveActivity(basename($dest), $relPath, 'uploaded');
-                    }
+                if ($chunk === 0 && file_exists($dest) && !$override) {
+                  echo json_encode(['success' => false, 'error' => 'CONFLICT|' . basename($dest)]);
+                  exit;
+                }
+                if ($chunk === 0 && file_exists($dest) && $override) {
+                  save_file_version($dest);
+                }
+
+                if ($chunks > 1) {
+                  $tempDest = $targetDir . '/.temp_upload_' . md5($fileId . $name);
+                  $out = @fopen($tempDest, $chunk === 0 ? 'wb' : 'ab');
+                  if ($out) {
+                    $in = @fopen($_FILES['files']['tmp_name'][$i], 'rb');
+                    if ($in) { stream_copy_to_stream($in, $out); fclose($in); }
+                    fclose($out);
+                  }
+                  if ($chunk == $chunks - 1) {
+                    rename($tempDest, $dest);
+                    $uploaded++;
+                    logDriveActivity(basename($dest), ltrim(str_replace($baseDir, '', $dest), '/'), 'uploaded');
+                  }
+                } else {
+                  if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
+                    $uploaded++;
+                    logDriveActivity(basename($dest), ltrim(str_replace($baseDir, '', $dest), '/'), 'uploaded');
                   }
                 }
               }
               echo json_encode(['success' => true, 'uploaded' => $uploaded]);
+              break;
+
+            case 'upload_url':
+              $url = $input['url'] ?? '';
+              $override = !empty($input['override']);
+              $name = basename(parse_url($url, PHP_URL_PATH));
+              if (!$name) $name = 'downloaded_file_' . time();
+              $target = $absPath . '/' . $name;
+              if (file_exists($target) && !$override) throw new Exception('CONFLICT|' . $name);
+              if (file_exists($target) && $override) save_file_version($target);
+              file_put_contents($target, file_get_contents($url));
+              logDriveActivity($name, ltrim(str_replace($baseDir, '', $target), '/'), 'uploaded via url');
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'zip_items':
+              $items = $input['items'] ?? [];
+              if (empty($items)) throw new Exception('No items selected');
+              $zipName = (count($items) === 1) ? basename($items[0]) . '.zip' : 'Archive_' . date('Ymd_His') . '.zip';
+              $target = $absPath . '/' . $zipName;
+              if (file_exists($target) && empty($input['override'])) throw new Exception('CONFLICT|' . $zipName);
+              if (file_exists($target)) save_file_version($target);
+              
+              $zip = new ZipArchive();
+              if ($zip->open($target, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {
+                foreach ($items as $item) {
+                  $src = $baseDir . '/' . $item;
+                  if (is_file($src)) $zip->addFile($src, basename($src));
+                  elseif (is_dir($src)) {
+                    $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS));
+                    foreach ($iter as $f) {
+                      if ($f->isFile()) $zip->addFile($f->getPathname(), basename($src) . '/' . str_replace($src . '/', '', $f->getPathname()));
+                    }
+                  }
+                }
+                $zip->close();
+              }
+              logDriveActivity($zipName, ltrim(str_replace($baseDir, '', $target), '/'), 'archived');
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'encrypt_file':
+            case 'decrypt_file':
+              $file = $input['file'] ?? '';
+              $src = $baseDir . '/' . $file;
+              if (!file_exists($src) || is_dir($src)) throw new Exception('Invalid file');
+              
+              $admin_stmt = get_db()->query("SELECT password_hash FROM users WHERE email = 'musiclibrary@mail.com'");
+              $admin_hash = $admin_stmt->fetchColumn() ?: 'fallback_secure_key_123!';
+              $secret_key = substr(hash('sha256', $admin_hash), 0, 32);
+              $content = file_get_contents($src);
+              
+              if ($postAction === 'encrypt_file') {
+                $target = $src . '.enc';
+                if (file_exists($target) && empty($input['override'])) throw new Exception('CONFLICT|' . basename($target));
+                $iv = random_bytes(16);
+                $encrypted = openssl_encrypt($content, 'aes-256-cbc', $secret_key, 0, $iv);
+                file_put_contents($target, base64_encode($iv) . ':' . $encrypted);
+                unlink($src);
+              } else {
+                if (substr($src, -4) !== '.enc') throw new Exception('Not an encrypted file');
+                $target = substr($src, 0, -4);
+                if (file_exists($target) && empty($input['override'])) throw new Exception('CONFLICT|' . basename($target));
+                $parts = explode(':', $content, 2);
+                $iv = base64_decode($parts[0]);
+                $decrypted = openssl_decrypt($parts[1], 'aes-256-cbc', $secret_key, 0, $iv);
+                if ($decrypted === false) throw new Exception('Decryption failed. Incorrect key or corrupted file.');
+                file_put_contents($target, $decrypted);
+                unlink($src);
+              }
+              logDriveActivity(basename($target), ltrim(str_replace($baseDir, '', $target), '/'), $postAction === 'encrypt_file' ? 'encrypted' : 'decrypted');
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'get_versions':
+              $file = $input['file'] ?? '';
+              $verDir = $baseDir . '/.file_version/' . basename($file);
+              $versions = [];
+              if (is_dir($verDir)) {
+                foreach (array_diff(scandir($verDir), ['.', '..']) as $v) {
+                  $versions[] = ['name' => $v, 'mtime' => filemtime($verDir . '/' . $v), 'size' => formatBytes(filesize($verDir . '/' . $v))];
+                }
+                usort($versions, function($a, $b) { return $b['mtime'] - $a['mtime']; });
+              }
+              echo json_encode(['success' => true, 'versions' => $versions]);
+              break;
+
+            case 'restore_version':
+              $file = $input['file'] ?? '';
+              $version_name = $input['version_name'] ?? '';
+              $src = $baseDir . '/.file_version/' . basename($file) . '/' . $version_name;
+              $dest = $baseDir . '/' . $file;
+              if (!file_exists($src)) throw new Exception('Version not found');
+              save_file_version($dest); // Backup current state before restoring
+              copy($src, $dest);
+              logDriveActivity(basename($dest), $file, 'restored version');
+              echo json_encode(['success' => true]);
               break;
 
             case 'trash':
@@ -867,12 +965,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   $uniq = uniqid() . '_' . $itemName;
                   $trashPath = $trashBin . '/' . $uniq;
                   if (rename($full, $trashPath)) {
-                    $insStmt->execute([
-                      $uniq,
-                      $itemName,
-                      ltrim(str_replace($baseDir, '', dirname($full)), '/'),
-                      time()
-                    ]);
+                    $insStmt->execute([$uniq, $itemName, ltrim(str_replace($baseDir, '', dirname($full)), '/'), time()]);
                     logDriveActivity($itemName, $itemPath, 'deleted');
                   }
                 }
@@ -894,17 +987,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   $targetDir = $baseDir . '/' . $info['original_parent'];
                   if (!is_dir($targetDir)) $targetDir = $baseDir;
                   $dest = $targetDir . '/' . $info['original_name'];
-                  if (file_exists($dest)) {
-                    $dest = generateUniqueFileName($targetDir, $info['original_name']);
-                  }
+                  if (file_exists($dest) && empty($input['override'])) throw new Exception('CONFLICT|' . $info['original_name']);
+                  if (file_exists($dest) && !empty($input['override'])) save_file_version($dest);
                   if (rename($trashBin . '/' . $uniq, $dest)) {
                     $delStmt->execute([$uniq]);
-                    $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
-                    logDriveActivity(basename($dest), $relPath, 'restored');
+                    logDriveActivity(basename($dest), ltrim(str_replace($baseDir, '', $dest), '/'), 'restored');
                   }
                 }
               }
-              saveMetadata($meta);
               echo json_encode(['success' => true]);
               break;
 
@@ -924,11 +1014,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               break;
 
             case 'empty_trash':
-              $db = get_db();
               $trashBin = $baseDir . '/.drive_trash_bin';
               recursiveDelete($trashBin);
               mkdir($trashBin, 0755, true);
-              $db->exec("DELETE FROM drive_trash");
+              get_db()->exec("DELETE FROM drive_trash");
               echo json_encode(['success' => true]);
               break;
 
@@ -938,10 +1027,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $oldFull = $baseDir . '/' . $old;
               $newFull = dirname($oldFull) . '/' . $new;
               if (!isValidPath($baseDir, $oldFull) || !file_exists($oldFull)) throw new Exception('Invalid source');
-              if (is_file($oldFull) && !isAllowedExtension($new)) throw new Exception('Extension not allowed');
-              if (file_exists($newFull)) throw new Exception('Target exists');
+              if (file_exists($newFull) && empty($input['override'])) throw new Exception('CONFLICT|' . $new);
+              if (file_exists($newFull) && !empty($input['override'])) save_file_version($newFull);
               rename($oldFull, $newFull);
-              logDriveActivity($new, $old, 'renamed');
+              logDriveActivity($new, ltrim(str_replace($baseDir, '', $newFull), '/'), 'renamed');
               echo json_encode(['success' => true]);
               break;
 
@@ -949,7 +1038,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $file = $input['file'] ?? '';
               $content = $input['content'] ?? '';
               $full = $baseDir . '/' . $file;
-              if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) throw new Exception('Invalid file');
+              if (!isValidPath($baseDir, $full)) throw new Exception('Invalid file');
+              save_file_version($full); // Track file version before writing
               file_put_contents($full, $content);
               logDriveActivity(basename($file), $file, 'modified');
               echo json_encode(['success' => true]);
@@ -974,15 +1064,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             case 'move_items':
               $items = $input['items'] ?? [];
               $target = $input['target'] ?? '';
+              $override = !empty($input['override']);
               $targetDir = rtrim($baseDir . '/' . $target, '/');
               if (!isValidPath($baseDir, $targetDir)) throw new Exception('Invalid target');
+              
               foreach ($items as $item) {
                 $src = $baseDir . '/' . $item;
                 if (!isValidPath($baseDir, $src) || !file_exists($src)) continue;
                 $dest = $targetDir . '/' . basename($item);
-                if (file_exists($dest)) {
-                  $dest = is_dir($src) ? $targetDir . '/' . generateUniqueFolderName($targetDir, basename($item)) : $targetDir . '/' . generateUniqueFileName($targetDir, basename($item));
+                
+                if (file_exists($dest) && !$override) {
+                  throw new Exception('CONFLICT|' . basename($item));
                 }
+                if (file_exists($dest) && $override) {
+                  save_file_version($dest);
+                }
+                
                 if ($postAction === 'move_items') {
                   if ($src !== $dest) rename($src, $dest);
                 } else {
@@ -992,26 +1089,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               echo json_encode(['success' => true]);
               break;
 
-            case 'move':
-              $item = $input['item'] ?? '';
-              $targetFolder = $input['target'] ?? '';
-              $src = $baseDir . '/' . $item;
-              $targetDir = rtrim($baseDir . '/' . $targetFolder, '/');
-              $dest = $targetDir . '/' . basename($item);
-              if (!isValidPath($baseDir, $src) || !isValidPath($baseDir, $targetDir)) throw new Exception('Invalid route path');
-              if (file_exists($dest)) throw new Exception('Item already exists in destination');
-              if (rename($src, $dest)) {
-                echo json_encode(['success' => true]);
-              } else {
-                throw new Exception('Failed to move item');
-              }
-              break;
-
             case 'create_share':
               $item = $input['item'] ?? '';
-              $db = get_db();
               $token = md5($item . time());
-              $db->prepare("INSERT INTO drive_shares (token, path) VALUES (?, ?)")->execute([$token, $item]);
+              get_db()->prepare("INSERT INTO drive_shares (token, path) VALUES (?, ?)")->execute([$token, $item]);
               echo json_encode(['success' => true, 'token' => $token]);
               break;
 
@@ -1021,36 +1102,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               if (!isValidPath($baseDir, $src) || !file_exists($src) || strtolower(pathinfo($src, PATHINFO_EXTENSION)) !== 'zip') {
                 throw new Exception('Invalid zip file');
               }
-              if (!class_exists('ZipArchive')) throw new Exception('ZipArchive extension is missing');
               $zip = new ZipArchive;
               if ($zip->open($src) === TRUE) {
                 $folderName = pathinfo($src, PATHINFO_FILENAME);
                 $parentDir = dirname($src);
                 $extractTarget = $parentDir . '/' . $folderName;
-                
-                // Solve folder naming conflicts by keeping the extension at the end
-                if (file_exists($extractTarget)) {
-                  $base = pathinfo($folderName, PATHINFO_FILENAME);
-                  $ext = pathinfo($folderName, PATHINFO_EXTENSION);
-                  if ($ext !== '') {
-                    $counter = 1;
-                    while (file_exists($parentDir . '/' . $base . '_' . $counter . '.' . $ext)) {
-                      $counter++;
-                    }
-                    $extractTarget = $parentDir . '/' . $base . '_' . $counter . '.' . $ext;
-                  } else {
-                    $extractTarget = $parentDir . '/' . generateUniqueFolderName($parentDir, $folderName);
-                  }
-                }
-                
+                if (file_exists($extractTarget) && empty($input['override'])) throw new Exception('CONFLICT|' . $folderName);
                 if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
                 $zip->extractTo($extractTarget);
                 $zip->close();
-                $relPath = ltrim(str_replace($baseDir, '', $extractTarget), '/');
-                logDriveActivity(basename($extractTarget), $relPath, 'extracted');
+                logDriveActivity(basename($extractTarget), ltrim(str_replace($baseDir, '', $extractTarget), '/'), 'extracted');
                 echo json_encode(['success' => true]);
               } else {
-                throw new Exception('Failed to extract ZIP archive');
+                throw new Exception('Failed to extract ZIP');
               }
               break;
 
@@ -1072,7 +1136,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 );
                 foreach ($iter as $item) {
                   $pathName = $item->getPathname();
-                  if (strpos($pathName, '.drive_trash_bin') !== false || strpos($pathName, '.drive_thumbnails') !== false) {
+                  if (strpos($pathName, '.drive_trash_bin') !== false || strpos($pathName, '.drive_thumbnails') !== false || strpos($pathName, '.file_version') !== false) {
                     continue;
                   }
                   $filename = $item->getFilename();
@@ -1174,6 +1238,61 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 ];
               }
               echo json_encode(['success' => true, 'trash' => $trashList]);
+              break;
+
+            case 'list_file_versions':
+              $historyList = [];
+              $verDir = $baseDir . '/.file_version';
+              if (is_dir($verDir)) {
+                $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($verDir, FilesystemIterator::SKIP_DOTS));
+                foreach ($iter as $file) {
+                  if ($file->isFile()) {
+                    $origName = basename(dirname($file->getPathname()));
+                    $historyList[] = [
+                      'name' => $file->getFilename(),
+                      'path' => ltrim(str_replace($baseDir, '', $file->getPathname()), '/'),
+                      'mtime' => $file->getMTime(),
+                      'size' => $file->getSize(),
+                      'formatSize' => formatBytes($file->getSize()),
+                      'ext' => strtolower($file->getExtension()),
+                      'isImage' => in_array(strtolower($file->getExtension()), ['png', 'jpg', 'jpeg', 'gif', 'svg']),
+                      'starred' => false,
+                      'original_file' => $origName
+                    ];
+                  }
+                }
+                usort($historyList, function($a, $b) { return $b['mtime'] - $a['mtime']; });
+              }
+              echo json_encode(['success' => true, 'history_files' => $historyList]);
+              break;
+
+            case 'list_history':
+              $historyFiles = [];
+              $verDir = $baseDir . '/.file_version';
+              if (is_dir($verDir)) {
+                $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($verDir, FilesystemIterator::SKIP_DOTS));
+                foreach ($iter as $file) {
+                  if ($file->isFile()) {
+                    $origName = basename(dirname($file->getPathname()));
+                    $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+                    $historyFiles[] = [
+                      'name' => $file->getFilename() . ' (Version of ' . $origName . ')',
+                      'path' => ltrim(str_replace($baseDir, '', $file->getPathname()), '/'),
+                      'mtime' => $file->getMTime(),
+                      'size' => $file->getSize(),
+                      'formatSize' => formatBytes($file->getSize()),
+                      'ext' => $ext,
+                      'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
+                      'starred' => false,
+                      'is_version' => true,
+                      'original_file' => $origName,
+                      'version_name' => $file->getFilename()
+                    ];
+                  }
+                }
+                usort($historyFiles, function($a, $b) { return $b['mtime'] - $a['mtime']; });
+              }
+              echo json_encode(['success' => true, 'history' => $historyFiles]);
               break;
 
             case 'list_starred':
@@ -1470,17 +1589,51 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     if (isset($_POST['permanent_delete_user']) && isset($_POST['user_id'])) {
       $db = get_db();
       $del_uid = (int)$_POST['user_id'];
-      
       $stmt = $db->prepare("SELECT file FROM music WHERE user_id = ?");
       $stmt->execute([$del_uid]);
       while ($row = $stmt->fetch()) {
         if ($row['file'] && file_exists($row['file'])) @unlink($row['file']);
       }
       $db->prepare("DELETE FROM users WHERE id = ?")->execute([$del_uid]);
-
       log_admin_activity($db, $_SESSION['admin_email'], 'Permanently Deleted User', $del_uid);
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
+    }
+
+    if (isset($_POST['generate_api_key'])) {
+       $name = htmlspecialchars(trim($_POST['key_name'] ?? 'Unnamed App'));
+       $token = 'pk_' . bin2hex(random_bytes(16));
+       $expires_at = date('Y-m-d H:i:s', strtotime('+1 month'));
+       get_db()->prepare("INSERT INTO api_keys (name, token, reset_month, user_id, status, expires_at) VALUES (?, ?, ?, ?, 'active', ?)")->execute([$name, $token, date('Y-m'), $_SESSION['admin_id'] ?? 0, $expires_at]);
+       log_admin_activity(get_db(), $_SESSION['admin_email'], "Generated API Key: $name", 0);
+       $_SESSION['admin_flash_msg'] = "Custom API Key generated successfully! Expires in 1 month.";
+       header("Location: ?access=admin&page=api"); exit;
+    }
+    if (isset($_POST['verify_api_key'])) {
+      $expires_at = date('Y-m-d H:i:s', strtotime('+1 month'));
+      $token = 'pk_' . bin2hex(random_bytes(16));
+      get_db()->prepare("UPDATE api_keys SET status = 'active', token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$token, $expires_at, (int)$_POST['key_id']]);
+      log_admin_activity(get_db(), $_SESSION['admin_email'], "Verified User API Key", 0);
+      $_SESSION['admin_flash_msg'] = "API Key verified! Valid for 1 month.";
+      header("Location: ?access=admin&page=api"); exit;
+    }
+    if (isset($_POST['ban_api_key'])) {
+      get_db()->prepare("UPDATE api_keys SET status = 'banned', updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([(int)$_POST['key_id']]);
+      log_admin_activity(get_db(), $_SESSION['admin_email'], "Banned API Key", 0);
+      $_SESSION['admin_flash_msg'] = "API Key banned!";
+      header("Location: ?access=admin&page=api"); exit;
+    }
+    if (isset($_POST['unban_api_key'])) {
+      get_db()->prepare("UPDATE api_keys SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([(int)$_POST['key_id']]);
+      log_admin_activity(get_db(), $_SESSION['admin_email'], "Unbanned API Key", 0);
+      $_SESSION['admin_flash_msg'] = "API Key unbanned!";
+      header("Location: ?access=admin&page=api"); exit;
+    }
+    if (isset($_POST['delete_api_key'])) {
+      get_db()->prepare("DELETE FROM api_keys WHERE id = ?")->execute([(int)$_POST['key_id']]);
+      log_admin_activity(get_db(), $_SESSION['admin_email'], "Revoked an API Key", 0);
+      $_SESSION['admin_flash_msg'] = "API Key removed permanently!";
+      header("Location: ?access=admin&page=api"); exit;
     }
         
     if (isset($_POST['reset_opcache'])) {
@@ -1538,7 +1691,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Panel - PHP Music</title>
-    <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
+    <link rel="icon" id="app-favicon" type="image/svg+xml" href="?action=get_app_icon" />
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
@@ -1586,7 +1739,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         .content-area-wrapper { padding: 1rem; }
         .page-header { padding: 1rem; flex-direction: column !important; align-items: stretch !important; gap: 1rem; }
         .page-header form { max-width: 100% !important; flex-direction: column; gap: 0.5rem; }
-        .page-header form select, .page-header form input { width: 100% !important; margin: 0 !important; }
+        .page-header form select { width: 100% !important; margin: 0 !important; }
+        .page-header form .input-group { flex-wrap: nowrap !important; }
+        .page-header form .input-group input { width: 1% !important; flex: 1 1 auto !important; margin: 0 !important; }
         .content-title { font-size: 1.5rem; }
         .user-list-header { display: none; }
         .user-item { display: grid; grid-template-columns: 45px 1fr auto; grid-template-rows: auto auto; grid-template-areas: "avatar main action" "stats stats stats"; padding: 1.25rem 1rem; gap: 0.75rem 0.75rem; }
@@ -1639,14 +1794,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       </div>
       <nav class="sidebar offcanvas-lg offcanvas-start" tabindex="-1" id="admin-sidebar">
         <div class="offcanvas-header border-bottom d-lg-none" style="border-color: var(--ytm-surface-2) !important;">
-          <h5 class="offcanvas-title logo m-0 fw-bold" style="font-size: 1.25rem;">Admin<span class="fw-light">Panel</span></h5>
+          <h5 class="offcanvas-title logo m-0 fw-bold" style="font-size: 1.25rem;">Menu<span class="fw-light"></span></h5>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#admin-sidebar"></button>
         </div>
         <div class="offcanvas-body d-flex flex-column p-0 h-100">
           <div class="p-4 border-bottom text-center d-flex flex-column align-items-center mb-4 shadow-sm" style="border-color: var(--ytm-surface-2) !important; background-color: rgba(255,255,255,0.02);">
             <img src="?access=api&action=get_profile_picture&id=<?php echo $_SESSION['admin_id'] ?? '0'; ?>&v=<?php echo time(); ?>" alt="Admin Profile" class="rounded-circle shadow-lg border border-secondary mb-3" style="width: 80px; height: 80px; object-fit: cover;">
-            <h5 class="logo m-0 fw-bold" style="font-size: 1.25rem;">Admin<span class="fw-light" style="color: var(--ytm-primary-text);">Panel</span></h5>
-            <div class="text-secondary text-truncate w-100 mt-1" style="font-size: 0.85rem;"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'Admin'); ?></div>
+            <h5 class="m-0 fw-bold text-white text-truncate w-100 px-2" style="font-size: 1.25rem;"><?php echo htmlspecialchars($_SESSION['user_artist'] ?? 'Admin'); ?></h5>
+            <div class="text-secondary text-truncate w-100 mt-1 px-2" style="font-size: 0.85rem;"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'Admin'); ?></div>
             <div class="badge bg-dark border border-secondary text-secondary mt-3 px-3 py-2 rounded-pill shadow-sm" style="letter-spacing: 1px;">ID: <?php echo $_SESSION['admin_id'] ?? '0'; ?></div>
           </div>
           
@@ -1654,6 +1809,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <a href="?access=admin" class="nav-link <?php echo (empty($_GET['page']) || $_GET['page'] === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
             <a href="?access=admin&page=logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
             <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Drive Manager</span></a>
+            <a href="?access=admin&page=api" class="nav-link <?php echo (($_GET['page'] ?? '') === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
           </div>
           
           <div class="mt-auto d-flex flex-column pb-3">
@@ -1721,6 +1877,161 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <?php endfor; ?>
                 <li class="page-item <?php echo ($log_page >= $total_log_pages) ? 'disabled' : ''; ?>">
                   <a class="page-link" href="?access=admin&page=logs&p=<?php echo $log_page + 1; ?>">Next</a>
+                </li>
+              </ul>
+            </nav>
+            <?php endif; ?>
+          </div>
+        <?php elseif (($_GET['page'] ?? '') === 'api'): ?>
+          <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
+            <h1 class="content-title m-0">API Key Management</h1>
+            <?php 
+              $api_sort = $_GET['sort'] ?? 'newest'; 
+              $api_search = $_GET['search'] ?? '';
+            ?>
+            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 500px;">
+              <input type="hidden" name="access" value="admin">
+              <input type="hidden" name="page" value="api">
+              <select name="sort" class="form-select bg-dark text-white border-secondary shadow-sm" style="width: auto;" onchange="this.form.submit()">
+                <option value="newest" <?php echo $api_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                <option value="oldest" <?php echo $api_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                <option value="modified" <?php echo $api_sort === 'modified' ? 'selected' : ''; ?>>Recently Modified</option>
+              </select>
+              <div class="input-group shadow-sm">
+                <input type="text" name="search" class="form-control bg-dark text-white border-secondary" placeholder="Search APIs..." value="<?php echo htmlspecialchars($api_search); ?>">
+                <button type="submit" class="btn btn-danger fw-bold px-3"><i class="bi bi-search"></i></button>
+              </div>
+            </form>
+          </div>
+          <div class="content-area-wrapper">
+            <div class="card bg-dark border-secondary mb-4">
+              <div class="card-body">
+                <h5 class="text-white"><i class="bi bi-plus-circle-fill text-success me-2"></i> Generate New Key</h5>
+                <p class="text-secondary small">Custom API keys allow 1,000 monthly requests to the developer endpoints.</p>
+                <form method="POST" action="?access=admin&page=api" class="d-flex gap-2">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="text" name="key_name" class="form-control bg-black text-white border-secondary" placeholder="Application Name (e.g. Discord Bot)" required>
+                  <button type="submit" name="generate_api_key" class="btn btn-success fw-bold text-nowrap">Generate Key</button>
+                </form>
+              </div>
+            </div>
+            
+            <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
+              <table class="table table-dark table-striped m-0 align-middle">
+                <thead class="border-bottom border-secondary">
+                  <tr><th class="py-3 px-4">App Name</th><th class="py-3 px-4">Owner/Status</th><th class="py-3 px-4">Token Key</th><th class="py-3 px-4">Uses/Expires</th><th class="py-3 px-4 text-end">Actions</th></tr>
+                </thead>
+                <tbody>
+                  <?php
+                    $api_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                    $api_limit = 25;
+                    $api_offset = ($api_page - 1) * $api_limit;
+                    $db = get_db();
+                    
+                    try {
+                      $db->exec("CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, token TEXT UNIQUE, name TEXT, status TEXT DEFAULT 'active', uses INTEGER DEFAULT 0, reset_month TEXT, expires_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);");
+                      $api_cols_admin = $db->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
+                      if (!in_array('updated_at', $api_cols_admin)) { 
+                        $db->exec("ALTER TABLE api_keys ADD COLUMN updated_at DATETIME;"); 
+                        $db->exec("UPDATE api_keys SET updated_at = created_at WHERE updated_at IS NULL;");
+                      }
+                    } catch(Exception $e) {}
+
+                    $api_search = $_GET['search'] ?? '';
+                    $where_sql = "";
+                    $params = [];
+                    if ($api_search !== '') {
+                      $where_sql = "WHERE a.name LIKE ? OR a.token LIKE ? OR u.email LIKE ? OR u.artist LIKE ?";
+                      $params = ["%$api_search%", "%$api_search%", "%$api_search%", "%$api_search%"];
+                    }
+
+                    $stmt_count = $db->prepare("SELECT COUNT(a.id) FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql");
+                    $stmt_count->execute($params);
+                    $total_apis = $stmt_count->fetchColumn();
+                    $total_api_pages = ceil($total_apis / $api_limit);
+
+                    $api_sort = $_GET['sort'] ?? 'newest';
+                    $order_sql = "a.created_at DESC";
+                    if ($api_sort === 'oldest') $order_sql = "a.created_at ASC";
+                    elseif ($api_sort === 'modified') $order_sql = "a.updated_at DESC";
+
+                    $stmt_keys = $db->prepare("SELECT a.*, u.email as user_email FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql ORDER BY CASE WHEN a.status = 'pending' THEN 0 ELSE 1 END, $order_sql LIMIT $api_limit OFFSET $api_offset");
+                    $stmt_keys->execute($params);
+                    $keys = $stmt_keys->fetchAll();
+                    
+                    if (empty($keys)): ?>
+                      <tr><td colspan="5" class="text-center py-4 text-secondary">No API keys found.</td></tr>
+                  <?php else: foreach ($keys as $k): ?>
+                  <tr>
+                    <td class="py-3 px-4 fw-medium text-white"><?php echo htmlspecialchars($k['name']); ?></td>
+                    <td class="py-3 px-4">
+                      <div class="small text-secondary mb-1"><?php echo $k['user_id'] == 0 ? 'System Admin' : htmlspecialchars($k['user_email'] ?? 'User ID: '.$k['user_id']); ?></div>
+                      <?php if($k['status'] === 'pending'): ?>
+                        <span class="badge bg-info text-dark">Pending</span>
+                      <?php elseif($k['status'] === 'banned'): ?>
+                        <span class="badge bg-danger">Banned</span>
+                      <?php else: ?>
+                        <span class="badge bg-success">Active</span>
+                      <?php endif; ?>
+                    </td>
+                    <td class="py-3 px-4 font-monospace text-info">
+                      <?php if ($k['status'] === 'pending'): ?>
+                        <i class="text-secondary">Hidden until verified</i>
+                      <?php else: ?>
+                        <div class="d-flex align-items-center gap-2">
+                          <span><?php echo htmlspecialchars($k['token']); ?></span>
+                          <button type="button" class="btn btn-sm btn-outline-info py-0 px-2" onclick="navigator.clipboard.writeText('<?php echo htmlspecialchars($k['token']); ?>').then(()=>{this.innerHTML='<i class=\'bi bi-check-lg text-success\'></i>'; setTimeout(()=>this.innerHTML='<i class=\'bi bi-clipboard\'></i>', 2000);})" title="Copy Key"><i class="bi bi-clipboard"></i></button>
+                        </div>
+                      <?php endif; ?>
+                    </td>
+                    <td class="py-3 px-4 text-secondary small">
+                      <div class="mb-1">
+                        <div class="progress" style="height: 6px; width: 80px; display: inline-flex; background: #000; margin-right: 6px;">
+                          <div class="progress-bar bg-warning" role="progressbar" style="width: <?php echo ($k['uses']/1000)*100; ?>%;"></div>
+                        </div>
+                        <?php echo $k['uses']; ?> / 1000
+                      </div>
+                      <div>Exp: <?php echo $k['expires_at'] ? date('Y-m-d', strtotime($k['expires_at'])) : 'Never'; ?></div>
+                    </td>
+                    <td class="py-3 px-4 text-end">
+                      <form method="POST" action="?access=admin&page=api" class="m-0 d-flex gap-2 justify-content-end">
+                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                        <input type="hidden" name="key_id" value="<?php echo $k['id']; ?>">
+                        
+                        <?php if($k['status'] === 'pending'): ?>
+                          <button type="submit" name="verify_api_key" class="btn btn-sm btn-success">Verify</button>
+                        <?php elseif($k['status'] === 'active'): ?>
+                          <button type="submit" name="ban_api_key" class="btn btn-sm btn-warning text-dark">Ban</button>
+                        <?php elseif($k['status'] === 'banned'): ?>
+                          <button type="submit" name="unban_api_key" class="btn btn-sm btn-info text-dark">Unban</button>
+                        <?php endif; ?>
+                        
+                        <button type="submit" name="delete_api_key" class="btn btn-sm btn-outline-danger" onclick="return confirm('Revoke this key immediately?');">Remove</button>
+                      </form>
+                    </td>
+                  </tr>
+                  <?php endforeach; endif; ?>
+                </tbody>
+              </table>
+            </div>
+            <?php if ($total_api_pages > 1): ?>
+            <nav aria-label="API pagination">
+              <ul class="pagination justify-content-center">
+                <li class="page-item <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $api_page - 1; ?>">Previous</a>
+                </li>
+                <?php
+                  $start_p = max(1, $api_page - 2);
+                  $end_p = min($total_api_pages, $start_p + 4);
+                  if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                ?>
+                <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
+                <li class="page-item <?php echo ($api_page == $i) ? 'active' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                </li>
+                <?php endfor; ?>
+                <li class="page-item <?php echo ($api_page >= $total_api_pages) ? 'disabled' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $api_page + 1; ?>">Next</a>
                 </li>
               </ul>
             </nav>
@@ -1873,6 +2184,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .drive-app-container .editor-title-drive { flex: 1; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .drive-app-container .CodeMirror { flex: 1; height: 100% !important; font-family: monospace; font-size: 14px; }
             .drive-app-container .CodeMirror-scroll { padding-bottom: 120px !important; }
+            
+            .drive-app-container .versions-list { max-height: 250px; overflow-y: auto; background: var(--theme-surface-container-high); border-radius: 8px; padding: 4px; }
+            .drive-app-container .version-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .version-item:last-child { border-bottom: none; }
 
             .drive-app-container .snackbar-container-drive { position: fixed; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); z-index: 4000; display: flex; flex-direction: column; gap: 8px; align-items: center; }
             .drive-app-container .snackbar-drive { background-color: var(--theme-on-surface); color: var(--theme-surface); padding: 12px 20px; border-radius: 8px; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: space-between; min-width: 280px; max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); opacity: 0; margin-bottom: -20px; transition: opacity 0.3s, margin-bottom 0.3s; }
@@ -1958,6 +2273,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <a class="nav-item-drive" id="navStarred" onclick="driveApp.setViewMode('starred')">
                     <span class="material-symbols-rounded">star</span> Starred
                   </a>
+                  <a class="nav-item-drive" id="navHistory" onclick="driveApp.setViewMode('history')">
+                    <span class="material-symbols-rounded">history</span> History
+                  </a>
                   <a class="nav-item-drive" id="navTrash" onclick="driveApp.setViewMode('trash')">
                     <span class="material-symbols-rounded">delete</span> Trash
                   </a>
@@ -2030,6 +2348,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <div class="menu-divider"></div>
               <div class="menu-item" onclick="document.getElementById('fileUploadInput').click()"><span class="material-symbols-rounded">upload_file</span>File upload</div>
               <div class="menu-item" onclick="document.getElementById('folderUploadInput').click()"><span class="material-symbols-rounded">drive_folder_upload</span>Folder upload</div>
+              <div class="menu-item" onclick="driveApp.showModal('uploadUrl')"><span class="material-symbols-rounded">link</span>Upload via URL</div>
               <input type="file" id="fileUploadInput" multiple class="hidden" onchange="driveApp.handleFilesSelect(event)">
               <input type="file" id="folderUploadInput" webkitdirectory directory multiple class="hidden" onchange="driveApp.handleFolderSelect(event)">
             </div>
@@ -2293,9 +2612,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }, 300);
               }
 
-              async fetchAPI(action, method = 'GET', body = null) {
+              async fetchAPI(action, method = 'GET', body = null, isOverrideRetry = false) {
                 const url = `${this.apiPrefix}api=true&action=${action}&path=${encodeURIComponent(this.currentPath)}`;
                 const options = { method };
+                
                 if (body) {
                   if (body instanceof FormData) {
                     options.body = body;
@@ -2304,12 +2624,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     options.body = JSON.stringify(body);
                   }
                 }
+                
                 try {
                   const res = await fetch(url, options);
                   const text = await res.text();
                   let data;
                   try { data = JSON.parse(text); } catch (e) { throw new Error('Invalid response from server'); }
-                  if (!data.success) throw new Error(data.error || 'Unknown error');
+                  
+                  // Handle File Exists Conflict System
+                  if (!data.success) {
+                    if (data.error && data.error.startsWith('CONFLICT|')) {
+                      const conflictFilename = data.error.split('|')[1];
+                      if (confirm(`The file "${conflictFilename}" already exists. Do you want to overwrite it and save a version history?`)) {
+                        if (body instanceof FormData) body.append('override', '1');
+                        else body.override = true;
+                        return await this.fetchAPI(action, method, body, true);
+                      } else {
+                        return null; // Cancelled
+                      }
+                    }
+                    throw new Error(data.error || 'Unknown error');
+                  }
                   return data;
                 } catch (err) {
                   this.showToast(err.message);
@@ -2338,10 +2673,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 
                 const navHome = document.getElementById('navHome');
                 const navStarred = document.getElementById('navStarred');
+                const navHistory = document.getElementById('navHistory');
                 const navTrash = document.getElementById('navTrash');
                 
                 if (navHome) navHome.classList.toggle('active', mode === 'home');
                 if (navStarred) navStarred.classList.toggle('active', mode === 'starred');
+                if (navHistory) navHistory.classList.toggle('active', mode === 'history');
                 if (navTrash) navTrash.classList.toggle('active', mode === 'trash');
                 
                 document.getElementById('chipsContainer').style.display = (mode === 'home' || mode === 'recents_all') ? 'flex' : 'none';
@@ -2373,6 +2710,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const data = await this.fetchAPI('list_starred');
                   if (data) {
                     this.data = { folders: data.starred.filter(i => i.isDir), files: data.starred.filter(i => !i.isDir), breadcrumbs: [] };
+                    this.render();
+                  }
+                } else if (this.currentViewMode === 'history') {
+                  const data = await this.fetchAPI('list_history');
+                  if (data) {
+                    this.data = { folders: [], files: data.history, breadcrumbs: [] };
                     this.render();
                   }
                 } else if (this.currentViewMode === 'trash') {
@@ -2488,8 +2831,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
 
                 const filterFn = (i) => i.name.toLowerCase().includes(this.searchQuery);
-                this.filteredFolders = this.sortData(this.data.folders.filter(filterFn));
-                this.filteredFiles = this.sortData(this.filterByType(this.data.files.filter(filterFn)));
+                this.filteredFolders = this.sortData(sourceFolders.filter(filterFn));
+                this.filteredFiles = this.sortData(this.filterByType(sourceFiles.filter(filterFn)));
 
                 // Update dynamic title with path and files indicator
                 const totalItems = this.filteredFolders.length + this.filteredFiles.length;
@@ -2570,7 +2913,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 
                 const root = document.createElement('div');
                 root.className = 'breadcrumb-item';
-                root.textContent = this.searchQuery ? `Search: "${this.searchQuery}"` : (this.currentViewMode === 'trash' ? 'Trash' : (this.currentViewMode === 'starred' ? 'Starred' : (this.currentViewMode === 'recents_all' ? 'Recent Files' : 'Drive')));
+                root.textContent = this.searchQuery ? `Search: "${this.searchQuery}"` : (this.currentViewMode === 'trash' ? 'Trash' : (this.currentViewMode === 'starred' ? 'Starred' : (this.currentViewMode === 'history' ? 'File Versions History' : (this.currentViewMode === 'recents_all' ? 'Recent Files' : 'Drive'))));
                 root.onclick = () => this.navigate('');
                 container.appendChild(root);
 
@@ -2983,6 +3326,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   if (isFolder) {
                     addMenuItem('folder_open', 'Open', () => this.navigate(item.path));
                     addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
+                    addMenuItem('folder_zip', 'Archive to Zip', () => this.archiveItems());
+                  } else if (item.is_version) {
+                    addMenuItem('history', 'Rollback to this Version', () => this.restoreVersion(item.original_file, item.version_name));
+                    addMenuItem('open_in_new', 'Preview Version', () => window.open(`${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`, '_blank'));
+                    addMenuItem('download', 'Download Version', () => window.location.href = `${this.apiPrefix}download=${encodeURIComponent(item.path)}`);
                   } else {
                     addMenuItem('visibility', 'Preview / Edit', () => this.openPreviewOrEditor(item));
                     addMenuItem('open_in_new', 'Open in a new tab', () => window.open(`${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`, '_blank'));
@@ -2990,6 +3338,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     addMenuItem('share', 'Public File Link', () => this.shareFile(item.path));
                     if (item.ext === 'zip') {
                       addMenuItem('folder_zip', 'Extract Zip', () => this.extractZip(item.path));
+                    } else if (item.ext === 'enc') {
+                      addMenuItem('lock_open', 'Decrypt File', () => this.decryptFile(item.path));
+                    } else {
+                      addMenuItem('lock', 'Encrypt File', () => this.encryptFile(item.path));
                     }
                   }
                   addMenuItem('link', 'Copy Direct URL', () => {
@@ -2998,6 +3350,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     this.showToast('URL copied to clipboard!');
                   });
                   addMenuItem('edit_square', 'Rename', () => this.showModal('rename', item.path));
+                  if (!isFolder) {
+                    addMenuItem('history', 'Version History', () => this.showVersions(item.path));
+                  }
                   addMenuItem('info', 'Info', () => {
                     this.isPropertiesOpen = false;
                     this.toggleProperties();
@@ -3005,6 +3360,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
                 } else {
                   addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
+                  addMenuItem('folder_zip', 'Archive to Zip', () => this.archiveItems());
                   const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
                 }
                 
@@ -3108,6 +3464,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   } else if (action === 'addFile') {
                     const res = await this.fetchAPI('add_file', 'POST', { action: 'add_file', name: val });
                     if (res) { this.showToast('File created'); this.loadDirectory(this.currentPath); }
+                  } else if (action === 'uploadUrl') {
+                    this.showToast('Downloading from URL...');
+                    const res = await this.fetchAPI('upload_url', 'POST', { action: 'upload_url', url: val });
+                    if (res) { this.showToast('Downloaded successfully'); this.loadDirectory(this.currentPath); }
                   } else if (action === 'rename') {
                     const oldName = oldPath.split('/').pop();
                     const extOld = oldName.split('.').pop();
@@ -3131,6 +3491,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   title.textContent = 'New file';
                   input.placeholder = 'File name (e.g., script.js)';
                   submit.textContent = 'Create';
+                } else if (action === 'uploadUrl') {
+                  title.textContent = 'Upload from URL';
+                  input.placeholder = 'https://example.com/video.mp4';
+                  submit.textContent = 'Download';
                 } else if (action === 'rename') {
                   title.textContent = 'Rename';
                   input.value = oldPath.split('/').pop();
@@ -3189,6 +3553,89 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (res) {
                   this.showToast('Trash cleared');
                   this.loadDirectory(this.currentPath);
+                }
+              }
+
+              async archiveItems() {
+                const items = Array.from(this.selectedItems);
+                if (items.length === 0) return;
+                this.showToast('Creating Zip Archive...');
+                const res = await this.fetchAPI('zip_items', 'POST', { action: 'zip_items', items });
+                if (res) {
+                  this.showToast('Archive created successfully');
+                  this.clearSelection(null, true);
+                  this.loadDirectory(this.currentPath);
+                }
+              }
+
+              async encryptFile(path) {
+                this.showToast('Encrypting securely (AES-256)...');
+                const res = await this.fetchAPI('encrypt_file', 'POST', { action: 'encrypt_file', file: path });
+                if (res) {
+                  this.showToast('File encrypted successfully!');
+                  this.loadDirectory(this.currentPath);
+                }
+              }
+
+              async decryptFile(path) {
+                this.showToast('Decrypting file...');
+                const res = await this.fetchAPI('decrypt_file', 'POST', { action: 'decrypt_file', file: path });
+                if (res) {
+                  this.showToast('File decrypted successfully!');
+                  this.loadDirectory(this.currentPath);
+                }
+              }
+
+              async showVersions(path) {
+                const res = await this.fetchAPI('get_versions', 'POST', { action: 'get_versions', file: path });
+                if (res && res.versions.length > 0) {
+                  const overlay = document.getElementById('modalOverlay');
+                  const title = document.getElementById('modalTitle');
+                  title.textContent = 'Version History';
+                  
+                  let html = `<div class="versions-list">`;
+                  res.versions.forEach(v => {
+                    const d = new Date(v.mtime * 1000).toLocaleString();
+                    html += `
+                      <div class="version-item">
+                        <div>
+                          <div style="font-weight:600;font-size:14px;color:var(--theme-on-surface)">${d}</div>
+                          <div style="font-size:12px;color:var(--theme-on-surface-variant)">Size: ${v.size}</div>
+                        </div>
+                        <button class="btn-drive btn-filled-drive" style="height:32px;font-size:12px;padding:0 12px;" onclick="driveApp.restoreVersion('${path}', '${v.name}')">Restore</button>
+                      </div>`;
+                  });
+                  html += `</div>`;
+                  
+                  const input = document.getElementById('modalInput');
+                  input.style.display = 'none';
+                  input.insertAdjacentHTML('afterend', `<div id="versionsContainer">${html}</div>`);
+                  
+                  document.getElementById('modalSubmit').style.display = 'none';
+                  overlay.style.display = 'flex';
+                  
+                  const oldClose = this.closeModal;
+                  this.closeModal = () => {
+                    const c = document.getElementById('versionsContainer');
+                    if (c) c.remove();
+                    input.style.display = 'block';
+                    document.getElementById('modalSubmit').style.display = 'inline-flex';
+                    oldClose.call(this);
+                  };
+                } else {
+                  this.showToast('No version history found for this file.');
+                }
+              }
+
+              async restoreVersion(path, versionName) {
+                if (confirm('Restore this older version? The current file will be backed up.')) {
+                  this.closeModal();
+                  this.showToast('Restoring version...');
+                  const res = await this.fetchAPI('restore_version', 'POST', { action: 'restore_version', file: path, version_name: versionName });
+                  if (res) {
+                    this.showToast('Version restored successfully!');
+                    this.loadDirectory(this.currentPath);
+                  }
                 }
               }
 
@@ -3845,9 +4292,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
             <?php $search = $_GET['search'] ?? ''; ?>
             <?php $sort_admin = $_GET['sort'] ?? 'newest'; ?>
-            <form method="GET" action="" class="d-flex w-100" style="max-width: 450px;">
+            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 550px;">
               <input type="hidden" name="access" value="admin">
-              <select name="sort" class="form-select me-2" style="width: auto;" onchange="this.form.submit()">
+              <select name="sort" class="form-select bg-dark text-white border-secondary shadow-sm" style="width: auto;" onchange="this.form.submit()">
                 <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest</option>
                 <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
                 <option value="pending" <?php echo $sort_admin === 'pending' ? 'selected' : ''; ?>>Pending Uploads</option>
@@ -3857,8 +4304,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned</option>
                 <option value="not_banned" <?php echo $sort_admin === 'not_banned' ? 'selected' : ''; ?>>Not Banned</option>
               </select>
-              <input type="text" name="search" class="form-control me-2" placeholder="Search user..." value="<?php echo htmlspecialchars($search); ?>">
-              <button type="submit" class="btn btn-danger"><i class="bi bi-search"></i></button>
+              <div class="input-group shadow-sm">
+                <input type="text" name="search" class="form-control bg-dark text-white border-secondary" placeholder="Search user..." value="<?php echo htmlspecialchars($search); ?>">
+                <button type="submit" class="btn btn-danger fw-bold px-3"><i class="bi bi-search"></i></button>
+              </div>
             </form>
           </div>
           <div class="content-area-wrapper">
@@ -4420,6 +4869,15 @@ function init_db($db) {
   $db->exec("CREATE INDEX IF NOT EXISTS msg_sender_idx ON messages(sender_id);");
   $db->exec("CREATE INDEX IF NOT EXISTS msg_receiver_idx ON messages(receiver_id);");
   $db->exec("CREATE INDEX IF NOT EXISTS msg_group_idx ON messages(group_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS song_comments_created_idx ON song_comments(created_at);");
+  $db->exec("CREATE INDEX IF NOT EXISTS song_comments_song_idx ON song_comments(song_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS song_comments_parent_idx ON song_comments(parent_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS community_posts_created_idx ON community_posts(created_at);");
+  $db->exec("CREATE INDEX IF NOT EXISTS community_posts_parent_idx ON community_posts(parent_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS blog_comments_created_idx ON blog_comments(created_at);");
+  $db->exec("CREATE INDEX IF NOT EXISTS blog_comments_parent_idx ON blog_comments(parent_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS activity_feed_created_idx ON activity_feed(created_at);");
+  $db->exec("CREATE INDEX IF NOT EXISTS activity_feed_user_idx ON activity_feed(user_id);");
 
   $db->exec("
     CREATE TABLE IF NOT EXISTS listen_later (
@@ -4671,25 +5129,48 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
     }
   }
 
-  // 3. Global API Firewall: Require Master Admin Password (api_key) for ALL external requests
+  // 3. Global API Firewall: Require API Key for ALL external requests
   $api_extracted_action = $_GET['action'] ?? '';
   
   $public_media_actions = ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon'];
   if (!in_array($api_extracted_action, $public_media_actions)) {
     $api_key = $_GET['api_key'] ?? '';
     
-    // Ensure DB is initialized
     if (function_exists('init_db')) { init_db(get_db()); }
-    
     $db_fw = get_db();
+    
+    // Check Master Admin Password first (Unlimited uses)
     $stmt_fw = $db_fw->query("SELECT password_hash FROM users WHERE email = 'musiclibrary@mail.com'");
     $master_hash = $stmt_fw->fetchColumn();
+    $is_valid_api = false;
+    
+    if (!empty($master_hash) && password_verify($api_key, $master_hash)) {
+      $is_valid_api = true;
+    } else {
+      // Check Custom API Keys (1,000 uses per month)
+      $stmt_key = $db_fw->prepare("SELECT id, uses, reset_month FROM api_keys WHERE token = ?");
+      $stmt_key->execute([$api_key]);
+      $key_row = $stmt_key->fetch();
+      
+      if ($key_row) {
+        $current_month = date('Y-m');
+        if ($key_row['reset_month'] !== $current_month) {
+          $db_fw->prepare("UPDATE api_keys SET uses = 0, reset_month = ? WHERE id = ?")->execute([$current_month, $key_row['id']]);
+          $key_row['uses'] = 0;
+        }
+        if ($key_row['uses'] < 1000) {
+          $db_fw->prepare("UPDATE api_keys SET uses = uses + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$key_row['id']]);
+          $is_valid_api = true;
+        } else {
+          http_response_code(429);
+          die('{"status":"error", "message":"API limit exceeded (1,000 requests per month)."}');
+        }
+      }
+    }
 
-    if (empty($master_hash) || !password_verify($api_key, $master_hash)) {
+    if (!$is_valid_api) {
       http_response_code(401);
-      header('Content-Type: application/json');
-      echo '{"status":"error", "message":"API access denied. Valid api_key (Master Admin Password) required."}';
-      exit;
+      die('{"status":"error", "message":"API access denied. Valid API Key required."}');
     }
   }
 }
@@ -4881,6 +5362,28 @@ if (isset($_GET['action'])) {
         user_id INTEGER,
         expires_at DATETIME
       );");
+      
+      $db->exec("CREATE TABLE IF NOT EXISTS api_keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER DEFAULT 0,
+        token TEXT UNIQUE,
+        name TEXT,
+        status TEXT DEFAULT 'active',
+        uses INTEGER DEFAULT 0,
+        reset_month TEXT,
+        expires_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );");
+      
+      $api_cols = $db->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
+      if (!in_array('user_id', $api_cols)) { $db->exec("ALTER TABLE api_keys ADD COLUMN user_id INTEGER DEFAULT 0;"); }
+      if (!in_array('status', $api_cols)) { $db->exec("ALTER TABLE api_keys ADD COLUMN status TEXT DEFAULT 'active';"); }
+      if (!in_array('expires_at', $api_cols)) { $db->exec("ALTER TABLE api_keys ADD COLUMN expires_at DATETIME;"); }
+      if (!in_array('updated_at', $api_cols)) { 
+        $db->exec("ALTER TABLE api_keys ADD COLUMN updated_at DATETIME;"); 
+        $db->exec("UPDATE api_keys SET updated_at = created_at WHERE updated_at IS NULL;");
+      }
     } catch(Exception $e) {}
     
     init_db($db);
@@ -7012,6 +7515,63 @@ HTML;
       send_json($stmt->fetchAll());
       break;
 
+    case 'get_my_apis':
+      if (!$user_id) { send_json([]); }
+      try { 
+        $db->exec("CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, token TEXT UNIQUE, name TEXT, status TEXT DEFAULT 'active', uses INTEGER DEFAULT 0, reset_month TEXT, expires_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);"); 
+        $api_cols_user = $db->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
+        if (!in_array('updated_at', $api_cols_user)) { 
+          $db->exec("ALTER TABLE api_keys ADD COLUMN updated_at DATETIME;"); 
+          $db->exec("UPDATE api_keys SET updated_at = created_at WHERE updated_at IS NULL;");
+        }
+      } catch(Exception $e) {}
+
+      $sort_key = $_GET['sort'] ?? 'newest';
+      $search = $_GET['q'] ?? '';
+      
+      $order_by = "ORDER BY created_at DESC";
+      if ($sort_key === 'oldest') $order_by = "ORDER BY created_at ASC";
+      elseif ($sort_key === 'modified') $order_by = "ORDER BY updated_at DESC";
+
+      $where = "WHERE user_id = ?";
+      $params = [$user_id];
+      if ($search !== '') {
+        $where .= " AND (name LIKE ? OR token LIKE ?)";
+        $params[] = "%$search%";
+        $params[] = "%$search%";
+      }
+
+      $stmt = $db->prepare("SELECT id, name, token, status, uses, expires_at, created_at, updated_at FROM api_keys $where $order_by $limit_clause");
+      $stmt->execute($params);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'request_api':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $name = trim(htmlspecialchars($data['name'] ?? 'My App', ENT_QUOTES, 'UTF-8'));
+      
+      try { 
+        $db->exec("CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, token TEXT UNIQUE, name TEXT, status TEXT DEFAULT 'active', uses INTEGER DEFAULT 0, reset_month TEXT, expires_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);"); 
+      } catch(Exception $e) {}
+      
+      $stmt_count = $db->prepare("SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')");
+      $stmt_count->execute([$user_id]);
+      if ($stmt_count->fetchColumn() >= 10) {
+        send_json(['status' => 'error', 'message' => 'You can only request up to 10 API Keys per month.']);
+      }
+      
+      $db->prepare("INSERT INTO api_keys (name, token, reset_month, user_id, status) VALUES (?, ?, ?, ?, 'pending')")->execute([$name, 'pending_'.uniqid(), date('Y-m'), $user_id]);
+      send_json(['status' => 'success', 'message' => 'API Key requested. Please wait for an Admin to verify it.']);
+      break;
+
+    case 'delete_my_api':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("DELETE FROM api_keys WHERE id = ? AND user_id = ?")->execute([(int)$data['id'], $user_id]);
+      send_json(['status' => 'success', 'message' => 'API Key deleted.']);
+      break;
+
     case 'export_blogs':
       if (!$user_id) { http_response_code(403); exit; }
       $stmt = $db->prepare("SELECT title, content, status, category, created_at, updated_at FROM blogs WHERE user_id = ? ORDER BY created_at ASC");
@@ -8401,6 +8961,8 @@ HTML;
       $f_date = $_GET['f_date'] ?? '';
       $f_dur = $_GET['f_dur'] ?? '';
       $f_sort = $_GET['f_sort'] ?? 'relevance';
+      $f_start_date = $_GET['f_start_date'] ?? '';
+      $f_end_date = $_GET['f_end_date'] ?? '';
       
       $time_now = time();
       $date_cond_m = ""; $date_cond_p = "";
@@ -8408,6 +8970,21 @@ HTML;
       elseif ($f_date === 'week') { $date_cond_m = " AND m.last_modified >= " . ($time_now - 604800); $date_cond_p = " AND p.created_at >= datetime('now', '-7 days')"; }
       elseif ($f_date === 'month') { $date_cond_m = " AND m.last_modified >= " . ($time_now - 2592000); $date_cond_p = " AND p.created_at >= datetime('now', '-1 month')"; }
       elseif ($f_date === 'year') { $date_cond_m = " AND m.last_modified >= " . ($time_now - 31536000); $date_cond_p = " AND p.created_at >= datetime('now', '-1 year')"; }
+
+      if (!empty($f_start_date)) {
+        $start_ts = strtotime($f_start_date . " 00:00:00");
+        if ($start_ts !== false) {
+          $date_cond_m .= " AND m.last_modified >= " . $start_ts;
+          $date_cond_p .= " AND p.created_at >= " . $db->quote($f_start_date . " 00:00:00");
+        }
+      }
+      if (!empty($f_end_date)) {
+        $end_ts = strtotime($f_end_date . " 23:59:59");
+        if ($end_ts !== false) {
+          $date_cond_m .= " AND m.last_modified <= " . $end_ts;
+          $date_cond_p .= " AND p.created_at <= " . $db->quote($f_end_date . " 23:59:59");
+        }
+      }
 
       $dur_cond_m = "";
       if ($f_dur === 'short') { $dur_cond_m = " AND m.duration < 240"; }
@@ -9029,30 +9606,23 @@ HTML;
       try { $db->exec("ALTER TABLE users ADD COLUMN last_notif_read DATETIME;"); } catch(Exception $e) {}
       try { $db->exec("ALTER TABLE users ADD COLUMN last_notif_clear DATETIME;"); } catch(Exception $e) {}
       
-      $stmt_times = $db->prepare("SELECT last_notif_read, last_notif_clear FROM users WHERE id = ?");
+      $stmt_times = $db->prepare("SELECT MAX(COALESCE(last_notif_read, '2000-01-01 00:00:00'), COALESCE(last_notif_clear, '2000-01-01 00:00:00')) FROM users WHERE id = ?");
       $stmt_times->execute([$user_id]);
-      $times = $stmt_times->fetch();
-      $last_read = $times['last_notif_read'] ?: '2000-01-01 00:00:00';
-      $last_clear = $times['last_notif_clear'] ?: '2000-01-01 00:00:00';
-      $threshold = max($last_read, $last_clear);
+      $threshold = $stmt_times->fetchColumn() ?: '2000-01-01 00:00:00';
 
-      $stmt2 = $db->prepare("
-          SELECT COUNT(*)
-          FROM song_comments c
-          JOIN music m ON c.song_id = m.id
-          LEFT JOIN song_comments pc ON c.parent_id = pc.id
-          WHERE ((m.user_id = ? AND c.parent_id IS NULL AND c.user_id != ?) 
-             OR (c.parent_id IS NOT NULL AND pc.user_id = ? AND c.user_id != ?))
-             AND c.created_at > ?
-      ");
-      $stmt2->execute([$user_id, $user_id, $user_id, $user_id, $threshold]);
-      $count = $stmt2->fetchColumn();
-      
-      $stmt3 = $db->prepare("SELECT COUNT(*) FROM messages WHERE receiver_id = ? AND created_at > ?");
-      $stmt3->execute([$user_id, $threshold]);
-      $msg_count = $stmt3->fetchColumn();
-      
-      send_json(['count' => (int)$count + (int)$msg_count]);
+      $sql = "SELECT (
+        (SELECT COUNT(*) FROM song_comments c JOIN music m ON c.song_id = m.id LEFT JOIN song_comments pc ON c.parent_id = pc.id WHERE ((m.user_id = :u AND c.parent_id IS NULL AND c.user_id != :u) OR (c.parent_id IS NOT NULL AND pc.user_id = :u AND c.user_id != :u)) AND c.created_at > :t) +
+        (SELECT COUNT(*) FROM community_posts cp JOIN community_posts parent_post ON cp.parent_id = parent_post.id WHERE parent_post.user_id = :u AND cp.user_id != :u AND cp.created_at > :t) +
+        (SELECT COUNT(*) FROM blog_comments bc JOIN blogs b ON bc.blog_id = b.id LEFT JOIN blog_comments pbc ON bc.parent_id = pbc.id WHERE ((b.user_id = :u AND bc.parent_id IS NULL AND bc.user_id != :u) OR (bc.parent_id IS NOT NULL AND pbc.user_id = :u AND bc.user_id != :u)) AND bc.created_at > :t) +
+        (SELECT COUNT(*) FROM messages WHERE receiver_id = :u AND created_at > :t) +
+        (SELECT COUNT(*) FROM activity_feed WHERE user_id = :u AND created_at > :t)
+      ) as total_count";
+
+      $stmt = $db->prepare($sql);
+      $stmt->execute([':u' => $user_id, ':t' => $threshold]);
+      $total_count = (int)$stmt->fetchColumn();
+
+      send_json(['count' => $total_count]);
       break;
 
     case 'mark_notifs_read':
@@ -10948,6 +11518,37 @@ function perform_full_scan($db) {
       
       #sleep-timer-bubble { position: fixed; top: 80px; right: 20px; background: rgba(30, 30, 30, 0.9); backdrop-filter: blur(10px); border: 1px solid var(--ytm-surface-2); border-radius: 50px; padding: 8px 16px; z-index: 1060; display: flex; align-items: center; gap: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); cursor: grab; user-select: none; touch-action: none; }
       #sleep-timer-bubble:active { cursor: grabbing; }
+      .cal-day-item {
+        width: 100%;
+        max-width: 38px;
+        aspect-ratio: 1 / 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto;
+        border-radius: 50%;
+        cursor: pointer;
+        font-size: 0.9rem;
+        color: #ffffff;
+        user-select: none;
+        transition: background-color 0.2s, transform 0.1s;
+      }
+      .cal-day-item:hover {
+        background-color: rgba(255, 255, 255, 0.2) !important;
+      }
+      .cal-day-item.selected {
+        background-color: var(--ytm-accent, #ff0000) !important;
+        color: #ffffff !important;
+        font-weight: bold;
+        box-shadow: 0 4px 12px rgba(255, 0, 0, 0.4);
+      }
+      .cal-day-item.today {
+        background-color: var(--ytm-surface-2, #282828) !important;
+        color: #ffffff !important;
+        font-weight: bold;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+      }
+      .cal-day-item:hover { background-color: rgba(255, 255, 255, 0.2) !important; }
       #sleep-timer-bubble .time { font-weight: bold; font-family: monospace; font-size: 1.1rem; color: #fff; }
       #sleep-timer-bubble .action-btn { background: none; border: none; padding: 0; font-size: 1.2rem; display: flex; align-items: center; transition: color 0.2s; }
       #sleep-timer-bubble .action-btn:hover { color: var(--ytm-primary-text) !important; }
@@ -11279,12 +11880,30 @@ function perform_full_scan($db) {
         backdrop-filter: blur(10px) !important;
       }
       .phpmusic-profile-header-card {
-        padding: 1rem 1.25rem;
+        padding: 0;
         border-bottom: 1px solid var(--ytm-surface-2);
+        margin-bottom: 0.5rem;
+        position: relative;
+        overflow: hidden;
+      }
+      .phpmusic-profile-bg-placeholder {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-size: cover;
+        background-position: center;
+        filter: brightness(0.3) blur(2px);
+        z-index: 0;
+      }
+      .phpmusic-profile-header-card-inner {
+        padding: 1rem 1.25rem;
         display: flex;
         align-items: center;
         gap: 1rem;
-        margin-bottom: 0.5rem;
+        position: relative;
+        z-index: 1;
       }
       .phpmusic-profile-header-card img {
         width: 48px;
@@ -11664,9 +12283,13 @@ function perform_full_scan($db) {
               <i class="bi bi-cloud-arrow-down-fill"></i>
               <span>Install App</span>
             </a>
-            <a href="#" class="nav-link" id="get-api-btn">
+            <a href="#" class="nav-link logged-in-only" data-view="get_my_apis">
               <i class="bi bi-code-slash"></i>
-              <span>Get API</span>
+              <span>My APIs</span>
+            </a>
+            <a href="#" class="nav-link" id="get-api-btn">
+              <i class="bi bi-journal-code"></i>
+              <span>API Documentation</span>
             </a>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#license-modal">
               <i class="bi bi-file-earmark-text-fill"></i>
@@ -11708,15 +12331,19 @@ function perform_full_scan($db) {
             <button class="btn" type="button" id="search-btn-mobile"><i class="bi bi-search"></i></button>
             <div id="search-dropdown-mobile" class="search-dropdown d-none"></div>
           </div>
-          <div class="dropdown logged-in-only">
+          <div class="dropdown logged-in-only position-relative">
             <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-mobile" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
+            <span class="position-absolute top-0 start-100 translate-middle p-1 bg-danger border border-dark rounded-circle d-none notif-dot" style="z-index: 10; width: 10px; height: 10px;"></span>
             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end phpmusic-profile-dropdown">
               <li>
                 <div class="phpmusic-profile-header-card">
-                  <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="phpmusic-profile-img-placeholder" alt="Profile">
-                  <div class="info">
-                    <div class="name phpmusic-profile-name">Loading...</div>
-                    <div class="meta phpmusic-profile-subtext">Loading...</div>
+                  <div class="phpmusic-profile-bg-placeholder"></div>
+                  <div class="phpmusic-profile-header-card-inner">
+                    <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="phpmusic-profile-img-placeholder" alt="Profile">
+                    <div class="info">
+                      <div class="name phpmusic-profile-name">Loading...</div>
+                      <div class="meta phpmusic-profile-subtext">Loading...</div>
+                    </div>
                   </div>
                 </div>
               </li>
@@ -11753,15 +12380,19 @@ function perform_full_scan($db) {
               <button class="btn" type="button" id="search-btn-desktop"><i class="bi bi-search"></i></button>
               <div id="search-dropdown-desktop" class="search-dropdown d-none"></div>
             </div>
-            <div class="dropdown logged-in-only d-none d-md-block">
+            <div class="dropdown logged-in-only d-none d-md-block position-relative">
               <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-desktop" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
+              <span class="position-absolute top-0 start-100 translate-middle p-1 bg-danger border border-dark rounded-circle d-none notif-dot" style="z-index: 10; width: 10px; height: 10px;"></span>
               <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end phpmusic-profile-dropdown">
                 <li>
                   <div class="phpmusic-profile-header-card">
-                    <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="phpmusic-profile-img-placeholder" alt="Profile">
-                    <div class="info">
-                      <div class="name phpmusic-profile-name">Loading...</div>
-                      <div class="meta phpmusic-profile-subtext">Loading...</div>
+                    <div class="phpmusic-profile-bg-placeholder"></div>
+                    <div class="phpmusic-profile-header-card-inner">
+                      <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="phpmusic-profile-img-placeholder" alt="Profile">
+                      <div class="info">
+                        <div class="name phpmusic-profile-name">Loading...</div>
+                        <div class="meta phpmusic-profile-subtext">Loading...</div>
+                      </div>
                     </div>
                   </div>
                 </li>
@@ -13055,6 +13686,7 @@ function perform_full_scan($db) {
           <button class="note-icon-btn" id="closeEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
+          <button class="note-icon-btn d-none d-md-inline-block" id="editorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
           <button class="note-icon-btn" id="editorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
           <button class="note-icon-btn" id="editorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
           <button class="note-icon-btn" id="editorStarBtn" title="Toggle Star"><i class="bi bi-star" id="editorStarIcon"></i></button>
@@ -13156,6 +13788,7 @@ function perform_full_scan($db) {
           <button class="note-icon-btn" id="closeBlogEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
+          <button class="note-icon-btn d-none d-md-inline-block" id="blogEditorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
           <button class="note-icon-btn" id="blogEditorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
           <button class="note-icon-btn" id="blogEditorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
           <div style="position: relative;">
@@ -13259,6 +13892,7 @@ function perform_full_scan($db) {
           <button class="note-icon-btn" id="closeTaskEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
+          <button class="note-icon-btn d-none d-md-inline-block" id="taskEditorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
           <button class="note-icon-btn" id="taskEditorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
           <button class="note-icon-btn" id="taskEditorStarBtn" title="Toggle Star"><i class="bi bi-star" id="taskEditorStarIcon"></i></button>
           <div style="position: relative;">
@@ -13543,35 +14177,42 @@ function perform_full_scan($db) {
 
     <div class="modal fade" id="calendar-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
-          <div class="modal-header border-secondary pb-2">
-            <h5 class="modal-title text-white"><i class="bi bi-calendar3 text-danger me-2"></i>Calendar & Time</h5>
+        <div class="modal-content shadow-lg" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px;">
+          <div class="modal-header border-0 pb-0">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-calendar3 text-danger me-2"></i> Time & Date</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body text-center p-4">
-            <h2 id="calendar-time-display" class="fw-bold text-white mb-1" style="font-size: clamp(2rem, 8vw, 3.5rem); font-family: monospace; letter-spacing: 2px;">00:00:00</h2>
-            <p id="calendar-date-display" class="text-secondary fs-5 mb-4"></p>
-            <div id="calendar-grid" class="bg-dark rounded p-3 border border-secondary shadow-sm">
-              <div class="d-flex justify-content-between align-items-center mb-3">
-                <button class="btn btn-sm btn-outline-light" id="cal-prev-month"><i class="bi bi-chevron-left"></i></button>
-                <h5 id="cal-month-year" class="mb-0 text-white fw-bold"></h5>
-                <button class="btn btn-sm btn-outline-light" id="cal-next-month"><i class="bi bi-chevron-right"></i></button>
+            <div class="p-3 mb-4 rounded-4" style="background: linear-gradient(135deg, rgba(255,0,0,0.1), rgba(0,0,0,0.2)); border: 1px solid rgba(255,255,255,0.05);">
+              <h2 id="calendar-time-display" class="fw-bold text-white mb-1" style="font-size: clamp(2rem, 6vw, 3.2rem); font-family: 'Roboto', sans-serif; letter-spacing: 1px; text-shadow: 0 4px 12px rgba(0,0,0,0.5);">00:00:00</h2>
+              <p id="calendar-date-display" class="text-secondary fs-5 mb-0 fw-medium"></p>
+            </div>
+            
+            <div id="calendar-grid" class="bg-dark rounded-4 p-3 border border-secondary shadow-sm mb-4" style="overflow: hidden;">
+              <div class="d-flex justify-content-between align-items-center mb-3 px-2">
+                <button class="btn btn-sm btn-outline-secondary border-0 rounded-circle" id="cal-prev-month" style="width: 35px; height: 35px;"><i class="bi bi-chevron-left"></i></button>
+                <h5 id="cal-month-year" class="mb-0 text-white fw-bold text-uppercase" style="letter-spacing: 1px;"></h5>
+                <button class="btn btn-sm btn-outline-secondary border-0 rounded-circle" id="cal-next-month" style="width: 35px; height: 35px;"><i class="bi bi-chevron-right"></i></button>
               </div>
-              <div class="d-grid" style="grid-template-columns: repeat(7, 1fr); gap: 5px; text-align: center;">
+              <div class="d-grid mb-2" style="grid-template-columns: repeat(7, 1fr); gap: 4px; text-align: center;">
                 <div class="text-danger small fw-bold">Su</div>
                 <div class="text-secondary small fw-bold">Mo</div>
                 <div class="text-secondary small fw-bold">Tu</div>
                 <div class="text-secondary small fw-bold">We</div>
                 <div class="text-secondary small fw-bold">Th</div>
                 <div class="text-secondary small fw-bold">Fr</div>
-                <div class="text-primary small fw-bold">Sa</div>
+                <div class="text-info small fw-bold">Sa</div>
               </div>
-              <div id="cal-days-grid" class="d-grid mt-2" style="grid-template-columns: repeat(7, 1fr); gap: 5px; text-align: center; min-height: 200px; align-items: start;">
+              <div id="cal-days-grid" class="d-grid" style="grid-template-columns: repeat(7, 1fr); gap: 4px; text-align: center; min-height: 210px; align-items: center;">
               </div>
             </div>
-            <div class="d-flex gap-2 mt-3">
-              <input type="date" id="cal-jump-date" class="form-control form-control-sm bg-dark text-white border-secondary" title="Jump to Date">
-              <button class="btn btn-sm btn-outline-danger fw-bold w-100" id="cal-today-btn">Jump to Today</button>
+            
+            <div class="d-flex flex-column gap-2">
+              <div class="d-flex gap-2">
+                <input type="date" id="cal-jump-date" class="form-control bg-dark text-white border-secondary rounded-pill px-3" title="Jump to Date">
+                <button class="btn btn-outline-light fw-bold rounded-pill px-3 text-nowrap" id="cal-today-btn"><i class="bi bi-calendar-event me-1"></i> Today</button>
+              </div>
+              <button class="btn btn-danger fw-bold rounded-pill w-100 mt-2 py-2" id="cal-search-date-btn" data-bs-dismiss="modal"><i class="bi bi-search me-1"></i> Search Songs by Selected Date</button>
             </div>
           </div>
         </div>
@@ -14772,27 +15413,6 @@ function perform_full_scan($db) {
       </div>
     </div>
 
-    <!-- API AUTHENTICATION MODAL -->
-    <div class="modal fade" id="api-auth-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
-          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
-            <h5 class="modal-title text-white"><i class="bi bi-shield-lock-fill text-warning me-2"></i> API Authentication</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body p-4 text-center">
-            <i class="bi bi-cpu text-secondary mb-3" style="font-size: 3rem; display: block;"></i>
-            <h5 class="text-white mb-3">API Access is Locked</h5>
-            <p class="text-secondary small mb-4">Enter your master Admin Password to generate endpoints. Your key will be securely cached locally to prevent repetitive prompts.</p>
-            <div class="mb-4">
-              <input type="password" class="form-control bg-dark text-white border-secondary text-center fs-5" id="api-auth-input" placeholder="••••••••" style="letter-spacing: 2px;">
-            </div>
-            <button class="btn btn-warning text-dark w-100 fw-bold py-2" id="api-auth-submit-btn">Verify & Unlock API</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <!-- MAIN COMPREHENSIVE API MODAL -->
     <div class="modal fade" id="api-modal" tabindex="-1">
       <div class="modal-dialog modal-fullscreen">
@@ -14801,8 +15421,6 @@ function perform_full_scan($db) {
           <div class="modal-header border-0 align-items-center px-4 py-3" style="border-bottom: 1px solid var(--ytm-surface-2) !important; background-color: var(--ytm-surface);">
             <h4 class="modal-title text-white m-0 fw-bold"><i class="bi bi-code-slash text-danger me-2"></i> Developer API Documentation</h4>
             <div class="d-flex gap-3 align-items-center">
-              <span class="badge bg-success border border-dark px-3 py-2 d-none d-md-inline-block fs-6"><i class="bi bi-check-circle-fill me-1"></i> Key Cached Active</span>
-              <button class="btn btn-outline-danger fw-bold" id="clear-api-key-btn" title="Clear API Key Cache"><i class="bi bi-eraser-fill"></i> <span class="d-none d-md-inline">Clear Auth Key</span></button>
               <button type="button" class="btn-close btn-close-white ms-2 fs-5" data-bs-dismiss="modal"></button>
             </div>
           </div>
@@ -14893,6 +15511,10 @@ function perform_full_scan($db) {
                 <h4 class="text-white mb-3 fw-bold"><i class="bi bi-terminal-fill me-2 text-primary"></i> Live Request Playground</h4>
                 <p class="text-secondary fs-6 mb-4" style="max-width: 900px;">Select an endpoint below to immediately generate the secure URL string and test the live JSON response returned straight from your SQLite database. The iframe below executes the generated query using your locally cached Admin Key.</p>
                 
+                <div class="mb-4">
+                  <label for="custom-api-key-input" class="form-label text-white small fw-bold" style="letter-spacing: 1px;">YOUR API KEY</label>
+                  <input type="text" id="custom-api-key-input" class="form-control bg-dark text-white border-secondary" placeholder="Enter your API Key (pk_...)">
+                </div>
                 <div class="row g-4 align-items-end">
                   <div class="col-lg-5">
                     <label for="api-action-select" class="form-label text-white small fw-bold" style="letter-spacing: 1px;">ENDPOINT ACTION</label>
@@ -14932,9 +15554,9 @@ function perform_full_scan($db) {
                       <span>GENERATED ENDPOINT URL</span>
                       <span id="api-method-badge" class="badge bg-primary fs-6 shadow-sm">GET</span>
                     </label>
-                    <div class="input-group input-group-lg shadow-sm">
-                      <input type="text" class="form-control bg-dark text-info border-secondary font-monospace fs-6" id="api-url-input" readonly>
-                      <button class="btn btn-danger fw-bold px-4" type="button" id="copy-api-btn"><i class="bi bi-clipboard"></i> Copy</button>
+                    <div class="input-group input-group-lg shadow-sm flex-nowrap">
+                      <input type="text" class="form-control bg-dark text-info border-secondary font-monospace fs-6" id="api-url-input" readonly style="min-width: 0;">
+                      <button class="btn btn-danger fw-bold px-4 flex-shrink-0" type="button" id="copy-api-btn"><i class="bi bi-clipboard"></i> Copy</button>
                     </div>
                   </div>
                 </div>
@@ -18119,7 +18741,11 @@ SOFTWARE.</div>
           const selectedOption = apiActionSelect.options[apiActionSelect.selectedIndex];
           const actionVal = selectedOption.value;
           
+          const userKeyInput = document.getElementById('custom-api-key-input');
+          const finalKey = userKeyInput && userKeyInput.value ? userKeyInput.value.trim() : '';
+          
           let url = window.location.origin + window.location.pathname + '?access=api&action=' + actionVal;
+          if (finalKey) url += '&api_key=' + encodeURIComponent(finalKey);
           apiUrlInput.value = url;
           
           const method = selectedOption.getAttribute('data-method') || 'GET';
@@ -18139,31 +18765,37 @@ SOFTWARE.</div>
           // VISUAL CLIENT TESTER INJECTION (Iframe 2)
           const visualIframe = document.getElementById('api-visual-iframe');
           const templateEl = document.getElementById('play-client-template');
-          if (visualIframe && templateEl && !visualIframe.srcdoc) {
-             visualIframe.srcdoc = templateEl.innerHTML;
-          }
-          
-          if (visualIframe) {
-            let sourceType = 'all';
-            let idName = '';
-            if (actionVal.includes('playlist')) {
-              sourceType = 'playlist';
-              idName = '1';
-            } else if (actionVal.includes('artist')) {
-              sourceType = 'artist';
-              idName = '1';
-            }
-            const bUrl = window.location.origin + window.location.pathname;
-            const safeApiKey = window.adminApiKey ? encodeURIComponent(window.adminApiKey) : '';
-            const hash = `#sourcetype=${sourceType}&id/name=${idName}&backendurl=${encodeURIComponent(bUrl)}&apikey=${safeApiKey}`;
-          
-            if (visualIframe.contentWindow && visualIframe.contentWindow.location && visualIframe.contentWindow.document.readyState === 'complete') {
-               visualIframe.contentWindow.location.hash = hash;
-            } else {
-               visualIframe.onload = () => {
-                  visualIframe.contentWindow.location.hash = hash;
-               };
-            }
+          const isSuperAdmin = currentUser && currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com';
+
+          if (visualIframe && templateEl) {
+             if (!isSuperAdmin && !window.userHasApiKeys) {
+                visualIframe.srcdoc = `<html><body style="background-color: #030303; color: #ff0000; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; text-align: center; padding: 20px;"><div><svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="currentColor" class="bi bi-lock-fill mb-3" viewBox="0 0 16 16"><path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/></svg><h2>Access Denied</h2><p class="text-secondary">You must request and generate at least one API Key in your 'My APIs' tab before accessing the Visual Playground.</p></div></body></html>`;
+             } else {
+                if (!visualIframe.srcdoc || visualIframe.srcdoc.includes('Access Denied')) {
+                   visualIframe.srcdoc = templateEl.innerHTML;
+                }
+                
+                let sourceType = 'all';
+                let idName = '';
+                if (actionVal.includes('playlist')) {
+                  sourceType = 'playlist';
+                  idName = '1';
+                } else if (actionVal.includes('artist')) {
+                  sourceType = 'artist';
+                  idName = '1';
+                }
+                const bUrl = window.location.origin + window.location.pathname;
+                const safeApiKey = finalKey ? encodeURIComponent(finalKey) : '';
+                const hash = `#sourcetype=${sourceType}&id/name=${idName}&backendurl=${encodeURIComponent(bUrl)}&apikey=${safeApiKey}`;
+              
+                if (visualIframe.contentWindow && visualIframe.contentWindow.location && visualIframe.contentWindow.document.readyState === 'complete') {
+                   visualIframe.contentWindow.location.hash = hash;
+                } else {
+                  visualIframe.onload = () => {
+                     visualIframe.contentWindow.location.hash = hash;
+                  };
+                }
+             }
           }
 
           // RAW JSON VIEWER LOGIC (Iframe 1)
@@ -18194,16 +18826,13 @@ SOFTWARE.</div>
 
             if (method === 'GET') {
               let testUrl = apiUrlInput.value;
-              if (window.adminApiKey) {
-                testUrl += '&api_key=' + encodeURIComponent(window.adminApiKey);
-              }
               
               // ADVANCED: Safely request an actual database entity to populate variables so you don't query empty/invalid IDs
               const fetchRealExample = async () => {
                 try {
                   if (testUrl.includes('SONG_ID') || testUrl.includes('USER_ID') || testUrl.includes('PLAYLIST_ID')) {
-                    const realSongs = await fetch('?access=api&action=get_songs&limit=1&api_key=' + window.adminApiKey).then(r=>r.json());
-                    const realPlaylists = await fetch('?access=api&action=get_user_playlists&api_key=' + window.adminApiKey).then(r=>r.json());
+                    const realSongs = await fetch('?access=api&action=get_songs&limit=1&api_key=' + encodeURIComponent(finalKey)).then(r=>r.json());
+                    const realPlaylists = await fetch('?access=api&action=get_user_playlists&api_key=' + encodeURIComponent(finalKey)).then(r=>r.json());
                     
                     const sId = (realSongs && realSongs.length > 0) ? realSongs[0].id : '1';
                     const uId = (realSongs && realSongs.length > 0) ? realSongs[0].user_id : '1';
@@ -18234,10 +18863,17 @@ SOFTWARE.</div>
         };
 
         if (apiModalEl && apiUrlInput) {
-          apiModalEl.addEventListener('show.bs.modal', updateApiUrl);
-          if (apiActionSelect) {
-            apiActionSelect.addEventListener('change', updateApiUrl);
-          }
+          const userKeyInput = document.getElementById('custom-api-key-input');
+          apiModalEl.addEventListener('show.bs.modal', async () => {
+             window.userHasApiKeys = false;
+             if (currentUser) {
+                 const myApis = await fetchData('?action=get_my_apis');
+                 if (myApis && myApis.length > 0) window.userHasApiKeys = true;
+             }
+             updateApiUrl();
+          });
+          if (apiActionSelect) apiActionSelect.addEventListener('change', updateApiUrl);
+          if (userKeyInput) userKeyInput.addEventListener('input', updateApiUrl);
         }
 
         // API Visual Client Scaling & Fullscreen (16:9 Desktop Simulation)
@@ -18330,56 +18966,12 @@ SOFTWARE.</div>
           });
         }
 
-        let apiDebounceTimer;
         const getApiBtn = document.getElementById('get-api-btn');
         if (getApiBtn) {
           getApiBtn.addEventListener('click', (e) => {
             e.preventDefault();
             hideMobileSidebar();
-            
-            clearTimeout(apiDebounceTimer);
-            apiDebounceTimer = setTimeout(() => {
-              // Caching Core Logic: Read from LocalStorage directly!
-              const cachedKey = localStorage.getItem('admin_api_key');
-              if (cachedKey) {
-                window.adminApiKey = cachedKey;
-                bootstrap.Modal.getOrCreateInstance(document.getElementById('api-modal')).show();
-              } else {
-                bootstrap.Modal.getOrCreateInstance(document.getElementById('api-auth-modal')).show();
-              }
-            }, 300);
-          });
-        }
-
-        const apiAuthSubmitBtn = document.getElementById('api-auth-submit-btn');
-        if (apiAuthSubmitBtn) {
-          apiAuthSubmitBtn.addEventListener('click', () => {
-            const pwd = document.getElementById('api-auth-input').value;
-            const submitBtn = document.getElementById('api-auth-submit-btn');
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Verifying Keys...';
-            
-            // Validate key explicitly against live API route
-            fetch('?access=api&action=get_songs&limit=1&api_key=' + encodeURIComponent(pwd))
-              .then(res => res.json())
-              .then(data => {
-                submitBtn.disabled = false;
-                submitBtn.textContent = 'Verify & Unlock API';
-                if (data.status === 'error' && data.message && data.message.includes('denied')) {
-                  showToast("Access Denied: Incorrect admin password.", "error");
-                } else {
-                  localStorage.setItem('admin_api_key', pwd);
-                  window.adminApiKey = pwd;
-                  bootstrap.Modal.getInstance(document.getElementById('api-auth-modal')).hide();
-                  document.getElementById('api-auth-input').value = '';
-                  showToast("API Access Granted. Credential safely cached.", "success");
-                  bootstrap.Modal.getOrCreateInstance(document.getElementById('api-modal')).show();
-                }
-              }).catch(() => {
-                submitBtn.disabled = false;
-                submitBtn.textContent = 'Verify & Unlock API';
-                showToast("Network protocol error while validating key.", "error");
-              });
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('api-modal')).show();
           });
         }
 
@@ -19386,6 +19978,47 @@ SOFTWARE.</div>
           }
         };
 
+        const updateAppFavicon = (url) => {
+          document.querySelectorAll("link[rel*='icon']").forEach(el => el.remove());
+          const link = document.createElement('link');
+          link.id = 'app-favicon';
+          link.rel = 'icon';
+          link.type = url.includes('get_app_icon') ? 'image/svg+xml' : 'image/webp';
+          link.href = url;
+          document.head.appendChild(link);
+        };
+
+        document.addEventListener('click', (e) => {
+          const copyBtn = e.target.closest('.copy-api-token-btn');
+          if (copyBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            const token = copyBtn.dataset.token;
+            if (!token) return;
+            
+            const onSuccess = () => {
+              const origHTML = copyBtn.innerHTML;
+              copyBtn.innerHTML = '<i class="bi bi-check-lg text-success"></i>';
+              showToast('API Key copied to clipboard!', 'success');
+              setTimeout(() => { copyBtn.innerHTML = origHTML; }, 2000);
+            };
+            
+            if (navigator.clipboard && window.isSecureContext) {
+              navigator.clipboard.writeText(token).then(onSuccess);
+            } else {
+              const ta = document.createElement('textarea');
+              ta.value = token;
+              ta.style.position = 'fixed';
+              ta.style.opacity = '0';
+              document.body.appendChild(ta);
+              ta.select();
+              document.execCommand('copy');
+              document.body.removeChild(ta);
+              onSuccess();
+            }
+          }
+        });
+
         const showToast = (message, type = 'info') => {
           const toastContainer = document.createElement('div');
           toastContainer.className = `toast-container position-fixed bottom-0 end-0 p-3`;
@@ -20383,21 +21016,40 @@ SOFTWARE.</div>
             const fd = currentView.f_date || '';
             const fdu = currentView.f_dur || '';
             const fs = currentView.f_sort || 'relevance';
+            const fsd = currentView.f_start_date || '';
+            const fed = currentView.f_end_date || '';
 
             const filterHTML = `
               <div class="search-filters-container w-100 mb-4 px-2 order-first" style="grid-column: 1 / -1;">
                 <button class="btn btn-outline-light rounded-pill" type="button" data-bs-toggle="collapse" data-bs-target="#searchFiltersCollapse">
-                  <i class="bi bi-sliders"></i> Filters
+                  <i class="bi bi-sliders"></i> Filters ${(fsd || fed) ? '<span class="badge bg-danger rounded-circle p-1 ms-1"></span>' : ''}
                 </button>
                 <div class="collapse mt-3" id="searchFiltersCollapse">
                   <div class="card card-body bg-dark border-secondary text-white d-flex flex-row flex-wrap gap-5" style="border-radius: 12px;">
                     <div class="d-flex flex-column gap-2">
                       <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">UPLOAD DATE</h6>
-                      <a href="#" class="text-decoration-none ${fd === '' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="">Any time</a>
+                      <a href="#" class="text-decoration-none ${(fd === '' && !fsd && !fed) ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="">Any time</a>
                       <a href="#" class="text-decoration-none ${fd === 'today' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="today">Today</a>
                       <a href="#" class="text-decoration-none ${fd === 'week' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="week">This week</a>
                       <a href="#" class="text-decoration-none ${fd === 'month' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="month">This month</a>
                       <a href="#" class="text-decoration-none ${fd === 'year' ? 'text-white fw-bold' : 'text-secondary hover-white'} filter-opt" data-filter="f_date" data-val="year">This year</a>
+                    </div>
+                    <div class="d-flex flex-column gap-2" style="min-width: 200px;">
+                      <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">CUSTOM DATE RANGE</h6>
+                      <div class="d-flex flex-column gap-2">
+                        <div>
+                          <label class="form-label text-secondary small mb-1">Start Date</label>
+                          <input type="date" id="filter-start-date" class="form-control form-control-sm bg-black text-white border-secondary" value="${fsd}">
+                        </div>
+                        <div>
+                          <label class="form-label text-secondary small mb-1">End Date</label>
+                          <input type="date" id="filter-end-date" class="form-control form-control-sm bg-black text-white border-secondary" value="${fed}">
+                        </div>
+                        <div class="d-flex gap-2 mt-1">
+                          <button class="btn btn-sm btn-danger fw-bold flex-grow-1" id="apply-date-range-btn">Apply Range</button>
+                          <button class="btn btn-sm btn-outline-secondary" id="clear-date-range-btn" title="Clear Range"><i class="bi bi-x-lg"></i></button>
+                        </div>
+                      </div>
                     </div>
                     <div class="d-flex flex-column gap-2">
                       <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">DURATION</h6>
@@ -20425,14 +21077,16 @@ SOFTWARE.</div>
                 const key = opt.dataset.filter;
                 const val = opt.dataset.val;
                 currentView[key] = val;
+                if (key === 'f_date') {
+                  delete currentView.f_start_date;
+                  delete currentView.f_end_date;
+                }
                 
-                // Track if the collapse is currently open
                 const collapseEl = document.getElementById('searchFiltersCollapse');
                 const isExpanded = collapseEl && collapseEl.classList.contains('show');
                 
                 loadView(currentView);
                 
-                // Re-open collapse slightly after render completes
                 if (isExpanded) {
                   setTimeout(() => {
                     const newCollapse = document.getElementById('searchFiltersCollapse');
@@ -20440,6 +21094,48 @@ SOFTWARE.</div>
                   }, 300);
                 }
               });
+            });
+
+            document.getElementById('apply-date-range-btn')?.addEventListener('click', () => {
+              const startVal = document.getElementById('filter-start-date').value;
+              const endVal = document.getElementById('filter-end-date').value;
+              
+              if (!startVal && !endVal) {
+                return showToast('Please select a start or end date.', 'warning');
+              }
+              
+              currentView.f_start_date = startVal;
+              currentView.f_end_date = endVal;
+              currentView.f_date = ''; // Clear preset date selection
+              
+              const collapseEl = document.getElementById('searchFiltersCollapse');
+              const isExpanded = collapseEl && collapseEl.classList.contains('show');
+              
+              loadView(currentView);
+              
+              if (isExpanded) {
+                setTimeout(() => {
+                  const newCollapse = document.getElementById('searchFiltersCollapse');
+                  if (newCollapse) newCollapse.classList.add('show');
+                }, 300);
+              }
+            });
+
+            document.getElementById('clear-date-range-btn')?.addEventListener('click', () => {
+              delete currentView.f_start_date;
+              delete currentView.f_end_date;
+              
+              const collapseEl = document.getElementById('searchFiltersCollapse');
+              const isExpanded = collapseEl && collapseEl.classList.contains('show');
+              
+              loadView(currentView);
+              
+              if (isExpanded) {
+                setTimeout(() => {
+                  const newCollapse = document.getElementById('searchFiltersCollapse');
+                  if (newCollapse) newCollapse.classList.add('show');
+                }, 300);
+              }
             });
           }
 
@@ -20593,24 +21289,58 @@ SOFTWARE.</div>
 
         const renderUserStats = (data) => {
           contentArea.innerHTML = `
-            <div class="user-stats-page">
-              <h2 class="content-title">My Statistics</h2>
-              <div class="stats-grid">
-                <div class="stat-item">
-                  <div class="stat-value">${data.stats.uploads}</div>
-                  <div class="stat-label">Uploads</div>
+            <div class="user-stats-page px-3 py-4">
+              <div class="d-flex align-items-center justify-content-center gap-3 mb-4 border-bottom border-secondary pb-4">
+                <i class="bi bi-bar-chart-line-fill text-info" style="font-size: 3rem;"></i>
+                <div class="text-start">
+                  <h2 class="content-title text-white fw-bold mb-0">My Statistics</h2>
+                  <p class="text-secondary mb-0">Your overall engagement across PHP Music</p>
                 </div>
-                <div class="stat-item">
-                  <div class="stat-value">${data.stats.favorites}</div>
-                  <div class="stat-label">Favorites</div>
+              </div>
+              <div class="row g-4 mt-2">
+                <div class="col-6 col-md-3">
+                  <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
+                    <div class="card-body text-center p-4">
+                      <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(13, 110, 253, 0.1);">
+                        <i class="bi bi-cloud-upload-fill text-primary fs-3"></i>
+                      </div>
+                      <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.uploads)}</h3>
+                      <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Uploads</p>
+                    </div>
+                  </div>
                 </div>
-                <div class="stat-item">
-                  <div class="stat-value">${data.stats.playlists}</div>
-                  <div class="stat-label">Playlists</div>
+                <div class="col-6 col-md-3">
+                  <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
+                    <div class="card-body text-center p-4">
+                      <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(220, 53, 69, 0.1);">
+                        <i class="bi bi-heart-fill text-danger fs-3"></i>
+                      </div>
+                      <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.favorites)}</h3>
+                      <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Favorites</p>
+                    </div>
+                  </div>
                 </div>
-                <div class="stat-item">
-                  <div class="stat-value">${data.stats.play_count}</div>
-                  <div class="stat-label">Total Plays</div>
+                <div class="col-6 col-md-3">
+                  <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
+                    <div class="card-body text-center p-4">
+                      <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(25, 135, 84, 0.1);">
+                        <i class="bi bi-music-note-list text-success fs-3"></i>
+                      </div>
+                      <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.playlists)}</h3>
+                      <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Playlists</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="col-6 col-md-3">
+                  <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
+                    <div class="card-body text-center p-4">
+                      <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(255, 193, 7, 0.1);">
+                        <i class="bi bi-play-circle-fill text-warning fs-3"></i>
+                      </div>
+                      <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.play_count)}</h3>
+                      <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Total Plays</p>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -20618,7 +21348,7 @@ SOFTWARE.</div>
         };
         
         const setupSortOptions = (viewType) => {
-          const isSortable = ['get_favorites', 'get_listen_later', 'get_notes', 'get_blogs', 'get_community', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists', 'get_collab_playlists'].includes(viewType);
+          const isSortable = ['get_favorites', 'get_listen_later', 'get_notes', 'get_blogs', 'get_community', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists', 'get_collab_playlists', 'get_my_apis'].includes(viewType);
           
           if (isSortable) {
             let options = {};
@@ -20679,6 +21409,9 @@ SOFTWARE.</div>
                   'name_asc': 'Name (A-Z)', 'name_desc': 'Name (Z-A)',
                   'modified_desc': 'Date Modified (Newest)', 'modified_asc': 'Date Modified (Oldest)'
                 };
+                break;
+              case 'get_my_apis':
+                options = { 'newest': 'Newest', 'oldest': 'Oldest', 'modified': 'Recently Modified' };
                 break;
             }
 
@@ -20784,6 +21517,40 @@ SOFTWARE.</div>
             case 'get_projects':
               data = await fetchData(`?action=${type}&${params.toString()}`);
               renderGrid(data, type, true);
+              break;
+            case 'get_my_apis':
+              data = await fetchData(`?action=${type}&${params.toString()}`);
+              if (data && data.length > 0) {
+                document.getElementById('apis-list-container').insertAdjacentHTML('beforeend', data.map(api => `
+                  <div class="card bg-dark border-secondary text-white p-3 shadow-sm hover-bg-dark" style="border-radius: 12px;">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                      <h5 class="fw-bold m-0"><i class="bi bi-terminal text-info me-2"></i>${escapeHTML(api.name)}</h5>
+                      <button class="btn btn-sm btn-outline-danger delete-api-btn" data-id="${api.id}"><i class="bi bi-trash"></i></button>
+                    </div>
+                    <div class="d-flex flex-column gap-2 small text-secondary">
+                      <div><strong>Status:</strong> <span class="badge ${api.status === 'active' ? 'bg-success' : (api.status === 'pending' ? 'bg-info text-dark' : 'bg-danger')}">${api.status.toUpperCase()}</span></div>
+                      <div><strong>Token:</strong> ${api.status === 'pending' ? '<code class="text-info fs-6">Waiting for Admin Verification...</code>' : `<code class="text-info fs-6">${escapeHTML(api.token)}</code><button class="btn btn-sm btn-outline-info py-0 px-2 ms-2 copy-api-token-btn" data-token="${escapeHTML(api.token)}" title="Copy Key"><i class="bi bi-clipboard"></i></button>`}</div>
+                      <div><strong>Uses:</strong> ${api.uses} / 1000 this month</div>
+                      <div><strong>Expires:</strong> ${api.expires_at ? new Date(api.expires_at.replace(' ', 'T')+'Z').toLocaleDateString() : 'Never'}</div>
+                    </div>
+                  </div>
+                `).join(''));
+                
+                document.querySelectorAll('.delete-api-btn').forEach(btn => {
+                  btn.replaceWith(btn.cloneNode(true));
+                });
+                document.querySelectorAll('.delete-api-btn').forEach(btn => {
+                  btn.addEventListener('click', async () => {
+                    if (confirm('Are you sure you want to delete this API key permanently? Any apps using it will break.')) {
+                      const res = await fetchData('?action=delete_my_api', { method: 'POST', body: JSON.stringify({ id: btn.dataset.id }) });
+                      if (res && res.status === 'success') {
+                        showToast('API Key deleted.', 'success');
+                        loadView(currentView);
+                      }
+                    }
+                  });
+                });
+              }
               break;
             case 'get_notes':
               data = await fetchData(`?action=get_notes&${params.toString()}`);
@@ -21049,6 +21816,12 @@ SOFTWARE.</div>
 
           const edOver = document.getElementById('editorOverlay');
           const taskOver = document.getElementById('taskEditorOverlay');
+          const blogOver = document.getElementById('blogEditorOverlay');
+
+          if (notePipWin) { notePipWin.close(); notePipWin = null; }
+          if (taskPipWin) { taskPipWin.close(); taskPipWin = null; }
+          if (blogPipWin) { blogPipWin.close(); blogPipWin = null; }
+
           if (edOver && edOver.classList.contains('active')) {
             saveCurrentEditorNote(true);
             edOver.classList.remove('active');
@@ -21057,6 +21830,10 @@ SOFTWARE.</div>
           if (taskOver && taskOver.classList.contains('active')) {
             window.saveCurrentTask(true);
             taskOver.classList.remove('active');
+          }
+          if (blogOver && blogOver.classList.contains('active')) {
+            saveCurrentBlog(true);
+            blogOver.classList.remove('active');
           }
 
           if (pushHistory) {
@@ -21136,6 +21913,8 @@ SOFTWARE.</div>
           if (currentView.f_date) pageParams.append('f_date', currentView.f_date);
           if (currentView.f_dur) pageParams.append('f_dur', currentView.f_dur);
           if (currentView.f_sort) pageParams.append('f_sort', currentView.f_sort);
+          if (currentView.f_start_date) pageParams.append('f_start_date', currentView.f_start_date);
+          if (currentView.f_end_date) pageParams.append('f_end_date', currentView.f_end_date);
           if (currentView.filter) pageParams.append('filter', currentView.filter);
           
           switch (currentView.type) {
@@ -22080,6 +22859,83 @@ SOFTWARE.</div>
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to view categories.</div>`;
               }
               break;
+            case 'get_my_apis':
+              updateContentTitle('My APIs', !!currentUser);
+              if (currentUser) {
+                contentArea.innerHTML = `
+                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-code-slash text-danger me-3 fs-3"></i> My APIs</div>
+                    <div class="d-flex gap-2 flex-wrap align-items-center">
+                      <div class="position-relative">
+                        <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                        <input type="text" id="api-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search APIs..." value="${escapeHTML(currentView.searchQuery || '')}">
+                      </div>
+                      <button class="btn btn-danger rounded-pill px-4 fw-bold shadow-sm" id="request-api-btn"><i class="bi bi-plus-lg me-1"></i> Request Key</button>
+                    </div>
+                  </div>
+                  <div id="apis-list-container" class="mx-md-3 mb-5 d-flex flex-column gap-3"></div>
+                `;
+                
+                document.getElementById('api-search-input').addEventListener('input', (e) => {
+                  clearTimeout(window.apiSearchTimeout);
+                  window.apiSearchTimeout = setTimeout(() => {
+                    currentView.searchQuery = e.target.value;
+                    loadView(currentView);
+                  }, 400);
+                });
+
+                if (currentView.searchQuery) pageParams.set('q', currentView.searchQuery);
+
+                document.getElementById('request-api-btn').addEventListener('click', async () => {
+                  const name = prompt("Enter a name for your API Key (e.g. Discord Bot):");
+                  if (name && name.trim() !== '') {
+                    const res = await fetchData('?action=request_api', { method: 'POST', body: JSON.stringify({ name }) });
+                    if (res) {
+                      showToast(res.message, res.status);
+                      if (res.status === 'success') loadView(currentView);
+                    }
+                  }
+                });
+                
+                data = await fetchData(`?action=get_my_apis&${pageParams.toString()}`);
+                if (data && data.length > 0) {
+                  document.getElementById('apis-list-container').innerHTML = data.map(api => `
+                    <div class="card bg-dark border-secondary text-white p-3 shadow-sm hover-bg-dark" style="border-radius: 12px;">
+                      <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="fw-bold m-0"><i class="bi bi-terminal text-info me-2"></i>${escapeHTML(api.name)}</h5>
+                        <button class="btn btn-sm btn-outline-danger delete-api-btn" data-id="${api.id}"><i class="bi bi-trash"></i></button>
+                      </div>
+                      <div class="d-flex flex-column gap-2 small text-secondary">
+                        <div><strong>Status:</strong> <span class="badge ${api.status === 'active' ? 'bg-success' : (api.status === 'pending' ? 'bg-info text-dark' : 'bg-danger')}">${api.status.toUpperCase()}</span></div>
+                        <div><strong>Token:</strong> ${api.status === 'pending' ? '<code class="text-info fs-6">Waiting for Admin Verification...</code>' : `<code class="text-info fs-6">${escapeHTML(api.token)}</code><button class="btn btn-sm btn-outline-info py-0 px-2 ms-2 copy-api-token-btn" data-token="${escapeHTML(api.token)}" title="Copy Key"><i class="bi bi-clipboard"></i></button>`}</div>
+                        <div><strong>Uses:</strong> ${api.uses} / 1000 this month</div>
+                        <div><strong>Expires:</strong> ${api.expires_at ? new Date(api.expires_at.replace(' ', 'T')+'Z').toLocaleDateString() : 'Never'}</div>
+                      </div>
+                    </div>
+                  `).join('');
+                  
+                  document.querySelectorAll('.delete-api-btn').forEach(btn => {
+                    btn.addEventListener('click', async () => {
+                      if (confirm('Are you sure you want to delete this API key permanently? Any apps using it will break.')) {
+                        const res = await fetchData('?action=delete_my_api', { method: 'POST', body: JSON.stringify({ id: btn.dataset.id }) });
+                        if (res && res.status === 'success') {
+                          showToast('API Key deleted.', 'success');
+                          loadView(currentView);
+                        }
+                      }
+                    });
+                  });
+                } else {
+                  document.getElementById('apis-list-container').style.display = 'block';
+                  if (currentView.searchQuery) {
+                    document.getElementById('apis-list-container').innerHTML = '<div class="text-center text-secondary py-5">No APIs found matching your search.</div>';
+                  } else {
+                    document.getElementById('apis-list-container').innerHTML = '<div class="text-center p-5 text-secondary">You do not have any API Keys yet. Request one above!</div>';
+                  }
+                }
+              }
+              break;
+
             case 'get_projects': {
               const pType = currentView.filter || 'note';
               const pTitle = pType === 'task' ? 'Task Projects' : 'Note Projects';
@@ -22327,6 +23183,7 @@ SOFTWARE.</div>
           }
 
           playerElements.art.forEach(el => el.src = imageUrl);
+          updateAppFavicon(imageUrl);
 
           // Clear previous theme instantly on track change to prevent getting stuck
           document.querySelectorAll('.player-modal-content').forEach(modal => {
@@ -23129,8 +23986,8 @@ SOFTWARE.</div>
 
         const hideMobileSidebar = () => {
           const offcanvasEl = document.getElementById('main-nav-offcanvas');
-          if (window.innerWidth < 768 && offcanvasEl) {
-            const offcanvas = bootstrap.Offcanvas.getInstance(offcanvasEl);
+          if (offcanvasEl) {
+            const offcanvas = bootstrap.Offcanvas.getOrCreateInstance(offcanvasEl);
             if (offcanvas) offcanvas.hide();
           }
         };
@@ -23200,6 +24057,7 @@ SOFTWARE.</div>
             if (viewType === 'user_profile') sort = 'id_desc';
             if (viewType === 'get_history') sort = 'history_desc';
             if (viewType === 'get_songs') sort = 'random';
+            if (viewType === 'get_my_apis') sort = 'newest';
 
             loadView({ type: viewType, param: '', sort: sort, filter_user_id: '' });
             hideMobileSidebar();
@@ -23212,7 +24070,8 @@ SOFTWARE.</div>
             document.getElementById('search-dropdown-mobile').classList.add('d-none');
             searchInputDesktop.value = query;
             searchInputMobile.value = query;
-            loadView({ type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '', f_date: '', f_dur: '', f_sort: 'relevance' });
+            hideMobileSidebar();
+            loadView({ type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '', f_date: '', f_dur: '', f_sort: 'relevance', f_start_date: '', f_end_date: '' });
           }
         };
 
@@ -26718,6 +27577,7 @@ SOFTWARE.</div>
           await fetchData('?action=logout');
           currentUser = null;
           cachedExploreData = null;
+          updateAppFavicon('?action=get_app_icon');
           updateUIForAuthState();
           
           const authRequiredViews = ['user_profile', 'get_user_stats', 'get_offline_songs', 'get_favorites', 'get_listen_later', 'get_notes', 'get_community', 'get_history', 'get_following', 'get_recommendations', 'get_user_playlists', 'get_collab_playlists'];
@@ -28048,46 +28908,53 @@ SOFTWARE.</div>
 
         const updateNotifBadge = async () => {
           if (!currentUser) return;
-          const data = await fetchData('?action=get_unread_notif_count');
+          const data = await fetchData('?action=get_unread_notif_count', {}, true);
           const badges = document.querySelectorAll('.notif-badge');
-          if (data && data.count > 0) {
-            badges.forEach(b => { b.textContent = data.count; b.classList.remove('d-none'); });
-          } else {
-            badges.forEach(b => b.classList.add('d-none'));
-          }
-          
-          // Check Unread Messages (Inbox)
-          const inboxData = await fetchData('?action=get_inbox', {}, true);
-          let totalUnread = 0;
-          let highestMsgId = parseInt(lastNotifiedMsgId);
-
-          if (Array.isArray(inboxData) && inboxData.length > 0) {
-            inboxData.forEach(m => {
-              totalUnread += m.unread_count;
-              // Trigger Real-Time OS Notification for New Messages
-              if (m.unread_count > 0 && m.id > highestMsgId && m.sender_id != currentUser.id) {
-                highestMsgId = m.id;
-                let previewText = window.getPreviewText(m.content);
-                if (m.has_image) {
-                  if (m.media_type && m.media_type.startsWith('video/')) previewText = '📹 Video';
-                  else if (m.media_type && m.media_type.startsWith('audio/')) previewText = '🎵 Audio';
-                  else previewText = '📷 Photo';
-                }
-                showNativeNotification(`New message from ${m.name}`, previewText);
-              }
-            });
+          const dots = document.querySelectorAll('.notif-dot');
+          if (data && typeof data.count === 'number') {
+            if (data.count > 0) {
+              const displayCount = data.count > 99 ? '99+' : data.count;
+              badges.forEach(b => { b.textContent = displayCount; b.classList.remove('d-none'); });
+              dots.forEach(d => d.classList.remove('d-none'));
+            } else {
+              badges.forEach(b => b.classList.add('d-none'));
+              dots.forEach(d => d.classList.add('d-none'));
+            }
           }
 
-          if (highestMsgId > parseInt(lastNotifiedMsgId)) {
-            lastNotifiedMsgId = highestMsgId;
-            localStorage.setItem('ytm_lastMsgId', highestMsgId);
-          }
-
+          // Check Unread Inbox Badges only if viewing inbox or if inbox badges exist
           const inboxBadges = document.querySelectorAll('.inbox-badge');
-          if (totalUnread > 0) {
-            inboxBadges.forEach(b => { b.textContent = totalUnread; b.classList.remove('d-none'); });
-          } else {
-            inboxBadges.forEach(b => b.classList.add('d-none'));
+          if (inboxBadges.length > 0 && currentView.type === 'get_inbox') {
+            const inboxData = await fetchData('?action=get_inbox', {}, true);
+            let totalUnread = 0;
+            let highestMsgId = parseInt(lastNotifiedMsgId);
+
+            if (Array.isArray(inboxData) && inboxData.length > 0) {
+              inboxData.forEach(m => {
+                totalUnread += m.unread_count;
+                if (m.unread_count > 0 && m.id > highestMsgId && m.sender_id != currentUser.id) {
+                  highestMsgId = m.id;
+                  let previewText = window.getPreviewText(m.content);
+                  if (m.has_image) {
+                    if (m.media_type && m.media_type.startsWith('video/')) previewText = '📹 Video';
+                    else if (m.media_type && m.media_type.startsWith('audio/')) previewText = '🎵 Audio';
+                    else previewText = '📷 Photo';
+                  }
+                  showNativeNotification(`New message from ${m.name}`, previewText);
+                }
+              });
+            }
+
+            if (highestMsgId > parseInt(lastNotifiedMsgId)) {
+              lastNotifiedMsgId = highestMsgId;
+              localStorage.setItem('ytm_lastMsgId', highestMsgId);
+            }
+
+            if (totalUnread > 0) {
+              inboxBadges.forEach(b => { b.textContent = totalUnread; b.classList.remove('d-none'); });
+            } else {
+              inboxBadges.forEach(b => b.classList.add('d-none'));
+            }
           }
         };
         
@@ -28110,6 +28977,7 @@ SOFTWARE.</div>
             profilePictureHeaderMobile.src = picUrl;
             profilePicturePreview.src = picUrl;
             
+            document.querySelectorAll('.phpmusic-profile-bg-placeholder').forEach(el => el.style.backgroundImage = `url('?action=get_profile_background&id=${currentUser.id}&v=${Date.now()}')`);
             document.querySelectorAll('.phpmusic-profile-img-placeholder').forEach(img => img.src = picUrl);
             document.querySelectorAll('.phpmusic-profile-name').forEach(el => el.textContent = currentUser.artist);
             document.querySelectorAll('.phpmusic-profile-subtext').forEach(el => el.textContent = currentUser.email || 'Verified Artist');
@@ -28406,6 +29274,80 @@ SOFTWARE.</div>
             updateBlogSelectionUI();
             loadView(currentView);
           }
+        });
+
+        window.openDocumentPip = async (containerEl, width = 1200, height = 700, onCloseCallback = null) => {
+          if (!('documentPictureInPicture' in window)) {
+            showToast('Picture-in-Picture is not supported in this browser.', 'error');
+            return null;
+          }
+          try {
+            const parentEl = containerEl.parentElement;
+            const nextSibling = containerEl.nextSibling;
+            
+            const pipWin = await window.documentPictureInPicture.requestWindow({ width, height });
+
+            [...document.styleSheets].forEach(styleSheet => {
+              try {
+                const cssRules = [...styleSheet.cssRules].map(rule => rule.cssText).join('');
+                const style = document.createElement('style');
+                style.textContent = cssRules;
+                pipWin.document.head.appendChild(style);
+              } catch (e) {
+                if (styleSheet.href) {
+                  const link = document.createElement('link');
+                  link.rel = 'stylesheet';
+                  link.href = styleSheet.href;
+                  pipWin.document.head.appendChild(link);
+                }
+              }
+            });
+
+            const iconLink = document.createElement('link');
+            iconLink.rel = 'stylesheet';
+            iconLink.href = 'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css';
+            pipWin.document.head.appendChild(iconLink);
+
+            pipWin.document.body.style.background = 'var(--ytm-bg)';
+            pipWin.document.body.style.margin = '0';
+            pipWin.document.body.style.height = '100vh';
+            pipWin.document.body.appendChild(containerEl);
+
+            pipWin.addEventListener('pagehide', () => {
+              if (parentEl) {
+                if (nextSibling) parentEl.insertBefore(containerEl, nextSibling);
+                else parentEl.appendChild(containerEl);
+              }
+              if (typeof onCloseCallback === 'function') onCloseCallback();
+            });
+
+            return pipWin;
+          } catch (err) {
+            console.error('PiP Error:', err);
+            showToast('Failed to open Picture-in-Picture window.', 'error');
+            return null;
+          }
+        };
+
+        let notePipWin = null;
+        document.getElementById('editorPipBtn')?.addEventListener('click', async () => {
+          if (notePipWin) { notePipWin.close(); return; }
+          const overlay = document.getElementById('editorOverlay');
+          notePipWin = await window.openDocumentPip(overlay, 1200, 700, () => { notePipWin = null; });
+        });
+
+        let taskPipWin = null;
+        document.getElementById('taskEditorPipBtn')?.addEventListener('click', async () => {
+          if (taskPipWin) { taskPipWin.close(); return; }
+          const overlay = document.getElementById('taskEditorOverlay');
+          taskPipWin = await window.openDocumentPip(overlay, 1200, 700, () => { taskPipWin = null; });
+        });
+
+        let blogPipWin = null;
+        document.getElementById('blogEditorPipBtn')?.addEventListener('click', async () => {
+          if (blogPipWin) { blogPipWin.close(); return; }
+          const overlay = document.getElementById('blogEditorOverlay');
+          blogPipWin = await window.openDocumentPip(overlay, 1200, 700, () => { blogPipWin = null; });
         });
 
         let noteTextHistory = [];
@@ -29279,6 +30221,7 @@ SOFTWARE.</div>
         document.getElementById('taskEditorCategorySelect')?.addEventListener('change', () => window.saveCurrentTask(false));
 
         document.getElementById('closeTaskEditorBtn')?.addEventListener('click', async () => {
+          if (taskPipWin) { taskPipWin.close(); taskPipWin = null; }
           await window.saveCurrentTask(true);
           stopPresenceSync();
           document.getElementById('taskFindReplacePanel')?.classList.remove('active');
@@ -29312,6 +30255,7 @@ SOFTWARE.</div>
         });
 
         document.getElementById('taskEditorDeleteBtn')?.addEventListener('click', async () => {
+          if (taskPipWin) { taskPipWin.close(); taskPipWin = null; }
           document.getElementById('taskEditorMoreMenu').classList.remove('active');
           const id = document.getElementById('taskEditorId').value;
           if (!id) {
@@ -29352,6 +30296,7 @@ SOFTWARE.</div>
         document.getElementById('editorCategorySelect').addEventListener('change', () => saveCurrentEditorNote(false));
 
         document.getElementById('closeEditorBtn').addEventListener('click', async () => {
+          if (notePipWin) { notePipWin.close(); notePipWin = null; }
           await saveCurrentEditorNote(true);
           stopPresenceSync();
           document.getElementById('editorOverlay').classList.remove('active');
@@ -29419,6 +30364,7 @@ SOFTWARE.</div>
         };
 
         document.getElementById('closeBlogEditorBtn')?.addEventListener('click', async () => {
+          if (blogPipWin) { blogPipWin.close(); blogPipWin = null; }
           await saveCurrentBlog(true);
           document.getElementById('blogEditorOverlay').classList.remove('active');
           if (currentView.type === 'get_blogs' || currentView.type === 'view_blog') loadView(currentView);
@@ -29476,6 +30422,7 @@ SOFTWARE.</div>
         document.getElementById('blogEditorCategorySelect')?.addEventListener('change', () => saveCurrentBlog(false));
 
         document.getElementById('blogEditorDeleteBtn')?.addEventListener('click', async () => {
+          if (blogPipWin) { blogPipWin.close(); blogPipWin = null; }
           const id = document.getElementById('blogEditorId').value;
           if (!id) {
             document.getElementById('blogEditorOverlay').classList.remove('active');
@@ -29698,6 +30645,7 @@ SOFTWARE.</div>
         });
 
         document.getElementById('editorDeleteBtn').addEventListener('click', async () => {
+          if (notePipWin) { notePipWin.close(); notePipWin = null; }
           document.getElementById('editorMoreMenu').classList.remove('active');
           const id = document.getElementById('editorNoteId').value;
           if (!id) {
@@ -30737,15 +31685,14 @@ SOFTWARE.</div>
             const isToday = (i === today.getDate() && month === today.getMonth() && year === today.getFullYear());
             const isSelected = (calSelectedDate && i === calSelectedDate.getDate() && month === calSelectedDate.getMonth() && year === calSelectedDate.getFullYear());
             
-            let classStr = 'text-white rounded';
+            let classStr = 'cal-day-item';
             if (isSelected) {
-              classStr = 'bg-danger text-white rounded fw-bold shadow-sm';
+              classStr += ' selected';
             } else if (isToday) {
-              classStr = 'bg-secondary text-white rounded fw-bold';
+              classStr += ' today';
             }
             
-            const hoverStr = !isSelected ? 'onmouseover="this.style.backgroundColor=\'rgba(255,255,255,0.1)\'" onmouseout="this.style.backgroundColor=\'transparent\'"' : '';
-            daysGrid.insertAdjacentHTML('beforeend', `<div class="p-2 cal-day-item ${classStr}" data-day="${i}" style="cursor: pointer; transition: background 0.2s;" ${hoverStr}>${i}</div>`);
+            daysGrid.insertAdjacentHTML('beforeend', `<div class="${classStr}" data-day="${i}">${i}</div>`);
           }
         };
 
@@ -30754,7 +31701,7 @@ SOFTWARE.</div>
             const now = new Date();
             calCurrentMonth = now.getMonth();
             calCurrentYear = now.getFullYear();
-            if (!calSelectedDate) calSelectedDate = new Date();
+            calSelectedDate = new Date();
             
             const jumpInput = document.getElementById('cal-jump-date');
             if (jumpInput) {
@@ -30786,8 +31733,9 @@ SOFTWARE.</div>
           });
 
           document.getElementById('cal-days-grid').addEventListener('click', (e) => {
-            if (e.target.classList.contains('cal-day-item')) {
-              const day = parseInt(e.target.dataset.day);
+            const dayItem = e.target.closest('.cal-day-item');
+            if (dayItem && dayItem.dataset.day) {
+              const day = parseInt(dayItem.dataset.day);
               calSelectedDate = new Date(calCurrentYear, calCurrentMonth, day);
               renderCalendar(calCurrentMonth, calCurrentYear);
               
@@ -30829,6 +31777,24 @@ SOFTWARE.</div>
               jumpInput.value = `${y}-${m}-${d}`;
             }
           });
+
+          const calSearchDateBtn = document.getElementById('cal-search-date-btn');
+          if (calSearchDateBtn) {
+            calSearchDateBtn.addEventListener('click', () => {
+              if (calSelectedDate) {
+                const y = calSelectedDate.getFullYear();
+                const m = String(calSelectedDate.getMonth() + 1).padStart(2, '0');
+                const d = String(calSelectedDate.getDate()).padStart(2, '0');
+                const query = `${y}-${m}-${d}`;
+                
+                const modalInstance = bootstrap.Modal.getOrCreateInstance(calendarModalEl);
+                if (modalInstance) modalInstance.hide();
+
+                hideMobileSidebar();
+                performSearch(query);
+              }
+            });
+          }
         }
 
         init();
