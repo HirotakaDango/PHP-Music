@@ -1,7 +1,9 @@
 <?php
-$admin_password = 'admin'; // Change this password once here!
+// Bypass Gzip compression for heavy files, streaming, and uploads to prevent memory exhaustion and play crashes
+$raw_uri_gzip = $_SERVER['REQUEST_URI'] ?? '';
+$is_gzip_bypass = preg_match('/action=(stream|thumb|get_stream|download_song|upload|batch)/i', $raw_uri_gzip) || isset($_GET['download']) || isset($_GET['batch']);
 
-if (isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip')) {
+if (!$is_gzip_bypass && isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip')) {
   ob_start('ob_gzhandler');
 }
 error_reporting(E_ALL & ~E_DEPRECATED);
@@ -365,11 +367,9 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '4.9');
+define('APP_VERSION', '5.0');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
-define('ADMIN_PASSWORD', $admin_password ?? 'admin');
-define('ADMIN_PASSWORD_HASH', password_hash(ADMIN_PASSWORD, PASSWORD_DEFAULT));
 define('DAILY_UPLOAD_LIMIT', 10);
 
 function get_db() {
@@ -419,14 +419,47 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     $_SESSION['admin_csrf_token'] = bin2hex(random_bytes(32));
   }
 
-  // 1-Year Admin Session Persistence Check
-  if (!isset($_SESSION['admin_logged_in']) && isset($_COOKIE['admin_session_token'])) {
-    if (hash_equals(hash('sha256', ADMIN_PASSWORD_HASH . ($_SERVER['HTTP_USER_AGENT'] ?? '')), $_COOKIE['admin_session_token'])) {
+  // Ensure DB schema is initialized so default admin exists immediately
+  if (function_exists('init_db')) { init_db(get_db()); }
+
+  // Sync main site login with Admin session
+  if (!isset($_SESSION['admin_logged_in']) && isset($_SESSION['user_id'])) {
+    $db = get_db();
+    $stmt = $db->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+    $stmt->execute([$_SESSION['user_id']]);
+    $u = $stmt->fetch();
+    if ($u && ($u['is_admin'] == 1 || strtolower(trim($u['email'])) === 'musiclibrary@mail.com')) {
       $_SESSION['admin_logged_in'] = true;
+      $_SESSION['admin_email'] = $u['email'];
+      $_SESSION['admin_id'] = $_SESSION['user_id'];
+    }
+  }
+
+  // 1-Year Admin Session Persistence Check
+  if (!isset($_SESSION['admin_logged_in']) && isset($_COOKIE['admin_session_token']) && isset($_COOKIE['admin_email'])) {
+    $db = get_db();
+    $stmt = $db->prepare("SELECT id, password_hash, is_admin FROM users WHERE email = ?");
+    $stmt->execute([$_COOKIE['admin_email']]);
+    $user = $stmt->fetch();
+    if ($user && ($user['is_admin'] == 1 || $_COOKIE['admin_email'] === 'musiclibrary@mail.com')) {
+      if (hash_equals(hash('sha256', $user['password_hash'] . ($_SERVER['HTTP_USER_AGENT'] ?? '')), $_COOKIE['admin_session_token'])) {
+        $_SESSION['admin_logged_in'] = true;
+        $_SESSION['admin_email'] = $_COOKIE['admin_email'];
+        $_SESSION['admin_id'] = $user['id'];
+      }
     }
   }
 
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
+
+  // Release the PHP session write-lock early for non-auth Drive actions.
+  // This allows parallel uploads and chunked streams to run concurrently without freezing.
+  if (isset($_GET['page']) && $_GET['page'] === 'drive') {
+    $driveAction = $_GET['action'] ?? '';
+    if ($driveAction !== 'login' && $driveAction !== 'toggle_auth' && $driveAction !== 'logout') {
+      session_write_close();
+    }
+  }
 
   // ==========================================
   // PHP DRIVE BACKEND CONTROLLER
@@ -611,13 +644,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       
       $fp = fopen($filePath, 'rb');
       fseek($fp, $start);
-      $buffer = 1024 * 8;
-      while (!feof($fp) && ($p = ftell($fp)) <= $end) {
-        if ($p + $buffer > $end) {
-          $buffer = $end - $p + 1;
-        }
-        echo fread($fp, $buffer);
+      $bytesLeft = $length;
+      $bufferSize = 1024 * 8;
+      while (!feof($fp) && $bytesLeft > 0) {
+        if (connection_aborted()) break;
+        $readSize = min($bufferSize, $bytesLeft);
+        $data = fread($fp, $readSize);
+        if ($data === false || strlen($data) === 0) break;
+        echo $data;
         flush();
+        $bytesLeft -= strlen($data);
       }
       fclose($fp);
     }
@@ -672,7 +708,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         
         $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
         $isImage = in_array($ext, ['png', 'jpg', 'jpeg', 'gif']);
-        $isVideo = in_array($ext, ['mp4', 'webm']);
         
         if ($ext === 'svg') {
           header('Content-Type: image/svg+xml');
@@ -680,14 +715,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           exit;
         }
         
-        if ($isImage || $isVideo) {
+        if ($isImage) {
           $thumbDir = $baseDir . '/.drive_thumbnails';
           if (!is_dir($thumbDir)) @mkdir($thumbDir, 0755, true);
           $hash = md5($full . filemtime($full));
           $thumbPath = $thumbDir . '/' . $hash . '.webp';
           
           if (!file_exists($thumbPath)) {
-            if ($isImage && function_exists('imagecreatefromstring')) {
+            if (function_exists('imagecreatefromstring')) {
               @ini_set('memory_limit', '256M');
               $content = @file_get_contents($full);
               if ($content) {
@@ -710,8 +745,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   imagedestroy($tmp);
                 }
               }
-            } elseif ($isVideo && function_exists('exec')) {
-              @exec("ffmpeg -y -i " . escapeshellarg($full) . " -ss 00:00:01 -vframes 1 -vf scale=320:-1 -c:v libwebp -q:v 50 " . escapeshellarg($thumbPath) . " 2>/dev/null");
             }
           }
           
@@ -773,22 +806,47 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               if (!isset($_FILES['files'])) throw new Exception('No files uploaded');
               $uploaded = 0;
               $paths = $_POST['paths'] ?? [];
+              $chunk = isset($_POST['chunk']) ? (int)$_POST['chunk'] : 0;
+              $chunks = isset($_POST['chunks']) ? (int)$_POST['chunks'] : 1;
+              $fileId = $_POST['file_id'] ?? 'unknown';
+
               foreach ($_FILES['files']['name'] as $i => $name) {
                 if (isAllowedExtension($name)) {
                   if (!empty($paths[$i])) {
-                    // Sanitize path traversals and rebuild directory tree structure recursively
                     $relPathClean = ltrim(str_replace(['..', '\\'], ['', '/'], $paths[$i]), '/');
                     $dest = $absPath . '/' . $relPathClean;
                     $targetDir = dirname($dest);
                     if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
                   } else {
                     $dest = $absPath . '/' . $name;
-                    if (file_exists($dest)) $dest = $absPath . '/' . generateUniqueFileName($absPath, $name);
+                    $targetDir = $absPath;
                   }
-                  if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
-                    $uploaded++;
-                    $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
-                    logDriveActivity(basename($dest), $relPath, 'uploaded');
+
+                  if ($chunks > 1) {
+                    $tempDest = $targetDir . '/.temp_upload_' . md5($fileId . $name);
+                    $out = @fopen($tempDest, $chunk === 0 ? 'wb' : 'ab');
+                    if ($out) {
+                      $in = @fopen($_FILES['files']['tmp_name'][$i], 'rb');
+                      if ($in) {
+                        stream_copy_to_stream($in, $out);
+                        fclose($in);
+                      }
+                      fclose($out);
+                    }
+                    if ($chunk == $chunks - 1) {
+                      if (file_exists($dest)) $dest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($dest));
+                      rename($tempDest, $dest);
+                      $uploaded++;
+                      $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
+                      if (function_exists('logDriveActivity')) logDriveActivity(basename($dest), $relPath, 'uploaded');
+                    }
+                  } else {
+                    if (file_exists($dest)) $dest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($dest));
+                    if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
+                      $uploaded++;
+                      $relPath = ltrim(str_replace($baseDir, '', $dest), '/');
+                      if (function_exists('logDriveActivity')) logDriveActivity(basename($dest), $relPath, 'uploaded');
+                    }
                   }
                 }
               }
@@ -1178,21 +1236,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $db = get_db();
               $limit = isset($_GET['all']) ? 100 : 15;
               $recentFiles = [];
-              $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS));
+              
+              // Optimized Directory Scanner: Skip scanning massive or irrelevant system directories
+              $dir = new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS);
+              $filter = new RecursiveCallbackFilterIterator($dir, function ($current) {
+                $exclude = ['getid3', '.drive_trash_bin', '.drive_thumbnails', '.git', 'uploads', 'covers', 'brain'];
+                if ($current->isDir() && in_array($current->getFilename(), $exclude)) {
+                  return false;
+                }
+                return true;
+              });
+              
+              $iter = new RecursiveIteratorIterator($filter);
               foreach ($iter as $file) {
                 if ($file->isFile() && isAllowedExtension($file->getFilename())) {
                   $path = $file->getPathname();
-                  if (strpos($path, '.drive_trash_bin') === false && strpos($path, '.drive_thumbnails') === false) {
-                    $recentFiles[] = [
-                      'name' => $file->getFilename(),
-                      'path' => ltrim(str_replace($baseDir, '', $path), '/'),
-                      'mtime' => $file->getMTime(),
-                      'size' => $file->getSize(),
-                      'formatSize' => formatBytes($file->getSize()),
-                      'ext' => strtolower($file->getExtension()),
-                      'isImage' => in_array(strtolower($file->getExtension()), ['png', 'jpg', 'jpeg', 'gif', 'svg'])
-                    ];
-                  }
+                  $recentFiles[] = [
+                    'name' => $file->getFilename(),
+                    'path' => ltrim(str_replace($baseDir, '', $path), '/'),
+                    'mtime' => $file->getMTime(),
+                    'size' => $file->getSize(),
+                    'formatSize' => formatBytes($file->getSize()),
+                    'ext' => strtolower($file->getExtension()),
+                    'isImage' => in_array(strtolower($file->getExtension()), ['png', 'jpg', 'jpeg', 'gif', 'svg'])
+                  ];
                 }
               }
               usort($recentFiles, function($a, $b) { return $b['mtime'] - $a['mtime']; });
@@ -1319,6 +1386,42 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['admin_csrf_token'], $_POST['csrf_token'])) {
       die("Security violation: CSRF token mismatch.");
     }
+
+    function log_admin_activity($db, $admin_email, $action, $target_user_id) {
+      $stmt = $db->prepare("SELECT email FROM users WHERE id = ?");
+      $stmt->execute([$target_user_id]);
+      $target_email = $stmt->fetchColumn() ?: 'Unknown';
+      $db->prepare("INSERT INTO admin_logs (admin_email, action, target_user_id, target_email) VALUES (?, ?, ?, ?)")->execute([$admin_email, $action, $target_user_id, $target_email]);
+    }
+
+    if (isset($_POST['generate_reset_link']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $user_id = (int)$_POST['user_id'];
+      $token = bin2hex(random_bytes(16));
+      $db->prepare("INSERT INTO password_resets (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+1 day'))")->execute([$token, $user_id]);
+      $db->prepare("UPDATE users SET reset_requested = 0 WHERE id = ?")->execute([$user_id]);
+      log_admin_activity($db, $_SESSION['admin_email'], 'Generated Password Reset Link', $user_id);
+      
+      $reset_link = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . strtok($_SERVER["REQUEST_URI"], '?') . "?reset_token=" . $token;
+      $_SESSION['admin_flash_msg'] = "Reset link generated for User ID $user_id. Copy & send this link to the user: $reset_link";
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['toggle_admin']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $user_id = (int)$_POST['user_id'];
+      $stmt = $db->prepare("SELECT email FROM users WHERE id = ?");
+      $stmt->execute([$user_id]);
+      $target_email = $stmt->fetchColumn();
+      if (strtolower(trim($target_email)) !== 'musiclibrary@mail.com') {
+        $db->prepare("UPDATE users SET is_admin = CASE WHEN is_admin = 1 THEN 0 ELSE 1 END WHERE id = ?")->execute([$user_id]);
+        log_admin_activity($db, $_SESSION['admin_email'], 'Toggled Admin Status', $user_id);
+      }
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
     if (isset($_POST['toggle_verify']) && isset($_POST['user_id'])) {
       $db = get_db();
       $user_id = (int)$_POST['user_id'];
@@ -1329,47 +1432,53 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         $new_status = ($current_status === 'yes') ? 'no' : 'yes';
         $update_stmt = $db->prepare("UPDATE users SET verified = ? WHERE id = ?");
         $update_stmt->execute([$new_status, $user_id]);
+        log_admin_activity($db, $_SESSION['admin_email'], 'Toggled Verification', $user_id);
       }
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
     }
+    
     if (isset($_POST['toggle_ban']) && isset($_POST['user_id'])) {
       $db = get_db();
       $user_id = (int)$_POST['user_id'];
       $db->prepare("UPDATE users SET banned = CASE WHEN banned = 1 THEN 0 ELSE 1 END WHERE id = ?")->execute([$user_id]);
+      log_admin_activity($db, $_SESSION['admin_email'], 'Toggled Ban Status', $user_id);
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
     }
-    if (isset($_POST['delete_user']) && isset($_POST['user_id'])) {
+    
+    if (isset($_POST['soft_delete_user']) && isset($_POST['user_id'])) {
       $db = get_db();
       $del_uid = (int)$_POST['user_id'];
+      
+      $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM tasks WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM favorites WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM offline_songs WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$del_uid, $del_uid]);
+      
+      $new_email = 'deleted_' . $del_uid . '_' . time() . '@mail.com';
+      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL, banned = 1 WHERE id = ?")->execute([$new_email, $del_uid]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Soft Deleted User', $del_uid);
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['permanent_delete_user']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $del_uid = (int)$_POST['user_id'];
+      
       $stmt = $db->prepare("SELECT file FROM music WHERE user_id = ?");
       $stmt->execute([$del_uid]);
       while ($row = $stmt->fetch()) {
         if ($row['file'] && file_exists($row['file'])) @unlink($row['file']);
       }
-      $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM tasks WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM blogs WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM note_categories WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM task_categories WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM blog_categories WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM play_counts WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM favorites WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM offline_songs WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM playlists WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM playlist_collaborators WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?")->execute([$del_uid, $del_uid]);
-      $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$del_uid]);
-      $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$del_uid, $del_uid]);
-      $db->prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM users WHERE id = ?")->execute([$del_uid]);
 
-      $new_email = 'deleted_' . $del_uid . '_' . time() . '@mail.com';
-      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL WHERE id = ?")->execute([$new_email, $del_uid]);
-
+      log_admin_activity($db, $_SESSION['admin_email'], 'Permanently Deleted User', $del_uid);
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
     }
@@ -1383,19 +1492,40 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     }
   }
 
-  if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
-    if (password_verify($_POST['password'], ADMIN_PASSWORD_HASH)) {
-      $_SESSION['admin_logged_in'] = true;
-      // Set 1-Year Persistent Cookie for Admin
-      setcookie('admin_session_token', hash('sha256', ADMIN_PASSWORD_HASH . ($_SERVER['HTTP_USER_AGENT'] ?? '')), time() + 31536000, '/');
-      header('Location: ?access=admin');
-      exit;
+  $admin_login_error = '';
+  if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_email']) && isset($_POST['admin_password'])) {
+    $db = get_db();
+    $stmt = $db->prepare("SELECT id, artist, password_hash, is_admin FROM users WHERE email = ?");
+    $stmt->execute([$_POST['admin_email']]);
+    $user = $stmt->fetch();
+    
+    if ($user && password_verify($_POST['admin_password'], $user['password_hash'])) {
+      if ($user['is_admin'] == 1 || strtolower(trim($_POST['admin_email'])) === 'musiclibrary@mail.com') {
+        $_SESSION['admin_logged_in'] = true;
+        $_SESSION['admin_email'] = $_POST['admin_email'];
+        $_SESSION['admin_id'] = $user['id'];
+        
+        // Auto-login to Main Site simultaneously
+        $_SESSION['user_id'] = $user['id'];
+        $_SESSION['user_artist'] = $user['artist'];
+        
+        setcookie('admin_session_token', hash('sha256', $user['password_hash'] . ($_SERVER['HTTP_USER_AGENT'] ?? '')), time() + 31536000, '/');
+        setcookie('admin_email', $_POST['admin_email'], time() + 31536000, '/');
+        header('Location: ?access=admin');
+        exit;
+      } else {
+        $admin_login_error = "Access denied: Account is not an administrator.";
+      }
+    } else {
+      $admin_login_error = "Invalid email or password.";
     }
   }
 
   if (isset($_GET['logout'])) {
-    unset($_SESSION['admin_logged_in']);
+    // Hard destroy the entire session to safely logout everywhere
+    session_destroy();
     setcookie('admin_session_token', '', time() - 3600, '/');
+    setcookie('admin_email', '', time() - 3600, '/');
     header('Location: ?access=admin');
     exit;
   }
@@ -1420,23 +1550,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       :root { --ytm-bg: #030303; --ytm-surface: #121212; --ytm-surface-2: #282828; --ytm-primary-text: #ffffff; --ytm-secondary-text: #aaaaaa; --ytm-accent: #ff0000; }
       body { background-color: var(--ytm-bg); color: var(--ytm-primary-text); font-family: 'Roboto', sans-serif; }
       .app-container { display: flex; min-height: 100vh; flex-direction: column; }
-      .sidebar { width: 240px; background-color: var(--ytm-bg); padding: 1.5rem 0; display: flex; flex-direction: column; flex-shrink: 0; z-index: 1045; }
-      .main-content { flex-grow: 1; display: flex; flex-direction: column; overflow-y: auto; }
+      .sidebar { width: 250px; background-color: var(--ytm-surface); border-right: 1px solid var(--ytm-surface-2); display: flex; flex-direction: column; flex-shrink: 0; z-index: 1045; transition: transform 0.3s ease; }
+      .main-content { flex-grow: 1; display: flex; flex-direction: column; overflow-y: auto; background-color: var(--ytm-bg); }
       .content-area-wrapper { padding: 1.5rem 2rem; }
-      .sidebar .logo { font-size: 1.5rem; font-weight: 700; padding: 0 1.5rem 1.5rem 1.5rem; }
+      .sidebar .logo { font-size: 1.25rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
       .sidebar .logo span { color: var(--ytm-accent); }
-      .nav-link { color: var(--ytm-secondary-text); display: flex; align-items: center; font-weight: 500; border-left: 3px solid transparent; gap: 1rem; text-decoration: none; padding: 0.75rem 1.5rem; }
-      .nav-link:hover { background-color: var(--ytm-surface); color: var(--ytm-primary-text); }
+      .nav-link { color: var(--ytm-secondary-text); display: flex; align-items: center; font-weight: 500; border-left: 3px solid transparent; gap: 1rem; text-decoration: none; padding: 0.85rem 1.5rem; transition: all 0.2s; }
+      .nav-link:hover { color: var(--ytm-primary-text); background-color: rgba(255,255,255,0.03); }
+      .nav-link.active { background-color: rgba(255,0,0,0.1); color: var(--ytm-primary-text); border-left-color: var(--ytm-accent); font-weight: 700; }
+      .nav-link .bi { font-size: 1.25rem; width: 24px; text-align: center; }
       .page-header { padding: 1.5rem 2rem 1.5rem 2rem; }
       .content-title { font-size: 2rem; font-weight: 700; margin-bottom: 0; }
-      .user-list { background-color: var(--ytm-surface); border-radius: 8px; overflow: hidden; }
-      .user-list-header { background-color: var(--ytm-surface-2); font-weight: 500; }
-      .user-item > *, .user-list-header > * { min-width: 0; }
-      .user-item .text-truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .user-list-header, .user-item { display: grid; grid-template-columns: 50px 1fr 1fr 120px 100px 100px 220px; align-items: center; gap: 1rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--ytm-surface-2); }
-      .user-item { color: var(--ytm-primary-text); }
-      .user-item .badge { font-size: 0.85rem; padding: 0.4em 0.6em; }
-      .user-item .btn { padding: .25rem .5rem; font-size: .875rem; margin-right: .25rem; }
+      .user-list { display: flex; flex-direction: column; gap: 12px; }
+      .user-list-header { display: grid; grid-template-columns: 60px 40px 2fr 2fr 180px 100px 80px 60px; align-items: center; gap: 1rem; padding: 0 1rem; font-weight: 600; color: var(--ytm-secondary-text); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; }
+      .user-item { display: grid; grid-template-columns: 60px 40px 2fr 2fr 180px 100px 80px 60px; align-items: center; gap: 1rem; padding: 1rem; background-color: var(--ytm-surface); border: 1px solid var(--ytm-surface-2); border-radius: 12px; transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s; color: var(--ytm-primary-text); }
+      .user-item:hover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,0.5); border-color: #555; background-color: #181818; }
+      .user-item .badge { font-size: 0.75rem; padding: 0.4em 0.6em; letter-spacing: 0.5px; }
+      .user-item .dropdown-menu { font-size: 0.85rem; border: 1px solid #555; border-radius: 10px; }
+      .user-item .dropdown-item { padding: 0.5rem 1rem; transition: background 0.2s; }
+      .user-item .dropdown-item:hover { background-color: var(--ytm-surface-2); }
       .login-container { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
       .login-card { background-color: var(--ytm-surface); width: 100%; max-width: 400px; padding: 2rem; border-radius: 8px; }
       .form-control { background-color: var(--ytm-surface-2); border: 1px solid #404040; color: var(--ytm-primary-text); }
@@ -1457,9 +1589,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         .page-header form select, .page-header form input { width: 100% !important; margin: 0 !important; }
         .content-title { font-size: 1.5rem; }
         .user-list-header { display: none; }
-        .user-item { display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; grid-template-areas: "main action" "stats stats"; padding: 1rem; gap: 0.5rem 1rem; }
+        .user-item { display: grid; grid-template-columns: 45px 1fr auto; grid-template-rows: auto auto; grid-template-areas: "avatar main action" "stats stats stats"; padding: 1.25rem 1rem; gap: 0.75rem 0.75rem; }
         .user-item-id, .user-item-email-desktop, .user-item-artist-desktop, .user-item-verified-desktop, .user-item-last-up-desktop, .user-item-count-desktop { display: none; }
-        .user-item-main { grid-area: main; display: flex; flex-direction: column; gap: 0.25rem; }
+        .user-item-avatar { grid-area: avatar; display: flex; align-items: center; justify-content: center; align-self: center; }
+        .user-item-avatar img { width: 45px !important; height: 45px !important; }
+        .user-item-main { grid-area: main; display: flex; flex-direction: column; gap: 0.25rem; justify-content: center; }
         .user-item-main .user-id-mobile { font-size: 0.8rem; color: var(--ytm-secondary-text); }
         .user-item-main .user-email { font-weight: 500; }
         .user-item-main .user-artist { font-size: 0.9rem; color: var(--ytm-secondary-text); }
@@ -1475,50 +1609,126 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <?php if (!$is_admin_logged_in): ?>
     <div class="login-container">
       <div class="login-card">
-        <h3 class="text-center mb-4">Admin Login</h3>
+        <h3 class="text-center mb-4 fw-bold">Admin Login</h3>
+        <?php if (!empty($admin_login_error)): ?>
+          <div class="alert alert-danger py-2 px-3 small border-danger fw-bold"><i class="bi bi-exclamation-circle-fill me-1"></i> <?php echo htmlspecialchars($admin_login_error); ?></div>
+        <?php endif; ?>
         <form method="POST" action="?access=admin">
           <div class="mb-3">
-            <label for="password" class="form-label">Password</label>
-            <input type="password" class="form-control" id="password" name="password" required>
+            <label for="admin_email" class="form-label text-secondary small fw-bold">ADMIN EMAIL</label>
+            <input type="email" class="form-control" id="admin_email" name="admin_email" required>
           </div>
-          <button type="submit" class="btn btn-danger w-100">Login</button>
+          <div class="mb-4">
+            <label for="admin_password" class="form-label text-secondary small fw-bold">PASSWORD</label>
+            <input type="password" class="form-control" id="admin_password" name="admin_password" required>
+          </div>
+          <button type="submit" class="btn btn-danger w-100 fw-bold py-2">Login to Dashboard</button>
         </form>
       </div>
     </div>
     <?php else: ?>
     <div class="app-container">
-      <div class="d-lg-none d-flex align-items-center justify-content-between p-3 border-bottom" style="border-color: var(--ytm-surface-2) !important; background-color: var(--ytm-bg);">
+      <div class="d-lg-none d-flex align-items-center justify-content-between p-3 border-bottom" style="border-color: var(--ytm-surface-2) !important; background-color: var(--ytm-surface);">
         <div class="logo d-flex align-items-center" style="font-size: 1.25rem; font-weight: 700;">
           <img src="?action=get_app_icon&size=32" alt="Logo" style="height: 28px; width: 28px; margin-right: 8px; border-radius: 6px;">
           Admin<span style="color: var(--ytm-accent);">Panel</span>
         </div>
-        <button class="btn text-white" type="button" data-bs-toggle="offcanvas" data-bs-target="#admin-sidebar">
+        <button class="btn text-white p-0" type="button" data-bs-toggle="offcanvas" data-bs-target="#admin-sidebar">
           <i class="bi bi-list fs-2"></i>
         </button>
       </div>
-      <nav class="sidebar offcanvas-lg offcanvas-start" tabindex="-1" id="admin-sidebar" style="background-color: var(--ytm-bg);">
-        <div class="offcanvas-header border-bottom" style="border-color: var(--ytm-surface-2) !important;">
-          <h5 class="offcanvas-title logo m-0 d-flex align-items-center" style="font-size: 1.25rem; font-weight: 700;">
-            <img src="?action=get_app_icon&size=32" alt="Logo" style="height: 28px; width: 28px; margin-right: 8px; border-radius: 6px;">
-            Admin<span style="color: var(--ytm-accent);">Panel</span>
-          </h5>
+      <nav class="sidebar offcanvas-lg offcanvas-start" tabindex="-1" id="admin-sidebar">
+        <div class="offcanvas-header border-bottom d-lg-none" style="border-color: var(--ytm-surface-2) !important;">
+          <h5 class="offcanvas-title logo m-0 fw-bold" style="font-size: 1.25rem;">Admin<span class="fw-light">Panel</span></h5>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#admin-sidebar"></button>
         </div>
-        <div class="offcanvas-body d-flex flex-column p-0 py-lg-4">
-          <div class="logo d-none d-lg-flex align-items-center" style="padding: 0 1.5rem 1.5rem 1.5rem;">
-            <img src="?action=get_app_icon&size=32" alt="Logo" style="height: 28px; width: 28px; margin-right: 8px; border-radius: 6px;">
-            Admin<span>Panel</span>
+        <div class="offcanvas-body d-flex flex-column p-0 h-100">
+          <div class="p-4 border-bottom text-center d-flex flex-column align-items-center mb-4 shadow-sm" style="border-color: var(--ytm-surface-2) !important; background-color: rgba(255,255,255,0.02);">
+            <img src="?access=api&action=get_profile_picture&id=<?php echo $_SESSION['admin_id'] ?? '0'; ?>&v=<?php echo time(); ?>" alt="Admin Profile" class="rounded-circle shadow-lg border border-secondary mb-3" style="width: 80px; height: 80px; object-fit: cover;">
+            <h5 class="logo m-0 fw-bold" style="font-size: 1.25rem;">Admin<span class="fw-light" style="color: var(--ytm-primary-text);">Panel</span></h5>
+            <div class="text-secondary text-truncate w-100 mt-1" style="font-size: 0.85rem;"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'Admin'); ?></div>
+            <div class="badge bg-dark border border-secondary text-secondary mt-3 px-3 py-2 rounded-pill shadow-sm" style="letter-spacing: 1px;">ID: <?php echo $_SESSION['admin_id'] ?? '0'; ?></div>
           </div>
-          <a href="?access=admin" class="nav-link <?php echo (empty($_GET['page']) || $_GET['page'] === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill d-none d-lg-inline-block"></i><span>User Management</span></a>
-          <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill d-none d-lg-inline-block"></i><span>Drive Manager</span></a>
-          <a href="./" class="nav-link"><i class="bi bi-arrow-left-circle-fill d-none d-lg-inline-block"></i><span>Back to Player</span></a>
-          <a href="?access=admin&logout=1" class="nav-link"><i class="bi bi-box-arrow-left d-none d-lg-inline-block"></i><span>Logout</span></a>
+          
+          <div class="mb-4 mt-3 d-flex flex-column">
+            <a href="?access=admin" class="nav-link <?php echo (empty($_GET['page']) || $_GET['page'] === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
+            <a href="?access=admin&page=logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
+            <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Drive Manager</span></a>
+          </div>
+          
+          <div class="mt-auto d-flex flex-column pb-3">
+            <hr class="text-secondary mx-3 mb-2 opacity-25">
+            <a href="./" class="nav-link"><i class="bi bi-music-note-beamed"></i><span>Back to Player</span></a>
+            <a href="?access=admin&logout=1" class="nav-link text-danger"><i class="bi bi-box-arrow-left"></i><span>Logout</span></a>
+          </div>
         </div>
       </nav>
-            <main class="main-content">
-        <?php if (($_GET['page'] ?? '') === 'drive'): ?>
+      <main class="main-content position-relative">
+        <?php if (!empty($_SESSION['admin_flash_msg'])): ?>
+          <div class="alert alert-success alert-dismissible fade show m-4 position-absolute top-0 end-0 shadow-lg z-3" style="max-width: 90vw; word-break: break-word;" role="alert">
+            <i class="bi bi-check-circle-fill me-2"></i> <?php echo htmlspecialchars($_SESSION['admin_flash_msg']); ?>
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>
+          <?php unset($_SESSION['admin_flash_msg']); ?>
+        <?php endif; ?>
+
+        <?php if (($_GET['page'] ?? '') === 'logs'): ?>
+          <div class="page-header"><h1 class="content-title m-0">Admin Activity Logs</h1></div>
+          <div class="content-area-wrapper">
+            <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
+              <table class="table table-dark table-striped m-0">
+                <thead class="border-bottom border-secondary">
+                  <tr><th class="py-3 px-4">Time</th><th class="py-3 px-4">Admin Email</th><th class="py-3 px-4">Action Performed</th><th class="py-3 px-4">Target User</th></tr>
+                </thead>
+                <tbody>
+                  <?php
+                    $log_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                    $log_limit = 25;
+                    $log_offset = ($log_page - 1) * $log_limit;
+                    
+                    $total_logs = get_db()->query("SELECT COUNT(id) FROM admin_logs")->fetchColumn();
+                    $total_log_pages = ceil($total_logs / $log_limit);
+                    
+                    $logs = get_db()->query("SELECT * FROM admin_logs ORDER BY created_at DESC LIMIT $log_limit OFFSET $log_offset")->fetchAll();
+                    if (empty($logs)): ?>
+                      <tr><td colspan="4" class="text-center py-4 text-secondary">No recent admin activity found.</td></tr>
+                  <?php else: foreach ($logs as $log): ?>
+                  <tr>
+                    <td class="py-3 px-4 text-secondary small"><?php echo $log['created_at']; ?></td>
+                    <td class="py-3 px-4 fw-medium text-info"><?php echo htmlspecialchars($log['admin_email']); ?></td>
+                    <td class="py-3 px-4"><?php echo htmlspecialchars($log['action']); ?></td>
+                    <td class="py-3 px-4 text-secondary"><?php echo htmlspecialchars($log['target_email']); ?> (ID: <?php echo $log['target_user_id']; ?>)</td>
+                  </tr>
+                  <?php endforeach; endif; ?>
+                </tbody>
+              </table>
+            </div>
+            <?php if ($total_log_pages > 1): ?>
+            <nav aria-label="Logs pagination">
+              <ul class="pagination justify-content-center">
+                <li class="page-item <?php echo ($log_page <= 1) ? 'disabled' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=logs&p=<?php echo $log_page - 1; ?>">Previous</a>
+                </li>
+                <?php
+                  $start_p = max(1, $log_page - 1);
+                  $end_p = min($total_log_pages, $start_p + 2);
+                  if ($end_p - $start_p < 2) { $start_p = max(1, $end_p - 2); }
+                ?>
+                <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
+                <li class="page-item <?php echo ($log_page == $i) ? 'active' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=logs&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                </li>
+                <?php endfor; ?>
+                <li class="page-item <?php echo ($log_page >= $total_log_pages) ? 'disabled' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=logs&p=<?php echo $log_page + 1; ?>">Next</a>
+                </li>
+              </ul>
+            </nav>
+            <?php endif; ?>
+          </div>
+        <?php elseif (($_GET['page'] ?? '') === 'drive'): ?>
           <!-- PHPDrive UI -->
-                    <style>
+          <style>
             .drive-app-container {
               --theme-primary: #ff3333;
               --theme-on-primary: #ffffff;
@@ -2278,15 +2488,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
 
                 const filterFn = (i) => i.name.toLowerCase().includes(this.searchQuery);
-          this.filteredFolders = this.sortData(this.data.folders.filter(filterFn));
-          this.filteredFiles = this.sortData(this.filterByType(this.data.files.filter(filterFn)));
+                this.filteredFolders = this.sortData(this.data.folders.filter(filterFn));
+                this.filteredFiles = this.sortData(this.filterByType(this.data.files.filter(filterFn)));
 
-          // Update dynamic title with path and files indicator
-          const totalItems = this.filteredFolders.length + this.filteredFiles.length;
-          document.title = (this.currentPath ? `/${this.currentPath}` : 'Drive') + ` (${totalItems} items) - Admin Panel`;
+                // Update dynamic title with path and files indicator
+                const totalItems = this.filteredFolders.length + this.filteredFiles.length;
+                document.title = (this.currentPath ? `/${this.currentPath}` : 'Drive') + ` (${totalItems} items) - Admin Panel`;
 
-          document.getElementById('foldersTitle').classList.toggle('hidden', this.filteredFolders.length === 0 || this.currentFilter !== 'all');
-          document.getElementById('filesTitle').classList.toggle('hidden', this.filteredFiles.length === 0);
+                document.getElementById('foldersTitle').classList.toggle('hidden', this.filteredFolders.length === 0 || this.currentFilter !== 'all');
+                document.getElementById('filesTitle').classList.toggle('hidden', this.filteredFiles.length === 0);
 
                 if (this.currentFilter === 'all') {
                   this.filteredFolders.slice(0, this.visibleFoldersCount).forEach(f => fList.appendChild(this.createItemNode(f, true)));
@@ -2299,7 +2509,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 // Execute deep link directly on initial load
                 if (this.initEditFile) {
-                  const fileToOpen = sourceFiles.find(f => f.name === this.initEditFile);
+                  const fileToOpen = sourceFiles.find(f => f.name === this.initEditFile || f.path === this.initEditFile);
                   if (fileToOpen) {
                     this.openPreviewOrEditor(fileToOpen);
                   }
@@ -2407,7 +2617,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (this.viewMode === 'grid') {
                   el.className = `item-card file-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
                   let previewHtml = `<span class="material-symbols-rounded">${icon}</span>`;
-                  if (!isFolder && (item.isImage || ['mp4', 'webm'].includes(item.ext))) {
+                  if (!isFolder && item.isImage) {
                     const streamUrl = `${this.apiPrefix}api=true&action=thumb&file=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
                     previewHtml = `<img src="${streamUrl}" loading="lazy" alt="${item.name}">`;
                   }
@@ -3071,12 +3281,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
                 this.currentEditFile = item.path;
                 
-                let qs = '?';
+                let qs = '?access=admin&page=drive&';
                 if (this.currentPath) qs += `path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}&`;
                 qs += `edit=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
-                window.history.pushState({}, '', qs);
+                window.history.pushState({ path: this.currentPath, edit: item.path }, '', qs);
                 
-                const streamUrl = `?api=true&action=stream&file=${encodeURIComponent(item.path)}`;
+                const streamUrl = `${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`;
 
                 if (item.isImage) {
                   const imageOverlay = document.getElementById('imageOverlay');
@@ -3125,9 +3335,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   
                   document.getElementById('editorTitle').textContent = item.name;
                   overlay.style.display = 'flex';
-                  
-                  const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '') + `&edit=${encodeURIComponent(item.name)}`;
-                  window.history.pushState({ path: this.currentPath, edit: item.name }, '', newUrl);
                   
                   desktopContainer.style.display = 'none';
                   mobileContainer.style.display = 'none';
@@ -3431,52 +3638,83 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.updateItemUI(nextItem);
                 this.updateHeader();
 
-                const formData = new FormData();
-                formData.append('action', 'upload');
-                formData.append('files[]', nextItem.file);
-                formData.append('paths[]', nextItem.path || '');
+                const uploadNextChunk = (chunkIndex) => {
+                  const chunkSize = 5 * 1024 * 1024; // Slice into 5MB chunks to bypass limits
+                  const totalChunks = Math.ceil(nextItem.file.size / chunkSize) || 1;
+                  const start = chunkIndex * chunkSize;
+                  const end = Math.min(start + chunkSize, nextItem.file.size);
+                  const chunkBlob = nextItem.file.slice(start, end);
 
-                const xhr = new XMLHttpRequest();
-                nextItem.xhr = xhr;
+                  const formData = new FormData();
+                  formData.append('action', 'upload');
+                  formData.append('files[]', chunkBlob, nextItem.file.name);
+                  formData.append('paths[]', nextItem.path || '');
+                  formData.append('chunk', chunkIndex);
+                  formData.append('chunks', totalChunks);
+                  formData.append('file_id', nextItem.id);
 
-                // FIXED: Now correctly routes via the authenticated `this.fm.apiPrefix` URL
-                xhr.open('POST', `${this.fm.apiPrefix}api=true&action=upload&path=${encodeURIComponent(this.fm.currentPath)}`);
+                  const xhr = new XMLHttpRequest();
+                  nextItem.xhr = xhr;
 
-                xhr.upload.onprogress = (e) => {
-                  if (e.lengthComputable) {
-                    nextItem.progress = Math.round((e.loaded / e.total) * 100);
-                    this.updateItemUI(nextItem);
-                  }
-                };
+                  xhr.open('POST', `${this.fm.apiPrefix}api=true&action=upload&path=${encodeURIComponent(this.fm.currentPath)}`);
 
-                xhr.onload = () => {
-                  this.activeCount--;
-                  try {
-                    const res = JSON.parse(xhr.responseText);
-                    if (res && res.success) {
-                      nextItem.status = 'success';
-                      nextItem.progress = 100;
-                    } else {
-                      nextItem.status = 'failed';
+                  xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                      const chunkProgress = e.loaded / e.total;
+                      const overallProgress = ((chunkIndex + chunkProgress) / totalChunks) * 100;
+                      nextItem.progress = Math.round(overallProgress);
+                      this.updateItemUI(nextItem);
                     }
-                  } catch (err) {
+                  };
+
+                  xhr.onload = () => {
+                    if (xhr.status === 200) {
+                      try {
+                        const res = JSON.parse(xhr.responseText);
+                        if (res && res.success) {
+                          if (chunkIndex < totalChunks - 1) {
+                            uploadNextChunk(chunkIndex + 1); // Blast the next chunk
+                          } else {
+                            // Finished stitching
+                            this.activeCount--;
+                            nextItem.status = 'success';
+                            nextItem.progress = 100;
+                            this.updateItemUI(nextItem);
+                            this.updateHeader();
+                            this.fm.loadDirectory(this.fm.currentPath);
+                            this.process();
+                          }
+                        } else {
+                          throw new Error("Server rejected chunk");
+                        }
+                      } catch (err) {
+                        this.activeCount--;
+                        nextItem.status = 'failed';
+                        this.updateItemUI(nextItem);
+                        this.updateHeader();
+                        this.process();
+                      }
+                    } else {
+                      this.activeCount--;
+                      nextItem.status = 'failed';
+                      this.updateItemUI(nextItem);
+                      this.updateHeader();
+                      this.process();
+                    }
+                  };
+
+                  xhr.onerror = () => {
+                    this.activeCount--;
                     nextItem.status = 'failed';
-                  }
-                  this.updateItemUI(nextItem);
-                  this.updateHeader();
-                  this.fm.loadDirectory(this.fm.currentPath);
-                  this.process();
+                    this.updateItemUI(nextItem);
+                    this.updateHeader();
+                    this.process();
+                  };
+
+                  xhr.send(formData);
                 };
 
-                xhr.onerror = () => {
-                  this.activeCount--;
-                  nextItem.status = 'failed';
-                  this.updateItemUI(nextItem);
-                  this.updateHeader();
-                  this.process();
-                };
-
-                xhr.send(formData);
+                uploadNextChunk(0);
                 this.process();
               }
 
@@ -3612,7 +3850,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <select name="sort" class="form-select me-2" style="width: auto;" onchange="this.form.submit()">
                 <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest</option>
                 <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
-                <option value="pending" <?php echo $sort_admin === 'pending' ? 'selected' : ''; ?>>Pending Requests</option>
+                <option value="pending" <?php echo $sort_admin === 'pending' ? 'selected' : ''; ?>>Pending Uploads</option>
+                <option value="reset_req" <?php echo $sort_admin === 'reset_req' ? 'selected' : ''; ?>>Reset Requests</option>
                 <option value="verified" <?php echo $sort_admin === 'verified' ? 'selected' : ''; ?>>Verified</option>
                 <option value="unverified" <?php echo $sort_admin === 'unverified' ? 'selected' : ''; ?>>Unverified</option>
                 <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned</option>
@@ -3625,7 +3864,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <div class="content-area-wrapper">
             <div class="user-list">
               <div class="user-list-header">
-                <div>ID</div><div>Email</div><div>Artist</div><div>Status</div><div>Last Up</div><div>Count</div><div>Action</div>
+                <div>ID</div><div>Pic</div><div>Email</div><div>Artist</div><div>Status</div><div>Last Up</div><div>Count</div><div>Action</div>
               </div>
               <?php
                 $db = get_db();
@@ -3640,6 +3879,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
                 if ($sort_admin === 'pending') {
                   $where_clauses[] = "verified = 'pending'";
+                }
+                if ($sort_admin === 'reset_req') {
+                  $where_clauses[] = "reset_requested = 1";
                 }
                 
                 $where = '';
@@ -3663,7 +3905,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 ];
                 $admin_order_by = $admin_sort_map[$sort_admin] ?? 'ORDER BY id DESC';
                 
-                $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned FROM users $where $admin_order_by LIMIT ? OFFSET ?";
+                $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned, is_admin, reset_requested FROM users $where $admin_order_by LIMIT ? OFFSET ?";
                 $stmt = $db->prepare($sql);
                 $param_index = 1;
                 if ($search !== '') {
@@ -3680,39 +3922,76 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               ?>
               <div class="user-item">
                 <div class="user-item-id"><?php echo htmlspecialchars($user['id']); ?></div>
+                <div class="user-item-avatar"><img src="?access=api&action=get_profile_picture&id=<?php echo $user['id']; ?>&v=<?php echo time(); ?>" class="rounded-circle shadow-sm" style="width: 32px; height: 32px; object-fit: cover; border: 1px solid var(--ytm-surface-2);"></div>
                 <div class="user-item-email-desktop text-truncate"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
                 <div class="user-item-artist-desktop text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
-                <div class="user-item-verified-desktop">
+                <div class="user-item-verified-desktop d-flex flex-wrap gap-1">
+                  <?php if ($user['reset_requested'] == 1): ?>
+                    <span class="badge bg-warning text-dark"><i class="bi bi-key-fill"></i> RESET REQ</span>
+                  <?php endif; ?>
+                  <?php if ($user['is_admin'] == 1 || strtolower(trim($user['email'])) === 'musiclibrary@mail.com'): ?>
+                    <span class="badge bg-primary"><i class="bi bi-shield-lock-fill"></i> ADMIN</span>
+                  <?php endif; ?>
                   <?php if ($user['verified'] === 'yes'): ?>
-                    <span class="badge bg-success">YES</span>
+                    <span class="badge bg-success"><i class="bi bi-patch-check-fill"></i> VERIFIED</span>
                   <?php elseif ($user['verified'] === 'pending'): ?>
-                    <span class="badge bg-info text-dark">PENDING</span>
-                  <?php else: ?>
-                    <span class="badge bg-secondary">NO</span>
+                    <span class="badge bg-info text-dark fw-bold"><i class="bi bi-hourglass-split"></i> PENDING</span>
                   <?php endif; ?>
                   <?php if ($user['banned']): ?>
-                  <span class="badge bg-danger">BANNED</span>
+                    <span class="badge bg-danger"><i class="bi bi-slash-circle-fill"></i> BANNED</span>
                   <?php endif; ?>
                 </div>
-                <div class="user-item-last-up-desktop"><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></div>
-                <div class="user-item-count-desktop"><?php echo htmlspecialchars($user['daily_upload_count'] ?? '0'); ?></div>
+                <div class="user-item-last-up-desktop text-secondary small fw-medium"><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></div>
+                <div class="user-item-count-desktop text-secondary small fw-bold"><?php echo htmlspecialchars($user['daily_upload_count'] ?? '0'); ?></div>
                 <div class="user-item-main">
                   <div class="user-id-mobile">ID: <?php echo htmlspecialchars($user['id']); ?></div>
-                  <div class="user-email text-truncate"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
+                  <div class="user-email text-truncate fw-bold"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
                   <div class="user-artist text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
                 </div>
-                <div class="user-item-action">
-                  <form method="POST" action="?access=admin&page=<?php echo $page; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>" class="d-inline">
-                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                    <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
-                    <button type="submit" name="toggle_verify" class="btn <?php echo $user['verified'] === 'yes' ? 'btn-warning' : ($user['verified'] === 'pending' ? 'btn-info text-dark fw-bold' : 'btn-success'); ?>">
-                      <?php echo $user['verified'] === 'yes' ? 'Un-verify' : ($user['verified'] === 'pending' ? 'Approve Request' : 'Verify'); ?>
+                <div class="user-item-action d-flex justify-content-end">
+                  <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-secondary border-0 rounded-circle d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" aria-expanded="false" style="width: 36px; height: 36px;">
+                      <i class="bi bi-three-dots-vertical fs-6"></i>
                     </button>
-                    <button type="submit" name="toggle_ban" class="btn <?php echo $user['banned'] ? 'btn-secondary' : 'btn-warning'; ?>">
-                      <?php echo $user['banned'] ? 'Unban' : 'Ban'; ?>
-                    </button>
-                    <button type="submit" name="delete_user" class="btn btn-danger" onclick="return confirm('Permanently delete this user and all their data?');">Delete</button>
-                  </form>
+                    <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary">
+                      <li>
+                        <form method="POST" action="?access=admin&page=<?php echo $page; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">
+                          <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                          <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                          
+                          <button type="submit" name="generate_reset_link" class="dropdown-item d-flex align-items-center gap-3 text-info fw-bold">
+                            <i class="bi bi-envelope-check"></i> Generate Reset Link
+                          </button>
+                          
+                          <button type="submit" name="toggle_verify" class="dropdown-item d-flex align-items-center gap-3 text-white">
+                            <i class="bi bi-patch-check text-success"></i> 
+                            <?php echo $user['verified'] === 'yes' ? 'Revoke Verification' : ($user['verified'] === 'pending' ? 'Approve Upload Request' : 'Verify User'); ?>
+                          </button>
+                          
+                          <?php if (strtolower(trim($user['email'])) !== 'musiclibrary@mail.com'): ?>
+                            <button type="submit" name="toggle_admin" class="dropdown-item d-flex align-items-center gap-3 text-white">
+                              <i class="bi bi-shield-lock text-warning"></i> 
+                              <?php echo $user['is_admin'] == 1 ? 'Revoke Admin Status' : 'Make Administrator'; ?>
+                            </button>
+                            
+                            <button type="submit" name="toggle_ban" class="dropdown-item d-flex align-items-center gap-3 text-white">
+                              <i class="bi bi-slash-circle" style="color: orange;"></i> 
+                              <?php echo $user['banned'] ? 'Unban User' : 'Ban User'; ?>
+                            </button>
+                            
+                            <li><hr class="dropdown-divider border-secondary opacity-50"></li>
+                            <button type="submit" name="soft_delete_user" class="dropdown-item d-flex align-items-center gap-3 text-warning fw-bold" onclick="return confirm('Soft delete this user? Their account will be anonymized and locked, but their uploaded music and posts will remain.');">
+                              <i class="bi bi-person-x-fill"></i> Soft Delete User
+                            </button>
+                            
+                            <button type="submit" name="permanent_delete_user" class="dropdown-item d-flex align-items-center gap-3 text-danger fw-bold" onclick="return confirm('Permanently delete this user and ALL their data (music, posts, files)? This action cannot be undone.');">
+                              <i class="bi bi-trash3-fill"></i> Permanent Delete
+                            </button>
+                          <?php endif; ?>
+                        </form>
+                      </li>
+                    </ul>
+                  </div>
                 </div>
                 <div class="user-item-stats">
                   <div>
@@ -3925,6 +4204,8 @@ function init_db($db) {
   $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS users_artist_idx ON users(artist);");
 
   if ($users_table_exists) {
+    if (!in_array('is_admin', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0;");
+    if (!in_array('reset_requested', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN reset_requested INTEGER DEFAULT 0;");
     if (!in_array('last_upload_date', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN last_upload_date TEXT;");
     if (!in_array('daily_upload_count', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN daily_upload_count INTEGER DEFAULT 0;");
     if (!in_array('verified', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN verified TEXT DEFAULT 'no';");
@@ -4223,7 +4504,7 @@ function init_db($db) {
     $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
     $bg_color = $colors[array_rand($colors)];
     $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="'.$bg_color.'"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#ffffff">' . htmlspecialchars($initial) . '</text></svg>';
-    $db->prepare("INSERT INTO users (email, artist, password_hash, verified, profile_picture, profile_picture_type) VALUES (?, ?, ?, ?, ?, 'image/svg+xml')")
+    $db->prepare("INSERT INTO users (email, artist, password_hash, verified, is_admin, profile_picture, profile_picture_type) VALUES (?, ?, ?, ?, 1, ?, 'image/svg+xml')")
       ->execute(['musiclibrary@mail.com', 'Music Library', password_hash('musiclibrary', PASSWORD_DEFAULT), 'yes', $svg]);
   }
 }
@@ -4390,15 +4671,26 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
     }
   }
 
-  // 3. Global API Firewall: Require Admin Password (api_key) for ALL external requests
+  // 3. Global API Firewall: Require Master Admin Password (api_key) for ALL external requests
   $api_extracted_action = $_GET['action'] ?? '';
   
-  $public_media_actions = ['embed', 'get_stream', 'get_image', 'get_app_icon'];
-  if (!in_array($api_extracted_action, $public_media_actions) && ($_GET['api_key'] ?? '') !== ADMIN_PASSWORD) {
-    http_response_code(401);
-    header('Content-Type: application/json');
-    echo '{"status":"error", "message":"API access denied. Valid api_key (Admin Password) required."}';
-    exit;
+  $public_media_actions = ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon'];
+  if (!in_array($api_extracted_action, $public_media_actions)) {
+    $api_key = $_GET['api_key'] ?? '';
+    
+    // Ensure DB is initialized
+    if (function_exists('init_db')) { init_db(get_db()); }
+    
+    $db_fw = get_db();
+    $stmt_fw = $db_fw->query("SELECT password_hash FROM users WHERE email = 'musiclibrary@mail.com'");
+    $master_hash = $stmt_fw->fetchColumn();
+
+    if (empty($master_hash) || !password_verify($api_key, $master_hash)) {
+      http_response_code(401);
+      header('Content-Type: application/json');
+      echo '{"status":"error", "message":"API access denied. Valid api_key (Master Admin Password) required."}';
+      exit;
+    }
   }
 }
 
@@ -4423,7 +4715,7 @@ if (isset($_GET['action'])) {
       $is_valid_internal = true;
     } elseif ($referer && parse_url($referer, PHP_URL_HOST) === $host) {
       $is_valid_internal = true;
-    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes'])) {
+    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes'])) {
       // Media routes are allowed internally without headers, but data JSON routes are strictly blocked!
       $is_valid_internal = true;
     }
@@ -4573,6 +4865,21 @@ if (isset($_GET['action'])) {
         playlist_id INTEGER NOT NULL,
         expires_at DATETIME,
         FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+      );");
+      
+      $db->exec("CREATE TABLE IF NOT EXISTS admin_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        admin_email TEXT,
+        action TEXT,
+        target_user_id INTEGER,
+        target_email TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );");
+      
+      $db->exec("CREATE TABLE IF NOT EXISTS password_resets (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER,
+        expires_at DATETIME
       );");
     } catch(Exception $e) {}
     
@@ -4905,7 +5212,7 @@ HTML;
         try { $db->exec("ALTER TABLE users ADD COLUMN last_active DATETIME;"); } catch(Exception $e) {}
         $db->prepare("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE id = ?")->execute([$user_id]);
 
-        $stmt = $db->prepare("SELECT id, email, artist, bio, verified, last_upload_date, daily_upload_count, banned, settings FROM users WHERE id = ?");
+        $stmt = $db->prepare("SELECT id, email, artist, bio, verified, last_upload_date, daily_upload_count, banned, settings, is_admin FROM users WHERE id = ?");
         $stmt->execute([$user_id]);
         $user = $stmt->fetch();
         if ($user && empty($user['banned'])) {
@@ -4923,6 +5230,38 @@ HTML;
         }
       } else {
         send_json(['status' => 'loggedout']);
+      }
+      break;
+
+    case 'forgot_password':
+      $data = json_decode(file_get_contents('php://input'), true);
+      $email = filter_var($data['email'], FILTER_VALIDATE_EMAIL);
+      if ($email) {
+        $db->prepare("UPDATE users SET reset_requested = 1 WHERE email = ?")->execute([$email]);
+      }
+      send_json(['status' => 'success', 'message' => 'If the email exists, an admin has been notified to send a password reset link to your email address.']);
+      break;
+
+    case 'reset_password_submit':
+      $data = json_decode(file_get_contents('php://input'), true);
+      $token = $data['token'] ?? '';
+      $new_password = $data['new_password'] ?? '';
+      
+      if (strlen($new_password) < 6) {
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'Password must be at least 6 characters.']);
+      }
+      
+      $stmt = $db->prepare("SELECT user_id FROM password_resets WHERE token = ? AND expires_at > datetime('now')");
+      $stmt->execute([$token]);
+      $uid = $stmt->fetchColumn();
+      
+      if ($uid) {
+        $hash = password_hash($new_password, PASSWORD_DEFAULT);
+        $db->prepare("UPDATE users SET password_hash = ? WHERE id = ?")->execute([$hash, $uid]);
+        $db->prepare("DELETE FROM password_resets WHERE token = ?")->execute([$token]);
+        send_json(['status' => 'success', 'message' => 'Password updated successfully! You can now log in.']);
+      } else {
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid or expired reset token.']);
       }
       break;
 
@@ -8589,9 +8928,14 @@ HTML;
       
       $feed = [];
       
+      $act_page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $act_limit = 25;
+      $act_offset = ($act_page - 1) * $act_limit;
+      $db_fetch_limit = $act_offset + $act_limit; // Fetch enough to cover the current page offset slice
+
       // 1. My standard activity
-      $stmt = $db->prepare("SELECT 'activity' as type, action, target_name, created_at FROM activity_feed WHERE user_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT 50");
-      $stmt->execute([$user_id, $last_clear]);
+      $stmt = $db->prepare("SELECT 'activity' as type, action, target_name, created_at FROM activity_feed WHERE user_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT ?");
+      $stmt->execute([$user_id, $last_clear, $db_fetch_limit]);
       $feed = array_merge($feed, $stmt->fetchAll());
       
       // 2. Incoming Comments and Replies
@@ -8615,9 +8959,9 @@ HTML;
         WHERE ((m.user_id = ? AND c.parent_id IS NULL AND c.user_id != ?) 
            OR (c.parent_id IS NOT NULL AND pc.user_id = ? AND c.user_id != ?))
            AND c.created_at > ?
-        ORDER BY c.created_at DESC LIMIT 50
+        ORDER BY c.created_at DESC LIMIT ?
       ");
-      $stmt2->execute([$user_id, $user_id, $user_id, $user_id, $last_clear]);
+      $stmt2->execute([$user_id, $user_id, $user_id, $user_id, $last_clear, $db_fetch_limit]);
       $feed = array_merge($feed, $stmt2->fetchAll());
       
       // 3. Incoming Community Replies
@@ -8634,9 +8978,9 @@ HTML;
         JOIN users u ON cp.user_id = u.id
         JOIN community_posts parent_post ON cp.parent_id = parent_post.id
         WHERE parent_post.user_id = ? AND cp.user_id != ? AND cp.created_at > ?
-        ORDER BY cp.created_at DESC LIMIT 50
+        ORDER BY cp.created_at DESC LIMIT ?
       ");
-      $stmt3->execute([$user_id, $user_id, $last_clear]);
+      $stmt3->execute([$user_id, $user_id, $last_clear, $db_fetch_limit]);
       $feed = array_merge($feed, $stmt3->fetchAll());
       
       // 4. Incoming Messages
@@ -8652,9 +8996,9 @@ HTML;
         FROM messages m
         JOIN users u ON m.sender_id = u.id
         WHERE m.receiver_id = ? AND m.created_at > ?
-        ORDER BY m.created_at DESC LIMIT 50
+        ORDER BY m.created_at DESC LIMIT ?
       ");
-      $stmt4->execute([$user_id, $last_clear]);
+      $stmt4->execute([$user_id, $last_clear, $db_fetch_limit]);
       $feed = array_merge($feed, $stmt4->fetchAll());
 
       // Sort all notifications by date
@@ -8662,8 +9006,8 @@ HTML;
         return strtotime($b['created_at']) - strtotime($a['created_at']);
       });
       
-      // Add unread status flags
-      $final_feed = array_slice($feed, 0, 50);
+      // Add unread status flags and slice safely based on the offset
+      $final_feed = array_slice($feed, $act_offset, $act_limit);
       foreach ($final_feed as &$item) {
         $item['is_unread'] = (strtotime($item['created_at']) > strtotime($last_read));
       }
@@ -13251,7 +13595,11 @@ function perform_full_scan($db) {
                 <label for="login-password" class="form-label">Password</label>
                 <input type="password" class="form-control" id="login-password" required>
               </div>
-              <button type="submit" class="btn btn-danger w-100">Login</button>
+              <button type="submit" class="btn btn-danger w-100 mb-3">Login</button>
+              <div class="text-center">
+                <a href="#" class="text-info text-decoration-none small d-block mb-2" data-bs-toggle="modal" data-bs-target="#forgot-password-modal" data-bs-dismiss="modal">I forgot my password</a>
+                <a href="#" class="text-secondary text-decoration-none small d-block" data-bs-toggle="modal" data-bs-target="#register-modal" data-bs-dismiss="modal">I don't have an account</a>
+              </div>
             </form>
           </div>
         </div>
@@ -13279,7 +13627,54 @@ function perform_full_scan($db) {
                 <label for="register-password" class="form-label">Password</label>
                 <input type="password" class="form-control" id="register-password" required minlength="6">
               </div>
-              <button type="submit" class="btn btn-danger w-100">Register</button>
+              <button type="submit" class="btn btn-danger w-100 mb-3">Register</button>
+              <div class="text-center">
+                <a href="#" class="text-secondary text-decoration-none small" data-bs-toggle="modal" data-bs-target="#login-modal" data-bs-dismiss="modal">I already have an account</a>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="forgot-password-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title text-white"><i class="bi bi-key-fill text-warning me-2"></i> Reset Password</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4">
+            <form id="forgot-password-form">
+              <p class="text-secondary small mb-4">Enter your email address and an administrator will generate a secure reset link for you.</p>
+              <div class="mb-4">
+                <label for="forgot-email" class="form-label text-secondary fw-bold small">EMAIL ADDRESS</label>
+                <input type="email" class="form-control bg-dark text-white border-secondary" id="forgot-email" required>
+              </div>
+              <button type="submit" class="btn btn-warning text-dark fw-bold w-100 mb-3">Request Reset Link</button>
+              <div class="text-center">
+                <a href="#" class="text-secondary text-decoration-none small" data-bs-toggle="modal" data-bs-target="#login-modal" data-bs-dismiss="modal">Back to Login</a>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="reset-password-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title text-white"><i class="bi bi-shield-lock-fill text-success me-2"></i> Set New Password</h5>
+          </div>
+          <div class="modal-body p-4">
+            <form id="reset-password-form">
+              <input type="hidden" id="reset-token-input" value="">
+              <div class="mb-4">
+                <label for="reset-new-password" class="form-label text-secondary fw-bold small">NEW PASSWORD</label>
+                <input type="password" class="form-control bg-dark text-white border-secondary" id="reset-new-password" required minlength="6">
+              </div>
+              <button type="submit" class="btn btn-success text-dark fw-bold w-100">Update Password & Login</button>
             </form>
           </div>
         </div>
@@ -16689,11 +17084,23 @@ SOFTWARE.</div>
         if (activityModalEl) {
           const body = document.getElementById('activity-modal-body');
           
-          const loadActivityFeed = async () => {
-            body.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary" role="status"></div></div>';
-            const feed = await fetchData('?action=get_activity_feed');
+          let activityPage = 1;
+          const loadActivityFeed = async (append = false) => {
+            if (!append) {
+              activityPage = 1;
+              body.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary" role="status"></div></div>';
+            } else {
+              const btn = document.getElementById('load-more-activity-btn');
+              if (btn) btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Loading...';
+            }
+            
+            const feed = await fetchData(`?action=get_activity_feed&page=${activityPage}`);
+            
+            const loadMoreBtnContainer = document.getElementById('load-more-activity-container');
+            if (loadMoreBtnContainer) loadMoreBtnContainer.remove();
+
             if (feed && feed.length > 0) {
-              body.innerHTML = '<ul class="list-group list-group-flush">' + feed.map(item => {
+              const htmlStr = feed.map(item => {
                 if (item.type === 'message_notif') {
                   const unreadBadge = item.is_unread ? '<span class="badge bg-danger ms-2" style="font-size: 0.65rem;">New</span>' : '';
                   const bgClass = item.is_unread ? 'bg-dark' : 'bg-transparent';
@@ -16736,7 +17143,7 @@ SOFTWARE.</div>
                     replyBtnHTML = `<button class="btn btn-sm btn-outline-light notif-reply-btn" data-song-id="${item.song_id}" data-comment-id="${item.comment_id}" data-username="${escapeHTML(item.commenter_name)}"><i class="bi bi-reply-fill"></i> Reply</button>`;
                   }
                      
-                  const cleanContent = parseUserText(item.content).replace(/<[^>]*>?/gm, ''); // Parse BBCode then strip HTML entirely for notifications
+                  const cleanContent = parseUserText(item.content).replace(/<[^>]*>?/gm, ''); 
 
                   return `
                     <li class="list-group-item ${bgClass} text-white border-secondary py-3">
@@ -16768,21 +17175,39 @@ SOFTWARE.</div>
                     </li>
                   `;
                 }
-              }).join('') + '</ul>';
+              }).join('');
+
+              if (!append) {
+                body.innerHTML = '<ul class="list-group list-group-flush" id="activity-list">' + htmlStr + '</ul>';
+              } else {
+                document.getElementById('activity-list').insertAdjacentHTML('beforeend', htmlStr);
+              }
+
+              if (feed.length === 25) {
+                body.insertAdjacentHTML('beforeend', `
+                  <div class="text-center p-3" id="load-more-activity-container">
+                    <button class="btn btn-outline-light rounded-pill px-4 btn-sm fw-bold" id="load-more-activity-btn">Load More Activity</button>
+                  </div>
+                `);
+                document.getElementById('load-more-activity-btn').addEventListener('click', () => {
+                  activityPage++;
+                  loadActivityFeed(true);
+                });
+              }
                
-              // Automatically mark all notifications as read when the feed is opened
-              setTimeout(async () => {
-                document.querySelectorAll('.notif-badge').forEach(b => b.classList.add('d-none'));
-                await fetchData('?action=mark_notifs_read', { method: 'POST' });
-                updateNotifBadge();
-              }, 1500);
-               
+              if (!append) {
+                setTimeout(async () => {
+                  document.querySelectorAll('.notif-badge').forEach(b => b.classList.add('d-none'));
+                  await fetchData('?action=mark_notifs_read', { method: 'POST' });
+                  updateNotifBadge();
+                }, 1500);
+              }
             } else {
-              body.innerHTML = '<p class="text-secondary text-center p-4">No recent activity.</p>';
+              if (!append) body.innerHTML = '<p class="text-secondary text-center p-4">No recent activity.</p>';
             }
           };
 
-          activityModalEl.addEventListener('show.bs.modal', loadActivityFeed);
+          activityModalEl.addEventListener('show.bs.modal', () => loadActivityFeed(false));
 
           const connectionsModalEl = document.getElementById('connections-modal');
           if (connectionsModalEl) {
@@ -25706,6 +26131,8 @@ SOFTWARE.</div>
         const loginForm = document.getElementById('login-form');
         const registerForm = document.getElementById('register-form');
         const restoreForm = document.getElementById('restore-form');
+        const forgotForm = document.getElementById('forgot-password-form');
+        const resetPwForm = document.getElementById('reset-password-form');
         const changeNameForm = document.getElementById('change-name-form');
         const changePwForm = document.getElementById('change-password-form');
         const profilePicForm = document.getElementById('profile-picture-form');
@@ -25825,6 +26252,46 @@ SOFTWARE.</div>
           }
         });
         
+        if (forgotForm) {
+          forgotForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const email = document.getElementById('forgot-email').value;
+            const btn = forgotForm.querySelector('button[type="submit"]');
+            btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Requesting...';
+            const data = await fetchData('?action=forgot_password', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ email })
+            });
+            if (data && data.status === 'success') {
+              bootstrap.Modal.getInstance(document.getElementById('forgot-password-modal')).hide();
+              forgotForm.reset();
+              showToast(data.message, 'success');
+            }
+            btn.disabled = false; btn.innerHTML = 'Request Reset Link';
+          });
+        }
+
+        if (resetPwForm) {
+          resetPwForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const token = document.getElementById('reset-token-input').value;
+            const new_password = document.getElementById('reset-new-password').value;
+            const btn = resetPwForm.querySelector('button[type="submit"]');
+            btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Updating...';
+            const data = await fetchData('?action=reset_password_submit', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ token, new_password })
+            });
+            if (data && data.status === 'success') {
+              bootstrap.Modal.getInstance(document.getElementById('reset-password-modal')).hide();
+              resetPwForm.reset();
+              showToast('Password updated! You can now log in.', 'success');
+              new bootstrap.Modal(document.getElementById('login-modal')).show();
+            }
+            btn.disabled = false; btn.innerHTML = 'Update Password & Login';
+          });
+        }
+
         if (restoreForm) {
           restoreForm.addEventListener('submit', async e => {
             e.preventDefault();
@@ -27650,6 +28117,7 @@ SOFTWARE.</div>
             const scanAllBtn = document.getElementById('nav-scan-all');
             const adminPanelBtn = document.getElementById('nav-admin-panel');
             const isSuperAdmin = currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com';
+            const isAdmin = currentUser.is_admin == 1 || isSuperAdmin;
             
             if (scanAllBtn) {
               if (isSuperAdmin) {
@@ -27659,7 +28127,7 @@ SOFTWARE.</div>
               }
             }
             if (adminPanelBtn) {
-              if (isSuperAdmin) {
+              if (isAdmin) {
                 adminPanelBtn.style.setProperty('display', 'flex', 'important');
               } else {
                 adminPanelBtn.style.setProperty('display', 'none', 'important');
@@ -29610,6 +30078,14 @@ SOFTWARE.</div>
                 }
               });
             }
+          }
+
+          const resetToken = urlParams.get('reset_token');
+          if (resetToken) {
+            document.getElementById('reset-token-input').value = resetToken;
+            window.history.replaceState({}, document.title, window.location.pathname);
+            new bootstrap.Modal(document.getElementById('reset-password-modal')).show();
+            return; // Halt default loading since we want the user to set a password first
           }
 
           const inviteToken = urlParams.get('collab_invite');
