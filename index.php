@@ -343,6 +343,9 @@ SW;
 }
 
 header('Content-Type: text/html; charset=utf-8');
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+header('Expires: 0');
 ini_set('session.gc_maxlifetime', 31536000); // 1 year
 ini_set('session.cookie_lifetime', 31536000);
 session_start([
@@ -367,7 +370,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '5.1');
+define('APP_VERSION', '5.2');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -6735,6 +6738,12 @@ HTML;
       }
       break;
       
+    case 'clear_offline':
+      if (!$user_id) { http_response_code(403); exit; }
+      $db->prepare("DELETE FROM offline_songs WHERE user_id = ?")->execute([$user_id]);
+      send_json(['status' => 'success', 'message' => 'All offline songs removed.']);
+      break;
+
     case 'export_offline':
       if (!$user_id) { http_response_code(403); exit; }
       $stmt = $db->prepare("SELECT m.file, m.title, m.artist, m.album FROM offline_songs os JOIN music m ON os.song_id = m.id WHERE os.user_id = ? ORDER BY os.sort_order ASC");
@@ -8769,12 +8778,23 @@ HTML;
           'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC',
         ];
         $order_by = $sort_map[$sort] ?? $sort_map['manual_order'];
+        
+        $q = $_GET['q'] ?? '';
+        $search_cond = '';
+        $params = [$user_id, $name];
+        if ($q !== '') {
+          $search_cond = " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
+          $params[] = "%$q%";
+          $params[] = "%$q%";
+          $params[] = "%$q%";
+        }
+        
         $stmt_songs = $db->prepare("
           SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m JOIN playlist_songs ps ON m.id = ps.song_id JOIN playlists p ON ps.playlist_id = p.id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-          WHERE p.public_id = ? {$order_by} {$limit_clause}
+          WHERE p.public_id = ? {$search_cond} {$order_by} {$limit_clause}
         ");
-        $stmt_songs->execute([$user_id, $name]);
+        $stmt_songs->execute($params);
         $songs = $stmt_songs->fetchAll();
       } elseif ($type === 'mix') {
         $mix_public_id = $name;
@@ -8790,14 +8810,24 @@ HTML;
             'total_duration' => 0,
             'public_id' => $mix_public_id
           ];
+          $q = $_GET['q'] ?? '';
+          $search_cond = '';
+          $params = [$user_id, $mix_row['id'], $user_id];
+          if ($q !== '') {
+            $search_cond = " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
+            $params[] = "%$q%";
+            $params[] = "%$q%";
+            $params[] = "%$q%";
+          }
+
           $stmt_songs = $db->prepare("
             SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
             FROM music m 
             JOIN mix_songs ms ON m.id = ms.song_id 
             LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-            WHERE ms.mix_id = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY ms.sort_order ASC
+            WHERE ms.mix_id = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) {$search_cond} ORDER BY ms.sort_order ASC
           ");
-          $stmt_songs->execute([$user_id, $mix_row['id'], $user_id]);
+          $stmt_songs->execute($params);
           $songs = $stmt_songs->fetchAll();
           $details['play_count'] = 0;
           foreach($songs as $s) { 
@@ -8914,12 +8944,23 @@ HTML;
         ];
         $default_sort = ($type === 'album') ? 'title_asc' : 'artist_asc';
         $order_by = $sort_map[$sort] ?? $sort_map[$default_sort];
+        
+        $search_cond = '';
+        $q = $_GET['q'] ?? '';
+        $exec_params = array_merge([$user_id], $user_params);
+        if ($q !== '') {
+          $search_cond = " AND (m.title LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE)";
+          $exec_params[] = "%$q%";
+          $exec_params[] = "%$q%";
+          $exec_params[] = "%$q%";
+        }
+
         $stmt_songs = $db->prepare("
           SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-          WHERE {$field_cond} {$user_cond} {$order_by} {$limit_clause}
+          WHERE {$field_cond} {$user_cond} {$search_cond} {$order_by} {$limit_clause}
         ");
-        $exec_params = array_merge([$user_id], $user_params);
+        
         $stmt_songs->execute($exec_params);
         $songs = $stmt_songs->fetchAll();
       }
@@ -9282,11 +9323,54 @@ HTML;
       header('Pragma: cache');
       header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
       $id = intval($_GET['id'] ?? 0);
+      $size = $_GET['size'] ?? 'large';
+      
       $stmt = $db->prepare("SELECT image, title, artist FROM music WHERE id = ?");
       $stmt->execute([$id]);
       $row = $stmt->fetch();
       
       if ($row && $row['image']) {
+        if ($size === 'small') {
+          $shard = substr(md5((string)$id), 0, 2);
+          $thumb_dir = MUSIC_DIR . '/thumbnails/' . $shard;
+          $cache_path = $thumb_dir . '/small_' . $id . '.webp';
+          
+          if (file_exists($cache_path)) {
+            header('Content-Type: image/webp');
+            readfile($cache_path);
+            exit;
+          }
+          
+          if (!is_dir($thumb_dir)) @mkdir($thumb_dir, 0755, true);
+          $img = @imagecreatefromstring($row['image']);
+          if ($img) {
+            $small = imagecreatetruecolor(200, 200);
+            imagealphablending($small, false);
+            imagesavealpha($small, true);
+            $transparent = imagecolorallocatealpha($small, 255, 255, 255, 127);
+            imagefilledrectangle($small, 0, 0, 200, 200, $transparent);
+            imagecopyresampled($small, $img, 0, 0, 0, 0, 200, 200, imagesx($img), imagesy($img));
+            
+            ob_start();
+            imagewebp($small, null, 40);
+            $small_data = ob_get_clean();
+            
+            if (strlen($small_data) > 5120) { // Enforce 5KB max
+               ob_start();
+               imagewebp($small, null, 15); 
+               $small_data = ob_get_clean();
+            }
+            
+            @file_put_contents($cache_path, $small_data);
+            imagedestroy($img);
+            imagedestroy($small);
+            
+            header('Content-Type: image/webp');
+            echo $small_data;
+            exit;
+          }
+        }
+        
         header('Content-Type: image/webp');
         echo $row['image'];
       } else {
@@ -9317,6 +9401,15 @@ HTML;
         $is_added_sql = ", (SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END FROM playlist_songs WHERE playlist_id = p.id AND song_id = {$sid}) as is_added";
       }
       
+      $q = $_GET['q'] ?? '';
+      $where_sql = "WHERE p.user_id = ?";
+      $params = [$user_id];
+      if ($q !== '') {
+        $where_sql .= " AND (p.name LIKE ? COLLATE NOCASE OR p.description LIKE ? COLLATE NOCASE)";
+        $params[] = "%$q%";
+        $params[] = "%$q%";
+      }
+      
       $stmt = $db->prepare("
         SELECT p.id, p.name, p.description, p.public_id, p.is_collaborative, p.is_private, p.user_id as owner_id, u.artist as creator, p.play_count, COUNT(ps.song_id) as song_count,
         (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id,
@@ -9325,11 +9418,11 @@ HTML;
         FROM playlists p 
         LEFT JOIN playlist_songs ps ON p.id = ps.playlist_id
         LEFT JOIN users u ON p.user_id = u.id
-        WHERE p.user_id = ?
+        $where_sql
         GROUP BY p.id, p.name, p.description, p.public_id, p.is_collaborative, p.is_private, p.user_id, u.artist, p.play_count
         {$order_by} {$limit_clause}
       ");
-      $stmt->execute([$user_id]);
+      $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
 
@@ -19136,7 +19229,7 @@ SOFTWARE.</div>
                 data-song-genre="${escapeAttr(song.genre)}"
                 data-song-user-id="${song.user_id}">
                 <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
-                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                   <i class="bi bi-soundwave playing-icon"></i>
                 </div>
                 <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
@@ -20747,7 +20840,7 @@ SOFTWARE.</div>
               data-song-genre="${escapeAttr(song.genre)}"
               data-song-user-id="${song.user_id}">
               <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
-                <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                 <i class="bi bi-soundwave playing-icon"></i>
               </div>
               <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${escapeHTML(song.title)}</div></div>
@@ -20852,14 +20945,41 @@ SOFTWARE.</div>
           if (!append) contentArea.innerHTML = '';
           if (type === 'get_user_playlists' && !append && currentUser) {
             contentArea.innerHTML = `
-              <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
-                <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-music-note-list text-danger me-3 fs-3"></i> Manage Playlists</div>
-                <div class="d-flex gap-2 flex-wrap">
-                  <button class="btn btn-danger rounded-pill px-4 fw-medium shadow-sm" id="create-new-playlist-btn"><i class="bi bi-plus-lg me-1"></i> Create</button>
-                  <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-playlist-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
+              <div class="p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+                  <div class="text-white fw-bold fs-5 d-flex align-items-center"><i class="bi bi-music-note-list text-danger me-3 fs-3"></i> Manage Playlists</div>
+                  <div class="d-flex gap-2">
+                    <button class="btn btn-danger rounded-pill px-4 fw-medium shadow-sm" id="create-new-playlist-btn"><i class="bi bi-plus-lg me-1"></i> Create</button>
+                    <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-playlist-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
+                  </div>
+                </div>
+                <div class="w-100 position-relative">
+                  <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                  <input type="text" id="playlists-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search playlists..." value="${escapeHTML(currentView.searchQuery || '')}">
                 </div>
               </div>
             `;
+            
+            setTimeout(() => {
+              const attachPlaylistSearch = () => {
+                const handler = (e) => {
+                  clearTimeout(window.playlistsSearchTimeout);
+                  window.playlistsSearchTimeout = setTimeout(() => {
+                    currentView.searchQuery = e.target.value;
+                    loadView(currentView);
+                  }, 400);
+                };
+                const pSearch = document.getElementById('playlists-search-input');
+                if (pSearch) {
+                  pSearch.addEventListener('input', handler);
+                  if (currentView.searchQuery) {
+                    pSearch.focus();
+                    pSearch.setSelectionRange(pSearch.value.length, pSearch.value.length);
+                  }
+                }
+              };
+              attachPlaylistSearch();
+            }, 0);
           } else if (type === 'get_collab_playlists' && !append && currentUser) {
             contentArea.innerHTML = `
               <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
@@ -20979,7 +21099,7 @@ SOFTWARE.</div>
                   <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} ${artistNameAttr} style="cursor: pointer;">
                     ${moreButton}
                     <div style="position: relative; display: block; ${borderStyle} overflow: hidden;">
-                      <img src="${imgSrc}${imageId || 0}&v=${item.image_v || 0}" class="card-img-top" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
+                      <img src="${imgSrc}${imageId || 0}&v=${item.image_v || 0}&size=small" class="card-img-top" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
                       ${songCountBadge}
                     </div>
                     <div class="card-body px-0 py-2">
@@ -21155,7 +21275,7 @@ SOFTWARE.</div>
                     <h3 class="shelf-title">${shelf.title}</h3>
                   </div>
                   <div class="card bg-transparent border-secondary d-flex flex-row align-items-center p-3 top-result-card" data-song-id="${song.id}" style="border-radius: 12px; cursor: pointer; max-width: 600px; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'">
-                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
                     <div class="d-flex flex-column justify-content-center overflow-hidden w-100">
                       <h4 class="text-white text-truncate mb-1 fw-bold">${escapeHTML(song.title)}</h4>
                       <p class="text-secondary text-truncate mb-0">Song • ${escapeHTML(song.artist)}</p>
@@ -21233,7 +21353,7 @@ SOFTWARE.</div>
             if (shelf.type === 'songs') {
               itemsHTML = shelf.items.map(song => `
                 <div class="shelf-item" data-song-id="${song.id}">
-                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" alt="${escapeHTML(song.title)}">
+                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" alt="${escapeHTML(song.title)}">
                   <div class="item-title">${escapeHTML(song.title)}</div>
                   <div class="item-subtitle" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${escapeHTML(song.artist)}</div>
                 </div>
@@ -21242,7 +21362,7 @@ SOFTWARE.</div>
               itemsHTML = shelf.items.map(album => `
                 <div class="shelf-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
                   <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
-                    <img src="?action=get_image&id=${album.id || 0}&v=${album.image_v || 0}" alt="${escapeHTML(album.album)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
+                    <img src="?action=get_image&id=${album.id || 0}&v=${album.image_v || 0}&size=small" alt="${escapeHTML(album.album)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
                     ${album.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(album.song_count)}</div>` : ''}
                   </div>
                   <div class="item-title">${escapeHTML(album.album)}</div>
@@ -21254,7 +21374,7 @@ SOFTWARE.</div>
               itemsHTML = shelf.items.map(playlist => `
                 <div class="shelf-item" data-${shelf.type === 'mixes' ? 'mix' : 'playlist'}="${encodeURIComponent(playlist.public_id)}">
                   <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
-                    <img src="?action=get_image&id=${playlist.image_id || 0}&v=${playlist.image_v || 0}" alt="${escapeHTML(playlist.name)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
+                    <img src="?action=get_image&id=${playlist.image_id || 0}&v=${playlist.image_v || 0}&size=small" alt="${escapeHTML(playlist.name)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
                     ${playlist.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(playlist.song_count)}</div>` : ''}
                   </div>
                   <div class="item-title">${escapeHTML(playlist.name)}</div>
@@ -22190,12 +22310,25 @@ SOFTWARE.</div>
               updateContentTitle('Offline Music', !!currentUser);
               if (currentUser) {
                 contentArea.innerHTML = `
-                  <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
-                    <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-cloud-arrow-down-fill text-info me-3 fs-3"></i> Offline Library</div>
-                    <div class="d-flex gap-2 flex-wrap">
-                      <button class="btn btn-warning rounded-pill px-4 fw-medium shadow-sm text-dark" id="recache-all-offline-btn"><i class="bi bi-arrow-repeat me-1"></i> Re-cache All</button>
-                      <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-offline-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</button>
-                      <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-offline-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
+                  <div class="p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
+                      <div class="text-white fw-bold fs-5 d-flex align-items-center"><i class="bi bi-cloud-arrow-down-fill text-info me-3 fs-3"></i> Offline Library</div>
+                      <div class="d-flex flex-wrap gap-2 w-100 w-md-auto justify-content-md-end">
+                        <button class="btn btn-warning rounded-pill px-4 fw-bold shadow-sm text-dark flex-grow-1 flex-md-grow-0 text-nowrap" id="recache-all-offline-btn">
+                          <i class="bi bi-arrow-repeat me-1"></i> Re-cache All
+                        </button>
+                        <div class="dropdown flex-grow-1 flex-md-grow-0">
+                          <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm w-100 text-nowrap" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="bi bi-three-dots"></i> Options
+                          </button>
+                          <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary" style="background-color: var(--ytm-surface-2); border-radius: 12px; min-width: 220px;">
+                            <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="import-offline-btn"><i class="bi bi-box-arrow-in-down fs-5 text-info"></i> Import Library</button></li>
+                            <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="export-offline-btn"><i class="bi bi-box-arrow-up fs-5 text-info"></i> Export Library</button></li>
+                            <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
+                            <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger fw-bold" id="remove-all-offline-btn"><i class="bi bi-trash-fill fs-5"></i> Clear Offline Cache</button></li>
+                          </ul>
+                        </div>
+                      </div>
                     </div>
                   </div>`;
                 
@@ -22988,6 +23121,10 @@ SOFTWARE.</div>
               if (title === 'Collab_playlists') title = 'Shared with me';
               updateContentTitle(title);
               pageParams.delete('page');
+              
+              // Apply search parameter globally for any grid views that support it
+              if (currentView.searchQuery) pageParams.set('q', currentView.searchQuery);
+              
               data = await fetchData(`?action=${currentView.type}&${pageParams.toString()}`);
               renderGrid(data, currentView.type, false);
               break;
@@ -23000,10 +23137,44 @@ SOFTWARE.</div>
               const type = currentView.type.split('_')[0];
               const name_param = encodeURIComponent(currentView.param);
               updateContentTitle('', false);
+              
+              if (currentView.searchQuery) pageParams.set('q', currentView.searchQuery);
+              
               const typeViewData = await fetchData(`?action=get_view_data&type=${type}&name=${name_param}&${pageParams.toString()}`);
               contentArea.innerHTML = '';
               if (typeViewData && typeViewData.details) {
                 renderViewDetailsHeader(typeViewData.details, type, typeViewData.songs);
+                
+                // Inject the search bar INTO the songs pane, directly below the tabs!
+                const targetPane = document.getElementById('songs-pane') || contentArea;
+                const searchHTML = `
+                  <div class="px-3 mb-3 mt-4">
+                    <div class="position-relative" style="max-width: 400px; width: 100%;">
+                      <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                      <input type="text" id="view-songs-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search songs..." value="${escapeHTML(currentView.searchQuery || '')}">
+                    </div>
+                  </div>
+                `;
+                targetPane.insertAdjacentHTML('beforeend', searchHTML);
+                
+                setTimeout(() => {
+                  const viewSearch = document.getElementById('view-songs-search-input');
+                  if (viewSearch) {
+                    viewSearch.addEventListener('input', (e) => {
+                      clearTimeout(window.viewSearchTimeout);
+                      window.viewSearchTimeout = setTimeout(() => {
+                        currentView.searchQuery = e.target.value;
+                        loadView(currentView);
+                      }, 400);
+                    });
+                    
+                    if (currentView.searchQuery) {
+                       viewSearch.focus();
+                       viewSearch.setSelectionRange(viewSearch.value.length, viewSearch.value.length);
+                    }
+                  }
+                }, 0);
+                
                 renderSongs(typeViewData.songs, false);
                 data = typeViewData.songs;
               } else {
@@ -24089,7 +24260,7 @@ SOFTWARE.</div>
                 const song = shelf.items[0];
                 html += `<div class="search-dropdown-header text-danger">Top Result</div>
                   <div class="search-dropdown-item top-result-item" data-id="${song.id}">
-                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" class="search-dropdown-img" style="width: 50px; height: 50px; border-radius: 50%;">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" class="search-dropdown-img" style="width: 50px; height: 50px; border-radius: 50%;">
                     <div class="search-dropdown-text">
                       <div class="search-dropdown-title fw-bold" style="font-size: 1rem;">${escapeHTML(song.title)}</div>
                       <div class="search-dropdown-subtitle">Song • ${escapeHTML(song.artist)}</div>
@@ -24099,7 +24270,7 @@ SOFTWARE.</div>
               html += `<div class="search-dropdown-header">Songs</div>`;
               shelf.items.slice(0, 4).forEach(song => {
                 html += `<div class="search-dropdown-item song-dropdown-item" data-id="${song.id}">
-                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" class="search-dropdown-img">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" class="search-dropdown-img">
                     <div class="search-dropdown-text">
                       <div class="search-dropdown-title">${escapeHTML(song.title)}</div>
                       <div class="search-dropdown-subtitle">${escapeHTML(song.artist)}</div>
@@ -24109,7 +24280,7 @@ SOFTWARE.</div>
             } else if (shelf.type === 'artists') {
               html += `<div class="search-dropdown-header">Artists</div>`;
               shelf.items.slice(0, 3).forEach(artist => {
-                const img = artist.is_user ? `?action=get_profile_picture&id=${artist.id}` : `?action=get_image&id=${artist.id || 0}`;
+                const img = artist.is_user ? `?action=get_profile_picture&id=${artist.id}` : `?action=get_image&id=${artist.id || 0}&size=small`;
                 html += `<div class="search-dropdown-item artist-dropdown-item" data-artist="${encodeURIComponent(artist.name)}" data-userid="${artist.is_user ? artist.id : ''}">
                     <img src="${img}" class="search-dropdown-img" style="border-radius: 50%;">
                     <div class="search-dropdown-text">
@@ -24122,7 +24293,7 @@ SOFTWARE.</div>
               html += `<div class="search-dropdown-header">Albums</div>`;
               shelf.items.slice(0, 2).forEach(album => {
                 html += `<div class="search-dropdown-item album-dropdown-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}" data-artistname="${encodeURIComponent(album.artist || '')}">
-                    <img src="?action=get_image&id=${album.id || 0}&v=${album.image_v || 0}" class="search-dropdown-img">
+                    <img src="?action=get_image&id=${album.id || 0}&v=${album.image_v || 0}&size=small" class="search-dropdown-img">
                     <div class="search-dropdown-text">
                       <div class="search-dropdown-title">${escapeHTML(album.album)}</div>
                       <div class="search-dropdown-subtitle">${escapeHTML(album.artist)}</div>
@@ -25131,23 +25302,48 @@ SOFTWARE.</div>
             window.exportData(`?action=export_playlist&id=${exportPlaylistBtn.dataset.publicId}`, `playlist_${exportPlaylistBtn.dataset.publicId}.json`);
             return;
           }
+          const removeAllOfflineBtn = target.closest('#remove-all-offline-btn');
+          if (removeAllOfflineBtn) {
+            e.stopPropagation();
+            if (!confirm("Are you sure you want to remove ALL songs from your offline library? This will instantly delete them from your device's cache space.")) return;
+            
+            removeAllOfflineBtn.disabled = true;
+            removeAllOfflineBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Removing...';
+            
+            fetchData('?action=clear_offline', { method: 'POST' }).then(async (res) => {
+              if (res && res.status === 'success') {
+                try {
+                  await caches.delete('php-music-offline');
+                } catch(err) {}
+                offlineSongsSet.clear();
+                showToast(res.message, 'success');
+                loadView(currentView);
+              } else {
+                showToast('Failed to clear offline library.', 'error');
+                removeAllOfflineBtn.disabled = false;
+                removeAllOfflineBtn.innerHTML = '<i class="bi bi-trash-fill me-1"></i> Remove All';
+              }
+            });
+            return;
+          }
+
           const recacheAllBtn = target.closest('#recache-all-offline-btn');
           if (recacheAllBtn) {
-             if (!confirm("Are you sure you want to re-download all offline songs? This might take a while and consume data.")) return;
-             if (offlineViewSongsData && offlineViewSongsData.length > 0) {
-                const processAll = async () => {
-                   recacheAllBtn.disabled = true;
-                   recacheAllBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Processing...';
-                   for (const song of offlineViewSongsData) {
-                      await recacheOfflineSong(parseInt(song.id));
-                   }
-                   recacheAllBtn.disabled = false;
-                   recacheAllBtn.innerHTML = '<i class="bi bi-arrow-repeat"></i> Re-cache All';
-                   showToast('Finished re-caching all offline songs!', 'success');
-                };
-                processAll();
-             }
-             return;
+            if (!confirm("Are you sure you want to re-download all offline songs? This might take a while and consume data.")) return;
+            if (offlineViewSongsData && offlineViewSongsData.length > 0) {
+              const processAll = async () => {
+                recacheAllBtn.disabled = true;
+                recacheAllBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Processing...';
+                for (const song of offlineViewSongsData) {
+                  await recacheOfflineSong(parseInt(song.id));
+                }
+                recacheAllBtn.disabled = false;
+                recacheAllBtn.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i> Re-cache All';
+                showToast('Finished re-caching all offline songs!', 'success');
+              };
+              processAll();
+            }
+            return;
           }
 
           const importOfflineBtn = target.closest('#import-offline-btn');
