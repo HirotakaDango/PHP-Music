@@ -370,7 +370,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '5.2');
+define('APP_VERSION', '5.3');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -4527,10 +4527,15 @@ function send_json($data) {
   exit;
 }
 
+$protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' || $_SERVER['SERVER_PORT'] == 443) ? "https://" : "http://";
+$domainName = $_SERVER['HTTP_HOST'];
+$base_app_url = $protocol . $domainName . strtok($_SERVER["REQUEST_URI"], '?');
+$current_url = $protocol . $domainName . $_SERVER['REQUEST_URI'];
+
 $initialViewJS = '';
 $og_title = "PHP Music";
 $og_desc = "A simple, fast music player with user accounts and uploads.";
-$og_image = "?action=get_app_icon&size=512";
+$og_image = $base_app_url . "?action=get_app_icon&size=512&ext=.jpg";
 
 if (isset($_GET['share_type'])) {
   $db_for_share = get_db();
@@ -4552,13 +4557,13 @@ if (isset($_GET['share_type'])) {
 
     case 'song':
       $share_id = (int)($_GET['id'] ?? 0);
-      $stmt = $db_for_share->prepare("SELECT album, user_id FROM music WHERE id = ?");
+      $stmt = $db_for_share->prepare("SELECT title, artist, album, user_id FROM music WHERE id = ?");
       $stmt->execute([$share_id]);
       $song_info = $stmt->fetch();
       if ($song_info) {
-        $og_title = htmlspecialchars($song_info['album']) . " (Song)";
-        $og_desc = "Listen to this track on PHP Music.";
-        $og_image = "?action=get_image&id=" . $share_id;
+        $og_title = htmlspecialchars($song_info['title']) . " - " . htmlspecialchars($song_info['artist']);
+        $og_desc = "Listen to " . htmlspecialchars($song_info['title']) . " from the album " . htmlspecialchars($song_info['album']) . " on PHP Music.";
+        $og_image = $base_app_url . "?action=get_image&id=" . $share_id . "&ext=.jpg";
         $view_config = [
           'type' => 'album_songs',
           'param' => rawurlencode($song_info['album']),
@@ -4577,11 +4582,20 @@ if (isset($_GET['share_type'])) {
         $og_title = htmlspecialchars($album_name) . " - Album";
         $og_desc = "Listen to this album on PHP Music.";
         $view_config = ['type' => 'album_songs', 'param' => $album_name, 'sort' => 'title_asc'];
+        
+        $stmt_cover = $db_for_share->prepare("SELECT id FROM music WHERE album = ? ORDER BY id DESC LIMIT 1");
+        $stmt_cover->execute([$album_name]);
+        $cover_id = $stmt_cover->fetchColumn();
+        if ($cover_id) {
+            $og_image = $base_app_url . "?action=get_image&id=" . $cover_id . "&ext=.jpg";
+        }
+        
         if ($artist_id) {
           $view_config['filter_user_id'] = (int)$artist_id;
         }
         if ($artist_name) {
           $view_config['artist_name'] = $artist_name;
+          $og_desc = "Listen to the album " . htmlspecialchars($album_name) . " by " . htmlspecialchars($artist_name) . " on PHP Music.";
         }
       }
       break;
@@ -4595,12 +4609,20 @@ if (isset($_GET['share_type'])) {
         if ($artist_name) {
           $og_title = htmlspecialchars($artist_name) . " - Artist";
           $og_desc = "Listen to " . htmlspecialchars($artist_name) . " on PHP Music.";
-          $og_image = "?action=get_profile_picture&id=" . (int)$share_id;
+          $og_image = $base_app_url . "?action=get_profile_picture&id=" . (int)$share_id . "&ext=.jpg";
           $view_config = ['type' => 'artist_songs', 'param' => $artist_name, 'sort' => 'album_asc', 'filter_user_id' => (int)$share_id];
         }
       } else if ($share_id) {
         $og_title = htmlspecialchars($share_id) . " - Artist";
         $og_desc = "Listen to " . htmlspecialchars($share_id) . " on PHP Music.";
+        
+        $stmt_cover = $db_for_share->prepare("SELECT id FROM music WHERE match_artist(artist, ?) = 1 ORDER BY id DESC LIMIT 1");
+        $stmt_cover->execute([$share_id]);
+        $cover_id = $stmt_cover->fetchColumn();
+        if ($cover_id) {
+            $og_image = $base_app_url . "?action=get_image&id=" . $cover_id . "&ext=.jpg";
+        }
+        
         $view_config = ['type' => 'artist_songs', 'param' => $share_id, 'sort' => 'album_asc'];
       }
       break;
@@ -4614,14 +4636,27 @@ if (isset($_GET['share_type'])) {
         $og_title = htmlspecialchars($pl['name']) . " - Playlist";
         $og_desc = "Listen to this playlist on PHP Music.";
         $view_config = ['type' => 'playlist_songs', 'param' => $share_id, 'sort' => 'manual_order'];
+        
+        $stmt_cover = $db_for_share->prepare("SELECT song_id FROM playlist_songs WHERE playlist_id = ? ORDER BY added_at DESC LIMIT 1");
+        $stmt_cover->execute([$pl['id']]);
+        $cover_id = $stmt_cover->fetchColumn();
+        if ($cover_id) {
+            $og_image = $base_app_url . "?action=get_image&id=" . $cover_id . "&ext=.jpg";
+        }
       }
       break;
 
     case 'mix':
       $share_id = $_GET['id'] ?? null;
-      $stmt = $db_for_share->prepare("SELECT id FROM mixes WHERE public_id = ?");
+      $stmt = $db_for_share->prepare("SELECT id, name, image_id FROM mixes WHERE public_id = ?");
       $stmt->execute([$share_id]);
-      if ($stmt->fetch()) {
+      $mix_data = $stmt->fetch();
+      if ($mix_data) {
+        $og_title = htmlspecialchars($mix_data['name']) . " - Mix";
+        $og_desc = "Listen to this custom mix on PHP Music.";
+        if ($mix_data['image_id']) {
+            $og_image = $base_app_url . "?action=get_image&id=" . $mix_data['image_id'] . "&ext=.jpg";
+        }
         $view_config = ['type' => 'mix_songs', 'param' => $share_id, 'sort' => 'manual_order'];
       }
       break;
@@ -6858,7 +6893,16 @@ HTML;
 
     case 'get_following':
       if (!$user_id) { send_json([]); }
-      $stmt = $db->prepare("SELECT u.artist as name, u.id as id FROM follows f JOIN users u ON f.following_id = u.id WHERE f.follower_id = ? AND u.banned = 0 AND u.email NOT LIKE 'deleted_%' ORDER BY u.artist COLLATE NOCASE ASC " . $limit_clause);
+      $sort_key = $_GET['sort'] ?? 'name_asc';
+      $order_by = 'ORDER BY u.artist COLLATE NOCASE ASC';
+      if ($sort_key === 'name_desc') {
+        $order_by = 'ORDER BY u.artist COLLATE NOCASE DESC';
+      } elseif ($sort_key === 'newest') {
+        $order_by = 'ORDER BY f.rowid DESC';
+      } elseif ($sort_key === 'oldest') {
+        $order_by = 'ORDER BY f.rowid ASC';
+      }
+      $stmt = $db->prepare("SELECT u.artist as name, u.id as id FROM follows f JOIN users u ON f.following_id = u.id WHERE f.follower_id = ? AND u.banned = 0 AND u.email NOT LIKE 'deleted_%' $order_by " . $limit_clause);
       $stmt->execute([$user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -8729,7 +8773,7 @@ HTML;
         $details['recommended_artists'] = $stmt_rec_art->fetchAll();
 
         // FIX: Fetch the user's playlists for the "My Profile" view
-        $stmt_playlists = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count FROM playlists p WHERE p.user_id = ? ORDER BY p.created_at DESC");
+        $stmt_playlists = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, p.created_at, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, (SELECT m.last_modified FROM playlist_songs ps2 JOIN music m ON ps2.song_id = m.id WHERE ps2.playlist_id = p.id ORDER BY ps2.added_at DESC LIMIT 1) as image_v, (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count FROM playlists p WHERE p.user_id = ? ORDER BY p.created_at DESC");
         $stmt_playlists->execute([$user_id]);
         $details['playlists'] = $stmt_playlists->fetchAll();
 
@@ -8747,12 +8791,22 @@ HTML;
         ];
         $order_by = $sort_map[$sort] ?? $sort_map['title_asc'];
 
+        $search_cond = '';
+        $q = $_GET['q'] ?? '';
+        $params = [$user_id, $user_id];
+        if ($q !== '') {
+          $search_cond = " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
+          $params[] = "%$q%";
+          $params[] = "%$q%";
+          $params[] = "%$q%";
+        }
+
         $stmt_songs = $db->prepare("
           SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-          WHERE m.user_id = ? {$order_by} {$limit_clause}
+          WHERE m.user_id = ? {$search_cond} {$order_by} {$limit_clause}
         ");
-        $stmt_songs->execute([$user_id, $user_id]);
+        $stmt_songs->execute($params);
         $songs = $stmt_songs->fetchAll();
       } elseif ($type === 'playlist') {
         if (empty($name)) { http_response_code(400); exit; }
@@ -8932,7 +8986,7 @@ HTML;
               $details['is_following'] = false;
             }
             // FIX: Added 'is_collaborative' and 'is_private' so the UI context menus work correctly on artist views
-            $stmt_playlists = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count FROM playlists p WHERE p.user_id = ? AND (p.is_private = 0 OR {$is_super_admin} = 1) ORDER BY p.created_at DESC");
+            $stmt_playlists = $db->prepare("SELECT p.name, p.public_id, p.is_collaborative, p.is_private, p.created_at, (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id, (SELECT m.last_modified FROM playlist_songs ps2 JOIN music m ON ps2.song_id = m.id WHERE ps2.playlist_id = p.id ORDER BY ps2.added_at DESC LIMIT 1) as image_v, (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count FROM playlists p WHERE p.user_id = ? AND (p.is_private = 0 OR {$is_super_admin} = 1) ORDER BY p.created_at DESC");
             $stmt_playlists->execute([$artist_user_id]);
             $details['playlists'] = $stmt_playlists->fetchAll();
           }
@@ -10969,19 +11023,39 @@ function perform_full_scan($db) {
 <html lang="en">
   <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="A simple, fast music player with user accounts and uploads.">
-    <meta property="og:title" content="<?php echo $og_title; ?>">
-    <meta property="og:description" content="<?php echo $og_desc; ?>">
-    <meta property="og:type" content="website">
-    <meta property="og:image" content="<?php echo $og_image; ?>">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title><?php echo $og_title; ?></title>
+    
+    <!-- Primary Meta Tags -->
+    <meta name="title" content="<?php echo $og_title; ?>">
+    <meta name="description" content="<?php echo $og_desc; ?>">
+    <meta name="keywords" content="music, player, php, streaming, audio, webapp">
+    <meta name="author" content="PHP Music">
+    <meta name="theme-color" content="#0a0a0a">
+    <meta name="application-name" content="PHP Music">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="PHP Music">
-    <meta name="application-name" content="PHP Music">
-    <title>PHP Music</title>
+
+    <!-- Open Graph / Facebook / WhatsApp -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="<?php echo $current_url; ?>">
+    <meta property="og:title" content="<?php echo $og_title; ?>">
+    <meta property="og:description" content="<?php echo $og_desc; ?>">
+    <meta property="og:image" content="<?php echo $og_image; ?>">
+    <meta property="og:image:secure_url" content="<?php echo $og_image; ?>">
+    <meta property="og:image:type" content="image/jpeg">
+    <meta property="og:image:width" content="600">
+    <meta property="og:image:height" content="600">
+
+    <!-- Twitter / Discord / Telegram -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:url" content="<?php echo $current_url; ?>">
+    <meta name="twitter:title" content="<?php echo $og_title; ?>">
+    <meta name="twitter:description" content="<?php echo $og_desc; ?>">
+    <meta name="twitter:image" content="<?php echo $og_image; ?>">
+
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
-    <meta name="theme-color" content="#0a0a0a"/>
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
       // ANTI-INSPECT: Block Eruda/vConsole, with Super Admin Bypass
@@ -15434,25 +15508,190 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+    <style>
+      .share-platform-btn .icon-box { transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1); }
+      .share-platform-btn:hover .icon-box { transform: scale(1.15) translateY(-2px); box-shadow: 0 8px 16px rgba(0,0,0,0.6) !important; }
+    </style>
     <div class="modal fade" id="share-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header border-0">
-            <h5 class="modal-title" id="share-modal-title">Share</h5>
+        <div class="modal-content" style="background: rgba(20, 20, 20, 0.95); backdrop-filter: blur(15px); border: 1px solid #444; border-radius: 24px;">
+          <div class="modal-header border-0 pb-1">
+            <h5 class="modal-title fw-bold text-white" id="share-modal-title">Share</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body">
-            <p class="text-secondary text-center mb-4" id="share-modal-text">Share this with your friends!</p>
-            <div class="d-flex justify-content-center gap-3 mb-4 fs-2">
-              <a href="#" id="share-facebook" target="_blank" class="text-white"><i class="bi bi-facebook"></i></a>
-                            <a href="#" id="share-twitter" target="_blank" class="text-white"><i class="bi bi-twitter-x"></i></a>
-              <a href="#" id="share-whatsapp" target="_blank" class="text-white"><i class="bi bi-whatsapp"></i></a>
-              <a href="#" id="share-telegram" target="_blank" class="text-white"><i class="bi bi-telegram"></i></a>
+          <div class="modal-body pt-0 pb-4 px-4">
+            
+            <div class="d-flex align-items-center gap-3 mb-4 mt-2 p-3 rounded-4" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">
+              <img id="share-modal-cover" src="" class="rounded-3 shadow" style="width: 70px; height: 70px; object-fit: cover; display: none;">
+              <div class="overflow-hidden flex-grow-1">
+                <h6 class="text-white fw-bold mb-1 text-truncate" id="share-modal-preview-title">Title</h6>
+                <p class="text-secondary small mb-0 text-truncate" id="share-modal-preview-desc">Description</p>
+              </div>
             </div>
-            <p class="small text-secondary">Or copy the link</p>
+
+            <button class="btn btn-light w-100 mb-4 fw-bold rounded-pill py-2 shadow-lg text-dark" id="system-share-btn" style="display: none; border: none;">
+              <i class="bi bi-share-fill me-2"></i> Share via System Apps
+            </button>
+            
+            <p class="small text-secondary fw-bold mb-2 text-uppercase" style="letter-spacing: 1px;">Share to Apps</p>
+            <div class="d-flex gap-4 overflow-auto pb-3 pt-2 mb-2 modern-custom-scroll" style="scroll-snap-type: x mandatory;">
+              <a href="#" id="share-whatsapp" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #25D366; color: #fff; font-size: 1.6rem;"><i class="bi bi-whatsapp"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">WhatsApp</span>
+              </a>
+              <a href="#" id="share-twitter" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #000000; border: 1px solid #333; color: #fff; font-size: 1.6rem;"><i class="bi bi-twitter-x"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">X (Twitter)</span>
+              </a>
+              <a href="#" id="share-facebook" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #1877F2; color: #fff; font-size: 1.6rem;"><i class="bi bi-facebook"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Facebook</span>
+              </a>
+              <a href="#" id="share-telegram" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #26A5E4; color: #fff; font-size: 1.6rem;"><i class="bi bi-telegram"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Telegram</span>
+              </a>
+              <a href="#" id="share-messenger" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #0084FF; color: #fff; font-size: 1.6rem;"><i class="bi bi-messenger"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Messenger</span>
+              </a>
+              <a href="#" id="share-reddit" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #FF4500; color: #fff; font-size: 1.6rem;"><i class="bi bi-reddit"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Reddit</span>
+              </a>
+              <a href="#" id="share-linkedin" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #0A66C2; color: #fff; font-size: 1.6rem;"><i class="bi bi-linkedin"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">LinkedIn</span>
+              </a>
+              <a href="#" id="share-pinterest" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #E60023; color: #fff; font-size: 1.6rem;"><i class="bi bi-pinterest"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Pinterest</span>
+              </a>
+              <a href="#" id="share-line" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #00C300; color: #fff; font-size: 1.6rem;"><i class="bi bi-line"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">LINE</span>
+              </a>
+              <a href="#" id="share-discord" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #5865F2; color: #fff; font-size: 1.6rem;"><i class="bi bi-discord"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Discord</span>
+              </a>
+              <a href="#" id="share-skype" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #00AFF0; color: #fff; font-size: 1.6rem;"><i class="bi bi-skype"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Skype</span>
+              </a>
+              <a href="#" id="share-wechat" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #7BB32E; color: #fff; font-size: 1.6rem;"><i class="bi bi-wechat"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">WeChat</span>
+              </a>
+              <a href="#" id="share-tumblr" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #36465D; color: #fff; font-size: 1.6rem;"><i class="bi bi-wordpress"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Tumblr</span>
+              </a>
+              <a href="#" id="share-mastodon" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #6364FF; color: #fff; font-size: 1.6rem;"><i class="bi bi-mastodon"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Mastodon</span>
+              </a>
+              <a href="#" id="share-hackernews" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #FF6600; color: #fff; font-size: 1.6rem;"><i class="bi bi-h-square"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">H. News</span>
+              </a>
+              <a href="#" id="share-pocket" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #EF4056; color: #fff; font-size: 1.6rem;"><i class="bi bi-bookmark-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Pocket</span>
+              </a>
+              <a href="#" id="share-vk" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #0077FF; color: #fff; font-size: 1.6rem;"><i class="bi bi-vimeo"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">VKontakte</span>
+              </a>
+              <a href="#" id="share-flipboard" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #E12828; color: #fff; font-size: 1.6rem;"><i class="bi bi-front"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Flipboard</span>
+              </a>
+              <a href="#" id="share-email" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #EA4335; color: #fff; font-size: 1.6rem;"><i class="bi bi-envelope-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Email</span>
+              </a>
+              <a href="#" id="share-sms" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #34B7F1; color: #fff; font-size: 1.6rem;"><i class="bi bi-chat-text-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">SMS</span>
+              </a>
+              
+              <a href="#" id="share-threads" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #000000; border: 1px solid #333; color: #fff; font-size: 1.6rem;"><i class="bi bi-threads"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Threads</span>
+              </a>
+              <a href="#" id="share-snapchat" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #FFFC00; color: #000; font-size: 1.6rem;"><i class="bi bi-snapchat"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Snapchat</span>
+              </a>
+              <a href="#" id="share-slack" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #4A154B; color: #fff; font-size: 1.6rem;"><i class="bi bi-slack"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Slack</span>
+              </a>
+              <a href="#" id="share-twitch" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #9146FF; color: #fff; font-size: 1.6rem;"><i class="bi bi-twitch"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Twitch</span>
+              </a>
+              <a href="#" id="share-medium" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #000000; border: 1px solid #333; color: #fff; font-size: 1.6rem;"><i class="bi bi-medium"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Medium</span>
+              </a>
+              <a href="#" id="share-quora" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #B92B27; color: #fff; font-size: 1.6rem;"><i class="bi bi-quora"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Quora</span>
+              </a>
+              <a href="#" id="share-tiktok" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #000000; border: 1px solid #333; color: #fff; font-size: 1.6rem;"><i class="bi bi-tiktok"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">TikTok</span>
+              </a>
+              <a href="#" id="share-instagram" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #E1306C; color: #fff; font-size: 1.6rem;"><i class="bi bi-instagram"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Instagram</span>
+              </a>
+              <a href="#" id="share-youtube" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #FF0000; color: #fff; font-size: 1.6rem;"><i class="bi bi-youtube"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">YouTube</span>
+              </a>
+              <a href="#" id="share-spotify" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #1DB954; color: #fff; font-size: 1.6rem;"><i class="bi bi-spotify"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Spotify</span>
+              </a>
+              <a href="#" id="share-github" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #333333; color: #fff; font-size: 1.6rem;"><i class="bi bi-github"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">GitHub</span>
+              </a>
+              <a href="#" id="share-wordpress" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #21759B; color: #fff; font-size: 1.6rem;"><i class="bi bi-wordpress"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">WordPress</span>
+              </a>
+              <a href="#" id="share-dribbble" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #EA4C89; color: #fff; font-size: 1.6rem;"><i class="bi bi-dribbble"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Dribbble</span>
+              </a>
+              <a href="#" id="share-weibo" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #DF2029; color: #fff; font-size: 1.6rem;"><i class="bi bi-eye-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Weibo</span>
+              </a>
+              <a href="#" id="share-qq" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #12B7F5; color: #fff; font-size: 1.6rem;"><i class="bi bi-chat-dots-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Tencent QQ</span>
+              </a>
+              <a href="#" id="share-kakaotalk" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #FEE500; color: #000; font-size: 1.6rem;"><i class="bi bi-chat-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">KakaoTalk</span>
+              </a>
+              <a href="#" id="share-viber" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #7360F2; color: #fff; font-size: 1.6rem;"><i class="bi bi-telephone-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Viber</span>
+              </a>
+              <a href="#" id="share-signal" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #3A76F0; color: #fff; font-size: 1.6rem;"><i class="bi bi-chat-square-dots-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Signal</span>
+              </a>
+              <a href="#" id="share-buffer" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #232428; color: #fff; font-size: 1.6rem;"><i class="bi bi-layers-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Buffer</span>
+              </a>
+              <a href="#" id="share-digg" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #000000; border: 1px solid #333; color: #fff; font-size: 1.6rem;"><i class="bi bi-hand-thumbs-up-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Digg</span>
+              </a>
+              <a href="#" id="share-douban" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #007722; color: #fff; font-size: 1.6rem;"><i class="bi bi-book-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Douban</span>
+              </a>
+              <a href="#" id="share-trello" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #0079BF; color: #fff; font-size: 1.6rem;"><i class="bi bi-kanban-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Trello</span>
+              </a>
+              <a href="#" id="share-xing" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #006567; color: #fff; font-size: 1.6rem;"><i class="bi bi-x-diamond-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Xing</span>
+              </a>
+              <a href="#" id="share-yammer" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #0072C6; color: #fff; font-size: 1.6rem;"><i class="bi bi-yelp"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Yammer</span>
+              </a>
+              <a href="#" id="share-blogger" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #FF5722; color: #fff; font-size: 1.6rem;"><i class="bi bi-pen-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Blogger</span>
+              </a>
+              <a href="#" id="share-evernote" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #00A82D; color: #fff; font-size: 1.6rem;"><i class="bi bi-journal-check"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Evernote</span>
+              </a>
+              <a href="#" id="share-mewe" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #006E98; color: #fff; font-size: 1.6rem;"><i class="bi bi-people-fill"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">MeWe</span>
+              </a>
+              <a href="#" id="share-diaspora" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #000000; border: 1px solid #333; color: #fff; font-size: 1.6rem;"><i class="bi bi-asterisk"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Diaspora</span>
+              </a>
+              <a href="#" id="share-taringa" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #015697; color: #fff; font-size: 1.6rem;"><i class="bi bi-globe"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Taringa</span>
+              </a>
+              <a href="#" id="share-teams" target="_blank" class="text-decoration-none d-flex flex-column align-items-center share-platform-btn" style="scroll-snap-align: start; min-width: 60px;">
+                <div class="icon-box rounded-circle d-flex align-items-center justify-content-center mb-2 shadow" style="width: 55px; height: 55px; background: #6264A7; color: #fff; font-size: 1.6rem;"><i class="bi bi-microsoft"></i></div><span class="text-secondary text-truncate w-100 text-center" style="font-size: 0.7rem;">Teams</span>
+              </a>
+            </div>
+            
+            <p class="small text-secondary fw-bold mb-2 mt-3 text-uppercase" style="letter-spacing: 1px;">Copy Link</p>
             <div class="input-group">
-              <input type="text" class="form-control" id="share-url-input" readonly>
-              <button class="btn btn-danger" type="button" id="copy-share-url-btn">Copy</button>
+              <input type="text" class="form-control bg-dark border-secondary text-white rounded-start-pill ps-4" id="share-url-input" readonly>
+              <button class="btn btn-danger px-4 rounded-end-pill fw-bold" type="button" id="copy-share-url-btn">Copy</button>
             </div>
           </div>
         </div>
@@ -20581,7 +20820,7 @@ SOFTWARE.</div>
               shareArtistName = songsList[0].artist;
             }
             shareButtonHTML = `
-              <button class="btn btn-outline-light border-0 share-view-btn" title="Share ${type}" data-share-type="${type}" data-share-id="${shareId}" data-share-name="${shareName}" data-artist-id="${artistIdForShare}" data-artist-name="${encodeURIComponent(shareArtistName)}">
+              <button class="btn btn-outline-light border-0 share-view-btn" title="Share ${type}" data-share-type="${type}" data-share-id="${shareId}" data-share-name="${shareName}" data-artist-id="${artistIdForShare}" data-artist-name="${encodeURIComponent(shareArtistName)}" data-image-url="${details.image_url}">
                 <i class="bi bi-share-fill"></i> <span class="d-none d-md-inline">Share</span>
               </button>`;
           }
@@ -20664,6 +20903,7 @@ SOFTWARE.</div>
                 const bPane = document.getElementById('blogs-pane');
                 if (!bPane) return;
                 const bData = await fetchData(`?action=get_blogs&artist_id=${details.user_id}&sort=newest`);
+                window.artistBlogsData = bData || [];
                 if (bData && bData.length > 0) {
                   bPane.innerHTML = `<div class="notes-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">` + bData.map(b => `
                     <div class="note-card bg-dark text-white border-secondary hover-bg-dark blog-card-item" data-id="${b.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
@@ -20769,6 +21009,7 @@ SOFTWARE.</div>
               </div>
             `;
             contentArea.insertAdjacentHTML('beforeend', tabsHTML);
+            window.artistPlaylistsData = details.playlists || [];
           }
         };
 
@@ -21468,7 +21709,7 @@ SOFTWARE.</div>
         };
         
         const setupSortOptions = (viewType) => {
-          const isSortable = ['get_favorites', 'get_listen_later', 'get_notes', 'get_blogs', 'get_community', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists', 'get_collab_playlists', 'get_my_apis'].includes(viewType);
+          const isSortable = ['get_favorites', 'get_listen_later', 'get_notes', 'get_blogs', 'get_community', 'get_offline_songs', 'artist_songs', 'album_songs', 'genre_songs', 'year_songs', 'user_profile', 'playlist_songs', 'get_history', 'get_albums', 'get_artists', 'get_user_playlists', 'get_collab_playlists', 'get_my_apis', 'get_following'].includes(viewType);
           
           if (isSortable) {
             let options = {};
@@ -21528,6 +21769,11 @@ SOFTWARE.</div>
                 options = {
                   'name_asc': 'Name (A-Z)', 'name_desc': 'Name (Z-A)',
                   'modified_desc': 'Date Modified (Newest)', 'modified_asc': 'Date Modified (Oldest)'
+                };
+                break;
+              case 'get_following':
+                options = {
+                  'newest': 'Recently Followed', 'oldest': 'Oldest Followed', 'name_asc': 'Name (A-Z)', 'name_desc': 'Name (Z-A)'
                 };
                 break;
               case 'get_my_apis':
@@ -21924,6 +22170,12 @@ SOFTWARE.</div>
           viewLoadCounter++;
           const currentLoadId = viewLoadCounter;
 
+          // Cleanup custom sort from profile/artist pages if navigating away
+          if (viewConfig.type !== 'user_profile' && viewConfig.type !== 'artist_songs') {
+            const existingCustomSort = document.getElementById('artist-custom-sort-container');
+            if (existingCustomSort) existingCustomSort.remove();
+          }
+
           // DEBOUNCE: Prevent rapid firing of database queries on fast clicks
           if (viewDebounceTimer) clearTimeout(viewDebounceTimer);
           showLoader(true);
@@ -22286,10 +22538,183 @@ SOFTWARE.</div>
               break;
             case 'user_profile':
               updateContentTitle('', false);
+              
+              if (currentView.searchQuery) pageParams.set('q', currentView.searchQuery);
+              
               const profileViewData = await fetchData(`?action=get_view_data&type=profile&${pageParams.toString()}`);
               contentArea.innerHTML = '';
               if (profileViewData && profileViewData.details) {
                 renderViewDetailsHeader(profileViewData.details, 'profile');
+                
+                const existingCustomSort = document.getElementById('artist-custom-sort-container');
+                if (existingCustomSort) existingCustomSort.remove();
+
+                const customSortHTML = `
+                    <div id="artist-custom-sort-container" class="d-none align-items-center gap-2">
+                      <label for="artist-custom-sort-select" class="text-secondary small">Sort by</label>
+                      <select id="artist-custom-sort-select" class="form-select form-select-sm" style="width: auto;"></select>
+                    </div>
+                `;
+                document.querySelector('.header-controls').insertAdjacentHTML('afterbegin', customSortHTML);
+
+                const searchHTML = `
+                  <div class="px-3 mb-3 mt-4 d-flex flex-wrap gap-2 align-items-center">
+                    <div class="position-relative" style="max-width: 400px; width: 100%;">
+                      <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                      <input type="text" id="view-songs-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search songs..." value="${escapeHTML(currentView.searchQuery || '')}">
+                    </div>
+                  </div>
+                `;
+                const targetPane = document.getElementById('artistTabsContent') || contentArea;
+                targetPane.insertAdjacentHTML('beforebegin', searchHTML);
+                
+                // Define the sorting and filtering engines (matching the artist profile engine)
+                window.filterAndSortArtistPlaylists = () => {
+                  const sInp = document.getElementById('view-songs-search-input');
+                  const sSel = document.getElementById('artist-custom-sort-select');
+                  if (!sInp || !sSel) return;
+                  const query = sInp.value.toLowerCase().trim();
+                  const sortVal = sSel.value;
+                  let filtered = [...(window.artistPlaylistsData || [])];
+                  if (query) filtered = filtered.filter(p => p.name.toLowerCase().includes(query) || (p.description && p.description.toLowerCase().includes(query)));
+                  filtered.sort((a, b) => {
+                    if (sortVal === 'newest') return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+                    if (sortVal === 'modified') return new Date(b.image_v || 0) - new Date(a.image_v || 0);
+                    if (sortVal === 'name_asc') return a.name.localeCompare(b.name);
+                    if (sortVal === 'name_desc') return b.name.localeCompare(a.name);
+                    if (sortVal === 'songs_desc') return (b.song_count || 0) - (a.song_count || 0);
+                    if (sortVal === 'songs_asc') return (a.song_count || 0) - (b.song_count || 0);
+                    return 0;
+                  });
+                  const pane = document.getElementById('playlists-pane');
+                  if (!pane) return;
+                  if (filtered.length === 0) { pane.innerHTML = '<div class="text-center p-5 text-secondary">No playlists found.</div>'; return; }
+                  pane.innerHTML = `<div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 g-4">${filtered.map(p => `
+                    <div class="col">
+                      <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
+                        ${(currentUser && (currentUser.id == currentViewOwnerId || currentUser.email === 'musiclibrary@mail.com')) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${currentViewOwnerId}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
+                        <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
+                          <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}&size=small" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
+                          ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ''}
+                        </div>
+                        <div class="card-body px-0 py-2"><h5 class="card-title fs-6 fw-normal text-truncate">${escapeHTML(p.name)}</h5></div>
+                      </div>
+                    </div>
+                  `).join('')}</div>`;
+                };
+
+                window.filterAndSortArtistBlogs = () => {
+                  const sInp = document.getElementById('view-songs-search-input');
+                  const sSel = document.getElementById('artist-custom-sort-select');
+                  if (!sInp || !sSel) return;
+                  const query = sInp.value.toLowerCase().trim();
+                  const sortVal = sSel.value;
+                  let filtered = [...(window.artistBlogsData || [])];
+                  if (query) filtered = filtered.filter(b => b.title.toLowerCase().includes(query) || (b.content && b.content.toLowerCase().includes(query)));
+                  filtered.sort((a, b) => {
+                    if (sortVal === 'newest') return new Date(b.created_at.replace(' ', 'T')+'Z') - new Date(a.created_at.replace(' ', 'T')+'Z');
+                    if (sortVal === 'oldest') return new Date(a.created_at.replace(' ', 'T')+'Z') - new Date(b.created_at.replace(' ', 'T')+'Z');
+                    if (sortVal === 'modified') return new Date(b.updated_at.replace(' ', 'T')+'Z') - new Date(a.updated_at.replace(' ', 'T')+'Z');
+                    if (sortVal === 'title_asc') return a.title.localeCompare(b.title);
+                    return 0;
+                  });
+                  const pane = document.getElementById('blogs-pane');
+                  if (!pane) return;
+                  if (filtered.length === 0) { pane.innerHTML = '<div class="text-center p-5 text-secondary">No blogs found.</div>'; return; }
+                  pane.innerHTML = `<div class="notes-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">${filtered.map(b => `
+                    <div class="note-card bg-dark text-white border-secondary hover-bg-dark blog-card-item" data-id="${b.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
+                      <div class="d-flex justify-content-between mb-2">
+                        <span class="badge bg-primary text-white">Public Blog</span>
+                        <span class="small text-secondary">${new Date(b.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()}</span>
+                      </div>
+                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
+                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                    </div>
+                  `).join('')}</div>`;
+                };
+
+                const updateArtistSearchAndSortUI = (activeTabId) => {
+                  const sInp = document.getElementById('view-songs-search-input');
+                  const sCont = document.getElementById('artist-custom-sort-container');
+                  const sSel = document.getElementById('artist-custom-sort-select');
+                  const gSort = document.getElementById('sort-controls');
+                  if (!sInp) return;
+                  
+                  // Clear query when switching tab to prevent accidental data filter mix-ups
+                  sInp.value = "";
+                  
+                  if (activeTabId === 'songs-tab') {
+                    sInp.placeholder = "Search songs...";
+                    if (sCont) sCont.classList.replace('d-flex', 'd-none');
+                    if (gSort) gSort.classList.remove('d-none');
+                  } else if (activeTabId === 'playlists-tab') {
+                    sInp.placeholder = "Search playlists...";
+                    if (gSort) gSort.classList.add('d-none');
+                    if (sCont && sSel) {
+                      sSel.innerHTML = '<option value="newest">Newest</option><option value="modified">Recently Modified</option><option value="name_asc">Name (A-Z)</option><option value="name_desc">Name (Z-A)</option><option value="songs_desc">Most Songs</option><option value="songs_asc">Least Songs</option>';
+                      sCont.classList.replace('d-none', 'd-flex');
+                      if (!sCont.classList.contains('d-flex')) sCont.classList.add('d-flex');
+                    }
+                    window.filterAndSortArtistPlaylists();
+                  } else if (activeTabId === 'blogs-tab') {
+                    sInp.placeholder = "Search blogs...";
+                    if (gSort) gSort.classList.add('d-none');
+                    if (sCont && sSel) {
+                      sSel.innerHTML = '<option value="newest">Newest</option><option value="oldest">Oldest</option><option value="modified">Recently Modified</option><option value="title_asc">Title (A-Z)</option>';
+                      sCont.classList.replace('d-none', 'd-flex');
+                      if (!sCont.classList.contains('d-flex')) sCont.classList.add('d-flex');
+                    }
+                    window.filterAndSortArtistBlogs();
+                  }
+                };
+
+                setTimeout(() => {
+                  const viewSearch = document.getElementById('view-songs-search-input');
+                  const sortSelect = document.getElementById('artist-custom-sort-select');
+                  
+                  if (viewSearch) {
+                    viewSearch.addEventListener('input', (e) => {
+                      const activeTab = document.querySelector('#artistTabs .nav-link.active');
+                      const activeTabId = activeTab ? activeTab.id : 'songs-tab';
+                      if (activeTabId === 'songs-tab') {
+                        clearTimeout(window.viewSearchTimeout);
+                        window.viewSearchTimeout = setTimeout(() => {
+                          currentView.searchQuery = e.target.value;
+                          loadView(currentView);
+                        }, 400);
+                      } else if (activeTabId === 'playlists-tab') {
+                        window.filterAndSortArtistPlaylists();
+                      } else if (activeTabId === 'blogs-tab') {
+                        window.filterAndSortArtistBlogs();
+                      }
+                    });
+                    
+                    if (currentView.searchQuery) {
+                       viewSearch.focus();
+                       viewSearch.setSelectionRange(viewSearch.value.length, viewSearch.value.length);
+                    }
+                  }
+
+                  if (sortSelect) {
+                    sortSelect.addEventListener('change', () => {
+                      const activeTab = document.querySelector('#artistTabs .nav-link.active');
+                      const activeTabId = activeTab ? activeTab.id : 'songs-tab';
+                      if (activeTabId === 'playlists-tab') {
+                        window.filterAndSortArtistPlaylists();
+                      } else if (activeTabId === 'blogs-tab') {
+                        window.filterAndSortArtistBlogs();
+                      }
+                    });
+                  }
+
+                  const artistTabs = document.getElementById('artistTabs');
+                  if (artistTabs) {
+                    artistTabs.addEventListener('shown.bs.tab', (e) => {
+                      updateArtistSearchAndSortUI(e.target.id);
+                    });
+                  }
+                }, 0);
+                
                 renderSongs(profileViewData.songs, false);
                 data = profileViewData.songs;
               } else {
@@ -23145,35 +23570,176 @@ SOFTWARE.</div>
               if (typeViewData && typeViewData.details) {
                 renderViewDetailsHeader(typeViewData.details, type, typeViewData.songs);
                 
-                // Inject the search bar INTO the songs pane, directly below the tabs!
-                const targetPane = document.getElementById('songs-pane') || contentArea;
-                const searchHTML = `
-                  <div class="px-3 mb-3 mt-4">
-                    <div class="position-relative" style="max-width: 400px; width: 100%;">
-                      <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
-                      <input type="text" id="view-songs-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search songs..." value="${escapeHTML(currentView.searchQuery || '')}">
+                if (type === 'artist') {
+                  const existingCustomSort = document.getElementById('artist-custom-sort-container');
+                  if (existingCustomSort) existingCustomSort.remove();
+
+                  const customSortHTML = `
+                      <div id="artist-custom-sort-container" class="d-none align-items-center gap-2">
+                        <label for="artist-custom-sort-select" class="text-secondary small">Sort by</label>
+                        <select id="artist-custom-sort-select" class="form-select form-select-sm" style="width: auto;"></select>
+                      </div>
+                  `;
+                  document.querySelector('.header-controls').insertAdjacentHTML('afterbegin', customSortHTML);
+
+                  const searchHTML = `
+                    <div class="px-3 mb-3 mt-4 d-flex flex-wrap gap-2 align-items-center">
+                      <div class="position-relative" style="max-width: 400px; width: 100%;">
+                        <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                        <input type="text" id="view-songs-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search songs..." value="${escapeHTML(currentView.searchQuery || '')}">
+                      </div>
                     </div>
-                  </div>
-                `;
-                targetPane.insertAdjacentHTML('beforeend', searchHTML);
-                
-                setTimeout(() => {
-                  const viewSearch = document.getElementById('view-songs-search-input');
-                  if (viewSearch) {
-                    viewSearch.addEventListener('input', (e) => {
-                      clearTimeout(window.viewSearchTimeout);
-                      window.viewSearchTimeout = setTimeout(() => {
-                        currentView.searchQuery = e.target.value;
-                        loadView(currentView);
-                      }, 400);
+                  `;
+                  const targetPane = document.getElementById('artistTabsContent') || contentArea;
+                  targetPane.insertAdjacentHTML('beforebegin', searchHTML);
+                  
+                  // Define the sorting and filtering engines
+                  window.filterAndSortArtistPlaylists = () => {
+                    const sInp = document.getElementById('view-songs-search-input');
+                    const sSel = document.getElementById('artist-custom-sort-select');
+                    if (!sInp || !sSel) return;
+                    const query = sInp.value.toLowerCase().trim();
+                    const sortVal = sSel.value;
+                    let filtered = [...(window.artistPlaylistsData || [])];
+                    if (query) filtered = filtered.filter(p => p.name.toLowerCase().includes(query) || (p.description && p.description.toLowerCase().includes(query)));
+                    filtered.sort((a, b) => {
+                      if (sortVal === 'newest') return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+                      if (sortVal === 'modified') return new Date(b.image_v || 0) - new Date(a.image_v || 0);
+                      if (sortVal === 'name_asc') return a.name.localeCompare(b.name);
+                      if (sortVal === 'name_desc') return b.name.localeCompare(a.name);
+                      if (sortVal === 'songs_desc') return (b.song_count || 0) - (a.song_count || 0);
+                      if (sortVal === 'songs_asc') return (a.song_count || 0) - (b.song_count || 0);
+                      return 0;
                     });
+                    const pane = document.getElementById('playlists-pane');
+                    if (!pane) return;
+                    if (filtered.length === 0) { pane.innerHTML = '<div class="text-center p-5 text-secondary">No playlists found.</div>'; return; }
+                    pane.innerHTML = `<div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 g-4">${filtered.map(p => `
+                      <div class="col">
+                        <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
+                          ${(currentUser && (currentUser.id == currentViewOwnerId || currentUser.email === 'musiclibrary@mail.com')) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${currentViewOwnerId}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
+                          <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
+                            <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}&size=small" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
+                            ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ''}
+                          </div>
+                          <div class="card-body px-0 py-2"><h5 class="card-title fs-6 fw-normal text-truncate">${escapeHTML(p.name)}</h5></div>
+                        </div>
+                      </div>
+                    `).join('')}</div>`;
+                  };
+
+                  window.filterAndSortArtistBlogs = () => {
+                    const sInp = document.getElementById('view-songs-search-input');
+                    const sSel = document.getElementById('artist-custom-sort-select');
+                    if (!sInp || !sSel) return;
+                    const query = sInp.value.toLowerCase().trim();
+                    const sortVal = sSel.value;
+                    let filtered = [...(window.artistBlogsData || [])];
+                    if (query) filtered = filtered.filter(b => b.title.toLowerCase().includes(query) || (b.content && b.content.toLowerCase().includes(query)));
+                    filtered.sort((a, b) => {
+                      if (sortVal === 'newest') return new Date(b.created_at.replace(' ', 'T')+'Z') - new Date(a.created_at.replace(' ', 'T')+'Z');
+                      if (sortVal === 'oldest') return new Date(a.created_at.replace(' ', 'T')+'Z') - new Date(b.created_at.replace(' ', 'T')+'Z');
+                      if (sortVal === 'modified') return new Date(b.updated_at.replace(' ', 'T')+'Z') - new Date(a.updated_at.replace(' ', 'T')+'Z');
+                      if (sortVal === 'title_asc') return a.title.localeCompare(b.title);
+                      return 0;
+                    });
+                    const pane = document.getElementById('blogs-pane');
+                    if (!pane) return;
+                    if (filtered.length === 0) { pane.innerHTML = '<div class="text-center p-5 text-secondary">No blogs found.</div>'; return; }
+                    pane.innerHTML = `<div class="notes-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">${filtered.map(b => `
+                      <div class="note-card bg-dark text-white border-secondary hover-bg-dark blog-card-item" data-id="${b.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
+                        <div class="d-flex justify-content-between mb-2">
+                          <span class="badge bg-primary text-white">Public Blog</span>
+                          <span class="small text-secondary">${new Date(b.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()}</span>
+                        </div>
+                        <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
+                        <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                      </div>
+                    `).join('')}</div>`;
+                  };
+
+                  const updateArtistSearchAndSortUI = (activeTabId) => {
+                    const sInp = document.getElementById('view-songs-search-input');
+                    const sCont = document.getElementById('artist-custom-sort-container');
+                    const sSel = document.getElementById('artist-custom-sort-select');
+                    const gSort = document.getElementById('sort-controls');
+                    if (!sInp) return;
                     
-                    if (currentView.searchQuery) {
-                       viewSearch.focus();
-                       viewSearch.setSelectionRange(viewSearch.value.length, viewSearch.value.length);
+                    // Clear query when switching tab to prevent accidental data filter mix-ups
+                    sInp.value = "";
+                    
+                    if (activeTabId === 'songs-tab') {
+                      sInp.placeholder = "Search songs...";
+                      if (sCont) sCont.classList.replace('d-flex', 'd-none');
+                      if (gSort) gSort.classList.remove('d-none');
+                    } else if (activeTabId === 'playlists-tab') {
+                      sInp.placeholder = "Search playlists...";
+                      if (gSort) gSort.classList.add('d-none');
+                      if (sCont && sSel) {
+                        sSel.innerHTML = '<option value="newest">Newest</option><option value="modified">Recently Modified</option><option value="name_asc">Name (A-Z)</option><option value="name_desc">Name (Z-A)</option><option value="songs_desc">Most Songs</option><option value="songs_asc">Least Songs</option>';
+                        sCont.classList.replace('d-none', 'd-flex');
+                        if (!sCont.classList.contains('d-flex')) sCont.classList.add('d-flex');
+                      }
+                      window.filterAndSortArtistPlaylists();
+                    } else if (activeTabId === 'blogs-tab') {
+                      sInp.placeholder = "Search blogs...";
+                      if (gSort) gSort.classList.add('d-none');
+                      if (sCont && sSel) {
+                        sSel.innerHTML = '<option value="newest">Newest</option><option value="oldest">Oldest</option><option value="modified">Recently Modified</option><option value="title_asc">Title (A-Z)</option>';
+                        sCont.classList.replace('d-none', 'd-flex');
+                        if (!sCont.classList.contains('d-flex')) sCont.classList.add('d-flex');
+                      }
+                      window.filterAndSortArtistBlogs();
                     }
-                  }
-                }, 0);
+                  };
+
+                  setTimeout(() => {
+                    const viewSearch = document.getElementById('view-songs-search-input');
+                    const sortSelect = document.getElementById('artist-custom-sort-select');
+                    
+                    if (viewSearch) {
+                      viewSearch.addEventListener('input', (e) => {
+                        const activeTab = document.querySelector('#artistTabs .nav-link.active');
+                        const activeTabId = activeTab ? activeTab.id : 'songs-tab';
+                        if (activeTabId === 'songs-tab') {
+                          clearTimeout(window.viewSearchTimeout);
+                          window.viewSearchTimeout = setTimeout(() => {
+                            currentView.searchQuery = e.target.value;
+                            loadView(currentView);
+                          }, 400);
+                        } else if (activeTabId === 'playlists-tab') {
+                          window.filterAndSortArtistPlaylists();
+                        } else if (activeTabId === 'blogs-tab') {
+                          window.filterAndSortArtistBlogs();
+                        }
+                      });
+                      
+                      if (currentView.searchQuery) {
+                         viewSearch.focus();
+                         viewSearch.setSelectionRange(viewSearch.value.length, viewSearch.value.length);
+                      }
+                    }
+
+                    if (sortSelect) {
+                      sortSelect.addEventListener('change', () => {
+                        const activeTab = document.querySelector('#artistTabs .nav-link.active');
+                        const activeTabId = activeTab ? activeTab.id : 'songs-tab';
+                        if (activeTabId === 'playlists-tab') {
+                          window.filterAndSortArtistPlaylists();
+                        } else if (activeTabId === 'blogs-tab') {
+                          window.filterAndSortArtistBlogs();
+                        }
+                      });
+                    }
+
+                    const artistTabs = document.getElementById('artistTabs');
+                    if (artistTabs) {
+                      artistTabs.addEventListener('shown.bs.tab', (e) => {
+                        updateArtistSearchAndSortUI(e.target.id);
+                      });
+                    }
+                  }, 0);
+                }
                 
                 renderSongs(typeViewData.songs, false);
                 data = typeViewData.songs;
@@ -23563,7 +24129,7 @@ SOFTWARE.</div>
           }
         };
         
-        const showShareModal = (type, id, name, artistId, artistName = '') => {
+        const showShareModal = (type, id, name, artistId, artistName = '', customImageUrl = '') => {
           const decodedName = decodeURIComponent(name || '');
           let shareUrl = `${window.location.origin}${window.location.pathname}?share_type=${type}`;
 
@@ -23573,13 +24139,19 @@ SOFTWARE.</div>
           const finalArtistId = (!isNaN(cleanArtistId) && cleanArtistId > 0) ? cleanArtistId : '';
           const cleanArtistName = String(artistName).replace(/undefined|null|nan/gi, '').trim();
           
+          let previewDesc = `Share this ${type} with your friends`;
+          
           if (type === 'album') {
             shareUrl += `&album_name=${encodeURIComponent(decodedName || cleanId)}`;
             if (finalArtistId !== '') {
               shareUrl += `&artist_id=${finalArtistId}`;
             }
             if (cleanArtistName !== '') {
-              shareUrl += `&artist_name=${encodeURIComponent(decodeURIComponent(cleanArtistName))}`;
+              const decodedArtistName = decodeURIComponent(cleanArtistName);
+              shareUrl += `&artist_name=${encodeURIComponent(decodedArtistName)}`;
+              previewDesc = `Album by ${decodedArtistName}`;
+            } else {
+              previewDesc = 'Album';
             }
           } else {
             if (cleanId !== '') {
@@ -23587,19 +24159,147 @@ SOFTWARE.</div>
             } else if (cleanName !== '') {
               shareUrl += `&id=${encodeURIComponent(cleanName)}`;
             }
+            if (type === 'song') previewDesc = 'Song';
+            if (type === 'artist') previewDesc = 'Artist Profile';
+            if (type === 'playlist') previewDesc = 'Public Playlist';
+            if (type === 'mix') previewDesc = 'Custom Mix';
+            if (type === 'blog') previewDesc = 'Blog Post';
           }
 
-          shareModalTitle.textContent = `Share "${decodedName}"`;
-          shareModalText.textContent = `Share this ${type} with your friends!`;
+          document.getElementById('share-modal-title').textContent = `Share`;
+          document.getElementById('share-modal-preview-title').textContent = decodedName;
+          document.getElementById('share-modal-preview-desc').textContent = previewDesc;
           shareUrlInput.value = shareUrl;
 
-          document.getElementById('share-facebook').href = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareUrl)}`;
-          document.getElementById('share-twitter').href = `https://twitter.com/intent/tweet?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(`Check out ${decodedName} on PHP Music`)}`;
-          document.getElementById('share-whatsapp').href = `https://api.whatsapp.com/send?text=${encodeURIComponent(`Check out ${decodedName} on PHP Music: ${shareUrl}`)}`;
-          document.getElementById('share-telegram').href = `https://t.me/share/url?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(`Check out ${decodedName} on PHP Music`)}`;
+          // Fetch the cover image URL dynamically
+          let imageUrl = '?action=get_app_icon&size=512';
+          if (customImageUrl) {
+            imageUrl = customImageUrl;
+          } else if (type === 'song' && cleanId) {
+            imageUrl = `?action=get_image&id=${cleanId}`;
+          } else if (type === 'artist' && cleanId) {
+            imageUrl = `?action=get_profile_picture&id=${cleanId}`;
+          } else if (type === 'album' && globalSongCache) {
+            const albumSong = Object.values(globalSongCache).find(s => s.album === decodedName);
+            if (albumSong) {
+              imageUrl = `?action=get_image&id=${albumSong.id}`;
+            }
+          } else if (currentSong) {
+            imageUrl = `?action=get_image&id=${currentSong.id}`;
+          }
+
+          const shareCover = document.getElementById('share-modal-cover');
+          if (shareCover) {
+            shareCover.src = imageUrl;
+            shareCover.style.display = 'block';
+          }
+
+          const textPayload = encodeURIComponent(`Check out "${decodedName}" on PHP Music`);
+          const urlEnc = encodeURIComponent(shareUrl);
+
+          // Null-safe helper function to prevent JS crashes
+          const setShareUrl = (id, url) => {
+            const el = document.getElementById(id);
+            if (el) el.href = url;
+          };
+
+          setShareUrl('share-facebook', `https://www.facebook.com/sharer/sharer.php?u=${urlEnc}`);
+          setShareUrl('share-twitter', `https://twitter.com/intent/tweet?url=${urlEnc}&text=${textPayload}`);
+          setShareUrl('share-whatsapp', `https://api.whatsapp.com/send?text=${textPayload}%3A%20${urlEnc}`);
+          setShareUrl('share-telegram', `https://t.me/share/url?url=${urlEnc}&text=${textPayload}`);
+          setShareUrl('share-messenger', `fb-messenger://share/?link=${urlEnc}`);
+          setShareUrl('share-reddit', `https://reddit.com/submit?url=${urlEnc}&title=${textPayload}`);
+          setShareUrl('share-linkedin', `https://www.linkedin.com/sharing/share-offsite/?url=${urlEnc}`);
+          setShareUrl('share-pinterest', `https://pinterest.com/pin/create/button/?url=${urlEnc}&description=${textPayload}`);
+          setShareUrl('share-line', `https://line.me/R/msg/text/?${textPayload}%20${urlEnc}`);
+          setShareUrl('share-discord', `https://discord.com/channels/@me`);
+          setShareUrl('share-skype', `https://web.skype.com/share?url=${urlEnc}&text=${textPayload}`);
+          setShareUrl('share-wechat', `weixin://`);
+          setShareUrl('share-tumblr', `https://www.tumblr.com/widgets/share/tool?canonicalUrl=${urlEnc}&title=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-mastodon', `https://mastodon.social/share?text=${textPayload}&url=${urlEnc}`);
+          setShareUrl('share-hackernews', `https://news.ycombinator.com/submitlink?u=${urlEnc}&t=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-pocket', `https://getpocket.com/save?url=${urlEnc}&title=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-vk', `https://vk.com/share.php?url=${urlEnc}&title=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-flipboard', `https://share.flipboard.com/bookmarklet/popout?v=2&title=${encodeURIComponent(decodedName)}&url=${urlEnc}`);
+          setShareUrl('share-email', `mailto:?subject=${encodeURIComponent(decodedName)}&body=${textPayload}%20${urlEnc}`);
+          setShareUrl('share-sms', `sms:?&body=${textPayload}%20${urlEnc}`);
+          setShareUrl('share-threads', `https://www.threads.net/intent/post?text=${textPayload}%20${urlEnc}`);
+          setShareUrl('share-snapchat', `https://snapchat.com/scan?attachmentUrl=${urlEnc}`);
+          setShareUrl('share-slack', `slack://`);
+          setShareUrl('share-twitch', `https://www.twitch.tv/`);
+          setShareUrl('share-medium', `https://medium.com/`);
+          setShareUrl('share-quora', `https://www.quora.com/`);
+          setShareUrl('share-tiktok', `https://www.tiktok.com/`);
+          setShareUrl('share-instagram', `instagram://`);
+          setShareUrl('share-youtube', `https://youtube.com/`);
+          setShareUrl('share-spotify', `https://open.spotify.com/`);
+          setShareUrl('share-github', `https://github.com/`);
+          setShareUrl('share-wordpress', `https://wordpress.com/press-this.php?u=${urlEnc}&t=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-dribbble', `https://dribbble.com/`);
+          setShareUrl('share-weibo', `http://service.weibo.com/share/share.php?url=${urlEnc}&title=${textPayload}`);
+          setShareUrl('share-qq', `http://connect.qq.com/widget/shareqq/index.html?url=${urlEnc}&title=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-kakaotalk', `kakaotalk://`);
+          setShareUrl('share-viber', `viber://forward?text=${textPayload}%20${urlEnc}`);
+          setShareUrl('share-signal', `sgnl://share?text=${textPayload}%20${urlEnc}`);
+          setShareUrl('share-buffer', `https://buffer.com/add?url=${urlEnc}&text=${textPayload}`);
+          setShareUrl('share-digg', `http://digg.com/submit?url=${urlEnc}&title=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-douban', `http://www.douban.com/recommend/?url=${urlEnc}&title=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-trello', `https://trello.com/add-card?url=${urlEnc}&name=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-xing', `https://www.xing.com/spi/shares/new?url=${urlEnc}`);
+          setShareUrl('share-yammer', `https://www.yammer.com/messages/new?status=${textPayload}%20${urlEnc}`);
+          setShareUrl('share-blogger', `https://www.blogger.com/blog-this.g?u=${urlEnc}&n=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-evernote', `https://www.evernote.com/clip.action?url=${urlEnc}&title=${encodeURIComponent(decodedName)}`);
+          setShareUrl('share-mewe', `https://mewe.com/share?link=${urlEnc}`);
+          setShareUrl('share-diaspora', `https://share.diasporafoundation.org/?title=${encodeURIComponent(decodedName)}&url=${urlEnc}`);
+          setShareUrl('share-taringa', `https://www.taringa.net/`);
+          setShareUrl('share-teams', `https://teams.microsoft.com/share?href=${urlEnc}&msgText=${textPayload}`);
           
           copyShareUrlBtn.textContent = 'Copy';
           copyShareUrlBtn.disabled = false;
+
+          const systemShareBtn = document.getElementById('system-share-btn');
+          if (systemShareBtn) {
+            if (navigator.share) {
+              systemShareBtn.style.display = 'block';
+              
+              const newBtn = systemShareBtn.cloneNode(true);
+              const newCopyBtn = newBtn;
+              systemShareBtn.parentNode.replaceChild(newCopyBtn, systemShareBtn);
+              
+              newCopyBtn.addEventListener('click', async () => {
+                newCopyBtn.disabled = true;
+                const originalText = newCopyBtn.innerHTML;
+                newCopyBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Preparing...';
+
+                try {
+                  const shareData = {
+                    title: decodedName,
+                    text: `Listen to "${decodedName}" on PHP Music!`,
+                    url: shareUrl
+                  };
+
+                  const response = await fetch(imageUrl);
+                  const blob = await response.blob();
+                  const file = new File([blob], 'cover.jpg', { type: blob.type });
+
+                  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    shareData.files = [file];
+                  }
+
+                  await navigator.share(shareData);
+                } catch (err) {
+                  if (err.name !== 'AbortError') {
+                    showToast('Failed to share via System Apps.', 'error');
+                  }
+                } finally {
+                  newCopyBtn.disabled = false;
+                  newCopyBtn.innerHTML = originalText;
+                }
+              });
+            } else {
+              systemShareBtn.style.display = 'none';
+            }
+          }
 
           if (shareModal) shareModal.show();
         };
@@ -25265,8 +25965,8 @@ SOFTWARE.</div>
           const shareBtn = target.closest('.share-view-btn');
           if (shareBtn) {
             e.stopPropagation();
-            const { shareType, shareId, shareName, artistId, artistName } = shareBtn.dataset;
-            showShareModal(shareType, shareId, shareName, artistId, artistName);
+            const { shareType, shareId, shareName, artistId, artistName, imageUrl } = shareBtn.dataset;
+            showShareModal(shareType, shareId, shareName, artistId, artistName, imageUrl);
             return;
           }
           const copyBtn = target.closest('.copy-playlist-btn');
@@ -25933,7 +26633,7 @@ SOFTWARE.</div>
                   if (modalTitle) modalTitle.textContent = 'Select Album Artist';
                   artistsModalBody.innerHTML = `
                     <div class="list-group list-group-flush rounded">
-                      ${songArtistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${safeMenuUserId}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join('')}
+                      ${songArtistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary album-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${safeMenuUserId}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join('')}
                     </div>
                   `;
                   if (artistsModal) artistsModal.show();
@@ -31125,29 +31825,7 @@ SOFTWARE.</div>
           updateNoteSelectionUI();
         });
 
-        const injectMetaTags = () => {
-          const metaTags = [
-            { name: 'description', content: 'A simple, fast music player with user accounts, streaming, and offline PWA capabilities.' },
-            { name: 'keywords', content: 'music, player, php, streaming, audio, webapp' },
-            { name: 'author', content: 'PHP Music' },
-            { name: 'apple-mobile-web-app-capable', content: 'yes' },
-            { name: 'apple-mobile-web-app-status-bar-style', content: 'black-translucent' },
-            { name: 'apple-mobile-web-app-title', content: 'PHP Music' },
-            { name: 'viewport', content: 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no' },
-            { property: 'og:title', content: 'PHP Music Player' },
-            { property: 'og:description', content: 'Listen to your favorite music anywhere.' },
-            { property: 'og:type', content: 'website' }
-          ];
-          metaTags.forEach(tag => {
-            const meta = document.createElement('meta');
-            Object.keys(tag).forEach(key => meta.setAttribute(key, tag[key]));
-            document.head.appendChild(meta);
-          });
-        };
-
-        const init = async () => {
-          injectMetaTags();
-          
+       const init = async () => {
           // Fix: Prevent aggressive audio preloading from causing infinite network buffering spinners on an empty src
           audio.preload = 'none';
           
