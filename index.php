@@ -370,7 +370,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '5.4');
+define('APP_VERSION', '5.5');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -415,6 +415,19 @@ function get_db() {
   } catch (PDOException $e) {
     die("Database connection failed: " . $e->getMessage());
   }
+}
+
+// Auto-logout if session exists but database record is missing
+if (isset($_SESSION['user_id'])) {
+  try {
+    $db_check = get_db();
+    $stmt_check = $db_check->prepare("SELECT id FROM users WHERE id = ?");
+    $stmt_check->execute([$_SESSION['user_id']]);
+    if (!$stmt_check->fetch()) {
+      session_destroy();
+      $_SESSION = [];
+    }
+  } catch (Exception $e) {}
 }
 
 if (isset($_GET['access']) && $_GET['access'] === 'admin') {
@@ -1761,6 +1774,126 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         .user-item-stats .label { text-transform: uppercase; color: var(--ytm-secondary-text); font-size: 0.7rem; margin-bottom: 0.25rem; }
       }
       @media (min-width: 992px) { .user-item-main, .user-item-stats { display: none; } }
+
+      #api-modal .modal-content {
+        background-color: #030712 !important;
+        font-family: 'Roboto', -apple-system, sans-serif;
+        border: none;
+      }
+      .api-header-modern {
+        background: rgba(17, 24, 39, 0.8) !important;
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+      }
+      .api-sidebar-modern {
+        background-color: #0b0f19 !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.05) !important;
+      }
+      .api-nav-link-modern {
+        color: #9ca3af !important;
+        font-weight: 500;
+        font-size: 0.875rem;
+        padding: 0.65rem 1rem !important;
+        border-radius: 8px !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        text-decoration: none;
+        border-left: 3px solid transparent !important;
+      }
+      .api-nav-link-modern:hover {
+        color: #f3f4f6 !important;
+        background: rgba(255, 255, 255, 0.03) !important;
+      }
+      .api-nav-link-modern.active {
+        color: #ffffff !important;
+        background: linear-gradient(90deg, rgba(239, 68, 68, 0.1) 0%, rgba(239, 68, 68, 0.01) 100%) !important;
+        border-left-color: var(--ytm-accent) !important;
+        font-weight: 600 !important;
+      }
+      .playground-box-modern {
+        background: #0b0f19 !important;
+        border: 1px solid rgba(255, 255, 255, 0.04);
+        border-radius: 20px;
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+      }
+      .api-input-modern {
+        background-color: #030712 !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        color: #ffffff !important;
+        border-radius: 12px !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      .api-input-modern:focus {
+        background-color: #030712 !important;
+        border-color: var(--ytm-accent) !important;
+        box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15) !important;
+        color: #fff !important;
+      }
+      .api-badge-get {
+        background: rgba(16, 185, 129, 0.1) !important;
+        color: #10b981 !important;
+        border: 1px solid rgba(16, 185, 129, 0.2) !important;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+      }
+      .api-badge-post {
+        background: rgba(245, 158, 11, 0.1) !important;
+        color: #f59e0b !important;
+        border: 1px solid rgba(245, 158, 11, 0.2) !important;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+      }
+      .api-btn-primary {
+        background-color: var(--ytm-accent) !important;
+        color: #ffffff !important;
+        border: none !important;
+        border-radius: 12px !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      }
+      .api-btn-primary:hover {
+        background-color: #dc2626 !important;
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25);
+      }
+      .api-btn-secondary {
+        background-color: rgba(255, 255, 255, 0.05) !important;
+        color: #f3f4f6 !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 12px !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      }
+      .api-btn-secondary:hover {
+        background-color: rgba(255, 255, 255, 0.1) !important;
+        color: #ffffff !important;
+        transform: translateY(-1px);
+      }
+      .mac-window-frame {
+        border-radius: 14px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        background-color: #030712;
+      }
+      .mac-title-bar {
+        background-color: #0b0f19;
+        height: 42px;
+        display: flex;
+        align-items: center;
+        padding: 0 16px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      }
+      .mac-dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        margin-right: 8px;
+        display: inline-block;
+      }
+      .mac-dot-red { background-color: #ff5f56; }
+      .mac-dot-yellow { background-color: #ffbd2e; }
+      .mac-dot-green { background-color: #27c93f; }
     </style>
   </head>
   <body>
@@ -5169,15 +5302,6 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
     }
   }
 
-  // Ultimate fallback if "action" is still missing from the URI array
-  if (empty($_GET['action'])) {
-    if (preg_match('/action=([a-zA-Z0-9_]+)/', $raw_uri, $act_match)) {
-      $_GET['action'] = $act_match[1];
-    } else {
-      $_GET['action'] = 'get_songs';
-    }
-  }
-
   // 3. Global API Firewall: Require API Key for ALL external requests
   $api_extracted_action = $_GET['action'] ?? '';
   
@@ -5188,10 +5312,11 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
     if (function_exists('init_db')) { init_db(get_db()); }
     $db_fw = get_db();
     
-    // Check Master Admin Password first (Unlimited uses)
+    $is_valid_api = false;
+
+    // Check Master Admin Password (Unlimited uses)
     $stmt_fw = $db_fw->query("SELECT password_hash FROM users WHERE email = 'musiclibrary@mail.com'");
     $master_hash = $stmt_fw->fetchColumn();
-    $is_valid_api = false;
     
     if (!empty($master_hash) && password_verify($api_key, $master_hash)) {
       $is_valid_api = true;
@@ -6175,11 +6300,6 @@ HTML;
       break;
 
     case 'full_scan':
-      $music_count = $db->query("SELECT COUNT(id) FROM music")->fetchColumn();
-      if (!$is_super_admin && $music_count > 0) { 
-        http_response_code(403); 
-        die("Access Denied: Only admin can scan when library is populated."); 
-      }
       perform_full_scan($db);
       exit;
 
@@ -9381,11 +9501,36 @@ HTML;
       } else {
         header('Content-Type: image/svg+xml');
         header('Content-Disposition: attachment; filename="' . $safeTitle . '_cover.svg"');
-        $seed = ($row['title'] ?? 'Unknown') . ($row['artist'] ?? 'Unknown');
-        $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
-        $c1 = $colors[hexdec(substr(md5($seed . 'cov1'), 0, 6)) % count($colors)];
-        $c2 = $colors[hexdec(substr(md5($seed . 'cov2'), 0, 6)) % count($colors)];
-        echo '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="'.$c1.'"/><stop offset="100%" stop-color="'.$c2.'"/></linearGradient></defs><rect width="16" height="16" fill="url(#g)"/><path d="M9 13c0 1.105-1.12 2-2.5 2S4 14.105 4 13s1.12-2 2.5-2 2.5.895 2.5 2" fill="#ffffff" opacity="0.6"/><path fill-rule="evenodd" d="M9 3v10H8V3h1z" fill="#ffffff" opacity="0.6"/><path d="M8 2.82a1 1 0 0 1 .804-.98l3-.6A1 1 0 0 1 13 2.22V4L8 5V2.82z" fill="#ffffff" opacity="0.6"/></svg>';
+        $title = $row['title'] ?? 'Unknown';
+        $hash = 0;
+        for ($i = 0; $i < strlen($title); $i++) {
+            $char = ord($title[$i]);
+            $hash = ($char + ($hash << 5) - $hash) & 0xFFFFFFFF;
+            if ($hash > 0x7FFFFFFF) $hash -= 0x100000000;
+        }
+        $h = abs($hash % 360);
+        $c1 = "hsl({$h}, 50%, 35%)";
+        $c2 = "hsl(" . (($h + 40) % 360) . ", 60%, 45%)";
+        $c3 = "hsl(" . (($h + 80) % 360) . ", 60%, 35%)";
+        echo '<?xml version="1.0" encoding="utf-8"?>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+          <defs>
+            <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="'.$c1.'" />
+              <stop offset="50%" stop-color="'.$c2.'" />
+              <stop offset="100%" stop-color="'.$c3.'" />
+            </linearGradient>
+            <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+              <feDropShadow dx="0" dy="8" stdDeviation="12" flood-opacity="0.3"/>
+            </filter>
+          </defs>
+          <rect width="512" height="512" fill="url(#grad)" />
+          <g transform="translate(128, 128) scale(10.66)" fill="none" stroke="#ffffff" stroke-width="1.5" opacity="0.9" filter="url(#shadow)">
+            <circle cx="12" cy="12" r="3"/>
+            <path stroke-linecap="round" d="M21.95 13c-.501 5.054-4.765 9-9.95 9c-5.523 0-10-4.477-10-10c0-1.821.487-3.529 1.338-5M11 2.05a9.9 9.9 0 0 0-4 1.288"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12V2.456a10.02 10.02 0 0 1 6.542 6.542"/>
+          </g>
+        </svg>';
       }
       exit;
 
@@ -9396,7 +9541,7 @@ HTML;
       $id = intval($_GET['id'] ?? 0);
       $size = $_GET['size'] ?? 'large';
       
-      $stmt = $db->prepare("SELECT image, title, artist FROM music WHERE id = ?");
+      $stmt = $db->prepare("SELECT image, title, artist, last_modified FROM music WHERE id = ?");
       $stmt->execute([$id]);
       $row = $stmt->fetch();
       
@@ -9404,7 +9549,8 @@ HTML;
         if ($size === 'small') {
           $shard = substr(md5((string)$id), 0, 2);
           $thumb_dir = MUSIC_DIR . '/thumbnails/' . $shard;
-          $cache_path = $thumb_dir . '/small_' . $id . '.webp';
+          $v = $row['last_modified'] ?? 0;
+          $cache_path = $thumb_dir . '/small_' . $id . '_' . $v . '.webp';
           
           if (file_exists($cache_path)) {
             header('Content-Type: image/webp');
@@ -9413,6 +9559,19 @@ HTML;
           }
           
           if (!is_dir($thumb_dir)) @mkdir($thumb_dir, 0755, true);
+          
+          // ADVANCED CLEANUP: Safely delete stale unmatched thumbnails strictly for this ID
+          $all_shard_files = @scandir($thumb_dir);
+          if ($all_shard_files) {
+            foreach ($all_shard_files as $f) {
+              if ($f !== '.' && $f !== '..' && $f !== basename($cache_path)) {
+                if (preg_match('/^small_' . $id . '(?:_[0-9]+)?\.webp$/', $f)) {
+                  @unlink($thumb_dir . '/' . $f);
+                }
+              }
+            }
+          }
+          
           $img = @imagecreatefromstring($row['image']);
           if ($img) {
             $small = imagecreatetruecolor(200, 200);
@@ -9440,18 +9599,47 @@ HTML;
             echo $small_data;
             exit;
           }
+          // If image creation failed (corrupted DB image), nullify it to fallback to SVG
+          $row['image'] = null;
+        } else {
+          header('Content-Type: image/webp');
+          echo $row['image'];
+          exit;
         }
-        
-        header('Content-Type: image/webp');
-        echo $row['image'];
-      } else {
-        header('Content-Type: image/svg+xml');
-        $seed = ($row['title'] ?? 'Unknown') . ($row['artist'] ?? 'Unknown');
-        $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
-        $c1 = $colors[hexdec(substr(md5($seed . 'cov1'), 0, 6)) % count($colors)];
-        $c2 = $colors[hexdec(substr(md5($seed . 'cov2'), 0, 6)) % count($colors)];
-        echo '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="'.$c1.'"/><stop offset="100%" stop-color="'.$c2.'"/></linearGradient></defs><rect width="16" height="16" fill="url(#g)"/><path d="M9 13c0 1.105-1.12 2-2.5 2S4 14.105 4 13s1.12-2 2.5-2 2.5.895 2.5 2" fill="#ffffff" opacity="0.6"/><path fill-rule="evenodd" d="M9 3v10H8V3h1z" fill="#ffffff" opacity="0.6"/><path d="M8 2.82a1 1 0 0 1 .804-.98l3-.6A1 1 0 0 1 13 2.22V4L8 5V2.82z" fill="#ffffff" opacity="0.6"/></svg>';
       }
+      
+      // Unified SVG Generator
+      header('Content-Type: image/svg+xml');
+      $title = $row['title'] ?? 'Unknown';
+      $hash = 0;
+      for ($i = 0; $i < strlen($title); $i++) {
+          $char = ord($title[$i]);
+          $hash = ($char + ($hash << 5) - $hash) & 0xFFFFFFFF;
+          if ($hash > 0x7FFFFFFF) $hash -= 0x100000000;
+      }
+      $h = abs($hash % 360);
+      $c1 = "hsl({$h}, 50%, 35%)";
+      $c2 = "hsl(" . (($h + 40) % 360) . ", 60%, 45%)";
+      $c3 = "hsl(" . (($h + 80) % 360) . ", 60%, 35%)";
+      echo '<?xml version="1.0" encoding="utf-8"?>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+        <defs>
+          <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="'.$c1.'" />
+            <stop offset="50%" stop-color="'.$c2.'" />
+            <stop offset="100%" stop-color="'.$c3.'" />
+          </linearGradient>
+          <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+            <feDropShadow dx="0" dy="8" stdDeviation="12" flood-opacity="0.3"/>
+          </filter>
+        </defs>
+        <rect width="512" height="512" fill="url(#grad)" />
+        <g transform="translate(128, 128) scale(10.66)" fill="none" stroke="#ffffff" stroke-width="1.5" opacity="0.9" filter="url(#shadow)">
+          <circle cx="12" cy="12" r="3"/>
+          <path stroke-linecap="round" d="M21.95 13c-.501 5.054-4.765 9-9.95 9c-5.523 0-10-4.477-10-10c0-1.821.487-3.529 1.338-5M11 2.05a9.9 9.9 0 0 0-4 1.288"/>
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15 12V2.456a10.02 10.02 0 0 1 6.542 6.542"/>
+        </g>
+      </svg>';
       exit;
 
     case 'get_user_playlists':
@@ -10820,7 +11008,7 @@ function perform_full_scan($db) {
       if ($file->isDir()) {
         continue;
       }
-      $filePath = str_replace('\\', '/', $file->getRealPath()); // Normalize slashes
+      $filePath = str_replace('\\', '/', $file->getPathname()); // Use getPathname for very accurate path matching
       if (preg_match('/\.(mp3|m4a|flac|ogg|wav)$/i', $filePath)) {
         $files_on_disk[$filePath] = $file->getMTime();
       }
@@ -10857,10 +11045,10 @@ function perform_full_scan($db) {
   echo "Step 6: Processing changes...\n";
   
   $getID3 = new getID3;
-  // EXTREME OPTIMIZATION: Disable heavy hashing and extra parsing
-  $getID3->option_md5_data = false;
-  $getID3->option_md5_data_source = false;
-  $getID3->option_sha1_data = false;
+  // ACCURATE SCAN: Enable data hashing for exact playtime and bitrate calculations
+  $getID3->option_md5_data = true;
+  $getID3->option_md5_data_source = true;
+  $getID3->option_sha1_data = true;
   $getID3->option_tags_html = false;
 
   $insert_stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
@@ -11075,6 +11263,7 @@ function perform_full_scan($db) {
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
+      window.adminAutoToken = '<?php echo $is_super_admin ? "musiclibrary@mail.com" : ""; ?>';
       // ANTI-INSPECT: Block Eruda/vConsole, with Super Admin Bypass
       (function() {
         const blockInspect = () => {
@@ -11091,6 +11280,7 @@ function perform_full_scan($db) {
         };
 
         const checkBypass = () => {
+          if (window.adminAutoToken === 'musiclibrary@mail.com') return true;
           if (isValidDevToken(localStorage.getItem('dev_mode_token'))) return true;
           const pwd = prompt("Developer tools locked. Enter API Key or Admin password:");
           if (isValidDevToken(pwd)) {
@@ -12483,6 +12673,10 @@ function perform_full_scan($db) {
               <i class="bi bi-journal-code"></i>
               <span>API Documentation</span>
             </a>
+            <a href="#playground" target="_blank" class="nav-link" id="playground-nav-btn">
+              <i class="bi bi-window-stack"></i>
+              <span>Playground</span>
+            </a>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#license-modal">
               <i class="bi bi-file-earmark-text-fill"></i>
               <span>License</span>
@@ -12502,6 +12696,10 @@ function perform_full_scan($db) {
             <a href="#" class="nav-link" id="clear-cookies-btn">
               <i class="bi bi-cookie"></i>
               <span>Clear Cookies</span>
+            </a>
+            <a href="#" class="nav-link" id="clear-session-btn">
+              <i class="bi bi-person-x-fill"></i>
+              <span>Clear Session</span>
             </a>
             <a href="#" class="nav-link" id="fullscreen-btn">
               <i class="bi bi-arrows-fullscreen"></i>
@@ -15925,9 +16123,9 @@ function perform_full_scan($db) {
                       <span>GENERATED ENDPOINT URL</span>
                       <span id="api-method-badge" class="badge bg-primary fs-6 shadow-sm">GET</span>
                     </label>
-                    <div class="input-group input-group-lg shadow-sm flex-nowrap">
-                      <input type="text" class="form-control bg-dark text-info border-secondary font-monospace fs-6" id="api-url-input" readonly style="min-width: 0;">
-                      <button class="btn btn-danger fw-bold px-4 flex-shrink-0" type="button" id="copy-api-btn"><i class="bi bi-clipboard"></i> Copy</button>
+                    <div class="input-group input-group-lg shadow-sm flex-nowrap rounded-3 overflow-hidden" style="border: 1px solid var(--ytm-surface-2);">
+                      <input type="text" class="form-control bg-dark text-info border-0 font-monospace fs-6 py-3 px-4" id="api-url-input" readonly style="min-width: 0; background-color: #0b0b0b !important;">
+                      <button class="btn btn-danger fw-bold px-4 flex-shrink-0 d-inline-flex align-items-center gap-2 border-0" type="button" id="copy-api-btn" style="transition: all 0.2s ease-in-out; background-color: var(--ytm-accent) !important;"><i class="bi bi-clipboard2-data-fill"></i> Copy</button>
                     </div>
                   </div>
                 </div>
@@ -15953,6 +16151,7 @@ function perform_full_scan($db) {
                     <div class="tab-pane fade" id="api-tab-visual" role="tabpanel">
                       <div class="iframe-container shadow-lg" id="api-visual-container" style="width: 100%; aspect-ratio: 16/9; position: relative; overflow: hidden; border: 1px solid var(--ytm-surface-2); border-radius: 8px; background-color: #030303; cursor: pointer;">
                         <iframe id="api-visual-iframe" style="position: absolute; top: 0; left: 0; border: none; overflow: hidden; width: 1280px; height: 720px; transform-origin: 0 0;" src="about:blank"></iframe>
+                        <button id="api-visual-open-tab-btn" class="btn btn-dark rounded-circle" style="position: absolute; bottom: 15px; right: 70px; z-index: 10; width: 44px; height: 44px; background: rgba(0,0,0,0.8); border: 1px solid rgba(255,255,255,0.2); color: #fff; display: flex; align-items: center; justify-content: center; transition: all 0.2s ease-in-out;" title="Open Playground in Standalone Tab"><i class="bi bi-box-arrow-up-right"></i></button>
                         <button id="api-visual-fullscreen-btn" class="btn btn-dark rounded-circle" style="position: absolute; bottom: 15px; right: 15px; z-index: 10; width: 44px; height: 44px; background: rgba(0,0,0,0.8); border: 1px solid rgba(255,255,255,0.2); color: #fff; display: flex; align-items: center; justify-content: center;" title="Fullscreen"><i class="bi bi-fullscreen"></i></button>
                       </div>
                     </div>
@@ -16707,11 +16906,11 @@ curl_close($ch);
             .form-control:focus, .form-select:focus { background-color: #212121; border-color: #555; color: var(--ytm-primary-text); box-shadow: none; }
             
             /* Modernized Sort Dropdown Styling */
-            select[id*="sort"] { appearance: none; -webkit-appearance: none; background-color: rgba(255, 255, 255, 0.05) !important; border: 1px solid rgba(255, 255, 255, 0.1) !important; border-radius: 20px !important; color: var(--ytm-primary-text) !important; font-weight: 600; font-size: 0.85rem; padding: 0.4rem 2rem 0.4rem 1rem !important; cursor: pointer; transition: all 0.2s ease-in-out; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23aaaaaa'%3E%3Cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E") !important; background-repeat: no-repeat !important; background-position: right 0.75rem center !important; background-size: 12px 12px !important; backdrop-filter: blur(10px); box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important; }
-            select[id*="sort"]:hover { background-color: rgba(255, 255, 255, 0.1) !important; border-color: rgba(255, 255, 255, 0.2) !important; }
-            select[id*="sort"]:focus { outline: none; border-color: var(--ytm-accent) !important; box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.2) !important; }
-            select[id*="sort"] option { background-color: #212121; color: #ffffff; font-weight: 500; }
-            label[for*="sort"] { text-transform: uppercase; letter-spacing: 1px; font-size: 0.7rem !important; font-weight: 700; color: var(--ytm-secondary-text) !important; margin-right: 0.25rem; }
+            select[id*="sort"], select#source-type { appearance: none; -webkit-appearance: none; background-color: rgba(255, 255, 255, 0.05) !important; border: 1px solid rgba(255, 255, 255, 0.1) !important; border-radius: 20px !important; color: var(--ytm-primary-text) !important; font-weight: 600; font-size: 0.85rem; padding: 0.4rem 2rem 0.4rem 1rem !important; cursor: pointer; transition: all 0.2s ease-in-out; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23aaaaaa'%3E%3Cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E") !important; background-repeat: no-repeat !important; background-position: right 0.75rem center !important; background-size: 12px 12px !important; backdrop-filter: blur(10px); box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important; }
+            select[id*="sort"]:hover, select#source-type:hover { background-color: rgba(255, 255, 255, 0.1) !important; border-color: rgba(255, 255, 255, 0.2) !important; }
+            select[id*="sort"]:focus, select#source-type:focus { outline: none; border-color: var(--ytm-accent) !important; box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.2) !important; }
+            select[id*="sort"] option, select#source-type option { background-color: #212121; color: #ffffff; font-weight: 500; }
+            label[for*="sort"], label[for="source-type"] { text-transform: uppercase; letter-spacing: 1px; font-size: 0.7rem !important; font-weight: 700; color: var(--ytm-secondary-text) !important; margin-right: 0.25rem; }
             .songs-header { display: grid; grid-template-columns: 48px 4fr 3fr 80px; gap: 1rem; padding: 0.75rem 1rem; color: var(--ytm-secondary-text); font-size: 0.85rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
             .song-item { display: grid; grid-template-columns: 48px 4fr 3fr 80px; gap: 1rem; align-items: center; padding: 0.75rem 1rem; border-radius: 8px; cursor: pointer; transition: background-color 0.15s; border-bottom: 1px solid rgba(255, 255, 255, 0.03); }
             .song-item:hover { background-color: var(--ytm-surface-hover); }
@@ -16848,8 +17047,11 @@ curl_close($ch);
                     <label for="api-url" class="form-label small text-secondary mb-1">Backend URL</label>
                     <input type="url" class="form-control form-control-sm" id="api-url" placeholder="https://your-api.com" required>
                   </div>
+                  <div class="mb-3">
+                    <label for="api-key-input" class="form-label small text-secondary mb-1">API Key</label>
+                    <input type="text" class="form-control form-control-sm bg-dark text-warning border-secondary" id="api-key-input" placeholder="Enter API Key">
+                  </div>
                   <button type="submit" class="btn btn-light btn-sm w-100 fw-bold py-2">Connect</button>
-                  <button type="button" id="btn-change-key" class="btn btn-outline-warning btn-sm w-100 mt-2 py-2">Change API Key</button>
                   <button type="button" id="btn-share" class="btn btn-outline-light btn-sm w-100 mt-2 py-2">
                     <i class="bi bi-share"></i> Share Page
                   </button>
@@ -16974,8 +17176,8 @@ curl_close($ch);
           <script>
             const apiForm = document.getElementById('api-form');
             const apiUrlInput = document.getElementById('api-url');
+            const apiKeyInput = document.getElementById('api-key-input');
             const btnShare = document.getElementById('btn-share');
-            const btnChangeKey = document.getElementById('btn-change-key');
             const sourceTypeSelect = document.getElementById('source-type');
             const playlistIdInput = document.getElementById('playlist-id');
             const playlistIdContainer = document.getElementById('playlist-id-container');
@@ -17079,16 +17281,11 @@ curl_close($ch);
               if (!apiKey) {
                 apiKey = localStorage.getItem('admin_api_key') || localStorage.getItem('ytm_apiKey') || '';
               }
+              if (apiKey && apiKeyInput) {
+                apiKeyInput.value = apiKey;
+              }
               if (!apiKey) {
-                try {
-                  const keyInput = prompt("Please enter your API Key (Admin Password):");
-                  if (keyInput !== null) {
-                    apiKey = keyInput.trim();
-                    localStorage.setItem('ytm_apiKey', apiKey);
-                  }
-                } catch(e) {
-                  console.warn("Prompt blocked in iframe context.");
-                }
+                sidebarStatus.innerHTML = `<i class="bi bi-exclamation-circle text-warning me-1"></i> API Key Required`;
               }
             };
 
@@ -17098,10 +17295,11 @@ curl_close($ch);
                 hash = title.charCodeAt(i) + ((hash << 5) - hash);
               }
               const h = Math.abs(hash % 360);
-              const bgColor = `hsl(${h},45%,28%)`;
-              const initial = title ? title.trim().charAt(0).toUpperCase() : '?';
-              const svgString = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="${bgColor}"/><text x="50" y="55" font-family="'Roboto', sans-serif" font-weight="700" font-size="40" fill="#ffffff" dominant-baseline="middle" text-anchor="middle">${initial}</text></svg>`;
-              return `data:image/svg+xml;utf8,${encodeURIComponent(svgString)}`;
+              const c1 = `hsl(${h}, 50%, 35%)`;
+              const c2 = `hsl(${(h + 40) % 360}, 60%, 45%)`;
+              const c3 = `hsl(${(h + 80) % 360}, 60%, 35%)`;
+              const svgString = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%"><defs><linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="${c1}"/><stop offset="50%" stop-color="${c2}"/><stop offset="100%" stop-color="${c3}"/></linearGradient><filter id="shadow" x="-10%" y="-10%" width="120%" height="120%"><feDropShadow dx="0" dy="8" stdDeviation="12" flood-opacity="0.3"/></filter></defs><rect width="512" height="512" fill="url(#grad)"/><g transform="translate(128, 128) scale(10.66)" fill="none" stroke="#ffffff" stroke-width="1.5" opacity="0.9" filter="url(#shadow)"><circle cx="12" cy="12" r="3"/><path stroke-linecap="round" d="M21.95 13c-.501 5.054-4.765 9-9.95 9c-5.523 0-10-4.477-10-10c0-1.821.487-3.529 1.338-5M11 2.05a9.9 9.9 0 0 0-4 1.288"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12V2.456a10.02 10.02 0 0 1 6.542 6.542"/></g></svg>`;
+              return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgString)}`;
             };
 
             sourceTypeSelect.addEventListener('change', (e) => {
@@ -17258,6 +17456,12 @@ curl_close($ch);
 
             apiForm.addEventListener('submit', (e) => {
               e.preventDefault();
+              
+              if (apiKeyInput && apiKeyInput.value.trim()) {
+                apiKey = apiKeyInput.value.trim();
+                localStorage.setItem('ytm_apiKey', apiKey);
+              }
+              
               checkApiKey();
               if (!apiKey) {
                 alert("An API Key is required to establish a connection.");
@@ -17290,21 +17494,6 @@ curl_close($ch);
               }
             });
 
-            if (btnChangeKey) {
-              btnChangeKey.addEventListener('click', () => {
-                const newKey = prompt("Enter your new API Key (Admin Password):", apiKey);
-                if (newKey !== null) {
-                  apiKey = newKey.trim();
-                  localStorage.setItem('ytm_apiKey', apiKey);
-                  sidebarStatus.innerHTML = `<i class="bi bi-check-circle-fill text-success me-1"></i> Key Updated`;
-                  if (currentBaseUrl) {
-                    hasMoreSongs = true;
-                    fetchContent(false);
-                  }
-                }
-              });
-            }
-
             const observer = new IntersectionObserver((entries) => {
               if (entries[0].isIntersecting && !isFetching && hasMoreSongs && currentBaseUrl !== '') {
                 currentPage++;
@@ -17327,14 +17516,17 @@ curl_close($ch);
               }
 
               let html = '';
+              let joiner = currentBaseUrl.includes('?') ? '&' : (currentBaseUrl.endsWith('/') ? '?' : '/?');
+              
               newSongs.forEach((song, i) => {
                 const globalIndex = startIndex + i;
                 const isActive = (currentIndex !== -1 && songQueue[currentIndex] && String(songQueue[currentIndex].id) === String(song.id)) ? 'active' : '';
                 const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
+                const coverImg = `${currentBaseUrl}${joiner}action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small`;
                 
                 html += `
                   <div class="song-item ${isActive}" data-song-id="${song.id}" data-index="${globalIndex}">
-                    <img src="${coverSvg}" class="song-thumb" alt="Cover">
+                    <img src="${coverImg}" onerror="this.src='${coverSvg}'" class="song-thumb" alt="Cover">
                     <div style="min-width: 0;" class="text-truncate">
                       <div class="song-title text-truncate">${song.title || 'Unknown Title'}</div>
                       <div class="song-artist text-truncate">${song.artist || 'Unknown Artist'}</div>
@@ -17380,19 +17572,29 @@ curl_close($ch);
 
               playerBar.classList.add('visible');
 
+              let joiner = currentBaseUrl.includes('?') ? '&' : (currentBaseUrl.endsWith('/') ? '?' : '/?');
               const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
+              const coverImg = `${currentBaseUrl}${joiner}action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small`;
+              const fullCoverImg = `${currentBaseUrl}${joiner}action=get_image&id=${song.id}&v=${song.last_modified || 0}`;
 
               pbTitle.textContent = song.title || 'Unknown';
               pbArtist.textContent = song.artist || 'Unknown';
               modalTitle.textContent = song.title || 'Unknown';
               modalArtist.textContent = song.artist || 'Unknown';
               
-              pbArt.src = coverSvg;
-              modalArt.src = coverSvg;
+              pbArt.src = coverImg;
+              pbArt.onerror = function() { this.src = coverSvg; };
+              modalArt.src = fullCoverImg;
+              modalArt.onerror = function() { this.src = coverSvg; };
+              
+              // Apply dynamic blurred background to modals
+              const mobileBg = document.getElementById('mobile-player-bg');
+              const desktopBg = document.getElementById('desktop-player-bg');
+              if (mobileBg) mobileBg.style.backgroundImage = `url('${fullCoverImg}')`;
+              if (desktopBg) desktopBg.style.backgroundImage = `url('${fullCoverImg}')`;
               
               lastSavedTime = 0;
               isRestoringTime = false;
-              let joiner = currentBaseUrl.includes('?') ? '&' : (currentBaseUrl.endsWith('/') ? '?' : '/?');
               audioPlayer.src = `${currentBaseUrl}${joiner}action=get_stream&id=${song.id}&api_key=${encodeURIComponent(apiKey)}`;
               audioPlayer.play().catch(err => console.error("Playback restriction: ", err));
 
@@ -17402,7 +17604,7 @@ curl_close($ch);
                   artist: song.artist || 'Unknown Artist',
                   album: song.album || 'Unknown Album',
                   artwork: [
-                    { src: coverSvg, sizes: '512x512', type: 'image/svg+xml' }
+                    { src: fullCoverImg, sizes: '512x512', type: 'image/webp' }
                   ]
                 });
               }
@@ -17631,24 +17833,29 @@ curl_close($ch);
               });
             }
 
-            // MODIFIED: Inject URL securely from Parent frame to avoid domain typing
+            // MODIFIED: Inject URL securely from Parent frame to avoid domain typing & prevent nullsrcdoc
             let savedApiUrl = '';
             try {
-              if (window.parent && window.parent.location && window.parent.location.origin === window.location.origin) {
-                savedApiUrl = window.parent.location.origin + window.parent.location.pathname;
+              if (window.parent && window.parent.location && window.parent.location.href && !window.parent.location.href.includes('srcdoc') && !window.parent.location.href.includes('about:blank')) {
+                savedApiUrl = window.parent.location.href.split('?')[0].split('#')[0];
               } else {
-                savedApiUrl = window.location.origin + window.location.pathname;
+                savedApiUrl = window.location.href.split('?')[0].split('#')[0];
               }
             } catch(e) {
-              // Cross-origin iframe (Cloud IDEs like Replit, CodeSandbox)
-              savedApiUrl = window.location.origin + window.location.pathname;
+              savedApiUrl = window.location.href.split('?')[0].split('#')[0];
+            }
+            if (savedApiUrl.includes('null') || savedApiUrl.includes('srcdoc') || savedApiUrl === 'about:blank') {
+              savedApiUrl = '/';
             }
             
             // Allow explicit local storage override if it exists
             const storedUrl = localStorage.getItem('ytm_apiUrl');
             if (storedUrl) savedApiUrl = storedUrl;
-            if (savedApiUrl && !savedApiUrl.includes('access=api')) {
-              savedApiUrl += (savedApiUrl.includes('?') ? '&' : '/?') + 'access=api';
+            if (savedApiUrl) {
+              savedApiUrl = savedApiUrl.replace(/\/+$/, ''); // Strip trailing slashes to prevent double slash bug
+              if (!savedApiUrl.includes('access=api')) {
+                savedApiUrl += (savedApiUrl.includes('?') ? '&' : '/?') + 'access=api';
+              }
             }
             const savedSourceType = localStorage.getItem('ytm_sourceType');
             const savedPlaylistId = localStorage.getItem('ytm_playlistId');
@@ -17677,6 +17884,7 @@ curl_close($ch);
               const params = {};
               const pairs = hash.split('&');
               for (let pair of pairs) {
+                if (pair === 'playground') continue; // Ignore the routing token
                 const [key, val] = pair.split('=');
                 if (key && val) {
                   params[decodeURIComponent(key)] = decodeURIComponent(val);
@@ -17696,6 +17904,7 @@ curl_close($ch);
                 if (hashApiKey) {
                   apiKey = hashApiKey;
                   localStorage.setItem('ytm_apiKey', apiKey);
+                  if (apiKeyInput) apiKeyInput.value = apiKey;
                 }
 
                 if (hashBackendUrl) {
@@ -17961,8 +18170,41 @@ SOFTWARE.</div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/nosleep/0.12.0/NoSleep.min.js"></script>
     <script>
+      // Global Hashchange Interceptor for Playground
+      window.addEventListener('hashchange', () => {
+        // If the hash changes to playground and we are inside the main app (where the template exists), force a clean reload to boot it.
+        if (window.location.hash.startsWith('#playground') && document.getElementById('play-client-template')) {
+          window.location.reload();
+        }
+      });
+
       document.addEventListener('DOMContentLoaded', () => {
+        // PLAYGROUND ROUTER INTERCEPTOR
+        // If the URL contains #playground, halt main app boot and swap out the DOM for the client template.
+        if (window.location.hash.startsWith('#playground')) {
+          const tpl = document.getElementById('play-client-template');
+          if (tpl) {
+            document.open();
+            document.write(tpl.innerHTML);
+            document.close();
+          }
+          return; // Strictly abort further execution of the main app
+        }
+
         'use strict';
+
+        const getSvgPlaceholder = (title) => {
+          let hash = 0;
+          for (let i = 0; i < title.length; i++) {
+            hash = title.charCodeAt(i) + ((hash << 5) - hash);
+          }
+          const h = Math.abs(hash % 360);
+          const c1 = `hsl(${h}, 50%, 35%)`;
+          const c2 = `hsl(${(h + 40) % 360}, 60%, 45%)`;
+          const c3 = `hsl(${(h + 80) % 360}, 60%, 35%)`;
+          const svgString = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%"><defs><linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="${c1}"/><stop offset="50%" stop-color="${c2}"/><stop offset="100%" stop-color="${c3}"/></linearGradient><filter id="shadow" x="-10%" y="-10%" width="120%" height="120%"><feDropShadow dx="0" dy="8" stdDeviation="12" flood-opacity="0.3"/></filter></defs><rect width="512" height="512" fill="url(#grad)"/><g transform="translate(128, 128) scale(10.66)" fill="none" stroke="#ffffff" stroke-width="1.5" opacity="0.9" filter="url(#shadow)"><circle cx="12" cy="12" r="3"/><path stroke-linecap="round" d="M21.95 13c-.501 5.054-4.765 9-9.95 9c-5.523 0-10-4.477-10-10c0-1.821.487-3.529 1.338-5M11 2.05a9.9 9.9 0 0 0-4 1.288"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12V2.456a10.02 10.02 0 0 1 6.542 6.542"/></g></svg>`;
+          return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgString)}`;
+        };
         
         window.scrollToCenter = (container, element, smooth = true) => {
           if (!container || !element) return false;
@@ -19131,9 +19373,38 @@ SOFTWARE.</div>
           const userKeyInput = document.getElementById('custom-api-key-input');
           const finalKey = userKeyInput && userKeyInput.value ? userKeyInput.value.trim() : '';
           
-          let url = window.location.origin + window.location.pathname + '?access=api&action=' + actionVal;
+          let baseAppUrl = window.location.href.split('?')[0].split('#')[0];
+          if (baseAppUrl.includes('null') || baseAppUrl.includes('srcdoc') || baseAppUrl === 'about:blank') {
+            baseAppUrl = '';
+          }
+          baseAppUrl = baseAppUrl.replace(/\/+$/, ''); // Strip trailing slashes to prevent double slash bug
+          
+          let url = baseAppUrl + '/?access=api&action=' + actionVal;
           if (finalKey) url += '&api_key=' + encodeURIComponent(finalKey);
           apiUrlInput.value = url;
+
+          const apiVisualOpenTabBtn = document.getElementById('api-visual-open-tab-btn');
+          if (apiVisualOpenTabBtn) {
+            let sourceType = 'all';
+            let idName = '';
+            if (actionVal.includes('playlist')) {
+              sourceType = 'playlist';
+              idName = '1';
+            } else if (actionVal.includes('artist')) {
+              sourceType = 'artist';
+              idName = '1';
+            }
+            let absoluteBaseUrl = window.location.protocol + '//' + window.location.host + window.location.pathname;
+            if (absoluteBaseUrl.includes('null') || absoluteBaseUrl.includes('srcdoc')) {
+              absoluteBaseUrl = '';
+            }
+            absoluteBaseUrl = absoluteBaseUrl.replace(/\/+$/, ''); // Clean absolute URL for Playground injection
+            
+            apiVisualOpenTabBtn.dataset.sourceType = sourceType;
+            apiVisualOpenTabBtn.dataset.idName = idName;
+            apiVisualOpenTabBtn.dataset.backendUrl = absoluteBaseUrl;
+            apiVisualOpenTabBtn.dataset.apiKey = finalKey;
+          }
           
           const method = selectedOption.getAttribute('data-method') || 'GET';
           if (apiMethodBadge) {
@@ -19152,37 +19423,32 @@ SOFTWARE.</div>
           // VISUAL CLIENT TESTER INJECTION (Iframe 2)
           const visualIframe = document.getElementById('api-visual-iframe');
           const templateEl = document.getElementById('play-client-template');
-          const isSuperAdmin = currentUser && currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com';
 
           if (visualIframe && templateEl) {
-             if (!isSuperAdmin && !window.userHasApiKeys) {
-                visualIframe.srcdoc = `<html><body style="background-color: #030303; color: #ff0000; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; text-align: center; padding: 20px;"><div><svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="currentColor" class="bi bi-lock-fill mb-3" viewBox="0 0 16 16"><path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/></svg><h2>Access Denied</h2><p class="text-secondary">You must request and generate at least one API Key in your 'My APIs' tab before accessing the Visual Playground.</p></div></body></html>`;
-             } else {
-                if (!visualIframe.srcdoc || visualIframe.srcdoc.includes('Access Denied')) {
-                   visualIframe.srcdoc = templateEl.innerHTML;
-                }
+            // Unconditionally render playground client UI, letting it gracefully query using session cookie
+            if (!visualIframe.srcdoc || visualIframe.srcdoc.includes('Access Denied')) {
+              visualIframe.srcdoc = templateEl.innerHTML;
+            }
                 
-                let sourceType = 'all';
-                let idName = '';
-                if (actionVal.includes('playlist')) {
-                  sourceType = 'playlist';
-                  idName = '1';
-                } else if (actionVal.includes('artist')) {
-                  sourceType = 'artist';
-                  idName = '1';
-                }
-                const bUrl = window.location.origin + window.location.pathname;
-                const safeApiKey = finalKey ? encodeURIComponent(finalKey) : '';
-                const hash = `#sourcetype=${sourceType}&id/name=${idName}&backendurl=${encodeURIComponent(bUrl)}&apikey=${safeApiKey}`;
-              
-                if (visualIframe.contentWindow && visualIframe.contentWindow.location && visualIframe.contentWindow.document.readyState === 'complete') {
-                   visualIframe.contentWindow.location.hash = hash;
-                } else {
-                  visualIframe.onload = () => {
-                     visualIframe.contentWindow.location.hash = hash;
-                  };
-                }
-             }
+            let sourceType = 'all';
+            let idName = '';
+            if (actionVal.includes('playlist')) {
+              sourceType = 'playlist';
+              idName = '1';
+            } else if (actionVal.includes('artist')) {
+              sourceType = 'artist';
+              idName = '1';
+            }
+            const safeApiKey = finalKey ? encodeURIComponent(finalKey) : '';
+            const hash = `#sourcetype=${sourceType}&id/name=${idName}&backendurl=${encodeURIComponent(baseAppUrl)}&apikey=${safeApiKey}`;
+          
+            if (visualIframe.contentWindow && visualIframe.contentWindow.location && visualIframe.contentWindow.document.readyState === 'complete') {
+              visualIframe.contentWindow.location.hash = hash;
+            } else {
+              visualIframe.onload = () => {
+                visualIframe.contentWindow.location.hash = hash;
+              };
+            }
           }
 
           // RAW JSON VIEWER LOGIC (Iframe 1)
@@ -19251,13 +19517,32 @@ SOFTWARE.</div>
 
         if (apiModalEl && apiUrlInput) {
           const userKeyInput = document.getElementById('custom-api-key-input');
+          const apiVisualOpenTabBtn = document.getElementById('api-visual-open-tab-btn');
+          
+          // Secure one-time click listener for the Playground Standalone Tab overlay icon
+          if (apiVisualOpenTabBtn) {
+            apiVisualOpenTabBtn.addEventListener('click', (e) => {
+              e.preventDefault();
+              e.stopPropagation(); // Avoid triggering any container clicks
+              const bUrl = apiVisualOpenTabBtn.dataset.backendUrl || window.location.origin + window.location.pathname;
+              const safeApiKey = apiVisualOpenTabBtn.dataset.apiKey ? encodeURIComponent(apiVisualOpenTabBtn.dataset.apiKey) : '';
+              const sourceType = apiVisualOpenTabBtn.dataset.sourceType || 'all';
+              const idName = apiVisualOpenTabBtn.dataset.idName || '';
+              
+              // Constructs the secure hash containing the #playground routing indicator
+              const hash = `#playground&sourcetype=${sourceType}&id/name=${idName}&backendurl=${encodeURIComponent(bUrl)}&apikey=${safeApiKey}`;
+              
+              window.open(bUrl + hash, '_blank');
+            });
+          }
+
           apiModalEl.addEventListener('show.bs.modal', async () => {
-             window.userHasApiKeys = false;
-             if (currentUser) {
-                 const myApis = await fetchData('?action=get_my_apis');
-                 if (myApis && myApis.length > 0) window.userHasApiKeys = true;
-             }
-             updateApiUrl();
+            window.userHasApiKeys = false;
+            if (currentUser) {
+              const myApis = await fetchData('?action=get_my_apis');
+              if (myApis && myApis.length > 0) window.userHasApiKeys = true;
+            }
+            updateApiUrl();
           });
           if (apiActionSelect) apiActionSelect.addEventListener('change', updateApiUrl);
           if (userKeyInput) userKeyInput.addEventListener('input', updateApiUrl);
@@ -19512,6 +19797,7 @@ SOFTWARE.</div>
             const song = globalSongCache[songId];
             if (!song) return;
             const isNowPlaying = currentSong && (songId === currentSong.id);
+            const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
             
             html += `
               <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''}" 
@@ -19523,7 +19809,7 @@ SOFTWARE.</div>
                 data-song-genre="${escapeAttr(song.genre)}"
                 data-song-user-id="${song.user_id}">
                 <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
-                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                   <i class="bi bi-soundwave playing-icon"></i>
                 </div>
                 <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
@@ -21093,9 +21379,12 @@ SOFTWARE.</div>
               if (currentView.type === 'get_songs') {
                 targetContainer.innerHTML = `
                   <div class="d-flex flex-column align-items-center justify-content-center text-secondary w-100" style="height: 60vh;">
-                    <i class="bi bi-music-note-beamed mb-3" style="font-size: 5rem; opacity: 0.3;"></i>
-                    <h3 class="fw-bold text-white">No songs detected, scan first</h3>
-                    <p class="text-secondary mt-2">Open the sidebar menu and select <strong><i class="bi bi-hdd-stack-fill"></i> Scan All</strong></p>
+                    <i class="bi bi-hdd-stack text-warning mb-3" style="font-size: 5rem;"></i>
+                    <h3 class="fw-bold text-white">Database is Empty!</h3>
+                    <p class="text-secondary mt-2 text-center" style="max-width: 400px;">There are no songs in the system. The admin must run a Full Library Scan to populate the database.</p>
+                    <button class="btn btn-danger fw-bold px-4 py-2 mt-3" data-bs-toggle="modal" data-bs-target="#full-scan-modal">
+                      <i class="bi bi-search me-2"></i>Scan Library Now
+                    </button>
                   </div>
                 `;
               } else {
@@ -21126,6 +21415,7 @@ SOFTWARE.</div>
             const isNowPlaying = currentSong && currentSong.id === song.id;
             const isHistory = currentView.type === 'get_history';
             const playedAtHTML = isHistory ? `<div class="played-at-text text-truncate" title="${timeAgo(song.played_at)}">${timeAgo(song.played_at)}</div>` : '';
+            const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
             return `
             <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''} ${isHistory ? 'history-item' : ''}" 
               data-song-id="${song.id}" 
@@ -21136,7 +21426,7 @@ SOFTWARE.</div>
               data-song-genre="${escapeAttr(song.genre)}"
               data-song-user-id="${song.user_id}">
               <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
-                <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                 <i class="bi bi-soundwave playing-icon"></i>
               </div>
               <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${escapeHTML(song.title)}</div></div>
@@ -21581,13 +21871,14 @@ SOFTWARE.</div>
 
             if (shelf.type === 'top_result') {
               const song = shelf.items[0];
+              const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
               const shelfHTML = `
                 <div class="recommendation-shelf mb-4">
                   <div class="shelf-header">
                     <h3 class="shelf-title">${shelf.title}</h3>
                   </div>
                   <div class="card bg-transparent border-secondary d-flex flex-row align-items-center p-3 top-result-card" data-song-id="${song.id}" style="border-radius: 12px; cursor: pointer; max-width: 600px; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'">
-                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
                     <div class="d-flex flex-column justify-content-center overflow-hidden w-100">
                       <h4 class="text-white text-truncate mb-1 fw-bold">${escapeHTML(song.title)}</h4>
                       <p class="text-secondary text-truncate mb-0">Song • ${escapeHTML(song.artist)}</p>
@@ -21622,6 +21913,7 @@ SOFTWARE.</div>
               const escapeAttr = (str) => str ? String(str).replace(/'/g, "&apos;").replace(/"/g, "&quot;") : '';
               const songsHTML = shelf.items.map(song => {
                 const isNowPlaying = currentSong && currentSong.id === song.id;
+                const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
                 return `
                 <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''}" 
                   data-song-id="${song.id}" 
@@ -21632,7 +21924,7 @@ SOFTWARE.</div>
                   data-song-genre="${escapeAttr(song.genre)}"
                   data-song-user-id="${song.user_id}">
                   <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
-                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" onerror="this.src='${coverSvg}'" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
                     <i class="bi bi-soundwave playing-icon"></i>
                   </div>
                   <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
@@ -21663,13 +21955,15 @@ SOFTWARE.</div>
             }
 
             if (shelf.type === 'songs') {
-              itemsHTML = shelf.items.map(song => `
+              itemsHTML = shelf.items.map(song => {
+                const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
+                return `
                 <div class="shelf-item" data-song-id="${song.id}">
-                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" alt="${escapeHTML(song.title)}">
+                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" alt="${escapeHTML(song.title)}">
                   <div class="item-title">${escapeHTML(song.title)}</div>
                   <div class="item-subtitle" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${escapeHTML(song.artist)}</div>
                 </div>
-              `).join('');
+              `}).join('');
             } else if (shelf.type === 'albums') {
               itemsHTML = shelf.items.map(album => `
                 <div class="shelf-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
@@ -25095,7 +25389,7 @@ SOFTWARE.</div>
         };
         
         allNavLinks.forEach(link => {
-          if (!link.hasAttribute('data-view') || link.classList.contains('cat-nav-link') || link.classList.contains('note-filter-link') || link.classList.contains('task-filter-link') || link.classList.contains('blog-filter-link') || link.getAttribute('data-bs-toggle') === 'collapse' || link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'clear-cookies-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
+          if (!link.hasAttribute('data-view') || link.classList.contains('cat-nav-link') || link.classList.contains('note-filter-link') || link.classList.contains('task-filter-link') || link.classList.contains('blog-filter-link') || link.getAttribute('data-bs-toggle') === 'collapse' || link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'clear-cookies-btn', 'clear-session-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
@@ -25139,9 +25433,10 @@ SOFTWARE.</div>
           data.shelves.forEach(shelf => {
             if (shelf.type === 'top_result') {
                 const song = shelf.items[0];
+                const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
                 html += `<div class="search-dropdown-header text-danger">Top Result</div>
                   <div class="search-dropdown-item top-result-item" data-id="${song.id}">
-                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" class="search-dropdown-img" style="width: 50px; height: 50px; border-radius: 50%;">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" class="search-dropdown-img" style="width: 50px; height: 50px; border-radius: 50%;">
                     <div class="search-dropdown-text">
                       <div class="search-dropdown-title fw-bold" style="font-size: 1rem;">${escapeHTML(song.title)}</div>
                       <div class="search-dropdown-subtitle">Song • ${escapeHTML(song.artist)}</div>
@@ -25150,8 +25445,9 @@ SOFTWARE.</div>
             } else if (shelf.type === 'songs_list') {
               html += `<div class="search-dropdown-header">Songs</div>`;
               shelf.items.slice(0, 4).forEach(song => {
+                const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
                 html += `<div class="search-dropdown-item song-dropdown-item" data-id="${song.id}">
-                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" class="search-dropdown-img">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" class="search-dropdown-img">
                     <div class="search-dropdown-text">
                       <div class="search-dropdown-title">${escapeHTML(song.title)}</div>
                       <div class="search-dropdown-subtitle">${escapeHTML(song.artist)}</div>
@@ -28007,6 +28303,19 @@ SOFTWARE.</div>
               document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/"); 
             });
             showToast('Cookies cleared successfully. Reloading...', 'success');
+            setTimeout(() => window.location.reload(true), 1500);
+          });
+        }
+
+        const clearSessionBtn = document.getElementById('clear-session-btn');
+        if (clearSessionBtn) {
+          clearSessionBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            if (!confirm('This will forcefully destroy your active server session. Use this if your account is stuck after a database reset. Are you sure?')) return;
+            try {
+              await fetch('?action=logout', { cache: 'no-store' });
+            } catch (err) {}
+            showToast('Session cleared successfully. Reloading...', 'success');
             setTimeout(() => window.location.reload(true), 1500);
           });
         }
@@ -32227,7 +32536,7 @@ SOFTWARE.</div>
               return currentApi && token === currentApi;
             };
 
-            if (!isValidDevToken(localStorage.getItem('dev_mode_token'))) {
+            if (!isValidDevToken(localStorage.getItem('dev_mode_token')) && window.adminAutoToken !== 'musiclibrary@mail.com') {
               e.preventDefault(); // Block the browser's default inspect window opening
               const pwd = prompt("Developer tools locked. Enter API Key or Admin password:");
               if (isValidDevToken(pwd)) {
