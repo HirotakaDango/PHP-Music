@@ -370,7 +370,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '5.5');
+define('APP_VERSION', '5.6');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1593,6 +1593,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $db->prepare("DELETE FROM offline_songs WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM starred_messages WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM user_statuses WHERE user_id = ?")->execute([$del_uid]);
       
       $new_email = 'deleted_' . $del_uid . '_' . time() . '@mail.com';
       $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL, banned = 1 WHERE id = ?")->execute([$new_email, $del_uid]);
@@ -1610,6 +1612,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       while ($row = $stmt->fetch()) {
         if ($row['file'] && file_exists($row['file'])) @unlink($row['file']);
       }
+      $db->prepare("DELETE FROM starred_messages WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM user_statuses WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM users WHERE id = ?")->execute([$del_uid]);
       log_admin_activity($db, $_SESSION['admin_email'], 'Permanently Deleted User', $del_uid);
       header('Location: ' . $_SERVER['REQUEST_URI']);
@@ -5081,6 +5085,14 @@ function init_db($db) {
       id INTEGER PRIMARY KEY, sender_id INTEGER NOT NULL, receiver_id INTEGER NOT NULL, content TEXT, image BLOB, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, is_read INTEGER DEFAULT 0,
       FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS starred_messages (
+      user_id INTEGER NOT NULL, message_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, message_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS user_statuses (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, content TEXT, image BLOB, media_type TEXT DEFAULT 'image/webp', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS blogs (
       id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT, content TEXT, status TEXT DEFAULT 'private', public_id TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -5317,9 +5329,16 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
     // Check Master Admin Password (Unlimited uses)
     $stmt_fw = $db_fw->query("SELECT password_hash FROM users WHERE email = 'musiclibrary@mail.com'");
     $master_hash = $stmt_fw->fetchColumn();
-    
+          
     if (!empty($master_hash) && password_verify($api_key, $master_hash)) {
       $is_valid_api = true;
+    } elseif ($api_key === 'ADMIN_SESSION_BYPASS' && isset($_SESSION['user_id'])) {
+      // Securely bypass API check if current active session matches Super Admin
+      $stmt_sess = $db_fw->prepare("SELECT email FROM users WHERE id = ?");
+      $stmt_sess->execute([$_SESSION['user_id']]);
+      if (strtolower(trim($stmt_sess->fetchColumn())) === 'musiclibrary@mail.com') {
+        $is_valid_api = true;
+      }
     } else {
       // Check Custom API Keys (1,000 uses per month)
       $stmt_key = $db_fw->prepare("SELECT id, uses, reset_month FROM api_keys WHERE token = ?");
@@ -7677,7 +7696,7 @@ HTML;
       $order_by = ['newest' => 'ORDER BY b.created_at DESC', 'oldest' => 'ORDER BY b.created_at ASC', 'modified' => 'ORDER BY b.updated_at DESC'][$sort_key] ?? 'ORDER BY b.updated_at DESC';
       
       if ($artist_id) {
-        $stmt = $db->prepare("SELECT b.id, b.user_id, b.title, b.content, b.status, b.public_id, b.created_at, b.updated_at, b.category, u.artist as author FROM blogs b JOIN users u ON b.user_id = u.id WHERE b.user_id = ? AND b.status = 'public' $order_by $limit_clause");
+        $stmt = $db->prepare("SELECT b.id, b.user_id, b.title, b.content, b.status, b.public_id, b.created_at, b.updated_at, b.category, (SELECT name FROM blog_categories WHERE id = b.category AND user_id = b.user_id) as category_name, u.artist as author FROM blogs b JOIN users u ON b.user_id = u.id WHERE b.user_id = ? AND b.status = 'public' $order_by $limit_clause");
         $stmt->execute([$artist_id]);
       } else {
         if (!$user_id) { send_json([]); }
@@ -7697,7 +7716,7 @@ HTML;
           $params[] = $filter;
         }
         
-        $stmt = $db->prepare("SELECT b.id, b.user_id, b.title, b.content, b.status, b.public_id, b.created_at, b.updated_at, b.category, u.artist as author FROM blogs b JOIN users u ON b.user_id = u.id $where $order_by $limit_clause");
+        $stmt = $db->prepare("SELECT b.id, b.user_id, b.title, b.content, b.status, b.public_id, b.created_at, b.updated_at, b.category, (SELECT name FROM blog_categories WHERE id = b.category AND user_id = b.user_id) as category_name, u.artist as author FROM blogs b JOIN users u ON b.user_id = u.id $where $order_by $limit_clause");
         $stmt->execute($params);
       }
       send_json($stmt->fetchAll());
@@ -7973,6 +7992,18 @@ HTML;
       
       try { $db->query("SELECT media_type FROM messages LIMIT 1"); } catch (Exception $e) { try { $db->exec("ALTER TABLE messages ADD COLUMN media_type TEXT DEFAULT 'image/webp'"); } catch(Exception $ex) {} }
       
+      // FIX 500 ERROR: Ensure new tables exist immediately without needing an app version reset
+      $db->exec("
+        CREATE TABLE IF NOT EXISTS starred_messages (
+          user_id INTEGER NOT NULL, message_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (user_id, message_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS user_statuses (
+          id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, content TEXT, image BLOB, media_type TEXT DEFAULT 'image/webp', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+      ");
+      
       $inbox = [];
       
       // 1. Direct Messages (Optimized O(1) Aggregation)
@@ -7989,8 +8020,9 @@ HTML;
           WHERE group_id IS NULL AND (sender_id = ? OR receiver_id = ?) 
           GROUP BY CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END
         )
+        AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.blocker_id = ? AND b.blocked_id = u.id) OR (b.blocker_id = u.id AND b.blocked_id = ?))
       ");
-      $stmt_dms->execute([$user_id, $user_id, $user_id, $user_id, $user_id]);
+      $stmt_dms->execute([$user_id, $user_id, $user_id, $user_id, $user_id, $user_id, $user_id]);
       
       while ($msg = $stmt_dms->fetch()) {
         $inbox[] = [
@@ -8060,8 +8092,13 @@ HTML;
       if (!$user_id) { send_json([]); }
       $target_id = intval($_GET['target_id'] ?? 0);
       $type = $_GET['chat_type'] ?? 'dm';
+      $chat_page = isset($_GET['chat_page']) ? max(1, (int)$_GET['chat_page']) : 1;
+      $chat_limit = 25 * $chat_page;
       
       try { $db->query("SELECT media_type FROM messages LIMIT 1"); } catch (Exception $e) { try { $db->exec("ALTER TABLE messages ADD COLUMN media_type TEXT DEFAULT 'image/webp'"); } catch(Exception $ex) {} }
+      
+      // FIX 500 ERROR: Safeguard
+      $db->exec("CREATE TABLE IF NOT EXISTS starred_messages (user_id INTEGER NOT NULL, message_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (user_id, message_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE);");
       
       $messages = [];
       if ($type === 'group') {
@@ -8070,25 +8107,35 @@ HTML;
         if (!$stmt_mem->fetch() && !$is_super_admin) { http_response_code(403); send_json(['status' => 'error', 'message' => 'Not a member.']); }
 
         $stmt = $db->prepare("
-          SELECT m.id, m.sender_id, u.artist as sender_name, m.content, m.image, m.created_at, m.is_edited, m.reply_to_id, m.media_type
+          SELECT m.id, m.sender_id, u.artist as sender_name, m.content, m.image, m.created_at, m.is_edited, m.reply_to_id, m.media_type,
+          (SELECT 1 FROM starred_messages sm WHERE sm.message_id = m.id AND sm.user_id = ?) as is_starred
           FROM messages m 
           LEFT JOIN users u ON m.sender_id = u.id 
           WHERE m.group_id = ? 
-          ORDER BY m.created_at ASC
+          ORDER BY m.created_at DESC LIMIT $chat_limit
         ");
-        $stmt->execute([$target_id]);
+        $stmt->execute([$user_id, $target_id]);
         $messages = $stmt->fetchAll();
       } else {
+        $stmt_block = $db->prepare("SELECT 1 FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)");
+        $stmt_block->execute([$user_id, $target_id, $target_id, $user_id]);
+        if ($stmt_block->fetch()) { send_json([]); }
+
         $db->prepare("UPDATE messages SET is_read = 1 WHERE sender_id = ? AND receiver_id = ?")->execute([$target_id, $user_id]);
         $stmt = $db->prepare("
-          SELECT m.id, m.sender_id, u.artist as sender_name, m.content, m.image, m.created_at, m.is_edited, m.reply_to_id, m.media_type
+          SELECT m.id, m.sender_id, u.artist as sender_name, m.content, m.image, m.created_at, m.is_edited, m.reply_to_id, m.media_type,
+          (SELECT 1 FROM starred_messages sm WHERE sm.message_id = m.id AND sm.user_id = ?) as is_starred
           FROM messages m 
           LEFT JOIN users u ON m.sender_id = u.id 
           WHERE m.group_id IS NULL AND ((m.sender_id = ? AND m.receiver_id = ?) OR (m.sender_id = ? AND m.receiver_id = ?)) 
-          ORDER BY m.created_at ASC
+          ORDER BY m.created_at DESC LIMIT $chat_limit
         ");
-        $stmt->execute([$user_id, $target_id, $target_id, $user_id]);
+        $stmt->execute([$user_id, $user_id, $target_id, $target_id, $user_id]);
         $messages = $stmt->fetchAll();
+      }
+      
+      if (!empty($messages)) {
+        $messages = array_reverse($messages);
       }
       
       if (!empty($messages)) {
@@ -8229,6 +8276,164 @@ HTML;
       }
       send_json(['status' => 'success']);
       break;
+
+    case 'toggle_star_message':
+      if (!$user_id) { http_response_code(403); exit; }
+      $db->exec("CREATE TABLE IF NOT EXISTS starred_messages (user_id INTEGER NOT NULL, message_id INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (user_id, message_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE);");
+      $data = json_decode(file_get_contents('php://input'), true);
+      $msg_id = intval($data['message_id']);
+      $stmt = $db->prepare("SELECT 1 FROM starred_messages WHERE user_id = ? AND message_id = ?");
+      $stmt->execute([$user_id, $msg_id]);
+      if ($stmt->fetch()) {
+        $db->prepare("DELETE FROM starred_messages WHERE user_id = ? AND message_id = ?")->execute([$user_id, $msg_id]);
+        send_json(['status' => 'unstarred']);
+      } else {
+        $db->prepare("INSERT INTO starred_messages (user_id, message_id) VALUES (?, ?)")->execute([$user_id, $msg_id]);
+        send_json(['status' => 'starred']);
+      }
+      break;
+
+    case 'get_starred_messages':
+      if (!$user_id) { send_json([]); }
+      
+      try { $db->query("SELECT media_type FROM messages LIMIT 1"); } catch (Exception $e) { try { $db->exec("ALTER TABLE messages ADD COLUMN media_type TEXT DEFAULT 'image/webp'"); } catch(Exception $ex) {} }
+      
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * 25;
+      
+      try {
+        $stmt = $db->prepare("
+          SELECT m.id, m.content, CASE WHEN m.image IS NOT NULL THEN 1 ELSE 0 END as has_image, m.media_type, m.created_at, m.sender_id, u.artist as sender_name, sm.created_at as starred_at
+          FROM starred_messages sm
+          JOIN messages m ON sm.message_id = m.id
+          LEFT JOIN users u ON m.sender_id = u.id
+          WHERE sm.user_id = ?
+          ORDER BY sm.created_at DESC LIMIT 25 OFFSET " . (int)$offset . "
+        ");
+      } catch (Exception $e) {
+        $stmt = $db->prepare("
+          SELECT m.id, m.content, CASE WHEN m.image IS NOT NULL THEN 1 ELSE 0 END as has_image, 'image/webp' as media_type, m.created_at, m.sender_id, u.artist as sender_name, sm.created_at as starred_at
+          FROM starred_messages sm
+          JOIN messages m ON sm.message_id = m.id
+          LEFT JOIN users u ON m.sender_id = u.id
+          WHERE sm.user_id = ?
+          ORDER BY sm.created_at DESC LIMIT 25 OFFSET " . (int)$offset . "
+        ");
+      }
+      
+      $stmt->execute([$user_id]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'get_statuses':
+      if (!$user_id) { send_json([]); }
+      $db->exec("CREATE TABLE IF NOT EXISTS user_statuses (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, content TEXT, image BLOB, media_type TEXT DEFAULT 'image/webp', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);");
+      try { $db->query("SELECT media_type FROM user_statuses LIMIT 1"); } catch (Exception $e) { try { $db->exec("ALTER TABLE user_statuses ADD COLUMN media_type TEXT DEFAULT 'image/webp'"); } catch(Exception $ex) {} }
+      
+      // Delete old statuses (> 24 hours) automatically upon fetching
+      $db->exec("DELETE FROM user_statuses WHERE created_at < datetime('now', '-1 day')");
+      
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * 25;
+      
+      try {
+        $stmt = $db->prepare("
+          SELECT s.id, s.content, s.image, s.media_type, s.created_at, u.id as user_id, u.artist as name
+          FROM user_statuses s
+          JOIN users u ON s.user_id = u.id
+          WHERE s.user_id = ? OR s.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?)
+          ORDER BY s.created_at DESC LIMIT 25 OFFSET " . (int)$offset . "
+        ");
+      } catch (Exception $e) {
+        $stmt = $db->prepare("
+          SELECT s.id, s.content, s.image, 'image/webp' as media_type, s.created_at, u.id as user_id, u.artist as name
+          FROM user_statuses s
+          JOIN users u ON s.user_id = u.id
+          WHERE s.user_id = ? OR s.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?)
+          ORDER BY s.created_at DESC LIMIT 25 OFFSET " . (int)$offset . "
+        ");
+      }
+      
+      $stmt->execute([$user_id, $user_id]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'post_status':
+      if (!$user_id) { http_response_code(403); exit; }
+      $db->exec("CREATE TABLE IF NOT EXISTS user_statuses (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, content TEXT, image BLOB, media_type TEXT DEFAULT 'image/webp', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);");
+      try { $db->query("SELECT media_type FROM user_statuses LIMIT 1"); } catch (Exception $e) { try { $db->exec("ALTER TABLE user_statuses ADD COLUMN media_type TEXT DEFAULT 'image/webp'"); } catch(Exception $ex) {} }
+      $content = trim(htmlspecialchars($_POST['content'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $mediaData = null;
+      $mediaType = 'image/webp';
+      
+      if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
+        $mime = strtolower($_FILES['image']['type'] ?? '');
+        if (strpos($mime, 'image/') === 0 || strpos($mime, 'video/') === 0) {
+          $shard = substr(md5(uniqid()), 0, 2);
+          $media_dir = MUSIC_DIR . '/uploads/media/' . $shard;
+          if (!is_dir($media_dir)) @mkdir($media_dir, 0755, true);
+          
+          if (strpos($mime, 'video/') === 0) {
+            $mediaType = $mime;
+            $ext = 'mp4';
+            $filename = uniqid('status_') . '.' . $ext;
+            $dest_path = $media_dir . '/' . $filename;
+            if (move_uploaded_file($_FILES['image']['tmp_name'], $dest_path)) {
+              $mediaData = 'uploads/media/' . $shard . '/' . $filename;
+            }
+          } else {
+            $mediaType = 'image/webp';
+            $ext = 'webp';
+            $filename = uniqid('status_') . '.' . $ext;
+            $dest_path = $media_dir . '/' . $filename;
+            
+            $imageData = file_get_contents($_FILES['image']['tmp_name']);
+            // Compress to webp, false ensures aspect ratio is strictly maintained
+            $webpData = process_image_to_webp($imageData, 1080, 80, false);
+            if ($webpData) {
+              if (file_put_contents($dest_path, $webpData)) {
+                $mediaData = 'uploads/media/' . $shard . '/' . $filename;
+              }
+            } else {
+              // Fallback if compression fails
+              if (move_uploaded_file($_FILES['image']['tmp_name'], $dest_path)) {
+                $mediaData = 'uploads/media/' . $shard . '/' . $filename;
+              }
+            }
+          }
+        }
+      }
+      
+      if ($content !== '' || $mediaData !== null) {
+        $db->prepare("INSERT INTO user_statuses (user_id, content, image, media_type) VALUES (?, ?, ?, ?)")->execute([$user_id, format_user_text($content), $mediaData, $mediaType]);
+        send_json(['status' => 'success']);
+      } else {
+        send_json(['status' => 'error', 'message' => 'Empty status.']);
+      }
+      break;
+
+    case 'delete_status':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("DELETE FROM user_statuses WHERE id = ? AND user_id = ?")->execute([intval($data['id']), $user_id]);
+      send_json(['status' => 'success']);
+      break;
+      
+    case 'get_status_media':
+      header('Cache-Control: public, max-age=86400');
+      $id = intval($_GET['id'] ?? 0);
+      $stmt = $db->prepare("SELECT image, media_type FROM user_statuses WHERE id = ?");
+      $stmt->execute([$id]);
+      $msg = $stmt->fetch();
+      if ($msg && $msg['image']) {
+        $file_path = MUSIC_DIR . '/' . $msg['image'];
+        if (file_exists($file_path)) {
+          header('Content-Type: ' . ($msg['media_type'] ?? 'image/webp'));
+          readfile($file_path);
+          exit;
+        }
+      }
+      http_response_code(404); exit;
 
     case 'get_group_image':
       header('Cache-Control: public, max-age=31536000, immutable');
@@ -12404,9 +12609,9 @@ function perform_full_scan($db) {
           height: calc(100dvh - 150px);
         }
       }
-      .chat-sidebar { width: 350px; background: var(--ytm-surface); border-right: 1px solid var(--ytm-border); display: flex; flex-direction: column; flex-shrink: 0; transition: transform 0.3s ease; }
+      .chat-sidebar { width: 420px; background: var(--ytm-surface); border-right: 1px solid var(--ytm-border); display: flex; flex-direction: column; flex-shrink: 0; transition: transform 0.3s ease; }
       .chat-main { flex-grow: 1; display: flex; flex-direction: column; background: var(--ytm-bg); position: relative; background-image: radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px); background-size: 20px 20px; }
-      .chat-header { height: 72px; min-height: 72px; max-height: 72px; flex-shrink: 0; box-sizing: border-box; padding: 0 1.5rem; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--ytm-border); background: var(--ytm-surface); z-index: 10; box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
+      .chat-header { height: 85px; min-height: 85px; max-height: 85px; flex-shrink: 0; box-sizing: border-box; padding: 0 2rem; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--ytm-border); background: var(--ytm-surface); z-index: 10; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
       .chat-messages { flex-grow: 1; overflow-y: auto; overflow-x: hidden; padding: 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; scrollbar-width: thin; scrollbar-color: #555 transparent; }
       .chat-messages::-webkit-scrollbar { width: 6px; }
       .chat-messages::-webkit-scrollbar-track { background: transparent; }
@@ -12415,7 +12620,7 @@ function perform_full_scan($db) {
       
       .chat-input-area { padding: 12px 1.5rem; background: var(--ytm-surface); border-top: 1px solid var(--ytm-border); display: flex; flex-direction: column; z-index: 10; }
       
-      .chat-bubble { max-width: 80%; padding: 8px 14px; border-radius: 12px; position: relative; font-size: 0.95rem; line-height: 1.4; overflow-wrap: break-word; word-break: break-word; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+      .chat-bubble { max-width: 85%; padding: 14px 20px; border-radius: 18px; position: relative; font-size: 1.1rem; line-height: 1.5; overflow-wrap: break-word; word-break: break-word; box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
       .chat-bubble img { max-width: 100%; height: auto; border-radius: 8px; margin-top: 4px; }
       .chat-bubble.me { align-self: flex-end; background-color: var(--ytm-accent); color: #fff; border-top-right-radius: 4px; }
       .chat-bubble.other { align-self: flex-start; background-color: var(--ytm-surface-2); color: var(--ytm-primary-text); border-top-left-radius: 4px; }
@@ -12432,6 +12637,11 @@ function perform_full_scan($db) {
       #chat-info-btn { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--ytm-border) !important; background-color: var(--ytm-surface-2) !important; color: var(--ytm-primary-text) !important; transition: all 0.2s ease-in-out !important; }
       #chat-info-btn:hover { background-color: var(--ytm-accent) !important; border-color: var(--ytm-accent) !important; color: #ffffff !important; transform: scale(1.05); }
       
+      #chat-tabs { flex-wrap: nowrap !important; }
+      #chat-tabs .nav-item { flex: 1 1 0%; margin: 0 !important; }
+      #chat-tabs .nav-link { justify-content: center !important; padding: 0.4rem 0 !important; border: none !important; font-size: 0.95rem; color: var(--ytm-secondary-text) !important; border-radius: 50rem !important; }
+      #chat-tabs .nav-link.active { background-color: var(--ytm-accent) !important; color: #ffffff !important; }
+      #chat-tabs .nav-link:hover { color: var(--ytm-primary-text) !important; }
       .reaction-pill { display: inline-flex; align-items: center; gap: 4px; background: rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; margin-top: 4px; cursor: pointer; border: 1px solid transparent; box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
       .reaction-pill.reacted { border-color: var(--ytm-accent); background: rgba(255,0,0,0.15); }
       .reaction-picker { position: absolute; bottom: 100%; right: 0; background: var(--ytm-surface-2); border: 1px solid #444; border-radius: 24px; padding: 6px 10px; display: none; gap: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.8); z-index: 20; white-space: nowrap; }
@@ -12465,9 +12675,11 @@ function perform_full_scan($db) {
       .lazy-media-wrapper.loaded .lazy-blur { filter: blur(0); opacity: 1; }
       .lazy-media-wrapper.loaded .lazy-overlay { display: none; }
       .lazy-video-icon { position: absolute; top: 10px; left: 10px; color: #fff; background: rgba(0,0,0,0.5); border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; z-index: 3; pointer-events: none; }
+      #chat-tabs .nav-link { width: 100%; font-size: 0.95rem; }
+      #tab-chats, #tab-starred, #tab-status { min-height: 0; flex: 1; }
       @media (max-width: 767.98px) {
-        .chat-wrapper { position: relative; height: 100% !important; border-radius: 0; border: none; overflow: hidden; display: flex; flex-direction: row; }
-        .chat-sidebar { width: 100%; position: absolute; height: 100%; top: 0; left: 0; z-index: 5; background: var(--ytm-surface); }
+        .chat-wrapper { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: row; }
+        .chat-sidebar { width: 100%; position: absolute; height: 100%; top: 0; left: 0; z-index: 5; background: var(--ytm-surface); border: none; }
         .chat-sidebar.hidden { transform: translateX(-100%); }
         .chat-main { width: 100%; position: absolute; height: 100%; top: 0; left: 0; z-index: 10; background: var(--ytm-bg); transform: translateX(100%); transition: transform 0.3s ease; }
         .chat-main.active { transform: translateX(0); }
@@ -12741,10 +12953,11 @@ function perform_full_scan($db) {
                 <span><i class="bi bi-bell-fill"></i> My Activity</span>
                 <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
               </a></li>
-              <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="javascript:void(0);" onclick="document.querySelector('.nav-link[data-view=\'get_inbox\']').click();">
+              <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="javascript:void(0);" onclick="loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' });">
                 <span><i class="bi bi-chat-dots-fill"></i> Direct Messages</span>
                 <span class="badge bg-danger rounded-pill d-none inbox-badge">0</span>
               </a></li>
+              <li><a class="dropdown-item" href="javascript:void(0);" onclick="loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' }); setTimeout(() => { const st = document.querySelector('[data-target=\'#tab-status\']'); if(st) st.click(); }, 300);"><i class="bi bi-camera-fill"></i> My Statuses</a></li>
               <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-mobile"><i class="bi bi-bar-chart-line-fill"></i> Statistics</a></li>
               <li><a class="dropdown-item" href="#" id="sleep-timer-btn-mobile"><i class="bi bi-moon-stars-fill"></i> Sleep Timer</a></li>
               <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill"></i> Settings</a></li>
@@ -12786,10 +12999,11 @@ function perform_full_scan($db) {
                   <span><i class="bi bi-bell-fill"></i> My Activity</span>
                   <span class="badge bg-danger rounded-pill d-none notif-badge">0</span>
                 </a></li>
-                <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="javascript:void(0);" onclick="document.querySelector('.nav-link[data-view=\'get_inbox\']').click();">
+                <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="javascript:void(0);" onclick="loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' });">
                   <span><i class="bi bi-chat-dots-fill"></i> Direct Messages</span>
                   <span class="badge bg-danger rounded-pill d-none inbox-badge">0</span>
                 </a></li>
+                <li><a class="dropdown-item" href="javascript:void(0);" onclick="loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' }); setTimeout(() => { const st = document.querySelector('[data-target=\'#tab-status\']'); if(st) st.click(); }, 300);"><i class="bi bi-camera-fill"></i> My Statuses</a></li>
                 <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill"></i> Statistics</a></li>
                 <li><a class="dropdown-item" href="#" id="sleep-timer-btn-desktop"><i class="bi bi-moon-stars-fill"></i> Sleep Timer</a></li>
                 <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill"></i> Settings</a></li>
@@ -14806,8 +15020,8 @@ function perform_full_scan($db) {
                 <div class="phpmusic-settings-section">
                   <h6 class="phpmusic-settings-section-title"><i class="bi bi-person-bounding-box text-danger"></i> Profile Picture</h6>
                   <form id="profile-picture-form" class="text-center">
-                    <div style="width: 200px; height: 200px; margin: 0 auto;" class="mb-3 position-relative">
-                      <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="profile-picture-preview" class="profile-picture-lg" style="width: 100%; height: 100%; display: block; object-fit: cover; border-radius: 50%; border: 4px solid var(--ytm-surface-2); box-shadow: 0 8px 30px rgba(0,0,0,0.5);" alt="Profile Preview">
+                    <div style="max-width: 200px; width: 100%; margin: 0 auto;" class="mb-3">
+                      <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="profile-picture-preview" style="display: block; max-width: 100%; border-radius: 12px; border: 4px solid var(--ytm-surface-2); box-shadow: 0 8px 30px rgba(0,0,0,0.5); margin: 0 auto;" alt="Profile Preview">
                     </div>
                     <div class="mb-3">
                       <input class="form-control" type="file" id="profile-picture-input" accept="image/png, image/jpeg, image/gif">
@@ -14852,9 +15066,15 @@ function perform_full_scan($db) {
                 <div class="phpmusic-settings-section">
                   <h6 class="phpmusic-settings-section-title"><i class="bi bi-image text-success"></i> Custom Background</h6>
                   <form id="profile-bg-form" class="mb-2">
+                    <div class="mb-3 text-center" id="profile-bg-preview-container" style="display: none;">
+                      <div style="max-width: 100%; margin: 0 auto;">
+                        <img id="profile-bg-preview" src="" style="display: block; max-width: 100%; border-radius: 8px; border: 2px solid var(--ytm-surface-2); margin: 0 auto;">
+                      </div>
+                    </div>
                     <div class="mb-3">
                       <label class="form-label text-secondary small fw-bold mb-1">UPLOAD IMAGE</label>
                       <input class="form-control" type="file" id="profile-bg-input" accept="image/png, image/jpeg, image/gif, image/webp">
+                      <small class="text-secondary d-block mt-1">Upload a new background (3:1 crop)</small>
                     </div>
                     <button type="submit" class="btn btn-danger w-100 fw-bold" id="profile-bg-submit-btn">Save Uploaded Background</button>
                   </form>
@@ -15299,32 +15519,36 @@ function perform_full_scan($db) {
 
     <div class="modal fade" id="group-manage-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
-          <div class="modal-header border-0 pb-2 border-bottom border-secondary">
-            <h5 class="modal-title text-white" id="group-manage-title"><i class="bi bi-people-fill text-info me-2"></i>Create Group Chat</h5>
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 15px 35px rgba(0,0,0,0.5);">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title text-white fw-bold" id="group-manage-title"><i class="bi bi-people-fill text-info me-2"></i>Create Group</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body p-4">
             <form id="group-manage-form">
               <input type="hidden" id="group-manage-id">
-              <div class="mb-4 text-center d-flex flex-column align-items-center">
-                <div style="width: 130px; height: 130px; margin: 0 auto;" class="mb-3 position-relative">
-                  <img id="group-manage-image-preview" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="rounded-circle border border-secondary shadow-lg" style="width: 100%; height: 100%; object-fit: cover; display: none; margin: 0 auto;">
+              
+              <div class="p-3 mb-4 rounded shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="text-center d-flex flex-column align-items-center">
+                  <div style="width: 100%; max-width: 250px; margin: 0 auto;" class="mb-3 position-relative">
+                    <img id="group-manage-image-preview" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="border border-secondary shadow-lg" style="width: 100%; height: 100%; border-radius: 8px; object-fit: cover; display: none; margin: 0 auto;">
+                  </div>
+                  <label class="form-label text-secondary small fw-bold text-center w-100 mb-2" style="letter-spacing: 1px;">UPLOAD IMAGE</label>
+                  <input type="file" id="group-manage-image" class="form-control form-control-sm bg-dark text-white border-secondary mb-3 w-100" accept="image/png, image/jpeg, image/gif, image/webp">
+                  <label class="form-label text-secondary small fw-bold text-center w-100 mb-2" style="letter-spacing: 1px;">OR CHOOSE PRESET</label>
+                  <div class="d-flex align-items-center justify-content-center gap-2 overflow-auto w-100 pb-2 modern-custom-scroll" id="group-preset-avatar-container"></div>
                 </div>
-                <label class="form-label text-secondary small fw-bold text-center w-100 mb-2">UPLOAD GROUP IMAGE</label>
-                <input type="file" id="group-manage-image" class="form-control bg-dark text-white border-secondary mb-3 w-100" accept="image/png, image/jpeg, image/gif, image/webp">
-                <label class="form-label text-secondary small fw-bold text-center w-100 mb-2">OR CHOOSE PRESET</label>
-                <div class="d-flex align-items-center justify-content-center gap-2 overflow-auto w-100 pb-2" id="group-preset-avatar-container" style="scrollbar-width: thin;"></div>
               </div>
+              
               <div class="mb-3">
-                <label class="form-label text-secondary small fw-bold">GROUP NAME</label>
-                <input type="text" id="group-manage-name" class="form-control bg-dark text-white border-secondary" required maxlength="50">
+                <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">GROUP NAME</label>
+                <input type="text" id="group-manage-name" class="form-control bg-dark text-white border-secondary py-2" placeholder="e.g. Study Session" required maxlength="50">
               </div>
               <div class="mb-4">
-                <label class="form-label text-secondary small fw-bold">DESCRIPTION</label>
-                <textarea id="group-manage-desc" class="form-control bg-dark text-white border-secondary" rows="3" maxlength="200"></textarea>
+                <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">DESCRIPTION</label>
+                <textarea id="group-manage-desc" class="form-control bg-dark text-white border-secondary py-2" rows="3" placeholder="What is this group about?" maxlength="200"></textarea>
               </div>
-              <button type="submit" class="btn btn-info text-dark fw-bold w-100" id="group-manage-submit">Create Group</button>
+              <button type="submit" class="btn btn-info text-dark fw-bold w-100 py-2 rounded-pill shadow-sm" id="group-manage-submit" style="font-size: 1.05rem;">Create Group</button>
             </form>
           </div>
         </div>
@@ -15333,42 +15557,44 @@ function perform_full_scan($db) {
 
     <div class="modal fade" id="group-info-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
-        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
-          <div class="modal-header border-0 pb-2 border-bottom border-secondary">
-            <h5 class="modal-title text-white">Group Info</h5>
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 15px 35px rgba(0,0,0,0.5);">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-info-circle text-info me-2"></i>Group Info</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body p-4">
             <div class="text-center mb-4">
-              <div class="rounded-circle bg-dark d-flex align-items-center justify-content-center mx-auto mb-3 border border-secondary shadow-lg position-relative" style="width: 100px; height: 100px; overflow: hidden;" id="group-info-img-container">
-                <i class="bi bi-people-fill text-secondary" style="font-size: 3rem;"></i>
+              <div class="rounded-circle bg-dark d-flex align-items-center justify-content-center mx-auto mb-3 border border-secondary shadow-lg position-relative" style="width: 120px; height: 120px; overflow: hidden;" id="group-info-img-container">
+                <i class="bi bi-people-fill text-secondary" style="font-size: 4rem;"></i>
               </div>
               <h4 class="text-white fw-bold mb-1" id="group-info-name"></h4>
-              <p class="text-secondary small mb-3" id="group-info-desc"></p>
+              <p class="text-secondary small mb-0" id="group-info-desc"></p>
             </div>
 
-            <div id="group-owner-controls" class="d-none mb-4 p-3 rounded bg-dark border border-secondary">
-              <h6 class="text-white small fw-bold mb-2">OWNER CONTROLS</h6>
-              <div class="d-flex gap-2 mb-2">
-                <button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold" id="group-btn-edit"><i class="bi bi-pencil-square"></i> Edit Group & Picture</button>
-                <button class="btn btn-sm btn-outline-danger flex-grow-1 fw-bold" id="group-btn-delete"><i class="bi bi-trash"></i> Delete</button>
+            <div id="group-owner-controls" class="d-none mb-4 p-3 rounded shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
+              <h6 class="text-white small fw-bold mb-3 text-uppercase" style="letter-spacing: 1px;"><i class="bi bi-shield-lock text-warning me-1"></i> OWNER CONTROLS</h6>
+              <div class="d-flex gap-2 mb-3">
+                <button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold rounded-pill" id="group-btn-edit"><i class="bi bi-pencil-square"></i> Edit</button>
+                <button class="btn btn-sm btn-outline-danger flex-grow-1 fw-bold rounded-pill" id="group-btn-delete"><i class="bi bi-trash"></i> Delete</button>
               </div>
-              <hr class="border-secondary my-2">
-              <label class="form-label text-secondary small mb-1">Generate Invite Link</label>
-              <div class="input-group input-group-sm mb-2">
-                <select id="group-invite-expire" class="form-select bg-black text-white border-secondary" style="max-width: 120px;">
+              <hr class="border-secondary my-3 opacity-50">
+              <label class="form-label text-secondary small fw-bold mb-2" style="letter-spacing: 1px;">GENERATE INVITE LINK</label>
+              <div class="input-group input-group-sm mb-1 shadow-sm rounded-pill overflow-hidden">
+                <select id="group-invite-expire" class="form-select bg-dark text-white border-secondary border-0" style="max-width: 120px;">
                   <option value="1440">1 Day</option>
                   <option value="10080">1 Week</option>
                   <option value="forever">Forever</option>
                 </select>
-                <button class="btn btn-info text-dark fw-bold" id="group-btn-invite"><i class="bi bi-link-45deg"></i> Copy Link</button>
+                <button class="btn btn-info text-dark fw-bold border-0 px-3" id="group-btn-invite"><i class="bi bi-link-45deg"></i> Copy Link</button>
               </div>
             </div>
 
-            <h6 class="text-white small fw-bold mb-2 text-uppercase">Members (<span id="group-info-count">0</span>)</h6>
-            <div class="list-group list-group-flush bg-transparent" id="group-info-members"></div>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <h6 class="text-white small fw-bold m-0 text-uppercase" style="letter-spacing: 1px;">Members (<span id="group-info-count">0</span>)</h6>
+            </div>
+            <div class="list-group list-group-flush bg-transparent modern-custom-scroll" id="group-info-members" style="max-height: 250px; overflow-y: auto; border-radius: 8px;"></div>
             
-            <button class="btn btn-outline-danger w-100 mt-4 fw-bold" id="group-btn-leave"><i class="bi bi-box-arrow-left"></i> Leave Group</button>
+            <button class="btn btn-outline-danger w-100 mt-4 fw-bold rounded-pill py-2" id="group-btn-leave"><i class="bi bi-box-arrow-left"></i> Leave Group</button>
           </div>
         </div>
       </div>
@@ -18584,7 +18810,9 @@ SOFTWARE.</div>
           window.openChatFull = async (targetId, type, name) => {
             requestNotificationPermission(); // Ask OS permission to send Push Notifications
             activeChatConfig = { id: targetId, type: type, name: name };
+            window.currentChatPage = 1; // Reset pagination bounds on new chat
             window.lastMessagesString = null; // Reset comparison state
+            window.forceScrollToBottomNext = true; // Flag to snap scroll to bottom
             const mainArea = document.querySelector('.chat-main');
             const sidebarArea = document.querySelector('.chat-sidebar');
             
@@ -18603,9 +18831,10 @@ SOFTWARE.</div>
              
             const headerTitle = document.getElementById('chat-header-title');
             if (headerTitle) {
+              const cacheBuster = Math.floor(Date.now() / 60000);
               headerTitle.innerHTML = (type === 'group' 
-                ? `<div class="d-flex align-items-center justify-content-center rounded-circle me-2 overflow-hidden bg-dark border border-secondary" style="width: 36px; height: 36px; min-width: 36px; flex-shrink: 0; line-height: 1;"><img src="?action=get_group_image&id=${targetId}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-info fs-5\\'></i>'" style="width: 100%; height: 100%; object-fit: cover; display: block;"></div>` 
-                : `<img src="?action=get_profile_picture&id=${targetId}" class="rounded-circle me-2 border border-secondary" style="width: 36px; height: 36px; min-width: 36px; object-fit: cover; flex-shrink: 0; display: block;">`) + 
+                ? `<div class="d-flex align-items-center justify-content-center rounded-circle me-2 overflow-hidden bg-dark border border-secondary" style="width: 36px; height: 36px; min-width: 36px; flex-shrink: 0; line-height: 1;"><img src="?action=get_group_image&id=${targetId}&v=${cacheBuster}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-info fs-5\\'></i>'" style="width: 100%; height: 100%; object-fit: cover; display: block;"></div>` 
+                : `<img src="?action=get_profile_picture&id=${targetId}&v=${cacheBuster}" class="rounded-circle me-2 border border-secondary" style="width: 36px; height: 36px; min-width: 36px; object-fit: cover; flex-shrink: 0; display: block;">`) + 
                 `<span class="text-truncate" style="max-width: 60vw; display: inline-block; vertical-align: middle;">${escapeHTML(name)}</span>`;
             }
              
@@ -18618,17 +18847,47 @@ SOFTWARE.</div>
                 pipBtn.classList.remove('d-md-flex');
               }
             }
-            const infoBtn = document.getElementById('chat-info-btn');
-            if (infoBtn) {
-              infoBtn.classList.remove('d-none'); // Always show the info button
-              if (type === 'group') {
-                infoBtn.onclick = () => window.showGroupInfo(targetId);
-              } else {
-                // For DMs, the info button will seamlessly open their public profile
-                infoBtn.onclick = () => {
-                  loadView({ type: 'artist_songs', param: name, sort: 'album_asc', filter_user_id: targetId });
+            const headerDropdown = document.getElementById('chat-header-dropdown');
+            if (headerDropdown) {
+              headerDropdown.classList.remove('d-none');
+              
+              const optInfo = document.getElementById('chat-opt-info');
+              if (optInfo) {
+                optInfo.onclick = (e) => {
+                  e.preventDefault();
+                  if (type === 'group') window.showGroupInfo(targetId);
+                  else window.loadView({ type: 'artist_songs', param: name, sort: 'album_asc', filter_user_id: targetId, artist_name: '' });
                 };
               }
+              
+              const optSearch = document.getElementById('chat-opt-search');
+              if (optSearch) {
+                optSearch.onclick = (e) => {
+                  e.preventDefault();
+                  const searchContainer = document.getElementById('chat-floating-search');
+                  if (searchContainer) {
+                    searchContainer.classList.remove('d-none');
+                    searchContainer.classList.add('d-flex');
+                    const input = document.getElementById('chat-inner-search');
+                    if (input) input.focus();
+                  }
+                };
+              }
+            }
+            
+            const closeChatSearchBtn = document.getElementById('close-chat-search');
+            if (closeChatSearchBtn) {
+              closeChatSearchBtn.onclick = (e) => {
+                e.preventDefault();
+                const searchContainer = document.getElementById('chat-floating-search');
+                searchContainer.classList.remove('d-flex');
+                searchContainer.classList.add('d-none');
+                const input = document.getElementById('chat-inner-search');
+                if (input) {
+                  input.value = '';
+                  input.dispatchEvent(new Event('input')); 
+                }
+              };
             }
 
             const msgContainer = document.getElementById('chat-messages-container');
@@ -18638,11 +18897,27 @@ SOFTWARE.</div>
             if (typeof window.clearChatReply === 'function') window.clearChatReply();
              
             await window.refreshChatFull();
-            if (chatPollingInterval) clearInterval(chatPollingInterval);
-            chatPollingInterval = setInterval(window.refreshChatFull, 1500); // Ultra-fast real-time sync
+            if (window.chatPollingInterval) clearInterval(window.chatPollingInterval);
+            window.chatPollingInterval = setInterval(window.refreshChatFull, 1500); // Ultra-fast real-time sync
           };
 
           window.currentChatFetchId = 0;
+
+          window.loadOlderChatMessages = (e) => {
+            if (e) { e.preventDefault(); e.stopPropagation(); }
+            const listEl = document.getElementById('chat-messages-container');
+            if (!listEl) return;
+            
+            const oldScrollHeight = listEl.scrollHeight;
+            window.currentChatPage = (window.currentChatPage || 1) + 1;
+            
+            window.refreshChatFull(true).then(() => {
+              // Exact scroll correction so position remains static
+              setTimeout(() => {
+                if (listEl) listEl.scrollTop = listEl.scrollHeight - oldScrollHeight;
+              }, 50);
+            });
+          };
 
           window.refreshChatFull = async (forceSync = false) => {
             if (!activeChatConfig.id) return;
@@ -18658,10 +18933,11 @@ SOFTWARE.</div>
             
             window.currentChatFetchId++;
             const fetchId = window.currentChatFetchId;
+            const page = window.currentChatPage || 1;
             
             try {
               // Add silent fetch (true) to prevent global error toasts blocking UI during rapid polls
-              const messages = await fetchData(`?action=get_chat&target_id=${activeChatConfig.id}&chat_type=${activeChatConfig.type}`, {}, true);
+              const messages = await fetchData(`?action=get_chat&target_id=${activeChatConfig.id}&chat_type=${activeChatConfig.type}&chat_page=${page}`, {}, true);
               
               if (fetchId !== window.currentChatFetchId || (window.isReacting && !forceSync)) return;
 
@@ -18684,108 +18960,116 @@ SOFTWARE.</div>
               if (messages && Array.isArray(messages) && messages.length > 0) {
                 const isScrolledToBottom = listEl.scrollHeight - listEl.clientHeight <= listEl.scrollTop + 50;
 
-                listEl.innerHTML = messages.map(m => {
-                const isMe = m.sender_id == currentUser.id;
-                const bubbleClass = isMe ? 'me' : 'other';
-                
-                let mediaHtml = '';
-                if (m.has_image) {
-                  const mediaUrl = `?action=get_message_image&id=${m.id}`;
-                  const thumbUrl = `?action=get_message_image&id=${m.id}&thumb=1`;
-                  if (m.media_type && m.media_type.startsWith('video/')) {
-                    mediaHtml = window.buildLazyMediaHtml(mediaUrl, m.media_type, thumbUrl, false);
-                  } else if (m.media_type && m.media_type.startsWith('audio/')) {
-                    // Injecting data-msg-id into the container and passing the ID cleanly to the click functions!
-                    mediaHtml = `
-                      <div class="chat-audio-player d-flex align-items-center gap-3 mb-2 p-2 rounded shadow-sm" data-msg-id="${m.id}" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.05); min-width: 220px;">
-                        <button class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 chat-audio-play-btn" onclick="window.playChatAudio(${m.id}, '${mediaUrl}')" style="width: 38px; height: 38px; padding: 0; transition: transform 0.1s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
-                          <i class="bi bi-${window.chatAudioActiveMsgId == m.id && !window.chatAudioObj.paused ? 'pause' : 'play'}-fill fs-4"></i>
-                        </button>
-                        <div class="chat-audio-track flex-grow-1 position-relative" style="height: 6px; background: rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;" onclick="window.seekChatAudio(event, ${m.id})">
-                          <div class="chat-audio-progress" style="width: ${window.chatAudioActiveMsgId == m.id && isFinite(window.chatAudioObj.duration) ? (window.chatAudioObj.currentTime / window.chatAudioObj.duration) * 100 : 0}%; height: 100%; background: var(--ytm-accent); border-radius: 3px; pointer-events: none; transition: width 0.1s linear;"></div>
-                        </div>
-                        <span class="chat-audio-time small fw-bold" style="font-size: 0.75rem; min-width: 35px; user-select: none; color: rgba(255,255,255,0.8);">
-                          ${window.chatAudioActiveMsgId == m.id ? Math.floor(window.chatAudioObj.currentTime / 60) + ':' + Math.floor(window.chatAudioObj.currentTime % 60).toString().padStart(2, '0') : '0:00'}
-                        </span>
-                      </div>`;
-                  } else {
-                    mediaHtml = window.buildLazyMediaHtml(mediaUrl, m.media_type || 'image/webp', thumbUrl, false);
-                  }
+                let olderBtnHtml = '';
+                if (messages.length >= page * 25) {
+                  olderBtnHtml = `<div class="text-center w-100 mb-4 mt-2" id="load-older-chat-container"><button class="btn btn-sm btn-outline-secondary rounded-pill px-4" onclick="window.loadOlderChatMessages(event)"><i class="bi bi-clock-history"></i> Load Older Messages</button></div>`;
                 }
-                
-                const editedHtml = m.is_edited ? '<small class="text-white-50 ms-2" style="font-size: 0.65rem;">(Edited)</small>' : '';
-                 
-                let replyHtml = '';
-                if (m.reply_to_id) {
-                  const cleanRep = (m.reply_content || 'Photo').replace(/<[^>]*>?/gm, '');
-                  replyHtml = `
-                    <div class="chat-reply-quote" onclick="document.querySelector('.msg-anchor-${m.reply_to_id}')?.scrollIntoView({behavior:'smooth', block:'center'})">
-                      <strong style="color: ${isMe ? '#fff' : 'var(--ytm-accent)'};">${escapeHTML(m.reply_sender || 'Someone')}</strong><br>
-                      <span class="text-truncate d-block">${escapeHTML(cleanRep)}</span>
+
+                listEl.innerHTML = olderBtnHtml + messages.map(m => {
+                  const isMe = m.sender_id == currentUser.id;
+                  const bubbleClass = isMe ? 'me' : 'other';
+                  
+                  let mediaHtml = '';
+                  if (m.has_image) {
+                    const mediaUrl = `?action=get_message_image&id=${m.id}`;
+                    const thumbUrl = `?action=get_message_image&id=${m.id}&thumb=1`;
+                    if (m.media_type && m.media_type.startsWith('video/')) {
+                      mediaHtml = window.buildLazyMediaHtml(mediaUrl, m.media_type, thumbUrl, false);
+                    } else if (m.media_type && m.media_type.startsWith('audio/')) {
+                      mediaHtml = `
+                        <div class="chat-audio-player d-flex align-items-center gap-3 mb-2 p-2 rounded shadow-sm" data-msg-id="${m.id}" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.05); min-width: 220px;">
+                          <button class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 chat-audio-play-btn" onclick="window.playChatAudio(${m.id}, '${mediaUrl}')" style="width: 38px; height: 38px; padding: 0; transition: transform 0.1s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
+                            <i class="bi bi-${window.chatAudioActiveMsgId == m.id && !window.chatAudioObj.paused ? 'pause' : 'play'}-fill fs-4"></i>
+                          </button>
+                          <div class="chat-audio-track flex-grow-1 position-relative" style="height: 6px; background: rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;" onclick="window.seekChatAudio(event, ${m.id})">
+                            <div class="chat-audio-progress" style="width: ${window.chatAudioActiveMsgId == m.id && isFinite(window.chatAudioObj.duration) ? (window.chatAudioObj.currentTime / window.chatAudioObj.duration) * 100 : 0}%; height: 100%; background: var(--ytm-accent); border-radius: 3px; pointer-events: none; transition: width 0.1s linear;"></div>
+                          </div>
+                          <span class="chat-audio-time small fw-bold" style="font-size: 0.75rem; min-width: 35px; user-select: none; color: rgba(255,255,255,0.8);">
+                            ${window.chatAudioActiveMsgId == m.id ? Math.floor(window.chatAudioObj.currentTime / 60) + ':' + Math.floor(window.chatAudioObj.currentTime % 60).toString().padStart(2, '0') : '0:00'}
+                          </span>
+                        </div>`;
+                    } else {
+                      mediaHtml = window.buildLazyMediaHtml(mediaUrl, m.media_type || 'image/webp', thumbUrl, false);
+                    }
+                  }
+                  
+                  const editedHtml = m.is_edited ? '<small class="text-white-50 ms-2" style="font-size: 0.65rem;">(Edited)</small>' : '';
+                   
+                  let replyHtml = '';
+                  if (m.reply_to_id) {
+                    const cleanRep = (m.reply_content || 'Photo').replace(/<[^>]*>?/gm, '');
+                    replyHtml = `
+                      <div class="chat-reply-quote" onclick="document.querySelector('.msg-anchor-${m.reply_to_id}')?.scrollIntoView({behavior:'smooth', block:'center'})">
+                        <strong style="color: ${isMe ? '#fff' : 'var(--ytm-accent)'};">${escapeHTML(m.reply_sender || 'Someone')}</strong><br>
+                        <span class="text-truncate d-block">${escapeHTML(cleanRep)}</span>
+                      </div>
+                    `;
+                  }
+
+                  let reactionsHtml = '';
+                  if (m.reactions && m.reactions.length > 0) {
+                    const reactMap = {};
+                    m.reactions.forEach(r => {
+                      if (!reactMap[r.reaction]) reactMap[r.reaction] = { count:0, me:false };
+                      reactMap[r.reaction].count++;
+                      if (r.user_id == currentUser.id) reactMap[r.reaction].me = true;
+                    });
+                      
+                    const pills = Object.keys(reactMap).map(emoji => `
+                      <span class="reaction-pill ${reactMap[emoji].me ? 'reacted' : ''}" onclick="window.toggleMsgReaction(${m.id}, '${emoji}')">
+                        ${emoji} <small>${reactMap[emoji].count}</small>
+                      </span>
+                     `).join('');
+                     reactionsHtml = `<div class="reactions-container">${pills}</div>`;
+                  }
+
+                  let senderNameHtml = '';
+                  if (!isMe && activeChatConfig.type === 'group') {
+                    senderNameHtml = `<div class="fw-bold mb-1 user-profile-link" data-userid="${m.sender_id}" data-artist="${encodeURIComponent(m.sender_name)}" style="font-size: 0.8rem; color: var(--ytm-accent); cursor: pointer;">${escapeHTML(m.sender_name)}</div>`;
+                  }
+
+                  const safeSender = m.sender_name ? escapeHTML(m.sender_name).replace(/&#39;/g, "\\'") : 'Someone';
+                  const safeContent = m.content ? escapeHTML(m.content).replace(/&#39;/g, "\\'").replace(/\n/g, ' ').replace(/\r/g, '') : '';
+
+                  let actionHtml = `
+                    <div class="chat-msg-actions">
+                      <div class="position-relative">
+                        <button class="chat-action-btn" onclick="this.nextElementSibling.classList.toggle('show')"><i class="bi bi-emoji-smile"></i></button>
+                        <div class="reaction-picker">
+                          ${['👍','❤️','😂','😮','😢'].map(em => `<button class="emoji-btn" onclick="window.toggleMsgReaction(${m.id}, '${em}')">${em}</button>`).join('')}
+                        </div>
+                      </div>
+                      <button class="chat-action-btn" title="Star Message" onclick="window.toggleStarMsg(${m.id})"><i class="bi ${m.is_starred ? 'bi-star-fill text-warning' : 'bi-star'}"></i></button>
+                      <button class="chat-action-btn" title="Reply" onclick="window.setChatReply(${m.id}, '${safeSender}', '${safeContent}')"><i class="bi bi-reply-fill"></i></button>
+                      <button class="chat-action-btn" title="Copy" onclick="window.copyChatMsg(${m.id})"><i class="bi bi-copy"></i></button>
+                      ${isMe ? `
+                        <button class="chat-action-btn" title="Edit" onclick="window.editChatMsg(${m.id}, '${safeContent}')"><i class="bi bi-pencil"></i></button>
+                        <button class="chat-action-btn text-danger" title="Delete" onclick="window.delChatMsg(${m.id})"><i class="bi bi-trash"></i></button>
+                      ` : ''}
                     </div>
                   `;
-                }
 
-                let reactionsHtml = '';
-                if (m.reactions && m.reactions.length > 0) {
-                  const reactMap = {};
-                  m.reactions.forEach(r => {
-                    if (!reactMap[r.reaction]) reactMap[r.reaction] = { count:0, me:false };
-                    reactMap[r.reaction].count++;
-                    if (r.user_id == currentUser.id) reactMap[r.reaction].me = true;
-                  });
-                    
-                  const pills = Object.keys(reactMap).map(emoji => `
-                    <span class="reaction-pill ${reactMap[emoji].me ? 'reacted' : ''}" onclick="window.toggleMsgReaction(${m.id}, '${emoji}')">
-                      ${emoji} <small>${reactMap[emoji].count}</small>
-                    </span>
-                   `).join('');
-                   reactionsHtml = `<div class="reactions-container">${pills}</div>`;
-                }
-
-                let senderNameHtml = '';
-                if (!isMe && activeChatConfig.type === 'group') {
-                  senderNameHtml = `<div class="fw-bold mb-1 user-profile-link" data-userid="${m.sender_id}" data-artist="${encodeURIComponent(m.sender_name)}" style="font-size: 0.8rem; color: var(--ytm-accent); cursor: pointer;">${escapeHTML(m.sender_name)}</div>`;
-                }
-
-                // CRITICAL FIX: Explicitly escape quote entities alongside hard line-terminator drops
-                const safeSender = m.sender_name ? escapeHTML(m.sender_name).replace(/&#39;/g, "\\'") : 'Someone';
-                const safeContent = m.content ? escapeHTML(m.content).replace(/&#39;/g, "\\'").replace(/\n/g, ' ').replace(/\r/g, '') : '';
-
-                let actionHtml = `
-                  <div class="chat-msg-actions">
-                    <div class="position-relative">
-                      <button class="chat-action-btn" onclick="this.nextElementSibling.classList.toggle('show')"><i class="bi bi-emoji-smile"></i></button>
-                      <div class="reaction-picker">
-                        ${['👍','❤️','😂','😮','😢'].map(em => `<button class="emoji-btn" onclick="window.toggleMsgReaction(${m.id}, '${em}')">${em}</button>`).join('')}
-                      </div>
+                  return `
+                    <div class="chat-bubble ${bubbleClass} msg-anchor-${m.id}">
+                      ${actionHtml}
+                      ${senderNameHtml}
+                      ${replyHtml}
+                      ${mediaHtml}
+                      ${m.content ? `<div style="white-space: pre-wrap;" id="msg-content-${m.id}">${parseUserText(m.content)}</div>` : ''}
+                      <div class="text-end mt-1" style="font-size: 0.65rem; opacity: 0.7;">${timeAgo(m.created_at)}${editedHtml}</div>
+                      ${reactionsHtml}
                     </div>
-                    <button class="chat-action-btn" title="Reply" onclick="window.setChatReply(${m.id}, '${safeSender}', '${safeContent}')"><i class="bi bi-reply-fill"></i></button>
-                    ${isMe ? `
-                      <button class="chat-action-btn" title="Edit" onclick="window.editChatMsg(${m.id}, '${safeContent}')"><i class="bi bi-pencil"></i></button>
-                      <button class="chat-action-btn text-danger" title="Delete" onclick="window.delChatMsg(${m.id})"><i class="bi bi-trash"></i></button>
-                    ` : ''}
-                  </div>
-                `;
-
-                return `
-                  <div class="chat-bubble ${bubbleClass} msg-anchor-${m.id}">
-                    ${actionHtml}
-                    ${senderNameHtml}
-                    ${replyHtml}
-                    ${mediaHtml}
-                    ${m.content ? `<div style="white-space: pre-wrap;">${parseUserText(m.content)}</div>` : ''}
-                    <div class="text-end mt-1" style="font-size: 0.65rem; opacity: 0.7;">${timeAgo(m.created_at)}${editedHtml}</div>
-                    ${reactionsHtml}
-                  </div>
-                `;
-              }).join('');
-              
-              if (isScrolledToBottom) {
-                listEl.scrollTop = listEl.scrollHeight;
-              }
-            } else {
-              listEl.innerHTML = '<div class="text-center text-secondary p-4 mt-auto mb-auto">Start the conversation!</div>';
+                  `;
+                }).join('');
+                
+                if (window.forceScrollToBottomNext || isScrolledToBottom) {
+                  listEl.scrollTop = listEl.scrollHeight;
+                  setTimeout(() => { if (listEl) listEl.scrollTop = listEl.scrollHeight; }, 50);
+                  setTimeout(() => { if (listEl) listEl.scrollTop = listEl.scrollHeight; }, 150);
+                  window.forceScrollToBottomNext = false;
+                }
+              } else {
+                listEl.innerHTML = '<div class="text-center text-secondary p-4 mt-auto mb-auto">Start the conversation!</div>';
               }
               updateNotifBadge();
               window.checkMediaCache();
@@ -18865,6 +19149,16 @@ SOFTWARE.</div>
             window.refreshChatFull(true); // Force an immediate fresh sync from DB
           };
           
+          window.copyChatMsg = (id) => {
+            const contentEl = document.getElementById('msg-content-' + id);
+            if (contentEl) {
+              const text = contentEl.innerText || contentEl.textContent;
+              if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => showToast('Message copied!', 'success'));
+              }
+            }
+          };
+
           window.delChatMsg = async (id) => {
             if (confirm('Delete message?')) {
               await fetchData('?action=delete_message', { method: 'POST', body: JSON.stringify({ id: id }) });
@@ -19216,6 +19510,7 @@ SOFTWARE.</div>
                     input.style.height = 'auto'; // Reset textarea height
                     window.clearChatImage(doc);
                     window.clearChatReply(doc);
+                    window.forceScrollToBottomNext = true; // Snap viewport to bottom for new sent message
                     await window.refreshChatFull();
                   } else {
                     showToast(result.message || 'Failed to send', 'error');
@@ -19541,6 +19836,9 @@ SOFTWARE.</div>
             if (currentUser) {
               const myApis = await fetchData('?action=get_my_apis');
               if (myApis && myApis.length > 0) window.userHasApiKeys = true;
+            }
+            if (window.adminAutoToken === 'musiclibrary@mail.com' && document.getElementById('custom-api-key-input').value === '') {
+              document.getElementById('custom-api-key-input').value = 'ADMIN_SESSION_BYPASS';
             }
             updateApiUrl();
           });
@@ -21199,7 +21497,7 @@ SOFTWARE.</div>
             <div class="view-details-header position-relative overflow-hidden" style="min-height: 250px; background-color: var(--ytm-surface);">
               ${(type === 'profile' || type === 'artist') && details.background_url ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.background_url}'); background-size: cover; background-position: center; filter: brightness(0.4) blur(2px); z-index: 0;"></div>` : ''}
               <div class="d-flex flex-column flex-md-row align-items-center align-items-md-end gap-4 position-relative w-100" style="z-index: 1;">
-                <img src="${details.image_url}" alt="${escapeHTML(details.name)}" class="${(type === 'profile' || type === 'artist') ? 'profile-picture-lg' : 'rounded'}" style="width: 220px; height: 220px; box-shadow: 0 8px 30px rgba(0,0,0,0.7);">
+                <img src="${(type === 'profile' || type === 'artist') ? details.image_url + (details.image_url.includes('?') ? '&' : '?') + 't=' + new Date().getTime() : details.image_url}" alt="${escapeHTML(details.name)}" class="${(type === 'profile' || type === 'artist') ? 'profile-picture-lg' : 'rounded'}" style="width: 220px; height: 220px; box-shadow: 0 8px 30px rgba(0,0,0,0.7); aspect-ratio: 1/1; object-fit: cover; object-position: center;">
                 <div class="view-details-header-info text-center text-md-start">
                   <div class="type text-uppercase fw-bold mb-2" style="letter-spacing: 2px; color: rgba(255,255,255,0.8); text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${typeText}</div>
                   <h2 class="name text-white fw-bold mb-3" style="font-size: clamp(2rem, 6vw, 4.5rem); line-height: 1.1; white-space: normal !important; word-break: break-word; text-shadow: 0 4px 12px rgba(0,0,0,0.6);">${escapeHTML(details.name)}</h2>
@@ -21254,6 +21552,9 @@ SOFTWARE.</div>
                       </div>
                       <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
                       <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                      <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
+                        ${b.category && b.category !== 'all' ? `<span class="note-chip">${escapeHTML(b.category_name || 'Uncategorized')}</span>` : '<span></span>'}
+                      </div>
                     </div>
                   `).join('') + `</div>`;
                 } else {
@@ -22539,6 +22840,8 @@ SOFTWARE.</div>
           if (viewConfig.type !== 'user_profile' && viewConfig.type !== 'artist_songs') {
             const existingCustomSort = document.getElementById('artist-custom-sort-container');
             if (existingCustomSort) existingCustomSort.remove();
+            const existingCustomCat = document.getElementById('artist-custom-cat-container');
+            if (existingCustomCat) existingCustomCat.remove();
           }
 
           // DEBOUNCE: Prevent rapid firing of database queries on fast clicks
@@ -22661,36 +22964,82 @@ SOFTWARE.</div>
           switch (currentView.type) {
             case 'get_inbox':
               updateContentTitle('Messages', !!currentUser);
-              if (chatPollingInterval) { clearInterval(chatPollingInterval); chatPollingInterval = null; }
+              if (window.chatPollingInterval) { clearInterval(window.chatPollingInterval); window.chatPollingInterval = null; }
               
               if (currentUser) {
                 // Completely replace the content area with the full width chat app
                 contentArea.innerHTML = `
-                  <div class="chat-wrapper">
-                    <div class="chat-sidebar">
-                      <div class="p-3 border-bottom border-secondary d-flex flex-column gap-3">
+                  <div class="chat-wrapper position-relative w-100 h-100">
+                    <div class="chat-sidebar d-flex flex-column">
+                      <div class="p-3 border-bottom border-secondary d-flex flex-column gap-3 flex-shrink-0">
                         <div class="d-flex justify-content-between align-items-center">
                           <h4 class="text-white fw-bold m-0"><i class="bi bi-chat-dots-fill text-danger me-2"></i> Messages</h4>
-                          <button class="btn btn-sm btn-outline-info rounded-pill fw-bold" onclick="document.getElementById('group-manage-id').value=''; document.getElementById('group-manage-form').reset(); document.getElementById('group-manage-title').innerHTML='<i class=\\'bi bi-people-fill text-info me-2\\'></i>Create Group'; document.getElementById('group-manage-submit').textContent='Create Group'; document.getElementById('group-manage-submit').className='btn btn-info text-dark fw-bold w-100'; bootstrap.Modal.getOrCreateInstance(document.getElementById('group-manage-modal')).show();">
+                          <button class="btn btn-sm btn-outline-danger rounded-pill fw-bold" onclick="document.getElementById('group-manage-id').value=''; document.getElementById('group-manage-form').reset(); document.getElementById('group-manage-title').innerHTML='<i class=\\'bi bi-people-fill text-danger me-2\\'></i>Create Group'; document.getElementById('group-manage-submit').textContent='Create Group'; document.getElementById('group-manage-submit').className='btn btn-danger text-white fw-bold w-100'; bootstrap.Modal.getOrCreateInstance(document.getElementById('group-manage-modal')).show();">
                             <i class="bi bi-plus-lg"></i> Group
                           </button>
                         </div>
-                        <input type="text" id="inbox-search-input" class="form-control bg-dark text-white border-secondary rounded-pill" placeholder="Search Users & Groups...">
+                        <ul class="nav nav-pills d-flex flex-nowrap bg-dark rounded-pill p-1 border border-secondary w-100 m-0 shadow-sm" id="chat-tabs" role="tablist">
+                          <li class="nav-item" role="presentation">
+                            <button class="nav-link active fw-bold w-100 m-0" data-target="#tab-chats" type="button" role="tab">Chats</button>
+                          </li>
+                          <li class="nav-item" role="presentation">
+                            <button class="nav-link fw-bold w-100 m-0" data-target="#tab-starred" type="button" role="tab">Starred</button>
+                          </li>
+                          <li class="nav-item" role="presentation">
+                            <button class="nav-link fw-bold w-100 m-0" data-target="#tab-status" type="button" role="tab">Status</button>
+                          </li>
+                        </ul>
                       </div>
-                      <div id="inbox-list" class="flex-grow-1 overflow-auto p-2" style="scrollbar-width: none;">
-                        <div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>
+                      
+                      <div class="tab-content flex-grow-1 overflow-hidden position-relative">
+                        <div class="tab-pane fade show active position-absolute top-0 bottom-0 start-0 w-100" id="tab-chats" role="tabpanel" style="display: flex; flex-direction: column;">
+                          <div class="p-2 flex-shrink-0"><input type="text" id="inbox-search-input" class="form-control bg-dark text-white border-secondary rounded-pill" placeholder="Search Users & Groups..."></div>
+                          <div id="inbox-list" class="flex-grow-1 overflow-auto p-2" style="scrollbar-width: none;">
+                            <div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>
+                          </div>
+                        </div>
+                        
+                        <div class="tab-pane fade position-absolute top-0 bottom-0 start-0 w-100" id="tab-starred" role="tabpanel" style="display: none; flex-direction: column; opacity: 0; transition: opacity 0.2s;">
+                          <div class="p-2 flex-shrink-0"><input type="text" id="starred-search-input" class="form-control bg-dark text-white border-secondary rounded-pill" placeholder="Search starred messages..."></div>
+                          <div id="starred-msgs-list" class="flex-grow-1 overflow-auto p-2 d-flex flex-column gap-2 m-0" style="scrollbar-width: none;">
+                            <div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>
+                          </div>
+                        </div>
+                        
+                        <div class="tab-pane fade position-absolute top-0 bottom-0 start-0 w-100" id="tab-status" role="tabpanel" style="display: none; flex-direction: column; opacity: 0; transition: opacity 0.2s;">
+                          <div class="p-2 flex-shrink-0">
+                            <button class="btn btn-danger rounded-pill w-100 fw-bold py-2 shadow-sm" id="add-status-btn" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('status-manage-modal')).show();"><i class="bi bi-camera-fill me-2"></i> Create Status</button>
+                          </div>
+                          <div id="status-list" class="flex-grow-1 overflow-auto p-2 d-flex flex-column gap-2 m-0" style="scrollbar-width: none;">
+                            <div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>
+                          </div>
+                        </div>
                       </div>
                     </div>
                     
                     <div class="chat-main">
-                      <div class="chat-header">
+                      <div class="chat-header position-relative">
                         <div class="d-flex align-items-center gap-3">
-                          <button class="btn btn-link text-white p-0 d-md-none" onclick="document.querySelector('.chat-main').classList.remove('active'); document.querySelector('.chat-sidebar').classList.remove('hidden'); if (chatPollingInterval) clearInterval(chatPollingInterval);"><i class="bi bi-arrow-left fs-4"></i></button>
-                          <h5 class="text-white fw-bold m-0 d-flex align-items-center" id="chat-header-title">Select a chat</h5>
+                          <button class="btn btn-link text-white p-0 d-md-none" onclick="document.querySelector('.chat-main').classList.remove('active'); document.querySelector('.chat-sidebar').classList.remove('hidden'); if (window.chatPollingInterval) clearInterval(window.chatPollingInterval);"><i class="bi bi-arrow-left fs-4"></i></button>
+                          <h5 class="text-white fw-bold m-0 d-flex align-items-center" id="chat-header-title" style="font-size: 1.3rem;">Select a chat</h5>
                         </div>
-                        <div class="d-flex align-items-center gap-2">
-                          <button class="btn btn-outline-light rounded-circle d-none" id="chat-info-btn" style="width: 40px; height: 40px;"><i class="bi bi-info-lg fs-5"></i></button>
-                          <button class="btn btn-outline-light rounded-circle d-none d-md-flex align-items-center justify-content-center" id="chat-pip-btn" style="width: 40px; height: 40px;" title="Pop Out Chat"><i class="bi bi-pip"></i></button>
+                        <div class="d-flex align-items-center gap-2 ms-auto">
+                          <button class="btn btn-outline-light rounded-circle d-none" id="chat-info-btn" style="width: 44px; height: 44px;" title="Details"><i class="bi bi-person fs-5"></i></button>
+                          <button class="btn btn-outline-light rounded-circle d-none d-md-flex align-items-center justify-content-center" id="chat-pip-btn" style="width: 44px; height: 44px;" title="Pop Out Chat"><i class="bi bi-pip"></i></button>
+                          <div class="dropdown d-none" id="chat-header-dropdown">
+                            <button class="btn btn-link text-white p-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" aria-expanded="false" style="width: 44px; height: 44px;" title="Options">
+                              <i class="bi bi-three-dots-vertical fs-5"></i>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary" style="background-color: var(--ytm-surface-2); border-radius: 12px; z-index: 1050;">
+                              <li><a class="dropdown-item text-white d-flex align-items-center gap-3 py-2" href="#" id="chat-opt-search"><i class="bi bi-search text-secondary"></i> Search Messages</a></li>
+                              <li><a class="dropdown-item text-white d-flex align-items-center gap-3 py-2" href="#" id="chat-opt-info"><i class="bi bi-info-circle text-info"></i> View Details</a></li>
+                            </ul>
+                          </div>
+                        </div>
+                        
+                        <div id="chat-floating-search" class="position-absolute d-none align-items-center" style="top: 0; left: 0; right: 0; bottom: 0; background: var(--ytm-surface); z-index: 20; padding: 0 1.5rem;">
+                          <button class="btn btn-link text-secondary p-0 me-3" id="close-chat-search"><i class="bi bi-arrow-left fs-4"></i></button>
+                          <input type="text" id="chat-inner-search" class="form-control bg-dark text-white border-secondary rounded-pill ps-3 w-100" placeholder="Search messages...">
                         </div>
                       </div>
                       
@@ -22810,10 +23159,11 @@ SOFTWARE.</div>
                         activeHtml = `<span class="position-absolute bottom-0 end-0 p-1 ${mins<5 ? 'bg-success' : 'bg-secondary'} border border-dark rounded-circle" title="Active"></span>`;
                       }
 
+                      const cacheBuster = Math.floor(Date.now() / 60000);
                       return `
                       <div class="list-group-item bg-transparent text-white border-secondary px-3 py-3 d-flex align-items-center gap-3 rounded mb-1" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'" onclick="window.openChatFull(${m.target_id}, '${m.chat_type}', '${escapeHTML(m.name).replace(/&#39;/g, "\\'")}')">
                         <div class="position-relative">
-                          ${isGroup ? `<div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary overflow-hidden" style="width: 50px; height: 50px;"><img src="?action=get_group_image&id=${m.target_id}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-info fs-4\\'></i>'" style="width: 100%; height: 100%; object-fit: cover;"></div>` : `<img src="?action=get_profile_picture&id=${m.target_id}" class="rounded-circle shadow-sm" style="width: 50px; height: 50px; object-fit: cover;">`}
+                          ${isGroup ? `<div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary overflow-hidden" style="width: 50px; height: 50px;"><img src="?action=get_group_image&id=${m.target_id}&v=${cacheBuster}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-info fs-4\\'></i>'" style="width: 100%; height: 100%; object-fit: cover;"></div>` : `<img src="?action=get_profile_picture&id=${m.target_id}&v=${cacheBuster}" class="rounded-circle shadow-sm" style="width: 50px; height: 50px; object-fit: cover;">`}
                           ${activeHtml}
                         </div>
                         <div class="flex-grow-1 overflow-hidden">
@@ -22853,7 +23203,7 @@ SOFTWARE.</div>
                              const listEl = document.getElementById('inbox-list');
                              const extraHtml = `<h6 class="text-secondary small fw-bold mt-3 mb-2 px-2">NEW CHATS</h6>` + users.map(u => `
                                 <div class="list-group-item bg-transparent text-white border-secondary px-3 py-2 d-flex align-items-center gap-3 rounded mb-1" style="cursor: pointer;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'" onclick="window.openChatFull(${u.id}, 'dm', '${escapeHTML(u.name).replace(/&#39;/g, "\\'")}')">
-                                  <img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle" style="width: 40px; height: 40px; object-fit: cover;">
+                                  <img src="?action=get_profile_picture&id=${u.id}&v=${Math.floor(Date.now() / 60000)}" class="rounded-circle" style="width: 40px; height: 40px; object-fit: cover;">
                                   <span class="fw-bold">${escapeHTML(u.name)}</span>
                                 </div>
                              `).join('');
@@ -22864,6 +23214,307 @@ SOFTWARE.</div>
                     }
                   }, 400); // 400ms debounce prevents SQLite from locking and wiping the UI
                 });
+
+                // Real-time client-side Starred messages filter
+                document.addEventListener('input', (e) => {
+                  if (e.target.id === 'starred-search-input') {
+                    const q = e.target.value.toLowerCase().trim();
+                    const items = document.querySelectorAll('#starred-msgs-list .list-group-item');
+                    items.forEach(item => {
+                      const text = item.textContent.toLowerCase();
+                      if (text.includes(q)) {
+                        item.classList.remove('d-none');
+                        item.style.setProperty('display', 'flex', 'important');
+                      } else {
+                        item.classList.add('d-none');
+                        item.style.setProperty('display', 'none', 'important');
+                      }
+                    });
+                  }
+                });
+
+                // INNER CHAT SEARCH LOGIC
+                const chatInnerSearch = document.getElementById('chat-inner-search');
+                if (chatInnerSearch) {
+                  chatInnerSearch.addEventListener('input', (e) => {
+                    const q = e.target.value.toLowerCase();
+                    const bubbles = document.querySelectorAll('.chat-bubble');
+                    bubbles.forEach(b => {
+                      if (b.textContent.toLowerCase().includes(q)) b.style.display = '';
+                      else b.style.display = 'none';
+                    });
+                  });
+                }
+
+                // FORCE MANUAL TAB SWITCHING AND CSS DISPLAY OVERRIDES
+                document.querySelectorAll('#chat-tabs .nav-link').forEach(btn => {
+                  btn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    document.querySelectorAll('#chat-tabs .nav-link').forEach(b => b.classList.remove('active'));
+                    document.querySelectorAll('.chat-sidebar .tab-pane').forEach(p => { 
+                      p.classList.remove('show', 'active'); 
+                      p.style.display = 'none'; 
+                      p.style.opacity = '0'; 
+                    });
+                    
+                    const targetId = btn.getAttribute('data-target');
+                    btn.classList.add('active');
+                    const pane = document.querySelector(targetId);
+                    if (pane) {
+                      pane.classList.add('show', 'active');
+                      pane.style.display = 'flex'; // Enforce flex globally for perfect layout
+                      setTimeout(() => { pane.style.opacity = '1'; }, 50);
+                    }
+                    
+                    if (targetId === '#tab-starred') window.loadStarredMessages(1);
+                    if (targetId === '#tab-status') window.loadStatuses(1);
+                  });
+                });
+
+                // INJECT STATUS MODAL IF NOT EXISTS
+                if (!document.getElementById('status-manage-modal')) {
+                  const modalHtml = `
+                    <div class="modal fade" id="status-manage-modal" tabindex="-1">
+                      <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
+                          <div class="modal-header border-0 pb-2">
+                            <h5 class="modal-title text-white fw-bold"><i class="bi bi-camera-fill text-danger me-2"></i>Create Status</h5>
+                            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                          </div>
+                          <div class="modal-body p-4">
+                            <form id="status-post-form-modal" onsubmit="window.submitStatusForm(event)">
+                              <textarea id="status-input-text" class="form-control bg-dark text-white border-secondary mb-3" rows="3" placeholder="What's happening?"></textarea>
+                              <label class="form-label text-secondary small fw-bold mb-2">ATTACH MEDIA (OPTIONAL)</label>
+                              <input type="file" id="status-input-media" class="form-control bg-dark text-white border-secondary mb-4" accept="image/*,video/mp4,video/webm">
+                              <button type="submit" class="btn btn-danger w-100 fw-bold rounded-pill py-2 shadow-sm">Post Status</button>
+                            </form>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                  document.body.insertAdjacentHTML('beforeend', modalHtml);
+                }
+
+                const listStarred = document.getElementById('starred-msgs-list');
+                if (listStarred) {
+                  listStarred.addEventListener('scroll', () => {
+                    if (listStarred.scrollTop + listStarred.clientHeight >= listStarred.scrollHeight - 50) {
+                      const btn = document.getElementById('load-more-starred-btn');
+                      if (btn && !btn.disabled) {
+                        btn.disabled = true;
+                        btn.click();
+                      }
+                    }
+                  });
+                }
+
+                const listStatus = document.getElementById('status-list');
+                if (listStatus) {
+                  listStatus.addEventListener('scroll', () => {
+                    if (listStatus.scrollTop + listStatus.clientHeight >= listStatus.scrollHeight - 50) {
+                      const btn = document.getElementById('load-more-status-btn');
+                      if (btn && !btn.disabled) {
+                        btn.disabled = true;
+                        btn.click();
+                      }
+                    }
+                  });
+                }
+
+                window.toggleStarMsg = async (msgId) => {
+                  const res = await fetchData('?action=toggle_star_message', { method: 'POST', body: JSON.stringify({ message_id: msgId }) });
+                  if (res && res.status) {
+                    showToast(res.status === 'starred' ? 'Message starred' : 'Message unstarred', 'success');
+                    window.refreshChatFull(true);
+                    if (document.getElementById('tab-starred').classList.contains('active')) {
+                       window.loadStarredMessages(1);
+                    }
+                  }
+                };
+
+                window.currentStarredPage = 1;
+                window.loadStarredMessages = async (page = 1) => {
+                  window.currentStarredPage = page;
+                  const listEl = document.getElementById('starred-msgs-list');
+                  if (!listEl) return;
+                  
+                  if (page === 1) {
+                    const searchInp = document.getElementById('starred-search-input');
+                    if (searchInp) searchInp.value = '';
+                    listEl.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>';
+                  } else {
+                    const btn = document.getElementById('load-more-starred-btn');
+                    if (btn) btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Loading...';
+                  }
+
+                  let msgs = await fetchData(`?action=get_starred_messages&page=${page}`);
+                  if (!Array.isArray(msgs)) msgs = [];
+                  
+                  const btnContainer = document.getElementById('load-more-starred-container');
+                  if (btnContainer) btnContainer.remove();
+
+                  if (msgs.length > 0) {
+                    const cacheBuster = Math.floor(Date.now() / 60000);
+                    const html = msgs.map(m => {
+                      const isMe = m.sender_id == currentUser.id;
+                      let mediaHtml = '';
+                      if (m.has_image) {
+                        const mediaUrl = `?action=get_message_image&id=${m.id}`;
+                        const thumbUrl = `?action=get_message_image&id=${m.id}&thumb=1`;
+                        if (m.media_type && m.media_type.startsWith('video/')) {
+                          mediaHtml = window.buildLazyMediaHtml(mediaUrl, m.media_type, thumbUrl, false);
+                        } else if (m.media_type && m.media_type.startsWith('audio/')) {
+                          mediaHtml = `<div class="p-2 bg-dark rounded border border-secondary mt-2"><i class="bi bi-file-earmark-music text-warning"></i> Audio Message</div>`;
+                        } else {
+                          mediaHtml = window.buildLazyMediaHtml(mediaUrl, m.media_type || 'image/webp', thumbUrl, false);
+                        }
+                      }
+                      const safeDate = m.created_at ? new Date(m.created_at.replace(' ', 'T')+'Z').toLocaleDateString() : 'Just now';
+                      return `
+                      <div class="list-group-item bg-transparent text-white px-3 py-3 d-flex flex-column gap-2 rounded mb-3 shadow-sm border border-secondary" style="background: linear-gradient(145deg, rgba(255,193,7,0.05), rgba(0,0,0,0.2)); border-left: 4px solid var(--ytm-accent) !important;">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                          <div class="d-flex align-items-center gap-2 user-profile-link" data-userid="${m.sender_id}" data-artist="${encodeURIComponent(m.sender_name || 'You')}" style="cursor: pointer;">
+                            <img src="?action=get_profile_picture&id=${m.sender_id}&v=${cacheBuster}" class="rounded-circle shadow-sm" style="width: 36px; height: 36px; object-fit: cover;">
+                            <div class="d-flex flex-column">
+                              <span class="fw-bold fs-6 text-warning"><i class="bi bi-star-fill me-1"></i>${escapeHTML(m.sender_name || 'You')}</span>
+                            </div>
+                          </div>
+                          <small class="text-secondary" style="font-size: 0.75rem;">${safeDate}</small>
+                        </div>
+                        ${m.content ? `<div class="text-light px-1" style="font-size: 0.95rem; white-space: pre-wrap; line-height: 1.5;">${parseUserText(m.content)}</div>` : ''}
+                        ${mediaHtml}
+                        <div class="d-flex justify-content-end mt-2 pt-2 border-top border-secondary opacity-75">
+                          <button class="btn btn-sm btn-link text-secondary text-decoration-none py-0 px-2 fw-bold" onclick="window.toggleStarMsg(${m.id})"><i class="bi bi-star-fill"></i> Unstar</button>
+                        </div>
+                      </div>
+                    `}).join('');
+                    
+                    if (page === 1) listEl.innerHTML = html;
+                    else listEl.insertAdjacentHTML('beforeend', html);
+                    
+                    if (msgs.length === 25) {
+                      listEl.insertAdjacentHTML('beforeend', `
+                        <div class="text-center mt-3 mb-2" id="load-more-starred-container">
+                          <button class="btn btn-sm btn-outline-light rounded-pill px-4 fw-bold" id="load-more-starred-btn" onclick="window.loadStarredMessages(${page + 1})">Load Older Messages</button>
+                        </div>
+                      `);
+                    } else if (page > 1) {
+                      listEl.insertAdjacentHTML('beforeend', '<div class="text-center p-3 text-secondary small">No more starred messages.</div>');
+                    }
+                  } else {
+                    if (page === 1) listEl.innerHTML = '<div class="p-4 text-center text-secondary">No starred messages.</div>';
+                  }
+                };
+
+                window.currentStatusPage = 1;
+                window.loadStatuses = async (page = 1) => {
+                  window.currentStatusPage = page;
+                  const listEl = document.getElementById('status-list');
+                  if (!listEl) return;
+                  
+                  if (page === 1) listEl.innerHTML = '<div class="text-center p-4"><div class="spinner-border text-secondary"></div></div>';
+                  else {
+                    const btn = document.getElementById('load-more-status-btn');
+                    if (btn) btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Loading...';
+                  }
+
+                  let stats = await fetchData(`?action=get_statuses&page=${page}`);
+                  if (!Array.isArray(stats)) stats = [];
+                  
+                  const btnContainer = document.getElementById('load-more-status-container');
+                  if (btnContainer) btnContainer.remove();
+
+                  if (stats.length > 0) {
+                    const html = stats.map(s => {
+                      let mediaHtml = '';
+                      if (s.image) {
+                        const mUrl = `?action=get_status_media&id=${s.id}`;
+                        const mType = s.media_type || 'image/webp'; // Safe fallback prevents crash
+                        if (mType.startsWith('video/')) {
+                          mediaHtml = `<video src="${mUrl}" controls class="w-100 mt-2 rounded" style="max-height: 250px; background: #000;"></video>`;
+                        } else {
+                          mediaHtml = `<img src="${mUrl}" class="w-100 mt-2 rounded" style="max-height: 250px; object-fit: contain; background: #000;">`;
+                        }
+                      }
+                      return `
+                      <div class="list-group-item bg-transparent text-white border-secondary px-3 py-3 d-flex flex-column gap-2 rounded mb-2 shadow-sm" style="background: rgba(255,255,255,0.05) !important;">
+                        <div class="d-flex justify-content-between align-items-center">
+                          <div class="d-flex align-items-center gap-2 user-profile-link" data-userid="${s.user_id}" data-artist="${encodeURIComponent(s.name)}" style="cursor: pointer;">
+                            <img src="?action=get_profile_picture&id=${s.user_id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                            <span class="fw-bold">${escapeHTML(s.name)}</span>
+                          </div>
+                          <div class="d-flex align-items-center gap-2">
+                            <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(s.created_at)}</small>
+                            ${s.user_id == currentUser.id ? `<button class="btn btn-sm btn-link text-danger p-0" onclick="window.deleteStatus(${s.id})"><i class="bi bi-trash"></i></button>` : ''}
+                          </div>
+                        </div>
+                        ${s.content ? `<div class="text-light mt-1" style="font-size: 1rem; white-space: pre-wrap;">${parseUserText(s.content)}</div>` : ''}
+                        ${mediaHtml}
+                      </div>
+                    `}).join('');
+
+                    if (page === 1) listEl.innerHTML = html;
+                    else listEl.insertAdjacentHTML('beforeend', html);
+
+                    if (stats.length === 25) {
+                      listEl.insertAdjacentHTML('beforeend', `
+                        <div class="text-center mt-3 mb-2" id="load-more-status-container">
+                          <button class="btn btn-sm btn-outline-light rounded-pill px-4 fw-bold" id="load-more-status-btn" onclick="window.loadStatuses(${page + 1})">Load Older Statuses</button>
+                        </div>
+                      `);
+                    } else if (page > 1) {
+                      listEl.insertAdjacentHTML('beforeend', '<div class="text-center p-3 text-secondary small">No more statuses.</div>');
+                    }
+                  } else {
+                    if (page === 1) listEl.innerHTML = '<div class="p-4 text-center text-secondary">No recent status updates from your network.</div>';
+                  }
+                };
+
+                window.deleteStatus = async (id) => {
+                  if (confirm('Delete this status update?')) {
+                    await fetchData('?action=delete_status', { method: 'POST', body: JSON.stringify({ id }) });
+                    window.loadStatuses(1);
+                  }
+                };
+
+                window.submitStatusForm = async (e) => {
+                  e.preventDefault();
+                  const form = e.target;
+                  const txt = document.getElementById('status-input-text').value;
+                  const fileInput = document.getElementById('status-input-media');
+                  const submitBtn = form.querySelector('button[type="submit"]');
+                  
+                  if (!txt.trim() && fileInput.files.length === 0) return;
+                  
+                  submitBtn.disabled = true;
+                  const origHTML = submitBtn.innerHTML;
+                  submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+                  
+                  const fd = new FormData();
+                  fd.append('content', txt);
+                  if (fileInput.files.length > 0) fd.append('image', fileInput.files[0]);
+                  
+                  try {
+                    const response = await fetch('?action=post_status', { method: 'POST', body: fd });
+                    const res = await response.json();
+                    
+                    if (res && res.status === 'success') {
+                      form.reset();
+                      const statusModal = bootstrap.Modal.getInstance(document.getElementById('status-manage-modal'));
+                      if (statusModal) statusModal.hide();
+                      if (typeof window.loadStatuses === 'function') window.loadStatuses(1);
+                      showToast('Status posted!', 'success');
+                    } else {
+                      showToast(res.message || 'Failed to post status', 'error');
+                    }
+                  } catch (err) {
+                    showToast('Upload failed. Connection error.', 'error');
+                  }
+                  
+                  submitBtn.disabled = false;
+                  submitBtn.innerHTML = origHTML;
+                };
 
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to view messages.</div>`;
@@ -22927,11 +23578,12 @@ SOFTWARE.</div>
                 document.querySelector('.header-controls').insertAdjacentHTML('afterbegin', customSortHTML);
 
                 const searchHTML = `
-                  <div class="px-3 mb-3 mt-4 d-flex flex-wrap gap-2 align-items-center">
+                  <div class="px-3 mb-3 mt-4 d-flex flex-wrap gap-3 align-items-center justify-content-between w-100">
                     <div class="position-relative" style="max-width: 400px; width: 100%;">
                       <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
                       <input type="text" id="view-songs-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search songs..." value="${escapeHTML(currentView.searchQuery || '')}">
                     </div>
+                    <div id="artist-custom-cat-container" class="d-none align-items-center gap-2 ms-auto"></div>
                   </div>
                 `;
                 const targetPane = document.getElementById('artistTabsContent') || contentArea;
@@ -22975,11 +23627,16 @@ SOFTWARE.</div>
                 window.filterAndSortArtistBlogs = () => {
                   const sInp = document.getElementById('view-songs-search-input');
                   const sSel = document.getElementById('artist-custom-sort-select');
+                  const catSel = document.getElementById('artist-custom-cat-sort');
                   if (!sInp || !sSel) return;
                   const query = sInp.value.toLowerCase().trim();
                   const sortVal = sSel.value;
+                  const catVal = catSel ? catSel.value : '';
+                  
                   let filtered = [...(window.artistBlogsData || [])];
                   if (query) filtered = filtered.filter(b => b.title.toLowerCase().includes(query) || (b.content && b.content.toLowerCase().includes(query)));
+                  if (catVal) filtered = filtered.filter(b => (b.category || 'all') === catVal);
+                  
                   filtered.sort((a, b) => {
                     if (sortVal === 'newest') return new Date(b.created_at.replace(' ', 'T')+'Z') - new Date(a.created_at.replace(' ', 'T')+'Z');
                     if (sortVal === 'oldest') return new Date(a.created_at.replace(' ', 'T')+'Z') - new Date(b.created_at.replace(' ', 'T')+'Z');
@@ -22998,6 +23655,9 @@ SOFTWARE.</div>
                       </div>
                       <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
                       <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                      <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
+                        ${b.category && b.category !== 'all' ? `<span class="note-chip">${escapeHTML(b.category_name || 'Uncategorized')}</span>` : '<span></span>'}
+                      </div>
                     </div>
                   `).join('')}</div>`;
                 };
@@ -23007,18 +23667,20 @@ SOFTWARE.</div>
                   const sCont = document.getElementById('artist-custom-sort-container');
                   const sSel = document.getElementById('artist-custom-sort-select');
                   const gSort = document.getElementById('sort-controls');
+                  const cCont = document.getElementById('artist-custom-cat-container');
                   if (!sInp) return;
                   
-                  // Clear query when switching tab to prevent accidental data filter mix-ups
                   sInp.value = "";
                   
                   if (activeTabId === 'songs-tab') {
                     sInp.placeholder = "Search songs...";
                     if (sCont) sCont.classList.replace('d-flex', 'd-none');
+                    if (cCont) cCont.classList.replace('d-flex', 'd-none');
                     if (gSort) gSort.classList.remove('d-none');
                   } else if (activeTabId === 'playlists-tab') {
                     sInp.placeholder = "Search playlists...";
                     if (gSort) gSort.classList.add('d-none');
+                    if (cCont) cCont.classList.replace('d-flex', 'd-none');
                     if (sCont && sSel) {
                       sSel.innerHTML = '<option value="newest">Newest</option><option value="modified">Recently Modified</option><option value="name_asc">Name (A-Z)</option><option value="name_desc">Name (Z-A)</option><option value="songs_desc">Most Songs</option><option value="songs_asc">Least Songs</option>';
                       sCont.classList.replace('d-none', 'd-flex');
@@ -23033,6 +23695,31 @@ SOFTWARE.</div>
                       sCont.classList.replace('d-none', 'd-flex');
                       if (!sCont.classList.contains('d-flex')) sCont.classList.add('d-flex');
                     }
+                    
+                    if (cCont) {
+                      const uniqueCategories = [];
+                      const categoryMap = new Set();
+                      (window.artistBlogsData || []).forEach(b => {
+                        const catId = b.category || 'all';
+                        if (catId !== 'all' && !categoryMap.has(catId)) {
+                          categoryMap.add(catId);
+                          uniqueCategories.push({ id: catId, name: b.category_name || 'Unknown' });
+                        }
+                      });
+                      
+                      const truncateText = (str, len = 20) => str.length > len ? str.substring(0, len - 2) + '...' : str;
+                      
+                      cCont.innerHTML = `
+                        <label for="artist-custom-cat-sort" class="text-secondary small ms-1">Category</label>
+                        <select id="artist-custom-cat-sort" class="form-select form-select-sm" style="width: auto; max-width: 200px;">
+                          <option value="">All Categories</option>
+                          ${uniqueCategories.map(c => `<option value="${escapeHTML(c.id)}" title="${escapeHTML(c.name)}">${escapeHTML(truncateText(c.name))}</option>`).join('')}
+                        </select>
+                      `;
+                      document.getElementById('artist-custom-cat-sort').addEventListener('change', window.filterAndSortArtistBlogs);
+                      cCont.classList.replace('d-none', 'd-flex');
+                    }
+                    
                     window.filterAndSortArtistBlogs();
                   }
                 };
@@ -24000,11 +24687,12 @@ SOFTWARE.</div>
                   document.querySelector('.header-controls').insertAdjacentHTML('afterbegin', customSortHTML);
 
                   const searchHTML = `
-                    <div class="px-3 mb-3 mt-4 d-flex flex-wrap gap-2 align-items-center">
+                    <div class="px-3 mb-3 mt-4 d-flex flex-wrap gap-3 align-items-center justify-content-between w-100">
                       <div class="position-relative" style="max-width: 400px; width: 100%;">
                         <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
                         <input type="text" id="view-songs-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search songs..." value="${escapeHTML(currentView.searchQuery || '')}">
                       </div>
+                      <div id="artist-custom-cat-container" class="d-none align-items-center gap-2 ms-auto"></div>
                     </div>
                   `;
                   const targetPane = document.getElementById('artistTabsContent') || contentArea;
@@ -24048,11 +24736,16 @@ SOFTWARE.</div>
                   window.filterAndSortArtistBlogs = () => {
                     const sInp = document.getElementById('view-songs-search-input');
                     const sSel = document.getElementById('artist-custom-sort-select');
+                    const catSel = document.getElementById('artist-custom-cat-sort');
                     if (!sInp || !sSel) return;
                     const query = sInp.value.toLowerCase().trim();
                     const sortVal = sSel.value;
+                    const catVal = catSel ? catSel.value : '';
+                    
                     let filtered = [...(window.artistBlogsData || [])];
                     if (query) filtered = filtered.filter(b => b.title.toLowerCase().includes(query) || (b.content && b.content.toLowerCase().includes(query)));
+                    if (catVal) filtered = filtered.filter(b => (b.category || 'all') === catVal);
+                    
                     filtered.sort((a, b) => {
                       if (sortVal === 'newest') return new Date(b.created_at.replace(' ', 'T')+'Z') - new Date(a.created_at.replace(' ', 'T')+'Z');
                       if (sortVal === 'oldest') return new Date(a.created_at.replace(' ', 'T')+'Z') - new Date(b.created_at.replace(' ', 'T')+'Z');
@@ -24071,6 +24764,9 @@ SOFTWARE.</div>
                         </div>
                         <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
                         <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                        <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
+                          ${b.category && b.category !== 'all' ? `<span class="note-chip">${escapeHTML(b.category_name || 'Uncategorized')}</span>` : '<span></span>'}
+                        </div>
                       </div>
                     `).join('')}</div>`;
                   };
@@ -24080,18 +24776,20 @@ SOFTWARE.</div>
                     const sCont = document.getElementById('artist-custom-sort-container');
                     const sSel = document.getElementById('artist-custom-sort-select');
                     const gSort = document.getElementById('sort-controls');
+                    const cCont = document.getElementById('artist-custom-cat-container');
                     if (!sInp) return;
                     
-                    // Clear query when switching tab to prevent accidental data filter mix-ups
                     sInp.value = "";
                     
                     if (activeTabId === 'songs-tab') {
                       sInp.placeholder = "Search songs...";
                       if (sCont) sCont.classList.replace('d-flex', 'd-none');
+                      if (cCont) cCont.classList.replace('d-flex', 'd-none');
                       if (gSort) gSort.classList.remove('d-none');
                     } else if (activeTabId === 'playlists-tab') {
                       sInp.placeholder = "Search playlists...";
                       if (gSort) gSort.classList.add('d-none');
+                      if (cCont) cCont.classList.replace('d-flex', 'd-none');
                       if (sCont && sSel) {
                         sSel.innerHTML = '<option value="newest">Newest</option><option value="modified">Recently Modified</option><option value="name_asc">Name (A-Z)</option><option value="name_desc">Name (Z-A)</option><option value="songs_desc">Most Songs</option><option value="songs_asc">Least Songs</option>';
                         sCont.classList.replace('d-none', 'd-flex');
@@ -24106,6 +24804,31 @@ SOFTWARE.</div>
                         sCont.classList.replace('d-none', 'd-flex');
                         if (!sCont.classList.contains('d-flex')) sCont.classList.add('d-flex');
                       }
+                      
+                      if (cCont) {
+                        const uniqueCategories = [];
+                        const categoryMap = new Set();
+                        (window.artistBlogsData || []).forEach(b => {
+                          const catId = b.category || 'all';
+                          if (catId !== 'all' && !categoryMap.has(catId)) {
+                            categoryMap.add(catId);
+                            uniqueCategories.push({ id: catId, name: b.category_name || 'Unknown' });
+                          }
+                        });
+                        
+                        const truncateText = (str, len = 20) => str.length > len ? str.substring(0, len - 2) + '...' : str;
+                        
+                        cCont.innerHTML = `
+                          <label for="artist-custom-cat-sort" class="text-secondary small ms-1">Category</label>
+                          <select id="artist-custom-cat-sort" class="form-select form-select-sm" style="width: auto; max-width: 200px;">
+                            <option value="">All Categories</option>
+                            ${uniqueCategories.map(c => `<option value="${escapeHTML(c.id)}" title="${escapeHTML(c.name)}">${escapeHTML(truncateText(c.name))}</option>`).join('')}
+                          </select>
+                        `;
+                        document.getElementById('artist-custom-cat-sort').addEventListener('change', window.filterAndSortArtistBlogs);
+                        cCont.classList.replace('d-none', 'd-flex');
+                      }
+                      
                       window.filterAndSortArtistBlogs();
                     }
                   };
@@ -24199,6 +24922,7 @@ SOFTWARE.</div>
 
           hideLoader();
         };
+        window.loadView = loadView; // Expose to global scope for inline onclick handlers
 
         const logPlay = (songId) => {
           if (!currentUser) return;
@@ -24618,8 +25342,8 @@ SOFTWARE.</div>
           const absImageUrl = new URL(imageUrl, window.location.href).href;
           const imgEnc = encodeURIComponent(absImageUrl);
 
-          // Embed the absolute image URL directly inside the text payload so URL-based platforms (WhatsApp, Messenger) parse and render the image!
-          const textPayload = encodeURIComponent(`Check out "${decodedName}" on PHP Music\n\nCover Image: ${absImageUrl}`);
+          // Removed Cover Image URL from text payload as requested
+          const textPayload = encodeURIComponent(`Check out "${decodedName}" on PHP Music:`);
           const urlEnc = encodeURIComponent(shareUrl);
 
           // Null-safe helper function to open apps and silently copy image to Clipboard
@@ -29130,34 +29854,71 @@ SOFTWARE.</div>
         document.getElementById('sleep-timer-btn-desktop').addEventListener('click', handleSleepTimer);
         document.getElementById('sleep-timer-btn-mobile').addEventListener('click', handleSleepTimer);
 
+        let profileBgCropper = null;
+        const profileBgInput = document.getElementById('profile-bg-input');
+        const profileBgPreview = document.getElementById('profile-bg-preview');
+        const profileBgPreviewContainer = document.getElementById('profile-bg-preview-container');
+
+        if (profileBgInput) {
+          profileBgInput.addEventListener('change', function(e) {
+            if (this.files && this.files[0]) {
+              const reader = new FileReader();
+              reader.onload = ev => {
+                profileBgPreviewContainer.style.display = 'block';
+                profileBgPreview.src = ev.target.result;
+                if (profileBgCropper) profileBgCropper.destroy();
+                profileBgCropper = new Cropper(profileBgPreview, {
+                  aspectRatio: 3 / 1, viewMode: 1, autoCropArea: 1, dragMode: 'move', background: false
+                });
+              };
+              reader.readAsDataURL(this.files[0]);
+            }
+          });
+        }
+
         const profileBgForm = document.getElementById('profile-bg-form');
         const bioForm = document.getElementById('bio-form');
 
         if (profileBgForm) {
           profileBgForm.addEventListener('submit', async e => {
             e.preventDefault();
-            const bgInput = document.getElementById('profile-bg-input');
-            if (bgInput.files.length === 0) return showToast('Select an image', 'error');
+            if (profileBgInput.files.length === 0 && !profileBgCropper) {
+              showToast('Please select an image file.', 'error');
+              return;
+            }
             const submitBtn = document.getElementById('profile-bg-submit-btn');
             submitBtn.disabled = true;
             submitBtn.textContent = 'Uploading...';
-            const formData = new FormData();
-            formData.append('profile_background', bgInput.files[0]);
-            
-            try {
-              const res = await fetch('?action=upload_profile_background', { method: 'POST', body: formData });
-              const result = await res.json();
-              showToast(result.message, result.status);
-              if (result.status === 'success') {
-                 bgInput.value = '';
-                 await checkSession();
-                 if (currentView.type === 'user_profile') loadView(currentView);
+
+            const doBgUpload = async (blob) => {
+              const formData = new FormData();
+              formData.append('profile_background', blob, 'background.jpg');
+              
+              try {
+                const res = await fetch('?action=upload_profile_background', { method: 'POST', body: formData });
+                const result = await res.json();
+                showToast(result.message, result.status);
+                if (result.status === 'success') {
+                   if (profileBgCropper) { profileBgCropper.destroy(); profileBgCropper = null; }
+                   profileBgPreviewContainer.style.display = 'none';
+                   profileBgInput.value = '';
+                   await checkSession();
+                   if (currentView.type === 'user_profile') loadView(currentView);
+                }
+              } catch (err) {
+                showToast('Upload failed', 'error');
               }
-            } catch (err) {
-              showToast('Upload failed', 'error');
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'Save Uploaded Background';
+            };
+
+            if (profileBgCropper) {
+              profileBgCropper.getCroppedCanvas({ width: 1200, height: 400 }).toBlob(blob => {
+                doBgUpload(blob);
+              }, 'image/jpeg', 0.85);
+            } else {
+              doBgUpload(profileBgInput.files[0]);
             }
-            submitBtn.disabled = false;
-            submitBtn.textContent = 'Save Uploaded Background';
           });
         }
 
@@ -29667,7 +30428,7 @@ SOFTWARE.</div>
             if (this.files && this.files[0]) {
               const reader = new FileReader();
               reader.onload = ev => {
-                profilePicPreview.src = e.target.result;
+                profilePicPreview.src = ev.target.result;
                 if (profileCropper) profileCropper.destroy();
                 profileCropper = new Cropper(profilePicPreview, {
                   aspectRatio: 1, viewMode: 1, autoCropArea: 1, dragMode: 'move', background: false
@@ -30361,12 +31122,24 @@ SOFTWARE.</div>
           document.body.classList.toggle('logged-out', !isLoggedIn);
           if (isLoggedIn) {
             document.body.classList.toggle('user-verified', currentUser.verified === 'yes');
-            const picUrl = currentUser.profile_picture_url;
+            const picUrl = currentUser.profile_picture_url + '&t=' + new Date().getTime();
             profilePictureHeaderDesktop.src = picUrl;
             profilePictureHeaderMobile.src = picUrl;
             profilePicturePreview.src = picUrl;
             
-            document.querySelectorAll('.phpmusic-profile-bg-placeholder').forEach(el => el.style.backgroundImage = `url('?action=get_profile_background&id=${currentUser.id}&v=${Date.now()}')`);
+            const bgUrl = `?action=get_profile_background&id=${currentUser.id}&v=${Date.now()}`;
+            document.querySelectorAll('.phpmusic-profile-bg-placeholder').forEach(el => el.style.backgroundImage = `url('${bgUrl}')`);
+            
+            const bgPreviewEl = document.getElementById('profile-bg-preview');
+            const bgPreviewContainer = document.getElementById('profile-bg-preview-container');
+            if (bgPreviewEl && bgPreviewContainer) {
+              bgPreviewContainer.style.display = 'block';
+              bgPreviewEl.src = bgUrl;
+              if (typeof profileBgCropper !== 'undefined' && profileBgCropper) {
+                profileBgCropper.destroy();
+                profileBgCropper = null;
+              }
+            }
             document.querySelectorAll('.phpmusic-profile-img-placeholder').forEach(img => img.src = picUrl);
             document.querySelectorAll('.phpmusic-profile-name').forEach(el => el.textContent = currentUser.artist);
             document.querySelectorAll('.phpmusic-profile-subtext').forEach(el => el.textContent = currentUser.email || 'Verified Artist');
