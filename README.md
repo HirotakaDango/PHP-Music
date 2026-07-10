@@ -1,6 +1,6 @@
 # PHP Music
 
-A simple, fast, and modern self-hosted music player built in PHP, with a clean UI, SQLite backend, and full PWA (Progressive Web App) features. Scan your music collection, play songs in your browser, manage favorites/playlists, download entire playlists, upload and edit your own songs, view lyrics, write and publish Markdown blogs, and more—all in one lightweight app.
+A simple, fast, and modern self-hosted music player built in PHP, with a clean UI, SQLite backend, and full PWA (Progressive Web App) features. Scan your music collection, play songs in your browser, manage favorites/playlists, download entire playlists, upload and edit your own songs, view lyrics, write and publish Markdown blogs, edit images, play rhythm game beatmaps, and more—all in one lightweight app.
 
 ![1](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/1.png)
 ![2](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/2.png) 
@@ -48,6 +48,8 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 | **Community Social Feed** | Micro-blogging space for sharing status updates, announcements, or thoughts. | Operates on the `community_posts` and `community_reactions` tables. Allows full CRUD capabilities for post owners, with likes/dislikes and multi-sorting (Newest, Most Liked, Following Users). |
 | **Song & Blog Discussions** | Threaded comments and reaction metrics for tracks and blog posts. | Leverages dedicated comment tables (`song_comments`, `blog_comments`, reactions). Features nested reply trees, edit/delete controls, likes, dislikes, and `@` username tag highlighting. Comments are read-only for non-logged-in guests. |
 | **Blogging & Markdown Platform** | Write, publish, or draft blogs with live Markdown preview, Find & Replace, and multi-format exports. | Uses `blogs` and `blog_categories` tables. Features auto-saving drafts, word/character counter, categories, status toggles (*Public* vs *Private*), multi-select bulk actions (download ZIP/delete), debounced search, and multi-format exports (PDF, HTML, MD, TXT, or ZIP). |
+| **Rhythm Game Engine** | Interactive game utilizing parsed tracks directly from your database. | Uses Web Audio API for fast decodes. Automatically builds note beatmaps via root-mean-square energy checks. Features lane speed scaling (up to 20x), pause states, and global standing leaderboards. |
+| **Advanced Image Editor** | Multi-layered image composition workspace. | Built on the HTML5 Canvas API. Renders text and vector shapes, calculates rotation transformations, applies graphic filters, and exports high-quality PNGs. |
 
 ### 3. Personal Privacy Controls
 
@@ -82,7 +84,7 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 | **Upload Quotas** | Multi-file uploads with quota tracking. | Restricts uploads to verified users with a daily limit of 10 songs/day (resetting at midnight). |
 | **PWA Cache Cleansing** | Force PWA and Service Worker hard-resets. | Offers a manual "Clear PWA Cache" option to wipe IndexedDB version tracking and unregister the service worker. |
 | **Administrative Dashboard** | Full-scale administrative manager (`?access=admin`). | Paginated user table, search filters, account verification toggles, ban managers, and complete file/account purging tools. |
-| **Integrated Drive Manager** | Built-in file management backend for server assets. | Features native `.zip` archive extraction, dynamic deep-linking URLs, recursive folder property calculations, and a responsive 2-column mobile grid. |
+| **Integrated Drive Manager** | Built-in file management backend for server assets. | Features native `.zip` extraction via context menus, dynamic URL deep linking for active files, an optimized 2-column mobile grid, and recursive folder property calculations (displaying total files, subdirectories, and byte size). |
 | **SQLite Backend Zero-Setup** | Completely self-hosted, lightweight architecture. | Auto-initializes SQLite database schemas on first run, with zero complex database setup required. |
 
 ---
@@ -174,24 +176,45 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite, follow
 
 ## Usage Guide
 
+### 1. General & Account Settings
 * **Account Portability**: Change your email or reset credentials safely using the "Delete Account but Keep Data" button in Settings. You will receive a backup key to input on the "Restore Account" modal.
 * **Navigation Sidebar**: The navigation hierarchy places dynamic directories like *Listen Later*, *Community*, *Personal Notes*, and *My Blogs* directly beneath the **Following** tab for quick transition.
-* **Blogging Platform & Markdown Editor**: Access *My Blogs* from the sidebar to write articles and announcements.
-  * **Markdown Support:** Full GFM support (headings, lists, code blocks, tables, images, video embeds). Click the Markdown icon to toggle live split-preview mode.
-  * **Find & Replace:** Search and replace text across your draft with real-time match counters.
-  * **Auto-Save & Drafts:** First drafts automatically save as you type (`status = private`). Unsaved/empty drafts can be discarded cleanly.
-  * **Multi-Format Export:** Export individual blogs to PDF (via `html2pdf.js`), HTML, Markdown (`.md`), or Plain Text (`.txt`).
-  * **Multi-Select & Bulk Actions:** Long-press or right-click blog cards to enter multi-select mode (highlighted with red borders). Bulk-delete or download selected blogs as a `.zip` archive.
-  * **Blog Comments & Reactions:** Public blogs feature like/dislike reactions and threaded comment trees with nested replies, comment reactions, and `@username` tag highlights. Unauthenticated guests can read blogs and comments in read-only mode (comment forms and reaction buttons are hidden until logged in).
 * **Listen Later Bookmarking**: Click the three vertical dots `...` on any song and tap `Listen Later` to bookmark it. In your *Listen Later* library, you can drag and drop tracks to configure a customized listening queue. Bookmark icons automatically alternate between empty and solid states.
-* **Song Community & Inline CRUD**: From a song's context menu, select `View Comments & Likes` to access the discussions. You can like or dislike the track, start threaded conversations, reply directly to previous responses, or update/delete your own submissions. Adding `@username` to comments automatically formats and highlights the handle for visibility.
-* **Community Social Feed**: Use the *Community* feed to post general updates. Posts support reactions (likes and dislikes) and full edit/deletion controls. Filters allow you to sort posts by *Newest*, *Most Liked*, or exclusively from *Following Users*.
 * **Personal Notes Notebook**: Organize draft lyrics, artist logs, or notes in the *Personal Notes* tab. Notes are sandboxed privately to your account and can be sorted by *Newest*, *Oldest*, or *Recently Modified*.
 * **Direct Messaging & Blocking**: Click the Message button on a user's profile to open a chat, or use the Inbox search to find users. You can send images, edit/delete messages, and view read receipts/active status. Use the Block button to prevent unwanted interactions.
 * **Calendar & Clock**: Open the Calendar from the sidebar to check the current time, jump to specific dates via the date-picker, and reference days seamlessly while managing your music metadata.
+* **PWA Cache**: If changes don't appear, use the "Clear Cache" button in the sidebar to securely wipe the IndexedDB version tracking and unregister the Service Worker dynamically.
+
+### 2. Blogging Platform & Markdown Editor
+* Access *My Blogs* from the sidebar to write articles and announcements.
+* **Markdown Support:** Full GFM support (headings, lists, code blocks, tables, images, video embeds). Click the Markdown icon to toggle live split-preview mode.
+* **Find & Replace:** Search and replace text across your draft with real-time match counters.
+* **Auto-Save & Drafts:** First drafts automatically save as you type (`status = private`). Unsaved/empty drafts can be discarded cleanly.
+* **Multi-Format Export:** Export individual blogs to PDF (via `html2pdf.js`), HTML, Markdown (`.md`), or Plain Text (`.txt`).
+* **Multi-Select & Bulk Actions:** Long-press or right-click blog cards to enter multi-select mode (highlighted with red borders). Bulk-delete or download selected blogs as a `.zip` archive.
+* **Blog Comments & Reactions:** Public blogs feature like/dislike reactions and threaded comment trees with nested replies, comment reactions, and `@username` tag highlights. Unauthenticated guests can read blogs and comments in read-only mode (comment forms and reaction buttons are hidden until logged in).
+* **Blog Search & Sorting:** Search through your blogs using the debounced search bar with empty-match feedback, and sort lists by *Newest*, *Oldest*, or *Recently Modified*.
+
+### 3. Rhythm Game Engine
+* **Accessing the Game:** Access the **Rhythm Game** directly from the sidebar. The UI launches straight into the game hub with zero startup screens, presenting a clean 4-tab interface (Songs, Favorites, Ranks, Settings).
+* **Beatmap Loading:** Tap **PLAY** on any track card in the list to open the launch setup dialog. The dialog will load and display the song's top 25 high scores (with green **FC** Full Combo badges on perfect runs). Select your difficulty (Easy, Medium, Hard, Expert, Master) and click Play.
+* **Customization & Note Speed:** Under Settings, you can configure your custom keyboard lane bindings (default: `D`, `F`, `J`, `K`), calibrate audio latency offset values, and tweak the Note Speed multiplier (up to `20x` tick speed).
+* **Pause & Abort System:** Click the in-game **Pause** button to halt playback immediately. The pause screen will overlay options to **Resume**, **Retry** (which instantly restarts the beatmap without dumping you back to the main menu), or **Quit to Menu**.
+* **Global Leaderboard:** The "Ranks" tab aggregates standings for players globally, ranking users by their total score accumulated across all completed song sessions and displaying their total plays.
+
+### 4. Advanced Image Editor
+* **Workspace Setup:** Click **Image Editor** in the sidebar to load the canvas. 
+* **Layer Composition:** Drag, drop, or upload images directly to create **Image Layers**. Click **Text** to append editable text layers, or **Shape** to render vector rectangles or ellipses.
+* **Layer Transform Handles:** Click any layer on the canvas to activate its bounding box transform borders. Drag the handles to dynamically scale, stretch, rotate, or position elements.
+* **Properties Inspector:** Tap **Settings** (or select an element) to reveal the Properties Panel. Here, you can manually type coordinates, adjust opacity, change corner-radius values, reorder layers (bring forward/send back), flip orientations, duplicate, or apply filters (brightness, contrast, and grayscale).
+* **Exporting:** When your design is complete, click **Export** to download your composite artwork as a high-resolution `.png` file.
+
+### 5. Curation, Social & Custom Music Attributes
+* **Song Community & Inline CRUD:** From a song's context menu, select `View Comments & Likes` to access the discussions. You can like or dislike the track, start threaded conversations, reply directly to previous responses, or update/delete your own submissions. Adding `@username` to comments automatically formats and highlights the handle for visibility.
+* **Community Social Feed:** Use the *Community* feed to post general updates. Posts support reactions (likes and dislikes) and full edit/deletion controls. Filters allow you to sort posts by *Newest*, *Most Liked*, or exclusively from *Following Users*.
 * **Synchronized LRC Lyrics**: Right-click (or tap "..." on mobile) a song and choose "Edit Info" to modify tags and paste synchronized `.lrc` text. Ensure that each timestamp is followed by a space so the parser reads it correctly:
     * ✅ **Correct:** `[00:15.30] Never gonna give you up`
-    - ❌ **Incorrect:** `[00:15.30]Never gonna give you up`
+    * ❌ **Incorrect:** `[00:15.30]Never gonna give you up`
 * **Private Items**: Toggle private mode when uploading tracks, editing playlists, or writing blogs. These items are strictly invisible to other users. Private songs added to public collaborative playlists are filtered out and remain invisible to everyone except you (and the `musiclibrary@mail.com` super admin).
 * **Downloader**: Open the "Downloader" tool from the sidebar, enter a Playlist ID, and sequentially batch-download every track in that playlist directly to your local drive.
 * **Offline Management**: Drag-and-drop to manually reorder offline lists. Standalone JSON import/export functions let you keep physical backups of your lists.

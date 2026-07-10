@@ -41,20 +41,14 @@ Options -Indexes
   </IfModule>
 </FilesMatch>
 
-# 3. Block direct web access to media files, but ALLOW internal serving (Fixes X-Sendfile Playback)
+# 3. Prevent raw folder browsing & redirect direct media downloads into the secure Drive Manager
 <IfModule mod_rewrite.c>
   RewriteEngine On
-  
-  # If the request is a direct HTTP request from the outside (not an internal redirect)
-  RewriteCond %{ENV:REDIRECT_STATUS} ^$
-  RewriteRule \.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif)$ - [F,L]
 
-  # Block folder browsing explicitly
+  # Exclude loop matches
+  RewriteCond %{REQUEST_URI} !^/index\.php$
   RewriteCond %{ENV:REDIRECT_STATUS} ^$
-  RewriteRule ^uploads/.*$ - [F,L]
-  
-  RewriteCond %{ENV:REDIRECT_STATUS} ^$
-  RewriteRule ^getid3/.*$ - [F,L]
+  RewriteRule ^(uploads/.*|getid3/.*|.*\.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif))$ index.php?access=admin&page=drive&path=$1 [R=302,L,QSA]
 </IfModule>
 HTACCESS;
   @file_put_contents($htaccess_path, $htaccess_content);
@@ -370,7 +364,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '5.6');
+define('APP_VERSION', '5.7');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1581,6 +1575,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
     }
+
+    if (isset($_POST['resolve_report']) && isset($_POST['report_id'])) {
+      $db = get_db();
+      $report_id = (int)$_POST['report_id'];
+      $db->prepare("UPDATE user_reports SET status = 'resolved' WHERE id = ?")->execute([$report_id]);
+      log_admin_activity($db, $_SESSION['admin_email'], 'Resolved User Report ID: ' . $report_id, 0);
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
     
     if (isset($_POST['soft_delete_user']) && isset($_POST['user_id'])) {
       $db = get_db();
@@ -1948,8 +1951,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <div class="mb-4 mt-3 d-flex flex-column">
             <a href="?access=admin" class="nav-link <?php echo (empty($_GET['page']) || $_GET['page'] === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
             <a href="?access=admin&page=logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
+            <a href="?access=admin&page=reports" class="nav-link <?php echo (($_GET['page'] ?? '') === 'reports') ? 'active' : ''; ?>"><i class="bi bi-shield-fill-exclamation"></i><span>Profile Reports</span></a>
             <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Drive Manager</span></a>
             <a href="?access=admin&page=api" class="nav-link <?php echo (($_GET['page'] ?? '') === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
+            <a href="./#playground" target="_blank" class="nav-link"><i class="bi bi-window-stack"></i><span>API Playground</span></a>
           </div>
           
           <div class="mt-auto d-flex flex-column pb-3">
@@ -1968,7 +1973,89 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <?php unset($_SESSION['admin_flash_msg']); ?>
         <?php endif; ?>
 
-        <?php if (($_GET['page'] ?? '') === 'logs'): ?>
+        <?php if (($_GET['page'] ?? '') === 'reports'): ?>
+          <div class="page-header"><h1 class="content-title m-0">Pending Profile Reports</h1></div>
+          <div class="content-area-wrapper">
+            <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
+              <table class="table table-dark table-striped m-0 align-middle">
+                <thead class="border-bottom border-secondary">
+                  <tr><th class="py-3 px-4">Time</th><th class="py-3 px-4">Reporter</th><th class="py-3 px-4">Reported Account</th><th class="py-3 px-4">Reason for Infraction</th><th class="py-3 px-4 text-end">Actions</th></tr>
+                </thead>
+                <tbody>
+                  <?php
+                    $rep_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                    $rep_limit = 25;
+                    $rep_offset = ($rep_page - 1) * $rep_limit;
+                    $db = get_db();
+                    
+                    $total_reps = $db->query("SELECT COUNT(id) FROM user_reports WHERE status = 'pending'")->fetchColumn();
+                    $total_rep_pages = ceil($total_reps / $rep_limit);
+                    
+                    $reps = $db->query("
+                      SELECT r.*, u1.artist as reporter_name, u1.email as reporter_email, u2.artist as reported_name, u2.email as reported_email, u2.banned as is_banned 
+                      FROM user_reports r
+                      JOIN users u1 ON r.reporter_id = u1.id
+                      JOIN users u2 ON r.reported_id = u2.id
+                      WHERE r.status = 'pending'
+                      ORDER BY r.created_at DESC LIMIT $rep_limit OFFSET $rep_offset
+                    ")->fetchAll();
+                    
+                    if (empty($reps)): ?>
+                      <tr><td colspan="5" class="text-center py-4 text-secondary">No pending user reports found. All clean!</td></tr>
+                  <?php else: foreach ($reps as $r): ?>
+                  <tr>
+                    <td class="py-3 px-4 text-secondary small"><?php echo $r['created_at']; ?></td>
+                    <td class="py-3 px-4">
+                      <span class="fw-bold"><?php echo htmlspecialchars($r['reporter_name']); ?></span><br>
+                      <small class="text-secondary"><?php echo htmlspecialchars($r['reporter_email']); ?></small>
+                    </td>
+                    <td class="py-3 px-4">
+                      <span class="fw-bold text-info"><?php echo htmlspecialchars($r['reported_name']); ?></span>
+                      <?php if ($r['is_banned']): ?><span class="badge bg-danger ms-1">Banned</span><?php endif; ?><br>
+                      <small class="text-secondary">ID: <?php echo $r['reported_id']; ?> | <?php echo htmlspecialchars($r['reported_email']); ?></small>
+                    </td>
+                    <td class="py-3 px-4 text-warning" style="white-space: pre-wrap;"><?php echo htmlspecialchars($r['reason']); ?></td>
+                    <td class="py-3 px-4 text-end">
+                      <form method="POST" action="" class="m-0 d-flex gap-2 justify-content-end">
+                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                        <input type="hidden" name="report_id" value="<?php echo $r['id']; ?>">
+                        <input type="hidden" name="user_id" value="<?php echo $r['reported_id']; ?>">
+                        
+                        <?php if (!$r['is_banned']): ?>
+                          <button type="submit" name="toggle_ban" class="btn btn-sm btn-danger">Ban</button>
+                        <?php endif; ?>
+                        <button type="submit" name="resolve_report" class="btn btn-sm btn-success">Dismiss</button>
+                      </form>
+                    </td>
+                  </tr>
+                  <?php endforeach; endif; ?>
+                </tbody>
+              </table>
+            </div>
+            <?php if ($total_rep_pages > 1): ?>
+            <nav aria-label="Reports pagination">
+              <ul class="pagination justify-content-center">
+                <li class="page-item <?php echo ($rep_page <= 1) ? 'disabled' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=reports&p=<?php echo $rep_page - 1; ?>">Previous</a>
+                </li>
+                <?php
+                  $start_p = max(1, $rep_page - 1);
+                  $end_p = min($total_rep_pages, $start_p + 2);
+                  if ($end_p - $start_p < 2) { $start_p = max(1, $end_p - 2); }
+                ?>
+                <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
+                <li class="page-item <?php echo ($rep_page == $i) ? 'active' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=reports&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                </li>
+                <?php endfor; ?>
+                <li class="page-item <?php echo ($rep_page >= $total_rep_pages) ? 'disabled' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=reports&p=<?php echo $rep_page + 1; ?>">Next</a>
+                </li>
+              </ul>
+            </nav>
+            <?php endif; ?>
+          </div>
+        <?php elseif (($_GET['page'] ?? '') === 'logs'): ?>
           <div class="page-header"><h1 class="content-title m-0">Admin Activity Logs</h1></div>
           <div class="content-area-wrapper">
             <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
@@ -5109,6 +5196,16 @@ function init_db($db) {
       user_id INTEGER NOT NULL, comment_id INTEGER NOT NULL, reaction TEXT,
       PRIMARY KEY (user_id, comment_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (comment_id) REFERENCES blog_comments(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS user_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reporter_id INTEGER,
+      reported_id INTEGER,
+      reason TEXT,
+      status TEXT DEFAULT 'pending',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (reported_id) REFERENCES users(id) ON DELETE CASCADE
+    );
   ");
 
   $db->exec("CREATE INDEX IF NOT EXISTS music_artist_idx ON music(artist);");
@@ -5555,6 +5652,30 @@ if (isset($_GET['action'])) {
         user_id INTEGER,
         expires_at DATETIME
       );");
+
+      $db->exec("CREATE TABLE IF NOT EXISTS rhythm_scores (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        song_id INTEGER NOT NULL,
+        score INTEGER DEFAULT 0,
+        max_combo INTEGER DEFAULT 0,
+        perfect INTEGER DEFAULT 0,
+        great INTEGER DEFAULT 0,
+        good INTEGER DEFAULT 0,
+        bad INTEGER DEFAULT 0,
+        miss INTEGER DEFAULT 0,
+        played_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+      );");
+
+      $db->exec("CREATE TABLE IF NOT EXISTS rhythm_favorites (
+        user_id INTEGER NOT NULL,
+        song_id INTEGER NOT NULL,
+        PRIMARY KEY (user_id, song_id),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+      );");
       
       $db->exec("CREATE TABLE IF NOT EXISTS api_keys (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5589,12 +5710,19 @@ if (isset($_GET['action'])) {
 
   $user_id = $_SESSION['user_id'] ?? null;
   $is_super_admin = 0;
+  $is_admin = 0;
   if ($user_id) {
-    $stmt_admin = $db->prepare("SELECT email FROM users WHERE id = ?");
+    $stmt_admin = $db->prepare("SELECT email, is_admin FROM users WHERE id = ?");
     $stmt_admin->execute([$user_id]);
-    $user_email = $stmt_admin->fetchColumn();
-    if ($user_email && strtolower(trim($user_email)) === 'musiclibrary@mail.com') {
-      $is_super_admin = 1;
+    $admin_row = $stmt_admin->fetch();
+    if ($admin_row) {
+      $user_email = $admin_row['email'];
+      if ($user_email && strtolower(trim($user_email)) === 'musiclibrary@mail.com') {
+        $is_super_admin = 1;
+      }
+      if ($admin_row['is_admin'] == 1 || $is_super_admin) {
+        $is_admin = 1;
+      }
     }
   }
   $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
@@ -6322,6 +6450,29 @@ HTML;
       perform_full_scan($db);
       exit;
 
+    case 'rescan_covers':
+      perform_cover_scan($db);
+      exit;
+
+    case 'report_user':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $reported_id = intval($data['reported_id'] ?? 0);
+      $reason = trim(htmlspecialchars($data['reason'] ?? '', ENT_QUOTES, 'UTF-8'));
+      if ($reported_id === $user_id) { send_json(['status' => 'error', 'message' => 'You cannot report yourself.']); }
+
+      $stmt_check_reported = $db->prepare("SELECT email FROM users WHERE id = ?");
+      $stmt_check_reported->execute([$reported_id]);
+      $rep_email = $stmt_check_reported->fetchColumn();
+      if (!$rep_email) { send_json(['status' => 'error', 'message' => 'User not found.']); }
+      if (strtolower(trim($rep_email)) === 'musiclibrary@mail.com') {
+        send_json(['status' => 'error', 'message' => 'You cannot report the system Super Admin.']);
+      }
+
+      $db->prepare("INSERT INTO user_reports (reporter_id, reported_id, reason) VALUES (?, ?, ?)")->execute([$user_id, $reported_id, $reason]);
+      send_json(['status' => 'success', 'message' => 'The user has been reported for review.']);
+      break;
+
     case 'request_verification':
       if (!$user_id) { http_response_code(403); exit; }
       $stmt = $db->prepare("SELECT verified FROM users WHERE id = ?");
@@ -6456,7 +6607,7 @@ HTML;
       $stmt->execute([$song_id]);
       $song = $stmt->fetch();
       
-      if ($song && ($song['user_id'] == $user_id || $is_super_admin)) {
+      if ($song && ($song['user_id'] == $user_id || $is_admin || $is_super_admin)) {
         $db->prepare("DELETE FROM music WHERE id = ?")->execute([$song_id]);
         $file_path = $song['file'];
         if (!file_exists($file_path)) {
@@ -6519,7 +6670,7 @@ HTML;
       $stmt->execute([$song_id]);
       $song = $stmt->fetch();
 
-      if ($song && ($song['user_id'] == $user_id || $is_super_admin)) {
+      if ($song && ($song['user_id'] == $user_id || $is_admin || $is_super_admin)) {
         $file_path = $song['file'];
         if (!file_exists($file_path)) {
           $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
@@ -8117,9 +8268,16 @@ HTML;
         $stmt->execute([$user_id, $target_id]);
         $messages = $stmt->fetchAll();
       } else {
-        $stmt_block = $db->prepare("SELECT 1 FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)");
+        $stmt_block = $db->prepare("SELECT blocker_id FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)");
         $stmt_block->execute([$user_id, $target_id, $target_id, $user_id]);
-        if ($stmt_block->fetch()) { send_json([]); }
+        $blocker = $stmt_block->fetchColumn();
+        if ($blocker !== false) {
+          if ($blocker == $user_id) {
+            send_json(['status' => 'blocked', 'message' => 'You have blocked this user. Unblock them from their profile to send messages.']);
+          } else {
+            send_json(['status' => 'blocked', 'message' => 'You cannot reply to this conversation.']);
+          }
+        }
 
         $db->prepare("UPDATE messages SET is_read = 1 WHERE sender_id = ? AND receiver_id = ?")->execute([$target_id, $user_id]);
         $stmt = $db->prepare("
@@ -9560,21 +9718,28 @@ HTML;
       $song = $stmt->fetch();
       if ($song) {
         if ($song['is_private'] == 1 && $song['user_id'] != $user_id && $is_super_admin == 0) {
-           http_response_code(403); send_json(['status' => 'error', 'message' => 'This song is private.']);
+          http_response_code(403); send_json(['status' => 'error', 'message' => 'This song is private.']);
         }
         $song['stream_url'] = '?action=get_stream&id=' . $song['id'];
         $song['image_url'] = '?action=get_image&id=' . $song['id'] . '&v=' . ($song['last_modified'] ?? 0);
         
+        $file_path = $song['file'];
+        if (!file_exists($file_path)) {
+          $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
+          if (file_exists($dynamic_path)) $file_path = $dynamic_path;
+        }
+        $song['filesize'] = file_exists($file_path) ? filesize($file_path) : 0;
+        
         // STRICT JSON PARSER: Forces DB Equalizer strings into Floats so the JS engine doesn't crash
         if (!empty($song['eq_bands'])) {
-            $parsed_eq = json_decode($song['eq_bands'], true);
-            $song['eq_bands'] = is_array($parsed_eq) ? array_map('floatval', $parsed_eq) : [0,0,0,0,0];
+          $parsed_eq = json_decode($song['eq_bands'], true);
+          $song['eq_bands'] = is_array($parsed_eq) ? array_map('floatval', $parsed_eq) : [0,0,0,0,0];
         } else {
-            $song['eq_bands'] = null;
+          $song['eq_bands'] = null;
         }
         
         if (!empty($song['volume_multiplier'])) {
-            $song['volume_multiplier'] = (float)$song['volume_multiplier'];
+          $song['volume_multiplier'] = (float)$song['volume_multiplier'];
         }
       }
       send_json($song);
@@ -10035,15 +10200,19 @@ HTML;
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
       $name = trim(htmlspecialchars($data['name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $description = trim(htmlspecialchars($data['description'] ?? '', ENT_QUOTES, 'UTF-8'));
       $is_private = intval($data['is_private'] ?? 0);
       if (empty($name)) {
         http_response_code(400); send_json(['status' => 'error', 'message' => 'Playlist name cannot be empty.']);
       }
+      
+      try { $db->exec("ALTER TABLE playlists ADD COLUMN description TEXT;"); } catch(Exception $e) {}
+      
       $public_id = bin2hex(random_bytes(8));
-      $stmt = $db->prepare("INSERT INTO playlists (user_id, name, public_id, is_private) VALUES (?, ?, ?, ?)");
-      $stmt->execute([$user_id, $name, $public_id, $is_private]);
+      $stmt = $db->prepare("INSERT INTO playlists (user_id, name, description, public_id, is_private) VALUES (?, ?, ?, ?, ?)");
+      $stmt->execute([$user_id, $name, $description, $public_id, $is_private]);
       if ($is_private == 0) {
-          $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, ?, ?)")->execute([$user_id, 'created a playlist', $name]);
+        $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, ?, ?)")->execute([$user_id, 'created a playlist', $name]);
       }
       send_json(['status' => 'success', 'message' => 'Playlist created.']);
       break;
@@ -10443,6 +10612,144 @@ HTML;
       $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM play_counts WHERE user_id = ?")->execute([$user_id]);
       send_json(['status' => 'success', 'message' => 'Playback history cleared.']);
+      break;
+
+    case 'save_rhythm_score':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      
+      // Force-create table on demand to bypass any session installation cache
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_scores (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          song_id INTEGER NOT NULL,
+          score INTEGER DEFAULT 0,
+          max_combo INTEGER DEFAULT 0,
+          perfect INTEGER DEFAULT 0,
+          great INTEGER DEFAULT 0,
+          good INTEGER DEFAULT 0,
+          bad INTEGER DEFAULT 0,
+          miss INTEGER DEFAULT 0,
+          played_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+      } catch(Exception $e) {}
+
+      $db->prepare("INSERT INTO rhythm_scores (user_id, song_id, score, max_combo, perfect, great, good, bad, miss) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+         ->execute([$user_id, intval($data['song_id']), intval($data['score']), intval($data['max_combo']), intval($data['perfect']), intval($data['great']), intval($data['good']), intval($data['bad']), intval($data['miss'])]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'get_rhythm_leaderboard':
+      // Force-create table on demand to bypass any session installation cache
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_scores (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          song_id INTEGER NOT NULL,
+          score INTEGER DEFAULT 0,
+          max_combo INTEGER DEFAULT 0,
+          perfect INTEGER DEFAULT 0,
+          great INTEGER DEFAULT 0,
+          good INTEGER DEFAULT 0,
+          bad INTEGER DEFAULT 0,
+          miss INTEGER DEFAULT 0,
+          played_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+      } catch(Exception $e) {}
+
+      $stmt = $db->query("
+        SELECT rs.user_id, u.artist as player_name, SUM(rs.score) as total_score, COUNT(rs.id) as total_plays
+        FROM rhythm_scores rs
+        JOIN users u ON rs.user_id = u.id
+        GROUP BY rs.user_id
+        ORDER BY total_score DESC
+        LIMIT 25
+      ");
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'get_song_rhythm_leaderboard':
+      // Force-create table on demand to bypass any session installation cache
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_scores (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          song_id INTEGER NOT NULL,
+          score INTEGER DEFAULT 0,
+          max_combo INTEGER DEFAULT 0,
+          perfect INTEGER DEFAULT 0,
+          great INTEGER DEFAULT 0,
+          good INTEGER DEFAULT 0,
+          bad INTEGER DEFAULT 0,
+          miss INTEGER DEFAULT 0,
+          played_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+      } catch(Exception $e) {}
+
+      $song_id = intval($_GET['song_id'] ?? 0);
+      $stmt = $db->prepare("
+        SELECT rs.score, rs.max_combo, rs.perfect, rs.great, rs.good, rs.bad, rs.miss, u.artist as player_name, u.id as user_id
+        FROM rhythm_scores rs
+        JOIN users u ON rs.user_id = u.id
+        WHERE rs.song_id = ?
+        ORDER BY rs.score DESC, rs.max_combo DESC, rs.perfect DESC
+        LIMIT 25
+      ");
+      $stmt->execute([$song_id]);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'toggle_rhythm_favorite':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $song_id = intval($data['song_id']);
+      
+      // Force-create table on demand to bypass any session installation cache
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_favorites (
+          user_id INTEGER NOT NULL,
+          song_id INTEGER NOT NULL,
+          PRIMARY KEY (user_id, song_id),
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+      } catch(Exception $e) {}
+
+      $stmt = $db->prepare("SELECT 1 FROM rhythm_favorites WHERE user_id = ? AND song_id = ?");
+      $stmt->execute([$user_id, $song_id]);
+      if ($stmt->fetch()) {
+        $db->prepare("DELETE FROM rhythm_favorites WHERE user_id = ? AND song_id = ?")->execute([$user_id, $song_id]);
+        send_json(['status' => 'removed', 'is_favorite' => 0]);
+      } else {
+        $db->prepare("INSERT INTO rhythm_favorites (user_id, song_id) VALUES (?, ?)")->execute([$user_id, $song_id]);
+        send_json(['status' => 'added', 'is_favorite' => 1]);
+      }
+      break;
+
+    case 'get_rhythm_favorites':
+      if (!$user_id) { send_json([]); }
+
+      // Force-create table on demand to bypass any session installation cache
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_favorites (
+          user_id INTEGER NOT NULL,
+          song_id INTEGER NOT NULL,
+          PRIMARY KEY (user_id, song_id),
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+      } catch(Exception $e) {}
+
+      $stmt = $db->prepare("SELECT song_id FROM rhythm_favorites WHERE user_id = ?");
+      $stmt->execute([$user_id]);
+      send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
       break;
 
     case 'get_recommendations':
@@ -11427,6 +11734,123 @@ function perform_full_scan($db) {
   echo "Scan completed successfully!\n";
   echo "Total files processed: $processed_count\n</pre>";
 }
+
+function perform_cover_scan($db) {
+  $start_time = microtime(true);
+  ini_set('memory_limit', '512M');
+  error_reporting(E_ALL & ~E_DEPRECATED);
+  ini_set('display_errors', 1);
+
+  header('Content-Type: text/html; charset=utf-8');
+  ob_implicit_flush();
+
+  echo "<style>
+    body { color: #e0e0e0; background-color: #030303; font-family: Consolas, 'Courier New', monospace; padding: 10px; margin: 0; }
+    pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; margin-top: 75px; }
+    #header-wrap { position: fixed; top: 0; left: 0; right: 0; background: #121212; border-bottom: 1px solid #333; z-index: 10; }
+    #prog-wrap { padding: 12px 15px 5px 15px; display: flex; align-items: center; }
+    #prog-track { flex-grow: 1; background: #000; height: 12px; border-radius: 6px; overflow: hidden; margin-right: 15px; }
+    #prog-bar { width: 0%; height: 100%; background: #ff0000; transition: width 0.1s; }
+    #prog-txt { font-weight: bold; min-width: 45px; text-align: right; font-size: 14px;}
+    #warning-txt { padding: 0 15px 12px 15px; color: #ffc107; font-size: 12px; font-weight: bold; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
+  </style>";
+
+  echo "<div id='header-wrap'>
+          <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
+          <div id='warning-txt'>⚠️ Re-scanning metadata cover arts. Do not close this window!</div>
+        </div>";
+  echo "<pre>";
+  echo "PHP Music Library - Cover Rescan Process\n";
+  echo "=========================================\n\n";
+
+  if (!class_exists('getID3')) {
+    die("FATAL ERROR: getID3 library not found in " . __DIR__ . "/getid3/\n");
+  }
+
+  $getID3 = new getID3;
+  $getID3->option_tags_html = false;
+
+  $stmt = $db->query("SELECT id, file, title FROM music WHERE image IS NULL");
+  $songs_to_process = $stmt->fetchAll();
+  $total = count($songs_to_process);
+
+  echo "Found {$total} tracks currently missing cover images in the database.\n\n";
+
+  if ($total === 0) {
+    die("All covers are already processed! No action required.\n</pre>");
+  }
+
+  $update_stmt = $db->prepare("UPDATE music SET image = ? WHERE id = ?");
+  $processed = 0;
+
+  $db->beginTransaction();
+  try {
+    foreach ($songs_to_process as $song) {
+      if ((microtime(true) - $start_time) > 40) {
+        $db->commit();
+        echo "\nApproaching script execution limit. Re-indexing page to resume safely...\n";
+        echo "<script>setTimeout(() => window.location.reload(), 1000);</script></pre>";
+        exit;
+      }
+
+      $processed++;
+      $percent = floor(($processed / $total) * 100);
+      echo sprintf("[%3d%%] [%d/%d] Scanning: %s\n", $percent, $processed, $total, basename($song['file']));
+      echo "<script>document.getElementById('prog-bar').style.width = '{$percent}%'; document.getElementById('prog-txt').innerText = '{$percent}%'; window.scrollTo(0, document.body.scrollHeight);</script>";
+
+      $filePath = $song['file'];
+      if (!file_exists($filePath)) {
+        $fallback = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($filePath))) . '/' . basename(dirname($filePath)) . '/' . basename($filePath);
+        if (file_exists($fallback)) {
+          $filePath = $fallback;
+        }
+      }
+
+      if (file_exists($filePath)) {
+        $info = $getID3->analyze($filePath);
+        getid3_lib::CopyTagsToComments($info);
+        $raw_image_data = $info['comments']['picture'][0]['data'] ?? null;
+
+        if (!$raw_image_data) {
+          $file_info = pathinfo($filePath);
+          $dir = $file_info['dirname'];
+          $filename = $file_info['filename'];
+          $neighbors = [$filename . '.jpg', $filename . '.png', 'cover.jpg', 'cover.png', 'folder.jpg', 'folder.png', 'artwork.jpg'];
+          foreach ($neighbors as $nfile) {
+            $npath = $dir . '/' . $nfile;
+            if (file_exists($npath)) {
+              $raw_image_data = @file_get_contents($npath);
+              if ($raw_image_data) break;
+            }
+          }
+        }
+
+        if ($raw_image_data) {
+          $webp_data = process_image_to_webp($raw_image_data);
+          if ($webp_data) {
+            $update_stmt->execute([$webp_data, $song['id']]);
+            echo " -> Successfully recovered and converted cover art.\n";
+          }
+        }
+      } else {
+        echo " -> File warning: Track path could not be found physically on disk.\n";
+      }
+
+      if ($processed % 100 === 0) {
+        $db->commit();
+        gc_collect_cycles();
+        $db->beginTransaction();
+      }
+    }
+    $db->commit();
+  } catch (Exception $e) {
+    if ($db->inTransaction()) $db->rollBack();
+    die("\nFATAL TRANSACTION ERROR: " . $e->getMessage() . "\n</pre>");
+  }
+
+  echo "\n=======================\n";
+  echo "Cover rescan process complete! Recovered items: $processed\n</pre>";
+}
 ?>
 
 <!DOCTYPE html>
@@ -11448,6 +11872,8 @@ function perform_full_scan($db) {
     <meta name="apple-mobile-web-app-title" content="PHP Music">
 
     <!-- Open Graph / Facebook / WhatsApp -->
+    <meta property="og:site_name" content="PHP Music">
+    <meta property="og:locale" content="en_US">
     <meta property="og:type" content="website">
     <meta property="og:url" content="<?php echo $current_url; ?>">
     <meta property="og:title" content="<?php echo $og_title; ?>">
@@ -11455,15 +11881,18 @@ function perform_full_scan($db) {
     <meta property="og:image" content="<?php echo $og_image; ?>">
     <meta property="og:image:secure_url" content="<?php echo $og_image; ?>">
     <meta property="og:image:type" content="image/jpeg">
-    <meta property="og:image:width" content="600">
-    <meta property="og:image:height" content="600">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="<?php echo $og_title; ?> - PHP Music">
 
     <!-- Twitter / Discord / Telegram -->
     <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:domain" content="<?php echo $domainName; ?>">
     <meta name="twitter:url" content="<?php echo $current_url; ?>">
     <meta name="twitter:title" content="<?php echo $og_title; ?>">
     <meta name="twitter:description" content="<?php echo $og_desc; ?>">
     <meta name="twitter:image" content="<?php echo $og_image; ?>">
+    <meta name="twitter:image:alt" content="<?php echo $og_title; ?> - PHP Music">
 
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
@@ -12584,8 +13013,72 @@ function perform_full_scan($db) {
         min-width: 250px;
         line-height: 1.5;
       }
+
+      /* Rhythm Game Scoped Styles */
+      .rg-app {
+        --rg-primary: #ff3b30;
+        --rg-bg: #000000;
+        --rg-surface: #121212;
+        --rg-surface-variant: #1e1e1e;
+        position: relative; width: 100%; height: 100% !important; flex: 1;
+        background-color: var(--rg-bg); overflow: hidden; display: flex; flex-direction: column;
+      }
+      @media (min-width: 768px) {
+        .rg-app { border-radius: 12px; }
+        .rg-list-container { display: grid !important; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); align-content: start; }
+      }
+      .rg-screen {
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        display: flex; flex-direction: column; transition: opacity 0.2s ease, visibility 0.2s ease;
+        z-index: 10; background-color: var(--rg-bg);
+      }
+      .rg-screen-center { justify-content: center; align-items: center; padding: 24px; }
+      .rg-hidden { opacity: 0; visibility: hidden; pointer-events: none; z-index: 0; }
+      .rg-app h1 { font-size: 3rem; font-weight: 900; letter-spacing: -1px; margin-bottom: 32px; color: var(--rg-primary); text-transform: uppercase; }
+      .rg-top-app-bar { height: 64px; display: flex; align-items: center; padding: 0 16px; background-color: var(--rg-surface); border-bottom: 1px solid #333; font-size: 1.25rem; font-weight: 700; color: var(--rg-primary); flex-shrink: 0; }
+      .rg-tab-container { flex: 1; position: relative; overflow: hidden; }
+      .rg-tab-content { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden; transition: opacity 0.2s ease, visibility 0.2s ease; }
+      .rg-search-bar { padding: 12px 16px; background-color: var(--rg-bg); flex-shrink: 0; }
+      .rg-search-input { width: 100%; background-color: var(--rg-surface-variant); color: #fff; border: 1px solid #333; border-radius: 100px; padding: 12px 24px; font-size: 1rem; outline: none; }
+      .rg-search-input:focus { border-color: var(--rg-primary); }
+      .rg-list-container { flex: 1; overflow-y: auto; padding: 8px 16px; display: flex; flex-direction: column; gap: 8px; }
+      .rg-list-item { background-color: var(--rg-surface); border: 1px solid #333; border-radius: 16px; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: background-color 0.2s; }
+      .rg-list-item:hover { background-color: var(--rg-surface-variant); }
+      .rg-list-item-info { display: flex; align-items: center; gap: 16px; overflow: hidden; flex: 1; }
+      .rg-list-item-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+      .rg-cover-img { width: 48px; height: 48px; border-radius: 12px; background-color: var(--rg-surface-variant); flex-shrink: 0; object-fit: cover; }
+      .rg-list-item-title { font-size: 1rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; }
+      .rg-list-item-sub { font-size: 0.8rem; color: #aaa; font-weight: 700; margin-top: 2px; }
+      .rg-fav-btn { background: transparent; border: none; color: #aaa; cursor: pointer; display: flex; justify-content: center; align-items: center; padding: 8px; border-radius: 50%; transition: all 0.2s; }
+      .rg-fav-btn.active { color: var(--rg-primary); }
+      .rg-play-btn { background-color: #4a0000; color: var(--rg-primary); border: none; padding: 8px 16px; border-radius: 100px; font-weight: 700; cursor: pointer; text-transform: uppercase; }
+      .rg-bottom-nav { height: 80px; background-color: var(--rg-surface); border-top: 1px solid #333; display: flex; justify-content: space-around; align-items: center; flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom, 0); }
+      .rg-nav-item { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #fff; opacity: 0.5; cursor: pointer; padding: 8px 16px; border-radius: 16px; transition: all 0.2s; }
+      .rg-nav-item.active { opacity: 1; color: var(--rg-primary); }
+      .rg-nav-label { font-size: 0.75rem; font-weight: 700; }
+      .rg-primary-btn { background-color: var(--rg-primary); color: #fff; border: none; padding: 16px 32px; border-radius: 100px; font-weight: 700; font-size: 1.1rem; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; transition: transform 0.1s; text-align: center; }
+      .rg-primary-btn:active { transform: scale(0.95); }
+      .rg-dialog-backdrop { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.85); display: flex; justify-content: center; align-items: center; z-index: 50; }
+      .rg-dialog-surface { background-color: var(--rg-surface); border: 1px solid #333; border-radius: 28px; padding: 24px; width: 90%; max-width: 400px; display: flex; flex-direction: column; gap: 24px; }
+      .rg-dialog-title { font-size: 1.2rem; font-weight: 700; color: var(--rg-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .rg-diff-btn { background-color: var(--rg-surface-variant); border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.8rem; font-weight: 700; cursor: pointer; text-transform: uppercase; }
+      .rg-diff-btn.active { background-color: #4a0000; border-color: var(--rg-primary); color: var(--rg-primary); }
+      .rg-key-btn { background-color: var(--rg-surface-variant); border: 1px solid #333; border-radius: 12px; padding: 16px 8px; color: #fff; cursor: pointer; font-size: 1rem; font-weight: 700; text-align: center; }
+      .rg-key-btn.listening { background-color: #4a0000; border-color: var(--rg-primary); color: var(--rg-primary); }
+      .rg-hud { position: absolute; top: 16px; width: 100%; padding: 0 24px; display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none; z-index: 20; }
+      .rg-hud-title { font-size: 1.2rem; font-weight: 700; color: #fff; max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 2px 4px rgba(0,0,0,0.8); margin-bottom: 2px; }
+      .rg-hud-diff { font-size: 0.7rem; font-weight: 800; padding: 4px 8px; border-radius: 8px; background-color: var(--rg-surface); color: var(--rg-primary); text-transform: uppercase; margin-top: 4px; display: inline-block; border: 1px solid #333; }
+      .rg-score-display { font-family: monospace; font-size: 1.8rem; font-weight: 700; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); }
+      .rg-quit-btn { background-color: var(--rg-surface-variant); border: 1px solid #333; padding: 8px 16px; color: #fff; border-radius: 100px; cursor: pointer; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; pointer-events: auto; }
+      .rg-combo-box { position: absolute; top: 15%; left: 50%; transform: translate(-50%, -50%); text-align: center; pointer-events: none; z-index: 15; }
+      .rg-combo-number { font-size: 4rem; font-weight: 900; color: #fff; line-height: 1; transition: transform 0.05s ease-out; text-shadow: 0 4px 8px rgba(0,0,0,0.6); }
+      .rg-combo-text { font-size: 0.85rem; letter-spacing: 4px; color: rgba(255, 255, 255, 0.7); font-weight: 700; }
+      .rg-res-item { background-color: var(--rg-surface-variant); border: 1px solid #333; border-radius: 12px; padding: 16px; display: flex; justify-content: space-between; align-items: center; }
+      .rg-res-full { grid-column: span 2; background-color: #4a0000; border-color: var(--rg-primary); }
+      .rg-res-label { font-size: 0.85rem; font-weight: 700; text-transform: uppercase; color: #fff; }
+      .rg-res-val { font-size: 1.2rem; font-weight: 700; font-family: monospace; color: #fff; }
       
-      /* Full Page Chat Layout CSS (Modern & Responsive WhatsApp Style) */
+      /* Full Page Chat Layout CSS (Modern WhatsApp-Red Style) */
       .chat-wrapper {
         height: 100% !important;
         border-radius: 0;
@@ -12599,94 +13092,196 @@ function perform_full_scan($db) {
         margin: 0 !important;
         padding: 0 !important;
       }
-      body.player-visible .app-container {
-        height: calc(100vh - 90px);
-        height: calc(100dvh - 90px);
+      body.player-visible .app-container { height: calc(100vh - 90px); height: calc(100dvh - 90px); }
+      @media (max-width: 767.98px) { body.player-visible .app-container { height: calc(100vh - 150px); height: calc(100dvh - 150px); } }
+      
+      .chat-sidebar { width: 420px; background: var(--ytm-surface); border-right: 1px solid #222; display: flex; flex-direction: column; flex-shrink: 0; transition: transform 0.3s ease; }
+      
+      /* Subtle dark pattern background for the main chat area */
+      .chat-main { 
+        flex-grow: 1; display: flex; flex-direction: column; position: relative; 
+        background-color: #080808;
+        background-image: radial-gradient(rgba(255,255,255,0.02) 1px, transparent 1px);
+        background-size: 20px 20px;
       }
-      @media (max-width: 767.98px) {
-        body.player-visible .app-container {
-          height: calc(100vh - 150px);
-          height: calc(100dvh - 150px);
-        }
-      }
-      .chat-sidebar { width: 420px; background: var(--ytm-surface); border-right: 1px solid var(--ytm-border); display: flex; flex-direction: column; flex-shrink: 0; transition: transform 0.3s ease; }
-      .chat-main { flex-grow: 1; display: flex; flex-direction: column; background: var(--ytm-bg); position: relative; background-image: radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px); background-size: 20px 20px; }
-      .chat-header { height: 85px; min-height: 85px; max-height: 85px; flex-shrink: 0; box-sizing: border-box; padding: 0 2rem; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--ytm-border); background: var(--ytm-surface); z-index: 10; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
-      .chat-messages { flex-grow: 1; overflow-y: auto; overflow-x: hidden; padding: 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; scrollbar-width: thin; scrollbar-color: #555 transparent; }
+      
+      /* FIXED Z-INDEX: Bumped chat-header to 1050 so it stays above all chat bubbles and their dropdown arrows */
+      .chat-header { height: 75px; min-height: 75px; max-height: 75px; flex-shrink: 0; box-sizing: border-box; padding: 0 1.5rem; display: flex; align-items: center; justify-content: space-between; background: #121212; z-index: 1050; border-bottom: 1px solid #2a2a2a; }
+      .chat-messages { flex-grow: 1; overflow-y: auto; overflow-x: hidden; padding: 1.5rem 1.5rem 120px 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; scrollbar-width: thin; scrollbar-color: #444 transparent; }
       .chat-messages::-webkit-scrollbar { width: 6px; }
       .chat-messages::-webkit-scrollbar-track { background: transparent; }
-      .chat-messages::-webkit-scrollbar-thumb { background-color: #555; border-radius: 10px; }
-      .chat-messages::-webkit-scrollbar-thumb:hover { background-color: #777; }
+      .chat-messages::-webkit-scrollbar-thumb { background-color: #444; border-radius: 10px; }
       
-      .chat-input-area { padding: 12px 1.5rem; background: var(--ytm-surface); border-top: 1px solid var(--ytm-border); display: flex; flex-direction: column; z-index: 10; }
+      /* Floating Pill Input Area */
+      .chat-input-area { padding: 12px 1.5rem; background: transparent; display: flex; flex-direction: column; z-index: 10; margin-bottom: 4px; }
+      .chat-input-wrapper { display: flex; align-items: center; gap: 8px; background: #1e1e1e; border-radius: 28px; padding: 4px 16px; border: 1px solid #333; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+      .chat-input-wrapper textarea { border: none; background: transparent; color: #fff; flex-grow: 1; padding: 12px 0; outline: none; font-size: 1rem; resize: none; min-height: 48px; max-height: 120px; overflow-y: auto; line-height: 1.4; scrollbar-width: none; }
+      .chat-input-wrapper textarea::-webkit-scrollbar { display: none; }
+      .chat-input-wrapper textarea::placeholder { color: #777; }
       
-      .chat-bubble { max-width: 85%; padding: 14px 20px; border-radius: 18px; position: relative; font-size: 1.1rem; line-height: 1.5; overflow-wrap: break-word; word-break: break-word; box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
-      .chat-bubble img { max-width: 100%; height: auto; border-radius: 8px; margin-top: 4px; }
-      .chat-bubble.me { align-self: flex-end; background-color: var(--ytm-accent); color: #fff; border-top-right-radius: 4px; }
-      .chat-bubble.other { align-self: flex-start; background-color: var(--ytm-surface-2); color: var(--ytm-primary-text); border-top-left-radius: 4px; }
+      /* FIXED: Increased bottom padding (28px) to give the timestamp more vertical breathing room */
+      .chat-bubble { max-width: 85%; min-width: 100px; padding: 8px 38px 28px 12px; border-radius: 12px; position: relative; font-size: 1.05rem; line-height: 1.4; overflow-wrap: break-word; word-break: break-word; box-shadow: 0 1px 2px rgba(0,0,0,0.3); }
+      .chat-bubble img { max-width: 100%; height: auto; border-radius: 6px; margin-top: 2px; }
       
-      .chat-reply-quote { background: rgba(0,0,0,0.2); border-left: 4px solid rgba(255,255,255,0.5); padding: 6px 10px; margin-bottom: 8px; border-radius: 8px; font-size: 0.85rem; cursor: pointer; overflow: hidden; }
+      .chat-bubble.me { align-self: flex-end; background-color: #dc2626; color: #fff; border-top-right-radius: 0; }
+      .chat-bubble.me::before { content: ''; position: absolute; top: 0; right: -8px; width: 0; height: 0; border-top: 12px solid #dc2626; border-right: 12px solid transparent; }
+      
+      .chat-bubble.other { align-self: flex-start; background-color: var(--ytm-surface-2); color: var(--ytm-primary-text); border-top-left-radius: 0; border: 1px solid #333; }
+      .chat-bubble.other::before { content: ''; position: absolute; top: 0; left: -8px; width: 0; height: 0; border-top: 12px solid var(--ytm-surface-2); border-left: 12px solid transparent; }
+      
+      .chat-reply-quote { background: rgba(0,0,0,0.25); border-left: 4px solid #fff; padding: 8px 10px; margin-bottom: 6px; border-radius: 6px; font-size: 0.85rem; cursor: pointer; overflow: hidden; border-top-right-radius: 4px; border-bottom-right-radius: 4px; }
       .chat-bubble.me .chat-reply-quote { background: rgba(0,0,0,0.15); border-left-color: rgba(255,255,255,0.8); }
       
-      /* FIXED: Toolbar floating above the bubble to prevent blocking names/text */
-      .chat-msg-actions { position: absolute; top: -16px; right: 8px; background: rgba(0,0,0,0.85); backdrop-filter: blur(4px); border-radius: 16px; padding: 2px 6px; opacity: 0; transition: opacity 0.2s; display: flex; gap: 4px; z-index: 5; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
-      .chat-bubble:hover .chat-msg-actions { opacity: 1; }
-      .chat-action-btn { background: transparent; border: none; color: #fff; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 0.95rem; transition: transform 0.2s; }
-      .chat-action-btn:hover { transform: scale(1.15); color: var(--ytm-accent); }
+      /* FIXED: Adjusted bottom and right positions for cleaner padding */
+      .msg-time-stamp { position: absolute; bottom: 8px; right: 12px; font-size: 0.65rem; opacity: 0.75; text-align: right; user-select: none; }
       
-      #chat-info-btn { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--ytm-border) !important; background-color: var(--ytm-surface-2) !important; color: var(--ytm-primary-text) !important; transition: all 0.2s ease-in-out !important; }
-      #chat-info-btn:hover { background-color: var(--ytm-accent) !important; border-color: var(--ytm-accent) !important; color: #ffffff !important; transform: scale(1.05); }
+      /* Dropdown Action Menu Trigger */
+      /* FIXED: Always on the top right, Z-INDEX bumped */
+      .msg-dropdown { position: absolute; top: 4px; right: 4px; opacity: 0; transition: opacity 0.2s; z-index: 25; }
+      .chat-bubble:hover .msg-dropdown { opacity: 1; }
+      .msg-opt-btn { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.8) !important; background: rgba(0,0,0,0.25) !important; border-radius: 50%; box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+      .msg-opt-btn:hover { color: #fff !important; background: rgba(0,0,0,0.6) !important; }
+      
+      #chat-info-btn { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; border: none !important; background-color: transparent !important; color: var(--ytm-secondary-text) !important; transition: all 0.2s ease-in-out !important; }
+      #chat-info-btn:hover { color: #fff !important; }
       
       #chat-tabs { flex-wrap: nowrap !important; }
       #chat-tabs .nav-item { flex: 1 1 0%; margin: 0 !important; }
       #chat-tabs .nav-link { justify-content: center !important; padding: 0.4rem 0 !important; border: none !important; font-size: 0.95rem; color: var(--ytm-secondary-text) !important; border-radius: 50rem !important; }
       #chat-tabs .nav-link.active { background-color: var(--ytm-accent) !important; color: #ffffff !important; }
       #chat-tabs .nav-link:hover { color: var(--ytm-primary-text) !important; }
-      .reaction-pill { display: inline-flex; align-items: center; gap: 4px; background: rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; margin-top: 4px; cursor: pointer; border: 1px solid transparent; box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
-      .reaction-pill.reacted { border-color: var(--ytm-accent); background: rgba(255,0,0,0.15); }
-      .reaction-picker { position: absolute; bottom: 100%; right: 0; background: var(--ytm-surface-2); border: 1px solid #444; border-radius: 24px; padding: 6px 10px; display: none; gap: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.8); z-index: 20; white-space: nowrap; }
-      .chat-bubble.other .reaction-picker { right: auto; left: 0; }
-      .reactions-container { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; justify-content: flex-end; }
-      .chat-bubble.other .reactions-container { justify-content: flex-start; }
-      .reaction-picker.show { display: flex; }
-      .emoji-btn { background: none; border: none; font-size: 1.35rem; cursor: pointer; padding: 2px; transition: transform 0.2s; }
-      .emoji-btn:hover { transform: scale(1.3); }
-
-      .chat-input-wrapper { display: flex; align-items: center; gap: 8px; background: var(--ytm-surface-2); border-radius: 24px; padding: 4px 16px; border: 1px solid var(--ytm-border); box-shadow: inset 0 1px 3px rgba(0,0,0,0.2); }
-      .chat-input-wrapper textarea { border: none; background: transparent; color: #fff; flex-grow: 1; padding: 12px 0; outline: none; font-size: 0.95rem; resize: none; min-height: 44px; max-height: 120px; overflow-y: auto; line-height: 1.4; scrollbar-width: none; }
-      .chat-input-wrapper textarea::-webkit-scrollbar { display: none; }
-      .chat-input-wrapper textarea::placeholder { color: #888; }
       
-      .reply-preview-bar { background: var(--ytm-surface-2); border-left: 4px solid var(--ytm-accent); padding: 8px 16px; display: none; justify-content: space-between; align-items: center; border-radius: 8px 8px 0 0; font-size: 0.85rem; margin-bottom: 4px; }
+      .reaction-pill { display: inline-flex; align-items: center; gap: 4px; background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; margin-top: 4px; cursor: pointer; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+      .reaction-pill.reacted { border-color: #fff; background: rgba(255,255,255,0.2); }
+      .reactions-container { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; justify-content: flex-end; position: relative; z-index: 2; }
+      .chat-bubble.other .reactions-container { justify-content: flex-start; }
+
+      .reply-preview-bar { background: #1e1e1e; border-left: 4px solid var(--ytm-accent); padding: 8px 16px; display: none; justify-content: space-between; align-items: center; border-radius: 12px 12px 0 0; font-size: 0.85rem; margin-bottom: 2px; margin-left: 1rem; margin-right: 1rem; border: 1px solid #333; border-bottom: none; }
       .reply-preview-bar.active { display: flex; }
       
-      .chat-img-upload-preview { display: none; padding: 10px 16px; background: var(--ytm-surface-2); position: relative; border-radius: 8px 8px 0 0; margin-bottom: 4px; }
+      .chat-img-upload-preview { display: none; padding: 10px 16px; background: #1e1e1e; position: relative; border-radius: 12px 12px 0 0; margin-bottom: 2px; margin-left: 1rem; margin-right: 1rem; border: 1px solid #333; border-bottom: none; }
       .chat-img-upload-preview.active { display: block; }
-      .chat-img-upload-preview img, .chat-img-upload-preview video { max-height: 150px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+      /* Fixed: Added max-width and object-fit to prevent image overflowing out of the container */
+      .chat-img-upload-preview img, .chat-img-upload-preview video { max-height: 150px; max-width: 100%; object-fit: contain; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
       .chat-img-remove { position: absolute; top: 16px; right: 24px; background: rgba(0,0,0,0.8); color: #fff; border: none; border-radius: 50%; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 10; }
 
       .lazy-media-wrapper { transition: all 0.3s ease; }
       .lazy-media-placeholder:hover { filter: brightness(1.2); }
-      .lazy-media-wrapper { position: relative; display: inline-block; max-width: 100%; border-radius: 8px; overflow: hidden; background: #222; }
+      .lazy-media-wrapper { position: relative; display: inline-block; max-width: 100%; border-radius: 8px; overflow: hidden; background: #111; }
       .lazy-blur { filter: blur(15px); transition: filter 0.3s; width: 100%; height: auto; display: block; opacity: 0.6; }
-      .lazy-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.3); cursor: pointer; z-index: 2; flex-direction: column; }
+      .lazy-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.4); cursor: pointer; z-index: 2; flex-direction: column; }
       .lazy-overlay i { font-size: 2rem; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.5); }
       .lazy-overlay span { color: #fff; font-size: 0.8rem; font-weight: bold; margin-top: 8px; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
       .lazy-media-wrapper.loaded .lazy-blur { filter: blur(0); opacity: 1; }
       .lazy-media-wrapper.loaded .lazy-overlay { display: none; }
-      .lazy-video-icon { position: absolute; top: 10px; left: 10px; color: #fff; background: rgba(0,0,0,0.5); border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; z-index: 3; pointer-events: none; }
+      .lazy-video-icon { position: absolute; top: 10px; left: 10px; color: #fff; background: rgba(0,0,0,0.6); border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; z-index: 3; pointer-events: none; }
       #chat-tabs .nav-link { width: 100%; font-size: 0.95rem; }
       #tab-chats, #tab-starred, #tab-status { min-height: 0; flex: 1; }
+      
       @media (max-width: 767.98px) {
         .chat-wrapper { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: row; }
         .chat-sidebar { width: 100%; position: absolute; height: 100%; top: 0; left: 0; z-index: 5; background: var(--ytm-surface); border: none; }
         .chat-sidebar.hidden { transform: translateX(-100%); }
         .chat-main { width: 100%; position: absolute; height: 100%; top: 0; left: 0; z-index: 10; background: var(--ytm-bg); transform: translateX(100%); transition: transform 0.3s ease; }
         .chat-main.active { transform: translateX(0); }
-        .chat-header { padding: 0 1rem; }
-        .chat-input-area { padding: 10px 1rem; }
+        /* Ensure mobile chat header preserves the high z-index to block scrolling content and dropdown arrows */
+        .chat-header { padding: 0 1rem; z-index: 1050; position: relative; }
+        .chat-input-area { padding: 8px 1rem; }
         .chat-bubble { max-width: 90%; }
+        .reply-preview-bar, .chat-img-upload-preview { margin-left: 0; margin-right: 0; }
       }
+
+      /* Photo Editor Styles */
+      .photo-editor-app {
+        --pe-sys-color-primary: #FF0000;
+        --pe-sys-color-on-primary: #FFFFFF;
+        --pe-sys-color-primary-container: #4A0000;
+        --pe-sys-color-surface: #000000;
+        --pe-sys-color-on-surface: #FFFFFF;
+        --pe-sys-color-surface-variant: #1E1E1E;
+        --pe-sys-color-on-surface-variant: #AAAAAA;
+        --pe-sys-color-surface-container: #0A0A0A;
+        --pe-sys-color-surface-container-high: #121212;
+        --pe-sys-color-surface-container-highest: #1A1A1A;
+        --pe-sys-color-outline: #333333;
+        --pe-sys-color-error: #FF5252;
+        --pe-sys-color-error-container: #8C1D18;
+        display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; border-radius: 12px;
+        position: relative; /* Added relative context for absolute properties overlay */
+      }
+      .pe-workspace { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; background-color: var(--pe-sys-color-surface-container); background-image: linear-gradient(45deg, var(--pe-sys-color-surface) 25%, transparent 25%), linear-gradient(-45deg, var(--pe-sys-color-surface) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--pe-sys-color-surface) 75%), linear-gradient(-45deg, transparent 75%, var(--pe-sys-color-surface) 75%); background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px; }
+      .pe-workspace canvas { position: absolute; touch-action: none; box-shadow: 0 8px 24px rgba(0,0,0,0.8); border-radius: 8px; }
+      #pe-overlay-canvas { pointer-events: auto; box-shadow: none; }
+      
+      /* Navigation Bar - Flex Row on Mobile, Flex Row Parent on Desktop */
+      .pe-bottom-nav { display: flex; flex-direction: column; position: relative; z-index: 20; background-color: var(--pe-sys-color-surface-container); }
+      
+      .pe-properties-panel { background-color: var(--pe-sys-color-surface-container-highest); border-radius: 28px 28px 0 0; padding: 24px 20px; max-height: 55vh; overflow-y: auto; display: none; flex-direction: column; box-shadow: 0 -4px 20px rgba(0,0,0,0.6); }
+      .pe-properties-panel.open { display: flex; animation: peSlideUp 0.3s cubic-bezier(0.2, 0, 0, 1); }
+      @keyframes peSlideUp { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+      
+      .pe-panel-header { display: flex; justify-content: space-between; align-items: center; font-weight: 500; font-size: 18px; color: var(--pe-sys-color-on-surface); margin-bottom: 24px; }
+      .pe-panel-header button { background: var(--pe-sys-color-surface-variant); color: var(--pe-sys-color-on-surface-variant); width: 32px; height: 32px; border: none; border-radius: 9999px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: 0.2s; }
+      .pe-panel-header button:hover { background: var(--pe-sys-color-outline); color: var(--pe-sys-color-on-surface); }
+      .pe-panel-header button svg { width: 24px; height: 24px; fill: currentColor; }
+      .pe-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+      .pe-control-group { display: flex; flex-direction: column; gap: 8px; }
+      .pe-slider-group { margin-bottom: 28px; }
+      .pe-control-header { display: flex; justify-content: space-between; align-items: center; }
+      .pe-control-header label, .pe-control-group > label { font-size: 13px; font-weight: 500; color: var(--pe-sys-color-on-surface-variant); }
+      .pe-control-header span { font-size: 12px; font-weight: 600; color: var(--pe-sys-color-primary); background: var(--pe-sys-color-surface-variant); padding: 4px 10px; border-radius: 9999px; min-width: 40px; text-align: center; }
+      .photo-editor-app input[type="range"] { -webkit-appearance: none; width: 100%; background: transparent; padding: 8px 0; border: none; }
+      .photo-editor-app input[type="range"]::-webkit-slider-runnable-track { width: 100%; height: 6px; background: var(--pe-sys-color-surface-variant); border-radius: 9999px; }
+      .photo-editor-app input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; height: 20px; width: 20px; border-radius: 50%; background: var(--pe-sys-color-primary); margin-top: -7px; cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.5); border: none; }
+      .photo-editor-app input[type="number"], .photo-editor-app input[type="text"], .photo-editor-app select { background: var(--pe-sys-color-surface-variant); border: 1px solid var(--pe-sys-color-outline); color: var(--pe-sys-color-on-surface); padding: 10px 12px; border-radius: 8px; width: 100%; outline: none; font-size: 14px; transition: 0.2s; }
+      .photo-editor-app input[type="number"]:focus, .photo-editor-app input[type="text"]:focus, .photo-editor-app select:focus { border-color: var(--pe-sys-color-primary); box-shadow: 0 0 0 1px var(--pe-sys-color-primary); }
+      .photo-editor-app input[type="color"] { -webkit-appearance: none; border: none; width: 100%; height: 44px; border-radius: 8px; cursor: pointer; background: var(--pe-sys-color-surface-variant); padding: 4px; margin-bottom: 24px; }
+      .photo-editor-app input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+      .photo-editor-app input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
+      .pe-action-buttons { display: flex; flex-direction: column; gap: 16px; margin-top: 8px; margin-bottom: 16px; }
+      .pe-btn-row { display: flex; gap: 16px; }
+      .pe-btn { flex: 1; height: 44px; border: none; border-radius: 9999px; background-color: var(--pe-sys-color-surface-variant); color: var(--pe-sys-color-on-surface); font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; transition: 0.2s; }
+      .pe-btn:hover { background-color: var(--pe-sys-color-outline); }
+      .pe-btn.primary { background-color: var(--pe-sys-color-primary); color: var(--pe-sys-color-on-primary); }
+      .pe-btn.primary:hover { background-color: var(--pe-sys-color-primary-container); color: var(--pe-sys-color-on-primary); }
+      .pe-btn.error { background-color: var(--pe-sys-color-error-container); color: var(--pe-sys-color-on-surface); }
+      
+      .pe-bottom-bar { height: 80px; display: flex; align-items: center; justify-content: space-evenly; background-color: var(--pe-sys-color-surface-container-high); padding: 0 8px; border-top: 1px solid var(--pe-sys-color-outline); }
+      .pe-tool-btn { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 64px; height: 64px; gap: 4px; border: none; background: transparent; color: var(--pe-sys-color-on-surface-variant); cursor: pointer; border-radius: 16px; transition: 0.2s; }
+      .pe-tool-btn:hover, .pe-tool-btn.active { color: var(--pe-sys-color-primary); }
+      .pe-tool-btn .pe-icon-container { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 9999px; transition: 0.2s; }
+      .pe-tool-btn.active .pe-icon-container { background-color: var(--pe-sys-color-primary-container); color: var(--pe-sys-color-primary); }
+      .pe-tool-btn svg { width: 24px; height: 24px; fill: currentColor; }
+      .pe-tool-btn span { font-size: 12px; font-weight: 500; }
+      
+      /* Mobile/Global Export Button Styles */
+      .pe-export-btn-desktop { display: none !important; }
+      .pe-export-btn-mobile { background-color: var(--pe-sys-color-primary); color: var(--pe-sys-color-on-primary); border: none; height: 48px; padding: 0 20px; border-radius: 9999px; display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; cursor: pointer; transition: 0.2s; }
+      .pe-export-btn-mobile:hover { background-color: #ff3333; box-shadow: 0 4px 12px rgba(255, 0, 0, 0.3); }
+      .pe-export-btn-mobile svg { width: 20px; height: 20px; fill: currentColor; }
+      
+      #pe-text-editor { position: absolute; z-index: 30; background: rgba(0, 0, 0, 0.9); color: var(--pe-sys-color-on-surface); border: 2px dashed var(--pe-sys-color-primary); border-radius: 8px; padding: 4px 8px; outline: none; display: none; white-space: nowrap; transform-origin: top left; box-shadow: 0 4px 12px rgba(0,0,0,0.8); }
+
+      /* Desktop Right Sidebar Overrides */
+      @media (min-width: 769px) {
+        .photo-editor-app { flex-direction: row; }
+        .pe-bottom-nav { width: 90px; height: 100%; border-left: 1px solid var(--pe-sys-color-outline); }
+        
+        /* FIXED: Added align-items: center so all buttons line up perfectly down the middle of the vertical bar */
+        .pe-bottom-bar { flex-direction: column; height: 100%; width: 90px; padding: 20px 0; justify-content: flex-start; align-items: center !important; gap: 16px; border-top: none; }
+        
+        /* Float the settings/properties panel on the right side over the canvas */
+        .pe-properties-panel { position: absolute; right: 100px; bottom: 20px; top: 20px; width: 340px; max-height: calc(100% - 40px); border-radius: 16px; border: 1px solid var(--pe-sys-color-outline); z-index: 30; }
+        .pe-properties-panel.open { display: flex; animation: peSlideLeft 0.3s cubic-bezier(0.2, 0, 0, 1); }
+        
+        /* Desktop-Specific Export Button Styles (Mathematical Perfect Circle Centering) */
+        .pe-export-btn-mobile { display: none !important; }
+        .pe-export-btn-desktop { display: flex !important; width: 56px; height: 56px; background-color: var(--pe-sys-color-primary); color: var(--pe-sys-color-on-primary); border: none; border-radius: 50%; justify-content: center; align-items: center; cursor: pointer; transition: 0.2s; }
+        .pe-export-btn-desktop:hover { background-color: #ff3333; box-shadow: 0 4px 12px rgba(255, 0, 0, 0.3); }
+        .pe-export-btn-desktop svg { width: 20px; height: 20px; fill: currentColor; }
+      }
+      
+      @keyframes peSlideLeft { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
     </style>
   </head>
   <body class="logged-out">
@@ -12755,6 +13350,10 @@ function perform_full_scan($db) {
               <i class="bi bi-cloud-arrow-down-fill"></i>
               <span>Offline Library</span>
             </a>
+            <a href="#" class="nav-link" data-view="rhythm_game">
+              <i class="bi bi-controller"></i>
+              <span>Rhythm Game</span>
+            </a>
             <a href="#" class="nav-link" data-view="get_following">
               <i class="bi bi-person-lines-fill"></i>
               <span>Following</span>
@@ -12766,6 +13365,10 @@ function perform_full_scan($db) {
             <a href="#" class="nav-link" data-view="get_community">
               <i class="bi bi-people"></i>
               <span>Community</span>
+            </a>
+            <a href="#" class="nav-link" data-view="photo_editor">
+              <i class="bi bi-image"></i>
+              <span>Image Editor</span>
             </a>
             <a href="#" class="nav-link" data-view="get_inbox">
               <i class="bi bi-chat-dots-fill"></i>
@@ -12869,6 +13472,10 @@ function perform_full_scan($db) {
               <i class="bi bi-hdd-stack-fill"></i>
               <span>Scan All</span>
             </a>
+            <a href="#" class="nav-link logged-in-only" id="nav-cover-scan" data-bs-toggle="modal" data-bs-target="#cover-scan-modal" style="display: none !important;">
+              <i class="bi bi-image-fill"></i>
+              <span>Re-scan Covers</span>
+            </a>
             <a href="?access=admin" class="nav-link logged-in-only" id="nav-admin-panel" style="display: none !important;">
               <i class="bi bi-shield-lock-fill"></i>
               <span>Admin Panel</span>
@@ -12918,7 +13525,7 @@ function perform_full_scan($db) {
               <span>Full Screen</span>
             </a>
             <div class="text-center mt-5 small text-secondary">
-              Made by <a href="https://github.com/HirotakaDango" target="_blank" class="text-decoration-none text-white-50">HirotakaDango</a>
+              Made by <a href="https://github.com/HirotakaDango" target="_blank" class="text-decoration-none fw-bold text-white-50">HirotakaDango</a>
             </div>
           </div>
         </div>
@@ -14995,6 +15602,50 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+    
+    <!-- Dynamic Modals for Editing and Deleting Direct Messages -->
+    <div class="modal fade" id="edit-chat-msg-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-danger me-2"></i>Edit Message</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4 pt-2">
+            <form id="edit-chat-msg-form">
+              <input type="hidden" id="edit-chat-msg-id">
+              <div class="d-flex gap-2 mb-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary flex-grow-1 fw-bold" id="chat-edit-undo-btn"><i class="bi bi-arrow-counterclockwise"></i> Undo</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary flex-grow-1 fw-bold" id="chat-edit-redo-btn"><i class="bi bi-arrow-clockwise"></i> Redo</button>
+              </div>
+              <textarea id="edit-chat-msg-input" class="form-control bg-dark text-white border-secondary mb-3" rows="4" placeholder="Edit your message..." maxlength="50000" required></textarea>
+              <div class="d-flex justify-content-end mb-3 mt-n2">
+                <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+              </div>
+              <button type="submit" class="btn btn-danger text-white fw-bold w-100 rounded-pill py-2 shadow-sm">Save Changes</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="delete-chat-msg-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px;">
+          <div class="modal-body p-4 text-center">
+            <i class="bi bi-trash-fill text-danger mb-3" style="font-size: 3rem; display: block;"></i>
+            <h5 class="text-white mb-2 fw-bold">Delete Message?</h5>
+            <p class="text-secondary small mb-4">Are you sure you want to permanently delete this message? This action cannot be undone.</p>
+            <input type="hidden" id="delete-chat-msg-id">
+            <div class="d-flex gap-2">
+              <button type="button" class="btn btn-outline-light flex-grow-1 rounded-pill fw-bold" data-bs-dismiss="modal">Cancel</button>
+              <button type="button" class="btn btn-danger flex-grow-1 rounded-pill fw-bold" id="confirm-delete-chat-btn">Delete</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="settings-modal" tabindex="-1">
       <div class="modal-dialog modal-fullscreen">
         <div class="modal-content" style="background-color: var(--ytm-bg);">
@@ -15614,6 +16265,24 @@ function perform_full_scan($db) {
         </div>
       </div>
     </div>
+    <!-- Auth Required Warning Modal -->
+    <div class="modal fade" id="auth-required-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
+          <div class="modal-body text-center p-4">
+            <i class="bi bi-person-lock text-warning mb-3" style="font-size: 3.5rem; display: block;"></i>
+            <h5 class="text-white fw-bold mb-3">Authentication Required</h5>
+            <p class="text-secondary small mb-4">Your session has expired or you are not logged in. Please log in or create an account to access this page.</p>
+            <div class="d-flex flex-column gap-2">
+              <button class="btn btn-danger w-100 fw-bold rounded-pill py-2 shadow-sm" data-bs-dismiss="modal" data-bs-toggle="modal" data-bs-target="#login-modal">Log In</button>
+              <button class="btn btn-outline-light w-100 fw-bold rounded-pill py-2" data-bs-dismiss="modal" data-bs-toggle="modal" data-bs-target="#register-modal">Create Account</button>
+              <button class="btn btn-link text-secondary text-decoration-none mt-1 fw-medium" data-bs-dismiss="modal" onclick="loadView({ type: 'get_songs', param: '', sort: 'random', filter_user_id: '' })">Return to Home</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="request-verification-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
@@ -15738,6 +16407,13 @@ function perform_full_scan($db) {
               <div class="mb-3">
                 <label for="playlist-name-input" class="form-label">Playlist Name</label>
                 <input type="text" class="form-control" id="playlist-name-input" required>
+              </div>
+              <div class="mb-3">
+                <label for="playlist-desc-input" class="form-label">Description (Bio)</label>
+                <textarea class="form-control" id="playlist-desc-input" rows="3" placeholder="Tell us about this playlist..."></textarea>
+                <div class="d-flex justify-content-end mt-1">
+                  <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+                </div>
               </div>
               <div class="form-check form-switch mb-3">
                 <input class="form-check-input" type="checkbox" id="playlist-is-private">
@@ -16189,6 +16865,20 @@ function perform_full_scan($db) {
           </div>
           <div class="modal-body p-0">
             <iframe id="full-scan-iframe" src="about:blank" style="width: 100%; height: 60vh; border: none; background-color: #030303;"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="cover-scan-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header border-0">
+            <h5 class="modal-title">Re-scan Empty Cover Arts Log</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-0">
+            <iframe id="cover-scan-iframe" src="about:blank" style="width: 100%; height: 60vh; border: none; background-color: #030303;"></iframe>
           </div>
         </div>
       </div>
@@ -18825,6 +19515,9 @@ SOFTWARE.</div>
             if (chatInput) {
               chatInput.placeholder = type === 'group' ? 'Type a message...' : 'Type a message...';
             }
+            
+            const chatInputArea = document.querySelector('.chat-input-area');
+            if (chatInputArea) chatInputArea.style.display = 'flex';
              
             if (mainArea) mainArea.classList.add('active');
             if (sidebarArea && window.innerWidth < 768) sidebarArea.classList.add('hidden');
@@ -18833,9 +19526,12 @@ SOFTWARE.</div>
             if (headerTitle) {
               const cacheBuster = Math.floor(Date.now() / 60000);
               headerTitle.innerHTML = (type === 'group' 
-                ? `<div class="d-flex align-items-center justify-content-center rounded-circle me-2 overflow-hidden bg-dark border border-secondary" style="width: 36px; height: 36px; min-width: 36px; flex-shrink: 0; line-height: 1;"><img src="?action=get_group_image&id=${targetId}&v=${cacheBuster}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-info fs-5\\'></i>'" style="width: 100%; height: 100%; object-fit: cover; display: block;"></div>` 
-                : `<img src="?action=get_profile_picture&id=${targetId}&v=${cacheBuster}" class="rounded-circle me-2 border border-secondary" style="width: 36px; height: 36px; min-width: 36px; object-fit: cover; flex-shrink: 0; display: block;">`) + 
-                `<span class="text-truncate" style="max-width: 60vw; display: inline-block; vertical-align: middle;">${escapeHTML(name)}</span>`;
+                ? `<div class="d-flex align-items-center justify-content-center rounded-circle me-3 overflow-hidden bg-dark" style="width: 44px; height: 44px; min-width: 44px; flex-shrink: 0; line-height: 1;"><img src="?action=get_group_image&id=${targetId}&v=${cacheBuster}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-info fs-4\\'></i>'" style="width: 100%; height: 100%; object-fit: cover; display: block;"></div>` 
+                : `<img src="?action=get_profile_picture&id=${targetId}&v=${cacheBuster}" class="rounded-circle me-3" style="width: 44px; height: 44px; min-width: 44px; object-fit: cover; flex-shrink: 0; display: block;">`) + 
+                `<div class="d-flex flex-column justify-content-center" style="min-width: 0;">
+                   <span class="text-truncate fw-bold" style="font-size: 1.1rem; line-height: 1.2;">${escapeHTML(name)}</span>
+                   <span class="text-success small fw-medium" style="font-size: 0.8rem;">${type === 'group' ? 'Group Chat' : 'Active'}</span>
+                 </div>`;
             }
              
             const pipBtn = document.getElementById('chat-pip-btn');
@@ -18921,8 +19617,8 @@ SOFTWARE.</div>
 
           window.refreshChatFull = async (forceSync = false) => {
             if (!activeChatConfig.id) return;
-            // Prevent polling if reaction picker is open or user is reacting
-            if ((window.isReacting || document.querySelector('.reaction-picker.show')) && !forceSync) return;
+            // Prevent polling if user is reacting
+            if (window.isReacting && !forceSync) return;
             
             let isMediaPlaying = false;
             if (window.chatAudioObj && !window.chatAudioObj.paused) isMediaPlaying = true;
@@ -18951,10 +19647,19 @@ SOFTWARE.</div>
               const doc = window.chatPipWindow ? window.chatPipWindow.document : document;
               const listEl = doc.getElementById('chat-messages-container');
               if (!listEl) return;
+              
+              const chatInputArea = doc.querySelector('.chat-input-area');
 
-              if (messages && messages.status === 'error') {
-                listEl.innerHTML = `<div class="text-center text-danger p-4 mt-auto mb-auto">${escapeHTML(messages.message)}</div>`;
+              if (messages && messages.status === 'blocked') {
+                listEl.innerHTML = `<div class="text-center text-secondary opacity-75 p-4 mt-auto mb-auto"><i class="bi bi-slash-circle fs-1 d-block mb-3"></i>${escapeHTML(messages.message)}</div>`;
+                if (chatInputArea) chatInputArea.style.display = 'none';
                 return;
+              } else if (messages && messages.status === 'error') {
+                listEl.innerHTML = `<div class="text-center text-danger p-4 mt-auto mb-auto">${escapeHTML(messages.message)}</div>`;
+                if (chatInputArea) chatInputArea.style.display = 'none';
+                return;
+              } else {
+                if (chatInputArea) chatInputArea.style.display = 'flex';
               }
 
               if (messages && Array.isArray(messages) && messages.length > 0) {
@@ -19031,23 +19736,32 @@ SOFTWARE.</div>
                   const safeSender = m.sender_name ? escapeHTML(m.sender_name).replace(/&#39;/g, "\\'") : 'Someone';
                   const safeContent = m.content ? escapeHTML(m.content).replace(/&#39;/g, "\\'").replace(/\n/g, ' ').replace(/\r/g, '') : '';
 
+                  // Build Dropdown Action Menu (Fixes double click bug & overlapping)
+                  // Added data-bs-boundary="window" to prevent clipping inside overflow container
                   let actionHtml = `
-                    <div class="chat-msg-actions">
-                      <div class="position-relative">
-                        <button class="chat-action-btn" onclick="this.nextElementSibling.classList.toggle('show')"><i class="bi bi-emoji-smile"></i></button>
-                        <div class="reaction-picker">
-                          ${['👍','❤️','😂','😮','😢'].map(em => `<button class="emoji-btn" onclick="window.toggleMsgReaction(${m.id}, '${em}')">${em}</button>`).join('')}
-                        </div>
-                      </div>
-                      <button class="chat-action-btn" title="Star Message" onclick="window.toggleStarMsg(${m.id})"><i class="bi ${m.is_starred ? 'bi-star-fill text-warning' : 'bi-star'}"></i></button>
-                      <button class="chat-action-btn" title="Reply" onclick="window.setChatReply(${m.id}, '${safeSender}', '${safeContent}')"><i class="bi bi-reply-fill"></i></button>
-                      <button class="chat-action-btn" title="Copy" onclick="window.copyChatMsg(${m.id})"><i class="bi bi-copy"></i></button>
-                      ${isMe ? `
-                        <button class="chat-action-btn" title="Edit" onclick="window.editChatMsg(${m.id}, '${safeContent}')"><i class="bi bi-pencil"></i></button>
-                        <button class="chat-action-btn text-danger" title="Delete" onclick="window.delChatMsg(${m.id})"><i class="bi bi-trash"></i></button>
-                      ` : ''}
+                    <div class="dropdown msg-dropdown">
+                      <button class="btn btn-link p-0 border-0 msg-opt-btn" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" aria-expanded="false">
+                        <i class="bi bi-chevron-down"></i>
+                      </button>
+                      <ul class="dropdown-menu shadow-lg border-0" style="background-color: #1e1e1e; min-width: 180px; z-index: 9999; border-radius: 12px; padding: 0.5rem 0;">
+                        <li class="px-3 py-2 d-flex justify-content-between mb-1" style="background: rgba(255,255,255,0.05);">
+                          ${['👍','❤️','😂','😮','😢'].map(em => `<button class="btn btn-link p-0 text-decoration-none fs-5" style="transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'" onclick="window.toggleMsgReaction(${m.id}, '${em}')">${em}</button>`).join('')}
+                        </li>
+                        <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.toggleStarMsg(${m.id})"><i class="bi ${m.is_starred ? 'bi-star-fill text-warning' : 'bi-star text-secondary'} fs-5"></i> ${m.is_starred ? 'Unstar' : 'Star'}</button></li>
+                        <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.setChatReply(${m.id}, '${safeSender}', '${safeContent}')"><i class="bi bi-reply-fill text-info fs-5"></i> Reply</button></li>
+                        <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.copyChatMsg(${m.id})"><i class="bi bi-copy text-secondary fs-5"></i> Copy Text</button></li>
+                        ${isMe ? `
+                        <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
+                        <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.editChatMsg(${m.id}, '${safeContent}')"><i class="bi bi-pencil text-secondary fs-5"></i> Edit</button></li>
+                        <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger fw-bold" onclick="window.delChatMsg(${m.id})"><i class="bi bi-trash text-danger fs-5"></i> Delete</button></li>
+                        ` : ''}
+                      </ul>
                     </div>
                   `;
+
+                  // Format standard readable time (e.g. 10:45 AM)
+                  const dateObj = m.created_at ? new Date(m.created_at.replace(' ', 'T')+'Z') : new Date();
+                  const timeString = dateObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
 
                   return `
                     <div class="chat-bubble ${bubbleClass} msg-anchor-${m.id}">
@@ -19055,9 +19769,9 @@ SOFTWARE.</div>
                       ${senderNameHtml}
                       ${replyHtml}
                       ${mediaHtml}
-                      ${m.content ? `<div style="white-space: pre-wrap;" id="msg-content-${m.id}">${parseUserText(m.content)}</div>` : ''}
-                      <div class="text-end mt-1" style="font-size: 0.65rem; opacity: 0.7;">${timeAgo(m.created_at)}${editedHtml}</div>
+                      ${m.content ? `<div style="white-space: pre-wrap; margin-top: ${m.has_image ? '4px' : '0'};" id="msg-content-${m.id}">${parseUserText(m.content)}</div>` : ''}
                       ${reactionsHtml}
+                      <div class="msg-time-stamp">${timeString} ${editedHtml}</div>
                     </div>
                   `;
                 }).join('');
@@ -19094,8 +19808,6 @@ SOFTWARE.</div>
           };
           
           window.toggleMsgReaction = async (msgId, emoji) => {
-            document.querySelectorAll('.reaction-picker').forEach(p => p.classList.remove('show'));
-            
             window.isReacting = true; // Lock background polling
             window.currentChatFetchId++; // Invalidate any currently running background polls
 
@@ -19159,18 +19871,108 @@ SOFTWARE.</div>
             }
           };
 
-          window.delChatMsg = async (id) => {
-            if (confirm('Delete message?')) {
-              await fetchData('?action=delete_message', { method: 'POST', body: JSON.stringify({ id: id }) });
-              window.refreshChatFull();
-            }
+          // Advanced Edit Modal Logic with Undo/Redo Array
+          let chatEditHistory = [];
+          let chatEditIndex = -1;
+          let chatEditTimeout = null;
+
+          window.delChatMsg = (id) => {
+            document.getElementById('delete-chat-msg-id').value = id;
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('delete-chat-msg-modal')).show();
           };
+
+          const confirmDeleteChatBtn = document.getElementById('confirm-delete-chat-btn');
+          if (confirmDeleteChatBtn) {
+            confirmDeleteChatBtn.addEventListener('click', async () => {
+              const id = document.getElementById('delete-chat-msg-id').value;
+              const originalHtml = confirmDeleteChatBtn.innerHTML;
+              confirmDeleteChatBtn.disabled = true;
+              confirmDeleteChatBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+              
+              const res = await fetchData('?action=delete_message', { method: 'POST', body: JSON.stringify({ id: id }) });
+              
+              confirmDeleteChatBtn.disabled = false;
+              confirmDeleteChatBtn.innerHTML = originalHtml;
+              bootstrap.Modal.getInstance(document.getElementById('delete-chat-msg-modal')).hide();
+              
+              if (res && res.status === 'success') {
+                window.refreshChatFull(true);
+                showToast('Message deleted', 'success');
+              }
+            });
+          }
+
           window.editChatMsg = (id, content) => {
-            const newContent = prompt('Edit your message:', decodeHTML(content));
-            if (newContent !== null && newContent.trim() !== '') {
-              fetchData('?action=edit_message', { method: 'POST', body: JSON.stringify({ id: id, content: newContent }) }).then(() => window.refreshChatFull());
-            }
+            const decodedContent = decodeHTML(content);
+            document.getElementById('edit-chat-msg-id').value = id;
+            const inputEl = document.getElementById('edit-chat-msg-input');
+            inputEl.value = decodedContent;
+            
+            // Reset History Array for Undo/Redo operations
+            chatEditHistory = [decodedContent];
+            chatEditIndex = 0;
+            
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('edit-chat-msg-modal')).show();
           };
+
+          const editChatInput = document.getElementById('edit-chat-msg-input');
+          if (editChatInput) {
+            editChatInput.addEventListener('input', (e) => {
+              clearTimeout(chatEditTimeout);
+              chatEditTimeout = setTimeout(() => {
+                const val = e.target.value;
+                if (chatEditHistory[chatEditIndex] !== val) {
+                  chatEditHistory = chatEditHistory.slice(0, chatEditIndex + 1);
+                  chatEditHistory.push(val);
+                  if (chatEditHistory.length > 30) chatEditHistory.shift(); // Cap history to 30 states
+                  else chatEditIndex++;
+                }
+              }, 400);
+            });
+          }
+
+          const chatEditUndoBtn = document.getElementById('chat-edit-undo-btn');
+          if (chatEditUndoBtn) {
+            chatEditUndoBtn.addEventListener('click', () => {
+              if (chatEditIndex > 0) {
+                chatEditIndex--;
+                document.getElementById('edit-chat-msg-input').value = chatEditHistory[chatEditIndex];
+              }
+            });
+          }
+
+          const chatEditRedoBtn = document.getElementById('chat-edit-redo-btn');
+          if (chatEditRedoBtn) {
+            chatEditRedoBtn.addEventListener('click', () => {
+              if (chatEditIndex < chatEditHistory.length - 1) {
+                chatEditIndex++;
+                document.getElementById('edit-chat-msg-input').value = chatEditHistory[chatEditIndex];
+              }
+            });
+          }
+
+          const editChatForm = document.getElementById('edit-chat-msg-form');
+          if (editChatForm) {
+            editChatForm.addEventListener('submit', async (e) => {
+              e.preventDefault();
+              const id = document.getElementById('edit-chat-msg-id').value;
+              const newContent = document.getElementById('edit-chat-msg-input').value;
+              
+              if (newContent.trim() !== '') {
+                const btn = editChatForm.querySelector('button[type="submit"]');
+                const origHtml = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
+                
+                await fetchData('?action=edit_message', { method: 'POST', body: JSON.stringify({ id: id, content: newContent }) });
+                
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+                bootstrap.Modal.getInstance(document.getElementById('edit-chat-msg-modal')).hide();
+                window.refreshChatFull(true);
+              }
+            });
+          }
 
           // Chat Media Preview logic
           window.handleChatImageSelection = (file) => {
@@ -21467,6 +22269,7 @@ SOFTWARE.</div>
           let followButtonHTML = '';
           let messageButtonHTML = '';
           let blockButtonHTML = '';
+          let reportButtonHTML = '';
 
           if (type === 'artist' && details.is_user && currentUser && currentUser.id !== details.user_id) {
             const followText = details.is_following ? 'Unfollow' : 'Follow';
@@ -21478,6 +22281,10 @@ SOFTWARE.</div>
             const blockText = details.is_blocked ? 'Unblock' : 'Block';
             const blockClass = details.is_blocked ? 'text-danger' : 'text-secondary';
             blockButtonHTML = `<button class="btn btn-outline-light border-0 block-btn" data-user-id="${details.user_id}" title="${blockText} User"><i class="bi bi-slash-circle-fill ${blockClass}"></i> <span class="d-none d-md-inline">${blockText}</span></button>`;
+
+            if (details.reported_id !== 1 && details.name !== 'Music Library') {
+              reportButtonHTML = `<button class="btn btn-outline-warning border-0 report-user-btn" data-user-id="${details.user_id}" title="Report Profile"><i class="bi bi-flag-fill"></i> <span class="d-none d-md-inline">Report</span></button>`;
+            }
           }
 
           // Make Connections Clickable if it's an artist/profile
@@ -21508,6 +22315,7 @@ SOFTWARE.</div>
                   ${followButtonHTML}
                   ${messageButtonHTML}
                   ${blockButtonHTML}
+                  ${reportButtonHTML}
                   ${copyButtonHTML}
                   ${shareButtonHTML}
                   ${downloadButtonHTML}
@@ -22876,6 +23684,10 @@ SOFTWARE.</div>
             blogOver.classList.remove('active');
           }
 
+          if (window.rhythmGameInstance) {
+            window.rhythmGameInstance.destroy();
+          }
+
           if (pushHistory) {
             const isSameView = currentView.type === viewConfig.type &&
                                currentView.param === viewConfig.param &&
@@ -22924,18 +23736,38 @@ SOFTWARE.</div>
           updateActiveNavLink(currentView.type);
           setupSortOptions(currentView.type);
 
+          // Check if view requires Authentication and User is logged out
+          const authRequiredViews = [
+            'get_inbox', 'user_profile', 'get_user_stats', 'get_offline_songs', 
+            'get_favorites', 'get_listen_later', 'get_history', 'get_recommendations', 
+            'get_user_playlists', 'get_collab_playlists', 'get_following', 'get_community', 
+            'get_notes', 'get_tasks', 'get_blogs', 'get_categories', 
+            'manage_note_categories', 'get_projects', 'get_my_apis'
+          ];
+          
+          if (!currentUser && authRequiredViews.includes(currentView.type)) {
+            setTimeout(() => {
+              const authModalEl = document.getElementById('auth-required-modal');
+              if (authModalEl) bootstrap.Modal.getOrCreateInstance(authModalEl).show();
+            }, 100);
+          }
+
           const pageHeaderEl = document.querySelector('.page-header');
           const mainContentEl = document.getElementById('main-content');
-          if (currentView.type === 'get_inbox') {
+          if (currentView.type === 'get_inbox' || currentView.type === 'rhythm_game') {
             if (pageHeaderEl) pageHeaderEl.classList.add('d-none');
             contentArea.style.padding = '0';
             contentArea.style.margin = '0';
             contentArea.style.width = '100%';
             contentArea.style.maxWidth = '100%';
             contentArea.style.height = '100%';
+            contentArea.style.display = 'flex';
+            contentArea.style.flexDirection = 'column';
             if (mainContentEl) {
               mainContentEl.style.height = '100%';
               mainContentEl.style.overflow = 'hidden';
+              mainContentEl.style.display = 'flex';
+              mainContentEl.style.flexDirection = 'column';
             }
           } else {
             if (pageHeaderEl) pageHeaderEl.classList.remove('d-none');
@@ -22962,6 +23794,260 @@ SOFTWARE.</div>
           if (currentView.filter) pageParams.append('filter', currentView.filter);
           
           switch (currentView.type) {
+            case 'rhythm_game':
+              updateContentTitle('Rhythm Game', !!currentUser);
+              if (currentUser) {
+                contentArea.style.padding = '0';
+                contentArea.style.height = '100%';
+                contentArea.innerHTML = `
+                  <div class="rg-app">
+                    <div id="rg-screen-hub" class="rg-screen">
+                      <div class="rg-tab-container">
+                        <div id="rg-tab-songs" class="rg-tab-content">
+                          <div class="rg-search-bar"><input type="text" id="rg-search-songs" class="rg-search-input" placeholder="Search database tracks..."></div>
+                          <div class="rg-list-container position-relative" id="rg-list-songs">
+                            <div class="position-absolute top-50 start-50 translate-middle">
+                              <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                            </div>
+                          </div>
+                        </div>
+                        <div id="rg-tab-favorites" class="rg-tab-content rg-hidden">
+                          <div class="rg-search-bar"><input type="text" id="rg-search-favs" class="rg-search-input" placeholder="Search favorites..."></div>
+                          <div class="rg-list-container" id="rg-list-favs"></div>
+                        </div>
+                        <div id="rg-tab-leaderboard" class="rg-tab-content rg-hidden">
+                          <div class="rg-list-container" id="rg-list-leaderboard"></div>
+                        </div>
+                        <div id="rg-tab-settings" class="rg-tab-content rg-hidden">
+                          <div class="rg-list-container" style="padding: 24px 16px;">
+                            <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:24px;">
+                              <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase;">Lane Keybindings</div>
+                              <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
+                                <button class="rg-key-btn" data-lane="0">D</button>
+                                <button class="rg-key-btn" data-lane="1">F</button>
+                                <button class="rg-key-btn" data-lane="2">J</button>
+                                <button class="rg-key-btn" data-lane="3">K</button>
+                              </div>
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:24px;">
+                              <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase; display: flex; justify-content: space-between;">
+                                <span>Audio Latency Offset</span>
+                                <span id="rg-offset-display" class="text-white">0ms</span>
+                              </div>
+                              <input type="range" id="rg-offset-slider" min="-250" max="250" value="0" step="5" style="width: 100%; accent-color: var(--rg-primary);">
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:24px;">
+                              <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase; display: flex; justify-content: space-between;">
+                                <span>Note Speed (Tick)</span>
+                                <span id="rg-speed-display" class="text-white">1.0x</span>
+                              </div>
+                              <input type="range" id="rg-speed-slider" min="0.5" max="20" value="1.0" step="0.1" style="width: 100%; accent-color: var(--rg-primary);">
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="rg-bottom-nav">
+                        <div class="rg-nav-item active" data-target="songs"><i class="bi bi-music-note-list fs-4"></i><div class="rg-nav-label">Songs</div></div>
+                        <div class="rg-nav-item" data-target="favorites"><i class="bi bi-heart-fill fs-4"></i><div class="rg-nav-label">Favorites</div></div>
+                        <div class="rg-nav-item" data-target="leaderboard"><i class="bi bi-trophy-fill fs-4"></i><div class="rg-nav-label">Ranks</div></div>
+                        <div class="rg-nav-item" data-target="settings"><i class="bi bi-gear-fill fs-4"></i><div class="rg-nav-label">Settings</div></div>
+                      </div>
+                    </div>
+
+                    <div id="rg-dialog-play" class="rg-dialog-backdrop rg-hidden">
+                      <div class="rg-dialog-surface" style="max-width: 480px; width: 90%; max-height: 90vh; display: flex; flex-direction: column;">
+                        <div class="rg-dialog-title" id="rg-dialog-song-name" style="flex-shrink: 0; margin-bottom: 8px;">Song Name</div>
+
+                        <div style="flex-shrink: 0;">
+                          <div style="font-size: 0.8rem; font-weight: 700; color: #777; margin-bottom: 8px;">SELECT DIFFICULTY</div>
+                          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+                            <button class="rg-diff-btn" data-diff="easy">Easy</button>
+                            <button class="rg-diff-btn active" data-diff="medium">Med</button>
+                            <button class="rg-diff-btn" data-diff="hard">Hard</button>
+                            <button class="rg-diff-btn" data-diff="expert">Exprt</button>
+                            <button class="rg-diff-btn" data-diff="master">Mstr</button>
+                          </div>
+                        </div>
+                        
+                        <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px; margin-bottom: 8px; flex-shrink: 0;">
+                          <button class="btn btn-link text-secondary text-decoration-none fw-bold" id="rg-btn-dialog-cancel">Cancel</button>
+                          <button class="btn btn-danger rounded-pill px-4 fw-bold" id="rg-btn-dialog-play">Play</button>
+                        </div>
+                        
+                        <!-- Song-Specific Top Scores Leaderboard -->
+                        <div style="display: flex; flex-direction: column; gap: 8px; overflow: hidden; margin-top: 8px;">
+                          <div style="font-size: 0.8rem; font-weight: 700; color: #777; flex-shrink: 0;">TOP SCORES</div>
+                          <div id="rg-song-leaderboard" style="overflow-y: auto; background-color: var(--rg-surface-variant); border-radius: 12px; padding: 12px; border: 1px solid #333; flex-grow: 1; min-height: 120px;">
+                            <div class="text-center text-secondary small py-2">Loading scores...</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="rg-screen-loading" class="rg-screen rg-screen-center rg-hidden" style="justify-content: center; background-color: #000;">
+                      <div class="text-center w-100 px-4">
+                        <img id="rg-loading-cover" src="" style="width: 250px; height: 250px; object-fit: cover; border-radius: 16px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); margin-bottom: 24px;">
+                        <h2 id="rg-loading-title" style="color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); margin: 0 0 24px 0; font-size: 1.8rem; font-weight: bold; text-align: center;">Song Title</h2>
+                        <div class="d-flex align-items-center justify-content-center gap-3">
+                          <div class="spinner-border text-danger" style="width: 1.5rem; height: 1.5rem; border-width: 0.2em;"></div>
+                          <div style="font-size: 1.2rem; font-weight: 700; color: var(--rg-primary);" id="rg-loading-text">Downloading 0%</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="rg-screen-game" class="rg-screen rg-hidden" style="background-color: #000;">
+                      <div class="rg-hud">
+                        <div style="display:flex; flex-direction:column; align-items:flex-start;">
+                          <div class="rg-hud-title" id="rg-in-game-title">Title</div>
+                          <div class="rg-score-display" id="rg-in-game-score">000000000</div>
+                          <div class="rg-hud-diff" id="rg-in-game-diff">Medium</div>
+                        </div>
+                        <div class="rg-hud-actions">
+                          <button class="rg-quit-btn" id="rg-btn-quit-game"><i class="bi bi-pause-fill"></i> Pause</button>
+                        </div>
+                      </div>
+                      <div class="rg-combo-box">
+                        <div class="rg-combo-number" id="rg-in-game-combo">0</div>
+                        <div class="rg-combo-text" id="rg-in-game-combo-lbl">COMBO</div>
+                      </div>
+                      <canvas id="rg-game-canvas" style="width: 100%; height: 100%; display: block;"></canvas>
+                      <div style="position: absolute; bottom: 0; left: 0; width: 100%; height: 50%; display: flex; z-index: 12; pointer-events: auto;" id="rg-touch-layer">
+                        <div style="flex: 1; height: 100%; outline: none; -webkit-tap-highlight-color: transparent;" data-lane="0"></div>
+                        <div style="flex: 1; height: 100%; outline: none; -webkit-tap-highlight-color: transparent;" data-lane="1"></div>
+                        <div style="flex: 1; height: 100%; outline: none; -webkit-tap-highlight-color: transparent;" data-lane="2"></div>
+                        <div style="flex: 1; height: 100%; outline: none; -webkit-tap-highlight-color: transparent;" data-lane="3"></div>
+                      </div>
+                    </div>
+
+                    <div id="rg-dialog-pause" class="rg-dialog-backdrop rg-hidden">
+                      <div class="rg-dialog-surface text-center">
+                        <h3 class="text-white fw-bold mb-4">Game Paused</h3>
+                        <div class="d-flex flex-column gap-3 w-100">
+                          <button class="rg-primary-btn" id="rg-btn-resume" style="background-color: #28a745; border-radius: 12px; border: none; padding: 16px;">Resume</button>
+                          <button class="rg-primary-btn" id="rg-btn-retry-pause" style="background-color: #ffc107; color: #000; border-radius: 12px; border: none; padding: 16px;">Retry</button>
+                          <button class="rg-primary-btn" id="rg-btn-quit" style="background-color: #4a0000; border-radius: 12px; border: none; padding: 16px;">Quit to Menu</button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="rg-screen-result" class="rg-screen rg-screen-center rg-hidden">
+                      <div style="width: 100%; max-width: 500px; background-color: var(--rg-surface); padding: 24px; border-radius: 28px; border: 1px solid #333;">
+                        <h2 style="text-align: center; color: var(--rg-primary); margin-bottom: 24px; text-transform: uppercase; font-weight: bold;">Stage Cleared</h2>
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 24px;">
+                          <div class="rg-res-item rg-res-full">
+                            <span class="rg-res-label">Total Score</span>
+                            <span class="rg-res-val" id="rg-res-score" style="color: var(--rg-primary);">0</span>
+                          </div>
+                          <div class="rg-res-item rg-res-full">
+                            <span class="rg-res-label">Max Combo</span>
+                            <span class="rg-res-val" id="rg-res-max-combo">0</span>
+                          </div>
+                          <div class="rg-res-item"><span class="rg-res-label" style="color: #fff;">Perfect</span><span class="rg-res-val" id="rg-res-perfect">0</span></div>
+                          <div class="rg-res-item"><span class="rg-res-label" style="color: #ff3b30;">Great</span><span class="rg-res-val" id="rg-res-great">0</span></div>
+                          <div class="rg-res-item"><span class="rg-res-label" style="color: #ffa000;">Good</span><span class="rg-res-val" id="rg-res-good">0</span></div>
+                          <div class="rg-res-item"><span class="rg-res-label" style="color: #8e1c1c;">Bad</span><span class="rg-res-val" id="rg-res-bad">0</span></div>
+                          <div class="rg-res-item rg-res-full"><span class="rg-res-label" style="color: #555;">Miss</span><span class="rg-res-val" id="rg-res-miss">0</span></div>
+                        </div>
+                        <div style="display: flex; gap: 12px; width: 100%;">
+                          <button class="rg-primary-btn" id="rg-btn-result-retry" style="flex: 1; background-color: #4a0000; color: var(--rg-primary); padding: 16px; border-radius: 12px;">Retry</button>
+                          <button class="rg-primary-btn" id="rg-btn-result-back" style="flex: 1; padding: 16px; border-radius: 12px;">Menu</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                `;
+                setTimeout(() => {
+                  if (!window.rhythmGameInstance) {
+                    window.rhythmGameInstance = new RhythmGameEngine();
+                  }
+                  window.rhythmGameInstance.initDOM();
+                }, 50);
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to play the Rhythm Game.</div>`;
+              }
+              allContentloaded = true;
+              break;
+
+            case 'photo_editor':
+              updateContentTitle('Image Editor', !!currentUser);
+              if (currentUser) {
+                // Remove padding to allow editor to fill the entire content area
+                contentArea.style.padding = '0';
+                contentArea.style.height = '100%';
+                
+                contentArea.innerHTML = `
+                  <div class="photo-editor-app">
+                    <main class="pe-workspace" id="pe-workspace">
+                      <canvas id="pe-main-canvas"></canvas>
+                      <canvas id="pe-overlay-canvas"></canvas>
+                      <input type="text" id="pe-text-editor">
+                    </main>
+
+                    <nav class="pe-bottom-nav">
+                      <div class="pe-properties-panel" id="pe-properties-panel">
+                        <div class="pe-panel-header">
+                          <span id="pe-panel-title">Properties</span>
+                          <button id="pe-btn-close-panel">
+                            <svg><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                          </button>
+                        </div>
+                        <div id="pe-panel-content"></div>
+                      </div>
+
+                      <div class="pe-bottom-bar">
+                        <label class="pe-tool-btn" id="pe-nav-img">
+                          <div class="pe-icon-container">
+                            <svg><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+                          </div>
+                          <span>Image</span>
+                          <input type="file" id="pe-upload-img" accept="image/*" multiple style="display:none;">
+                        </label>
+                        <button class="pe-tool-btn" id="pe-btn-add-text">
+                          <div class="pe-icon-container">
+                            <svg><path d="M2.5 4v3h5v12h3V7h5V4h-13zm19 5h-9v3h3v7h3v-7h3V9z"/></svg>
+                          </div>
+                          <span>Text</span>
+                        </button>
+                        <button class="pe-tool-btn" id="pe-btn-add-shape">
+                          <div class="pe-icon-container">
+                            <svg><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+                          </div>
+                          <span>Shape</span>
+                        </button>
+                        <button class="pe-tool-btn" id="pe-btn-properties">
+                          <div class="pe-icon-container">
+                            <svg><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg>
+                          </div>
+                          <span>Settings</span>
+                        </button>
+                        <!-- Desktop-Specific Export Button (Perfect Circle) -->
+                        <button class="pe-export-btn-desktop" id="pe-btn-export-desktop">
+                          <svg><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                        </button>
+                        <!-- Mobile-Specific Export Button (Pill Layout) -->
+                        <button class="pe-export-btn-mobile" id="pe-btn-export-mobile">
+                          <svg><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                          <span>Export</span>
+                        </button>
+                      </div>
+                    </nav>
+                  </div>
+                `;
+                
+                // Allow HTML to render before binding JS engine
+                setTimeout(() => {
+                  if (!window.photoEditorInstance) {
+                    window.photoEditorInstance = new EditorEngine();
+                  }
+                  window.photoEditorInstance.initDOM();
+                }, 50);
+                
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to use the image editor.</div>`;
+              }
+              allContentloaded = true;
+              break;
+
             case 'get_inbox':
               updateContentTitle('Messages', !!currentUser);
               if (window.chatPollingInterval) { clearInterval(window.chatPollingInterval); window.chatPollingInterval = null; }
@@ -23030,7 +24116,8 @@ SOFTWARE.</div>
                             <button class="btn btn-link text-white p-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" aria-expanded="false" style="width: 44px; height: 44px;" title="Options">
                               <i class="bi bi-three-dots-vertical fs-5"></i>
                             </button>
-                            <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary" style="background-color: var(--ytm-surface-2); border-radius: 12px; z-index: 1050;">
+                            <!-- FIXED: Bumped header dropdown z-index to 1060 so it cleanly covers bubble dropdowns -->
+                            <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary" style="background-color: var(--ytm-surface-2); border-radius: 12px; z-index: 1060;">
                               <li><a class="dropdown-item text-white d-flex align-items-center gap-3 py-2" href="#" id="chat-opt-search"><i class="bi bi-search text-secondary"></i> Search Messages</a></li>
                               <li><a class="dropdown-item text-white d-flex align-items-center gap-3 py-2" href="#" id="chat-opt-info"><i class="bi bi-info-circle text-info"></i> View Details</a></li>
                             </ul>
@@ -25343,7 +26430,7 @@ SOFTWARE.</div>
           const imgEnc = encodeURIComponent(absImageUrl);
 
           // Removed Cover Image URL from text payload as requested
-          const textPayload = encodeURIComponent(`Check out "${decodedName}" on PHP Music:`);
+          const textPayload = encodeURIComponent(`Check out "${decodedName}" on PHP Music`);
           const urlEnc = encodeURIComponent(shareUrl);
 
           // Null-safe helper function to open apps and silently copy image to Clipboard
@@ -26289,6 +27376,20 @@ SOFTWARE.</div>
           });
         }
 
+        const coverScanModalEl = document.getElementById('cover-scan-modal');
+        const coverScanIframe = document.getElementById('cover-scan-iframe');
+        if (coverScanModalEl && coverScanIframe) {
+          coverScanModalEl.addEventListener('show.bs.modal', () => {
+            coverScanIframe.src = '?action=rescan_covers';
+          });
+          coverScanModalEl.addEventListener('hidden.bs.modal', () => {
+            coverScanIframe.src = 'about:blank';
+            if (currentView.type === 'get_songs') {
+              loadView(currentView);
+            }
+          });
+        }
+
         playerElements.playPauseBtn.forEach(btn => btn.addEventListener('click', togglePlayPause));
         setupHoldToSkip(playerElements.prevBtn, 'prev', playPrev);
         setupHoldToSkip(playerElements.nextBtn, 'next', playNext);
@@ -26981,6 +28082,24 @@ SOFTWARE.</div>
             e.stopPropagation();
             await loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' });
             window.openChatFull(messageBtn.dataset.userId, 'dm', decodeURIComponent(messageBtn.dataset.artist));
+            return;
+          }
+
+          const reportUserBtn = target.closest('.report-user-btn');
+          if (reportUserBtn) {
+            e.stopPropagation();
+            const reportedId = reportUserBtn.dataset.userId;
+            const reason = prompt("Enter reason for reporting this profile:");
+            if (reason && reason.trim() !== '') {
+              const res = await fetchData('?action=report_user', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ reported_id: parseInt(reportedId), reason: reason.trim() })
+              });
+              if (res) {
+                showToast(res.message, res.status);
+              }
+            }
             return;
           }
 
@@ -28277,16 +29396,57 @@ SOFTWARE.</div>
               const metaSongData = await fetchData(`?action=get_song_data&id=${songIdForMeta}`);
               if (metaSongData && metadataModalBody) {
                 metadataModalBody.innerHTML = `
-                  <ul class="list-group list-group-flush">
-                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Title:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.title || 'N/A'}</span></li>
-                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Artist:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.artist || 'N/A'}</span></li>
-                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Album:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.album || 'N/A'}</span></li>
-                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Genre:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.genre || 'N/A'}</span></li>
-                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Year:</strong> <span>${metaSongData.year || 'N/A'}</span></li>
-                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Duration:</strong> <span>${formatTime(metaSongData.duration)}</span></li>
-                    <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Bitrate:</strong> <span>${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + ' kbps' : 'N/A'}</span></li>
-                  </ul>`;
-                metadataModal.show();
+                  <div class="p-2">
+                    <div class="d-flex align-items-center gap-3 mb-4 border-bottom border-secondary pb-3">
+                      <div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary shadow-sm" style="width: 48px; height: 48px;">
+                        <i class="bi bi-info-circle-fill text-danger fs-4"></i>
+                      </div>
+                      <div>
+                        <h5 class="text-white fw-bold mb-0">Song Metadata</h5>
+                        <div class="text-secondary small">Database ID: ${metaSongData.id}</div>
+                      </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                      <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Title</div>
+                      <div class="text-white fs-5 fw-bold text-wrap text-break lh-sm">${escapeHTML(metaSongData.title) || 'N/A'}</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                      <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Artist</div>
+                      <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.artist) || 'N/A'}</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                      <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Album</div>
+                      <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.album) || 'N/A'}</div>
+                    </div>
+                    
+                    <div class="mb-4">
+                      <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Genre</div>
+                      <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.genre) || 'N/A'}</div>
+                    </div>
+                    
+                    <div class="row g-3 p-3 mt-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
+                      <div class="col-6">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Year</div>
+                        <div class="text-white fw-medium text-wrap">${metaSongData.year || 'N/A'}</div>
+                      </div>
+                      <div class="col-6">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Duration</div>
+                        <div class="text-white fw-medium text-wrap">${formatTime(metaSongData.duration)}</div>
+                      </div>
+                      <div class="col-6">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Bitrate</div>
+                        <div class="text-white fw-medium text-wrap">${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + ' kbps' : 'N/A'}</div>
+                      </div>
+                      <div class="col-6">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Size</div>
+                        <div class="text-white fw-medium text-wrap">${metaSongData.filesize ? (metaSongData.filesize / 1048576).toFixed(2) + ' MB' : 'N/A'}</div>
+                      </div>
+                    </div>
+                  </div>`;
+                bootstrap.Modal.getOrCreateInstance(document.getElementById('metadata-modal')).show();
               }
               break;
             case 'show_lyrics':
@@ -28400,18 +29560,18 @@ SOFTWARE.</div>
           addToPlaylistModalBody.addEventListener('click', async e => {
             const createBtn = e.target.closest('#quick-create-playlist-btn');
             if (createBtn) {
-               const nameInput = document.getElementById('quick-create-playlist-input');
-               const name = nameInput.value.trim();
-               if (!name) return showToast('Playlist name cannot be empty', 'error');
-               const data = await fetchData('?action=create_playlist', {
-                  method: 'POST', headers: {'Content-Type': 'application/json'},
-                  body: JSON.stringify({ name: name, is_private: 0 })
-               });
-               if (data && data.status === 'success') {
-                  showToast('Playlist created', 'success');
-                  await reRenderPlaylistModal();
-               }
-               return;
+              const nameInput = document.getElementById('quick-create-playlist-input');
+              const name = nameInput.value.trim();
+              if (!name) return showToast('Playlist name cannot be empty', 'error');
+              const data = await fetchData('?action=create_playlist', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ name: name, description: '', is_private: 0 })
+              });
+              if (data && data.status === 'success') {
+                showToast('Playlist created', 'success');
+                await reRenderPlaylistModal();
+              }
+              return;
             }
 
             const item = e.target.closest('.add-to-playlist-item');
@@ -29291,10 +30451,13 @@ SOFTWARE.</div>
         createPlaylistForm.addEventListener('submit', async e => {
           e.preventDefault();
           const name = document.getElementById('playlist-name-input').value;
+          const descInput = document.getElementById('playlist-desc-input');
+          const description = descInput ? descInput.value : '';
           const is_private = document.getElementById('playlist-is-private').checked ? 1 : 0;
+          
           const data = await fetchData('?action=create_playlist', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ name, is_private })
+            body: JSON.stringify({ name, description, is_private })
           });
           if (data && data.status === 'success') {
             createPlaylistModal.hide();
@@ -31146,6 +32309,7 @@ SOFTWARE.</div>
 
             const scanAllBtn = document.getElementById('nav-scan-all');
             const adminPanelBtn = document.getElementById('nav-admin-panel');
+            const coverScanBtn = document.getElementById('nav-cover-scan');
             const isSuperAdmin = currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com';
             const isAdmin = currentUser.is_admin == 1 || isSuperAdmin;
             
@@ -31154,8 +32318,10 @@ SOFTWARE.</div>
             if (adminPanelBtn) {
               if (isAdmin) {
                 adminPanelBtn.style.setProperty('display', 'flex', 'important');
+                if (coverScanBtn) coverScanBtn.style.setProperty('display', 'flex', 'important');
               } else {
                 adminPanelBtn.style.setProperty('display', 'none', 'important');
+                if (coverScanBtn) coverScanBtn.style.setProperty('display', 'none', 'important');
               }
             }
           } else {
@@ -33582,15 +34748,56 @@ SOFTWARE.</div>
                 const metaBody = document.getElementById('metadata-modal-body');
                 if (metaBody) {
                   metaBody.innerHTML = `
-                    <ul class="list-group list-group-flush">
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Title:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.title || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Artist:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.artist || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Album:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.album || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Genre:</strong> <span class="text-truncate" style="max-width: 70%;">${metaSongData.genre || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Year:</strong> <span>${metaSongData.year || 'N/A'}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Duration:</strong> <span>${formatTime(metaSongData.duration)}</span></li>
-                      <li class="list-group-item bg-transparent border-secondary text-white d-flex justify-content-between"><strong>Bitrate:</strong> <span>${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + ' kbps' : 'N/A'}</span></li>
-                    </ul>`;
+                    <div class="p-2">
+                      <div class="d-flex align-items-center gap-3 mb-4 border-bottom border-secondary pb-3">
+                        <div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary shadow-sm" style="width: 48px; height: 48px;">
+                          <i class="bi bi-info-circle-fill text-danger fs-4"></i>
+                        </div>
+                        <div>
+                          <h5 class="text-white fw-bold mb-0">Song Metadata</h5>
+                          <div class="text-secondary small">Database ID: ${metaSongData.id}</div>
+                        </div>
+                      </div>
+                      
+                      <div class="mb-3">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Title</div>
+                        <div class="text-white fs-5 fw-bold text-wrap text-break lh-sm">${escapeHTML(metaSongData.title) || 'N/A'}</div>
+                      </div>
+                      
+                      <div class="mb-3">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Artist</div>
+                        <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.artist) || 'N/A'}</div>
+                      </div>
+                      
+                      <div class="mb-3">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Album</div>
+                        <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.album) || 'N/A'}</div>
+                      </div>
+                      
+                      <div class="mb-4">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Genre</div>
+                        <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.genre) || 'N/A'}</div>
+                      </div>
+                      
+                      <div class="row g-3 p-3 mt-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
+                        <div class="col-6">
+                          <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Year</div>
+                          <div class="text-white fw-medium text-wrap">${metaSongData.year || 'N/A'}</div>
+                        </div>
+                        <div class="col-6">
+                          <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Duration</div>
+                          <div class="text-white fw-medium text-wrap">${formatTime(metaSongData.duration)}</div>
+                        </div>
+                        <div class="col-6">
+                          <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Bitrate</div>
+                          <div class="text-white fw-medium text-wrap">${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + ' kbps' : 'N/A'}</div>
+                        </div>
+                        <div class="col-6">
+                          <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Size</div>
+                          <div class="text-white fw-medium text-wrap">${metaSongData.filesize ? (metaSongData.filesize / 1048576).toFixed(2) + ' MB' : 'N/A'}</div>
+                        </div>
+                      </div>
+                    </div>`;
                   bootstrap.Modal.getOrCreateInstance(document.getElementById('metadata-modal')).show();
                 }
               }
@@ -33937,6 +35144,1745 @@ SOFTWARE.</div>
                 performSearch(query);
               }
             });
+          }
+        }
+
+        // --- Rhythm Game Engine ---
+        class RhythmGameEngine {
+          constructor() {
+            this.LANES = 4;
+            this.JUDGMENT = { PERFECT: 0.045, GREAT: 0.080, GOOD: 0.125, BAD: 0.170 };
+            this.KEY_CODES = ['KeyD', 'KeyF', 'KeyJ', 'KeyK'];
+            this.KEY_LABELS = ['D', 'F', 'J', 'K'];
+            this.calibrationOffsetMs = 0;
+            this.userTickSpeed = 1.0;
+            this.listeningLane = null;
+            
+            this.songs = [];
+            this.filteredSongs = [];
+            this.favFilteredSongs = [];
+            this.renderLimit = 25;
+            this.favRenderLimit = 25;
+            
+            this.selectedSong = null;
+            this.selectedDiff = 'medium';
+            
+            this.audioCtx = null;
+            this.sfxCtx = null;
+            this.audioBuffer = null;
+            this.audioPlayback = null;
+            this.chartNotes = [];
+            this.isPlaying = false;
+            this.activeKeysHeld = [false, false, false, false];
+            this.particles = [];
+            this.laneApproachSpeed = 1.3;
+            
+            this.curScore = 0;
+            this.curCombo = 0;
+            this.maxCombo = 0;
+            this.stats = { perfect: 0, great: 0, good: 0, bad: 0, miss: 0 };
+            
+            this.feedbackTxt = "";
+            this.feedbackCol = "#fff";
+            this.feedbackTimer = 0;
+            this.feedbackScale = 1;
+            
+            // Event bindings
+            this.handleKeyDown = this.onKeyDown.bind(this);
+            this.handleKeyUp = this.onKeyUp.bind(this);
+            this.handleResize = this.resizeCanvas.bind(this);
+          }
+
+          destroy() {
+            this.isPlaying = false;
+            if (this.audioPlayback) {
+              this.audioPlayback.pause();
+              this.audioPlayback.src = "";
+            }
+            if (this.audioCtx && this.audioCtx.state !== 'closed') this.audioCtx.close();
+            if (this.sfxCtx && this.sfxCtx.state !== 'closed') this.sfxCtx.close();
+            
+            window.removeEventListener('keydown', this.handleKeyDown);
+            window.removeEventListener('keyup', this.handleKeyUp);
+            window.removeEventListener('resize', this.handleResize);
+          }
+
+          initDOM() {
+            this.screens = {
+              hub: document.getElementById('rg-screen-hub'),
+              loading: document.getElementById('rg-screen-loading'),
+              game: document.getElementById('rg-screen-game'),
+              result: document.getElementById('rg-screen-result')
+            };
+            this.tabs = {
+              songs: document.getElementById('rg-tab-songs'),
+              favorites: document.getElementById('rg-tab-favorites'),
+              leaderboard: document.getElementById('rg-tab-leaderboard'),
+              settings: document.getElementById('rg-tab-settings')
+            };
+            this.listSongsEl = document.getElementById('rg-list-songs');
+            this.listFavsEl = document.getElementById('rg-list-favs');
+            
+            // Automatically launch directly into hub on load
+            setTimeout(() => {
+              this.switchScreen('hub');
+              this.loadSongs();
+            }, 50);
+
+            const navItems = document.querySelectorAll('.rg-nav-item');
+            navItems.forEach(item => {
+              item.addEventListener('click', () => {
+                navItems.forEach(n => n.classList.remove('active'));
+                item.classList.add('active');
+                const target = item.getAttribute('data-target');
+                Object.values(this.tabs).forEach(t => t.classList.add('rg-hidden'));
+                this.tabs[target].classList.remove('rg-hidden');
+              });
+            });
+
+            const keyBtns = document.querySelectorAll('.rg-key-btn');
+            keyBtns.forEach(btn => {
+              btn.addEventListener('click', () => {
+                keyBtns.forEach(b => b.classList.remove('listening'));
+                this.listeningLane = parseInt(btn.getAttribute('data-lane'));
+                btn.classList.add('listening');
+              });
+            });
+
+            document.getElementById('rg-offset-slider').addEventListener('input', (e) => {
+              this.calibrationOffsetMs = parseInt(e.target.value);
+              document.getElementById('rg-offset-display').textContent = `${this.calibrationOffsetMs >= 0 ? '+' : ''}${this.calibrationOffsetMs}ms`;
+            });
+            
+            document.getElementById('rg-speed-slider').addEventListener('input', (e) => {
+              this.userTickSpeed = parseFloat(e.target.value);
+              document.getElementById('rg-speed-display').textContent = `${this.userTickSpeed}x`;
+            });
+
+            let searchDebounceTimeout = null;
+            document.getElementById('rg-search-songs').addEventListener('input', (e) => {
+              clearTimeout(searchDebounceTimeout);
+              const q = e.target.value.trim();
+              
+              if (q === '') {
+                this.renderLimit = 25;
+                this.filteredSongs = this.songs;
+                this.renderSongsList();
+                return;
+              }
+
+              searchDebounceTimeout = setTimeout(async () => {
+                try {
+                  const searchData = await fetchData(`?action=search&q=${encodeURIComponent(q)}`, {}, true);
+                  let results = [];
+                  if (searchData && searchData.shelves) {
+                    const songShelf = searchData.shelves.find(s => s.type === 'songs_list' || s.type === 'songs');
+                    results = songShelf ? songShelf.items : [];
+                  }
+                  
+                  const favData = await fetchData('?action=get_rhythm_favorites', {}, true) || [];
+                  const favSet = new Set(Array.isArray(favData) ? favData.map(id => parseInt(id)) : []);
+
+                  this.filteredSongs = results.map(s => {
+                    s.rg_favorite = favSet.has(parseInt(s.id)) ? 1 : 0;
+                    return s;
+                  });
+                  
+                  this.renderLimit = 25;
+                  this.renderSongsList();
+                } catch (err) {
+                  console.error("Global rhythm search failed:", err);
+                }
+              }, 300);
+            });
+
+            document.getElementById('rg-search-favs').addEventListener('input', (e) => {
+              this.favRenderLimit = 25;
+              const q = e.target.value.toLowerCase();
+              this.favFilteredSongs = this.songs.filter(f => f.rg_favorite == 1 && (f.title.toLowerCase().includes(q) || f.artist.toLowerCase().includes(q)));
+              this.renderFavoritesList();
+            });
+
+            this.listSongsEl.addEventListener('scroll', () => {
+              if (this.listSongsEl.scrollTop + this.listSongsEl.clientHeight >= this.listSongsEl.scrollHeight - 20) {
+                if (this.renderLimit < this.filteredSongs.length) {
+                  this.renderLimit += 25;
+                  this.renderSongsList();
+                }
+              }
+            });
+
+            this.listFavsEl.addEventListener('scroll', () => {
+              if (this.listFavsEl.scrollTop + this.listFavsEl.clientHeight >= this.listFavsEl.scrollHeight - 20) {
+                if (this.favRenderLimit < this.favFilteredSongs.length) {
+                  this.favRenderLimit += 25;
+                  this.renderFavoritesList();
+                }
+              }
+            });
+
+            const diffBtns = document.querySelectorAll('.rg-diff-btn');
+            diffBtns.forEach(btn => {
+              btn.addEventListener('click', () => {
+                diffBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                this.selectedDiff = btn.getAttribute('data-diff');
+              });
+            });
+
+            document.getElementById('rg-btn-dialog-cancel').addEventListener('click', () => document.getElementById('rg-dialog-play').classList.add('rg-hidden'));
+            document.getElementById('rg-btn-dialog-play').addEventListener('click', () => {
+              document.getElementById('rg-dialog-play').classList.add('rg-hidden');
+              this.prepGame(this.selectedSong, this.selectedDiff);
+            });
+
+            // PAUSE MENU LOGIC
+            const pauseDialog = document.getElementById('rg-dialog-pause');
+            document.getElementById('rg-btn-quit-game').addEventListener('click', () => {
+              this.isPlaying = false;
+              if (this.audioPlayback) this.audioPlayback.pause();
+              pauseDialog.classList.remove('rg-hidden');
+            });
+            document.getElementById('rg-btn-resume').addEventListener('click', () => {
+              pauseDialog.classList.add('rg-hidden');
+              this.isPlaying = true;
+              if (this.audioPlayback) this.audioPlayback.play();
+              requestAnimationFrame(this.gameLoop.bind(this));
+            });
+            document.getElementById('rg-btn-retry-pause').addEventListener('click', () => {
+              pauseDialog.classList.add('rg-hidden');
+              this.switchScreen('loading');
+              this.prepGame(this.selectedSong, this.selectedDiff);
+            });
+            document.getElementById('rg-btn-quit').addEventListener('click', () => {
+              pauseDialog.classList.add('rg-hidden');
+              this.switchScreen('hub');
+            });
+
+            // RESULTS MENU LOGIC
+            document.getElementById('rg-btn-result-back').addEventListener('click', () => this.switchScreen('hub'));
+            document.getElementById('rg-btn-result-retry').addEventListener('click', () => {
+              this.switchScreen('loading');
+              this.prepGame(this.selectedSong, this.selectedDiff);
+            });
+
+            const touchLayer = document.getElementById('rg-touch-layer');
+            const handleTouch = (e, isDown) => {
+              if (!this.isPlaying) return;
+              const rect = this.canvas.getBoundingClientRect();
+              for (let i = 0; i < e.changedTouches.length; i++) {
+                const t = e.changedTouches[i];
+                const x = t.clientX - rect.left, y = t.clientY - rect.top;
+                if (y > rect.height * 0.4) {
+                  const lane = Math.floor((x / rect.width) * this.LANES);
+                  if (lane >= 0 && lane < this.LANES) {
+                    this.activeKeysHeld[lane] = isDown;
+                    if (isDown) this.processHit(lane);
+                  }
+                }
+              }
+              e.preventDefault();
+            };
+            touchLayer.addEventListener('touchstart', e => handleTouch(e, true), {passive: false});
+            touchLayer.addEventListener('touchend', e => handleTouch(e, false), {passive: false});
+
+            window.addEventListener('keydown', this.handleKeyDown);
+            window.addEventListener('keyup', this.handleKeyUp);
+            window.addEventListener('resize', this.handleResize);
+          }
+
+          async loadSongs() {
+            try {
+              // Execute parallel high-speed asynchronous data fetching using internal sessions
+              const [res1, res2, res3, favRes] = await Promise.all([
+                fetchData('?action=get_songs&page=1&sort=random', {}, true),
+                fetchData('?action=get_songs&page=2&sort=random', {}, true),
+                fetchData('?action=get_songs&page=3&sort=random', {}, true),
+                fetchData('?action=get_rhythm_favorites', {}, true)
+              ]);
+
+              const arr1 = Array.isArray(res1) ? res1 : [];
+              const arr2 = Array.isArray(res2) ? res2 : [];
+              const arr3 = Array.isArray(res3) ? res3 : [];
+              const favArr = Array.isArray(favRes) ? favRes.map(id => parseInt(id)) : [];
+
+              const favSet = new Set(favArr);
+              const uniqueSongs = new Map();
+
+              // Merge random library songs
+              [...arr1, ...arr2, ...arr3].forEach(s => {
+                if (s && s.id && !uniqueSongs.has(s.id)) {
+                  s.rg_favorite = favSet.has(parseInt(s.id)) ? 1 : 0;
+                  uniqueSongs.set(s.id, s);
+                }
+              });
+
+              let favoriteSongsList = [];
+              if (favArr.length > 0) {
+                const favDetails = await fetchData('?action=get_queue_songs', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ ids: favArr })
+                }, true);
+                if (Array.isArray(favDetails)) {
+                  favoriteSongsList = favDetails.map(s => {
+                    s.rg_favorite = 1;
+                    if (!uniqueSongs.has(s.id)) {
+                      uniqueSongs.set(s.id, s);
+                    }
+                    return s;
+                  });
+                }
+              }
+
+              this.songs = Array.from(uniqueSongs.values());
+              this.filteredSongs = this.songs;
+              this.favFilteredSongs = favoriteSongsList;
+              
+              this.renderSongsList();
+              this.renderFavoritesList();
+              this.loadLeaderboard();
+              
+            } catch (err) {
+              console.error("Game Engine Failed to Load Tracks:", err);
+              if (this.listSongsEl) {
+                this.listSongsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: var(--rg-error, #ffb4ab);">Error establishing database connection.</div>';
+              }
+            }
+          }
+
+          async loadLeaderboard() {
+            try {
+              const data = await fetchData('?action=get_rhythm_leaderboard', {}, true);
+              const container = document.getElementById('rg-list-leaderboard');
+              
+              if (!Array.isArray(data) || data.length === 0) {
+                container.innerHTML = '<div style="text-align:center; padding:24px; color:#aaa;">No scores recorded yet. Be the first to play!</div>';
+                return;
+              }
+              
+              container.innerHTML = data.map((entry, idx) => `
+                <div class="rg-list-item" style="cursor: default;">
+                  <div class="rg-list-item-info">
+                    <div style="width: 24px; font-weight: 900; color: var(--rg-primary); text-align: center;">${idx + 1}</div>
+                    <img src="?action=get_profile_picture&id=${entry.user_id}" class="rg-cover-img" style="border-radius: 50%;">
+                    <div>
+                      <div class="rg-list-item-title">${escapeHTML(entry.player_name)}</div>
+                      <div class="rg-list-item-sub" style="color: var(--rg-primary);">
+                        Total Score: ${parseInt(entry.total_score).toLocaleString()} 
+                        <span style="color:#aaa; font-size:0.75rem; margin-left:8px;">(${entry.total_plays} Plays)</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              `).join('');
+            } catch (err) {
+              console.error("Failed to load Leaderboard:", err);
+            }
+          }
+
+          switchScreen(name) {
+            Object.values(this.screens).forEach(s => s.classList.add('rg-hidden'));
+            if (this.screens[name]) this.screens[name].classList.remove('rg-hidden');
+          }
+
+          onKeyDown(e) {
+            if (this.listeningLane !== null) {
+              this.KEY_CODES[this.listeningLane] = e.code;
+              let label = e.key.toUpperCase();
+              if (e.code.startsWith('Key')) label = e.code.replace('Key', '');
+              else if (e.code === 'Space') label = 'SPC';
+              this.KEY_LABELS[this.listeningLane] = label;
+              
+              const btn = document.querySelector(`.rg-key-btn[data-lane="${this.listeningLane}"]`);
+              if (btn) {
+                btn.textContent = label;
+                btn.classList.remove('listening');
+              }
+              this.listeningLane = null;
+              e.preventDefault();
+            } else if (this.isPlaying && !e.repeat) {
+              const idx = this.KEY_CODES.indexOf(e.code);
+              if (idx !== -1) {
+                this.activeKeysHeld[idx] = true;
+                this.processHit(idx);
+                e.preventDefault();
+                e.stopPropagation();
+              }
+            }
+          }
+
+          onKeyUp(e) {
+            if (this.isPlaying) {
+              const idx = this.KEY_CODES.indexOf(e.code);
+              if (idx !== -1) this.activeKeysHeld[idx] = false;
+            }
+          }
+
+          createSongElement(song) {
+            const el = document.createElement('div');
+            el.className = 'rg-list-item';
+            el.innerHTML = `
+              <div class="rg-list-item-info" style="min-width: 0;">
+                <img src="?action=get_image&id=${song.id}&v=${song.last_modified}" class="rg-cover-img">
+                <div class="text-truncate flex-grow-1 ms-1" style="min-width: 0;">
+                  <div class="rg-list-item-title text-truncate">${escapeHTML(song.title)}</div>
+                  <div class="rg-list-item-sub text-truncate">${escapeHTML(song.artist)}</div>
+                </div>
+              </div>
+              <div class="rg-list-item-actions">
+                <button class="rg-fav-btn ${song.rg_favorite == 1 ? 'active' : ''}"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i></button>
+                <button class="rg-play-btn">PLAY</button>
+              </div>
+            `;
+            const favBtn = el.querySelector('.rg-fav-btn');
+            favBtn.addEventListener('click', async (e) => {
+              e.stopPropagation();
+              const res = await fetchData('?action=toggle_rhythm_favorite', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ song_id: song.id })
+              });
+              if (res) {
+                song.rg_favorite = res.is_favorite;
+                favBtn.classList.toggle('active', song.rg_favorite == 1);
+                favBtn.innerHTML = `<i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i>`;
+                
+                // Sync the favorites array in local memory reactively
+                if (song.rg_favorite == 1) {
+                  if (!this.favFilteredSongs.some(s => s.id === song.id)) {
+                    this.favFilteredSongs.push(song);
+                  }
+                } else {
+                  this.favFilteredSongs = this.favFilteredSongs.filter(s => s.id !== song.id);
+                }
+                
+                // Refresh list if the favorites tab is currently active
+                if (document.getElementById('rg-tab-favorites').classList.contains('rg-hidden') === false) {
+                  this.renderFavoritesList();
+                }
+              }
+            });
+            el.addEventListener('click', () => {
+              this.openPlayDialog(song);
+            });
+            return el;
+          }
+
+          async openPlayDialog(song) {
+            this.selectedSong = song;
+            document.getElementById('rg-dialog-song-name').textContent = song.title;
+            const container = document.getElementById('rg-song-leaderboard');
+            container.innerHTML = '<div class="text-center text-secondary small py-2"><div class="spinner-border spinner-border-sm text-danger" style="border-width: 0.15em;"></div> Loading scores...</div>';
+            document.getElementById('rg-dialog-play').classList.remove('rg-hidden');
+
+            try {
+              const data = await fetchData(`?action=get_song_rhythm_leaderboard&song_id=${song.id}`, {}, true);
+              if (!Array.isArray(data) || data.length === 0) {
+                container.innerHTML = '<div class="text-center text-secondary small py-2">No scores recorded yet. Be the first!</div>';
+                return;
+              }
+
+              container.innerHTML = data.map((entry, idx) => {
+                const isFullCombo = parseInt(entry.miss) === 0 && parseInt(entry.bad) === 0;
+                const fcBadge = isFullCombo ? '<span class="badge bg-success ms-2" style="font-size: 0.65rem; padding: 2px 6px;">FC</span>' : '';
+                return `
+                  <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem;">
+                    <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+                      <span style="font-weight: 900; color: var(--rg-primary); width: 16px;">${idx + 1}</span>
+                      <img src="?action=get_profile_picture&id=${entry.user_id}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;">
+                      <span class="text-white text-truncate fw-medium" style="max-width: 140px;">${escapeHTML(entry.player_name)}</span>
+                      ${fcBadge}
+                    </div>
+                    <div class="text-end" style="font-family: monospace;">
+                      <span class="text-white" style="font-weight: 700;">${parseInt(entry.score).toLocaleString()}</span>
+                      <div style="font-size: 0.7rem; color: #aaa;">Max Combo: ${entry.max_combo}x</div>
+                    </div>
+                  </div>
+                `;
+              }).join('');
+            } catch (err) {
+              console.error("Failed to load song specific leaderboard:", err);
+              container.innerHTML = '<div class="text-center text-danger small py-2">Failed to load scores.</div>';
+            }
+          }
+
+          onKeyDown(e) {
+            if (this.listeningLane !== null) {
+              this.KEY_CODES[this.listeningLane] = e.code;
+              let label = e.key.toUpperCase();
+              if (e.code.startsWith('Key')) label = e.code.replace('Key', '');
+              else if (e.code === 'Space') label = 'SPC';
+              this.KEY_LABELS[this.listeningLane] = label;
+              
+              const btn = document.querySelector(`.rg-key-btn[data-lane="${this.listeningLane}"]`);
+              if (btn) {
+                btn.textContent = label;
+                btn.classList.remove('listening');
+              }
+              this.listeningLane = null;
+              e.preventDefault();
+            } else if (this.isPlaying && !e.repeat) {
+              const idx = this.KEY_CODES.indexOf(e.code);
+              if (idx !== -1) {
+                this.activeKeysHeld[idx] = true;
+                this.processHit(idx);
+                e.preventDefault();
+                e.stopPropagation();
+              }
+            }
+          }
+
+          onKeyUp(e) {
+            if (this.isPlaying) {
+              const idx = this.KEY_CODES.indexOf(e.code);
+              if (idx !== -1) this.activeKeysHeld[idx] = false;
+            }
+          }
+
+          createSongElement(song) {
+            const el = document.createElement('div');
+            el.className = 'rg-list-item';
+            el.innerHTML = `
+              <div class="rg-list-item-info" style="min-width: 0;">
+                <img src="?action=get_image&id=${song.id}&v=${song.last_modified}" class="rg-cover-img">
+                <div class="text-truncate flex-grow-1 ms-1" style="min-width: 0;">
+                  <div class="rg-list-item-title text-truncate">${escapeHTML(song.title)}</div>
+                  <div class="rg-list-item-sub text-truncate">${escapeHTML(song.artist)}</div>
+                </div>
+              </div>
+              <div class="rg-list-item-actions">
+                <button class="rg-fav-btn ${song.rg_favorite == 1 ? 'active' : ''}"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i></button>
+                <button class="rg-play-btn">PLAY</button>
+              </div>
+            `;
+            const favBtn = el.querySelector('.rg-fav-btn');
+            favBtn.addEventListener('click', async (e) => {
+              e.stopPropagation();
+              const res = await fetchData('?action=toggle_rhythm_favorite', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ song_id: song.id })
+              });
+              if (res) {
+                song.rg_favorite = res.is_favorite;
+                favBtn.classList.toggle('active', song.rg_favorite == 1);
+                favBtn.innerHTML = `<i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i>`;
+                
+                if (song.rg_favorite == 1) {
+                  if (!this.favFilteredSongs.some(s => s.id === song.id)) {
+                    this.favFilteredSongs.push(song);
+                  }
+                } else {
+                  this.favFilteredSongs = this.favFilteredSongs.filter(s => s.id !== song.id);
+                }
+                
+                if (document.getElementById('rg-tab-favorites').classList.contains('rg-hidden') === false) {
+                  this.renderFavoritesList();
+                }
+              }
+            });
+            el.addEventListener('click', () => {
+              this.openPlayDialog(song);
+            });
+            return el;
+          }
+
+          async openPlayDialog(song) {
+            this.selectedSong = song;
+            document.getElementById('rg-dialog-song-name').textContent = song.title;
+            const container = document.getElementById('rg-song-leaderboard');
+            
+            // Set Loading State
+            container.innerHTML = '<div class="text-center text-secondary small py-2"><div class="spinner-border spinner-border-sm text-danger" style="border-width: 0.15em;"></div> Loading scores...</div>';
+            document.getElementById('rg-dialog-play').classList.remove('rg-hidden');
+
+            try {
+              // Fetch up to 25 scores for this specific song
+              const data = await fetchData(`?action=get_song_rhythm_leaderboard&song_id=${song.id}`, {}, true);
+              
+              if (!Array.isArray(data) || data.length === 0) {
+                container.innerHTML = '<div class="text-center text-secondary small py-2">No scores recorded yet. Be the first!</div>';
+                return;
+              }
+
+              // Render the leaderboard
+              container.innerHTML = data.map((entry, idx) => {
+                const isFullCombo = parseInt(entry.miss) === 0 && parseInt(entry.bad) === 0;
+                const fcBadge = isFullCombo ? '<span class="badge bg-success ms-2" style="font-size: 0.65rem; padding: 2px 6px;">FC</span>' : '';
+                return `
+                  <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem;">
+                    <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+                      <span style="font-weight: 900; color: var(--rg-primary); width: 16px;">${idx + 1}</span>
+                      <img src="?action=get_profile_picture&id=${entry.user_id}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;">
+                      <span class="text-white text-truncate fw-medium" style="max-width: 140px;">${escapeHTML(entry.player_name)}</span>
+                      ${fcBadge}
+                    </div>
+                    <div class="text-end" style="font-family: monospace;">
+                      <span class="text-white" style="font-weight: 700;">${parseInt(entry.score).toLocaleString()}</span>
+                      <div style="font-size: 0.7rem; color: #aaa;">Max Combo: ${entry.max_combo}x</div>
+                    </div>
+                  </div>
+                `;
+              }).join('');
+            } catch (err) {
+              console.error("Failed to load song specific leaderboard:", err);
+              container.innerHTML = '<div class="text-center text-danger small py-2">Failed to load scores.</div>';
+            }
+          }
+
+          renderSongsList() {
+            this.listSongsEl.innerHTML = '';
+            const chunk = this.filteredSongs.slice(0, this.renderLimit);
+            if (chunk.length === 0) {
+              this.listSongsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: #aaa;">No songs found.</div>';
+              return;
+            }
+            chunk.forEach(song => this.listSongsEl.appendChild(this.createSongElement(song)));
+          }
+
+          renderFavoritesList() {
+            this.listFavsEl.innerHTML = '';
+            const chunk = this.favFilteredSongs.slice(0, this.favRenderLimit);
+            if (chunk.length === 0) {
+              this.listFavsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite songs yet. Add some!</div>';
+              return;
+            }
+            chunk.forEach(song => this.listFavsEl.appendChild(this.createSongElement(song)));
+          }
+
+          async prepGame(song, diff) {
+            this.switchScreen('loading');
+            document.getElementById('rg-loading-cover').src = `?action=get_image&id=${song.id}&v=${song.last_modified}`;
+            document.getElementById('rg-loading-title').textContent = song.title;
+            const progressText = document.getElementById('rg-loading-text');
+            progressText.textContent = `Downloading 0%`;
+            
+            try {
+              if (this.audioCtx) this.audioCtx.close();
+              if (this.sfxCtx) this.sfxCtx.close();
+              this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+              this.sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
+              
+              const url = `?action=get_stream&id=${song.id}`;
+              const response = await fetch(url);
+              if (!response.ok) throw new Error(`Stream fetch failed: HTTP ${response.status}`);
+              
+              const contentLength = response.headers.get('content-length');
+              let arrayBuffer;
+              
+              // Custom fetch reader to display exact downloading percentage visually
+              if (contentLength) {
+                const total = parseInt(contentLength, 10);
+                let loaded = 0;
+                const reader = response.body.getReader();
+                const chunks = [];
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  chunks.push(value);
+                  loaded += value.length;
+                  const pct = Math.round((loaded / total) * 100);
+                  progressText.textContent = `Downloading ${pct}%`;
+                }
+                const blob = new Blob(chunks);
+                arrayBuffer = await blob.arrayBuffer();
+              } else {
+                progressText.textContent = `Downloading...`;
+                arrayBuffer = await response.arrayBuffer();
+              }
+              
+              progressText.textContent = `Decoding Audio...`;
+              this.audioBuffer = await this.audioCtx.decodeAudioData(arrayBuffer);
+              
+              progressText.textContent = `Building Chart...`;
+              this.generateChart(diff);
+              
+              if (this.audioPlayback) {
+                this.audioPlayback.pause();
+                this.audioPlayback.src = "";
+              }
+              
+              this.audioPlayback = new Audio(url);
+              this.audioPlayback.crossOrigin = 'anonymous';
+              
+              this.startGame(song.title, diff);
+            } catch (err) {
+              console.error("Game prep failed:", err);
+              showToast("Failed to process audio engine. The track format may be unsupported.", "error");
+              this.switchScreen('hub');
+            }
+          }
+
+          generateChart(diff) {
+            const channel = this.audioBuffer.getChannelData(0);
+            const sampleRate = this.audioBuffer.sampleRate;
+            
+            let peakThresholdScale = 0.2, spacingMinSec = 0.12, chanceLong = 0.15;
+            
+            if (diff === 'easy') { peakThresholdScale = 0.3; spacingMinSec = 0.20; chanceLong = 0.05; this.laneApproachSpeed = 1.0; }
+            else if (diff === 'medium') { peakThresholdScale = 0.2; spacingMinSec = 0.12; chanceLong = 0.15; this.laneApproachSpeed = 1.3; }
+            else if (diff === 'hard') { peakThresholdScale = 0.15; spacingMinSec = 0.07; chanceLong = 0.25; this.laneApproachSpeed = 1.6; }
+            else if (diff === 'expert') { peakThresholdScale = 0.1; spacingMinSec = 0.05; chanceLong = 0.35; this.laneApproachSpeed = 2.0; }
+            else if (diff === 'master') { peakThresholdScale = 0.05; spacingMinSec = 0.03; chanceLong = 0.45; this.laneApproachSpeed = 2.4; }
+
+            // Apply User Custom Multiplier Settings
+            this.laneApproachSpeed = this.laneApproachSpeed * this.userTickSpeed;
+
+            const frameSize = Math.floor(sampleRate * 0.025);
+            const energies = [];
+            let maxEnergy = 0;
+
+            for (let i = 0; i < channel.length; i += frameSize) {
+              let sum = 0;
+              const limit = Math.min(i + frameSize, channel.length);
+              for (let j = i; j < limit; j++) sum += channel[j] * channel[j];
+              const rms = Math.sqrt(sum / (limit - i));
+              energies.push({ time: i / sampleRate, rms });
+              if (rms > maxEnergy) maxEnergy = rms;
+            }
+
+            const threshold = maxEnergy * peakThresholdScale;
+            const notes = [];
+            let lastTime = -spacingMinSec;
+            let lastLane = -1;
+
+            for (let i = 1; i < energies.length - 1; i++) {
+              const curr = energies[i].rms;
+              if (curr > threshold && curr > energies[i-1].rms && curr > energies[i+1].rms) {
+                const t = energies[i].time;
+                if (t - lastTime >= spacingMinSec) {
+                  let lane = Math.floor(Math.random() * this.LANES);
+                  if (lane === lastLane) lane = (lane + 1) % this.LANES;
+                  
+                  const isLong = Math.random() < chanceLong;
+                  const dur = isLong ? 0.3 + (Math.random() * 0.6) : 0;
+                  
+                  notes.push({ time: t + 2.0, lane, isLong, endTime: t + 2.0 + dur, hitStart: false, hitEnd: false, missed: false, holding: false });
+                  lastTime = t + dur;
+                  lastLane = lane;
+                }
+              }
+            }
+            this.chartNotes = notes;
+          }
+
+          startGame(title, diff) {
+            this.switchScreen('game');
+            document.getElementById('rg-in-game-title').textContent = title;
+            document.getElementById('rg-in-game-diff').textContent = diff;
+            
+            this.curScore = 0; this.curCombo = 0; this.maxCombo = 0;
+            this.stats = { perfect: 0, great: 0, good: 0, bad: 0, miss: 0 };
+            this.updateHUD();
+            
+            this.canvas = document.getElementById('rg-game-canvas');
+            this.ctx = this.canvas.getContext('2d');
+            this.resizeCanvas();
+            
+            this.chartNotes.forEach(n => { n.hitStart=false; n.hitEnd=false; n.missed=false; n.holding=false; });
+            this.particles = []; this.feedbackTimer = 0;
+            
+            if (this.audioPlayback) this.audioPlayback.currentTime = 0;
+            
+            setTimeout(() => {
+              if (this.audioPlayback) this.audioPlayback.play().catch(e => console.warn(e));
+              this.isPlaying = true;
+              requestAnimationFrame(this.gameLoop.bind(this));
+            }, 1000);
+          }
+
+          resizeCanvas() {
+            if (!this.canvas) return;
+            const rect = this.canvas.parentNode.getBoundingClientRect();
+            this.canvas.width = rect.width * window.devicePixelRatio;
+            this.canvas.height = rect.height * window.devicePixelRatio;
+            this.canvas.style.width = rect.width + 'px';
+            this.canvas.style.height = rect.height + 'px';
+            this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+          }
+
+          playHitSFX() {
+            if (!this.sfxCtx) return;
+            if (this.sfxCtx.state === 'suspended') this.sfxCtx.resume();
+            const osc = this.sfxCtx.createOscillator();
+            const gain = this.sfxCtx.createGain();
+            osc.connect(gain); gain.connect(this.sfxCtx.destination);
+            osc.frequency.setValueAtTime(800, this.sfxCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(100, this.sfxCtx.currentTime + 0.05);
+            gain.gain.setValueAtTime(0.3, this.sfxCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, this.sfxCtx.currentTime + 0.05);
+            osc.start(); osc.stop(this.sfxCtx.currentTime + 0.05);
+          }
+
+          updateHUD() {
+            document.getElementById('rg-in-game-score').textContent = String(this.curScore).padStart(9, '0');
+            const cNum = document.getElementById('rg-in-game-combo');
+            const cLbl = document.getElementById('rg-in-game-combo-lbl');
+            if (this.curCombo >= 3) {
+              cNum.textContent = this.curCombo;
+              cNum.style.transform = "scale(1.2)";
+              setTimeout(() => cNum.style.transform = "scale(1)", 50);
+              cNum.style.opacity = "1"; cLbl.style.opacity = "1";
+            } else {
+              cNum.style.opacity = "0"; cLbl.style.opacity = "0";
+            }
+          }
+
+          showFeedback(txt, col) {
+            this.feedbackTxt = txt; this.feedbackCol = col;
+            this.feedbackTimer = 0.6; this.feedbackScale = 1.3;
+          }
+
+          registerMiss() {
+            this.curCombo = 0; this.stats.miss++;
+            this.updateHUD(); this.showFeedback("MISS", "#555");
+          }
+
+          processHit(lane) {
+            const time = this.audioPlayback.currentTime + (this.calibrationOffsetMs / 1000);
+            let tgt = null, minDiff = Infinity;
+
+            for (let i = 0; i < this.chartNotes.length; i++) {
+              const n = this.chartNotes[i];
+              if (n.lane === lane && !n.missed && !n.hitStart) {
+                const diff = Math.abs(time - n.time);
+                if (diff < minDiff && diff <= this.JUDGMENT.BAD) {
+                  minDiff = diff; tgt = n;
+                }
+              }
+            }
+
+            if (tgt) {
+              this.playHitSFX();
+              tgt.hitStart = true;
+              if (tgt.isLong) tgt.holding = true;
+              
+              let pts = 50, rating = "BAD", col = "#8e1c1c";
+              if (minDiff <= this.JUDGMENT.PERFECT) { rating = "PERFECT"; col = "#fff"; pts = 1000; this.stats.perfect++; }
+              else if (minDiff <= this.JUDGMENT.GREAT) { rating = "GREAT"; col = "#ff3b30"; pts = 750; this.stats.great++; }
+              else if (minDiff <= this.JUDGMENT.GOOD) { rating = "GOOD"; col = "#ffa000"; pts = 400; this.stats.good++; }
+              else this.stats.bad++;
+
+              if (rating !== "BAD") { this.curCombo++; if (this.curCombo > this.maxCombo) this.maxCombo = this.curCombo; }
+              else this.curCombo = 0;
+
+              this.curScore += pts;
+              this.updateHUD(); this.showFeedback(rating, col);
+              this.spawnParticles(lane, !tgt.isLong);
+            }
+          }
+
+          gameLoop() {
+            if (!this.isPlaying) return;
+            const time = this.audioPlayback.currentTime + (this.calibrationOffsetMs / 1000);
+
+            this.chartNotes.forEach(n => {
+              if (!n.missed) {
+                if (!n.isLong) {
+                  if (!n.hitStart && (time - n.time) > this.JUDGMENT.BAD) {
+                    n.missed = true; this.registerMiss();
+                  }
+                } else {
+                  if (!n.hitStart && (time - n.time) > this.JUDGMENT.BAD) {
+                    n.missed = true; this.registerMiss();
+                  } else if (n.hitStart && n.holding && !n.hitEnd) {
+                    if (!this.activeKeysHeld[n.lane] && time < n.endTime - this.JUDGMENT.GREAT) {
+                      n.holding = false; n.missed = true; this.registerMiss();
+                    } else if (time >= n.endTime - this.JUDGMENT.GREAT) {
+                      n.holding = false; n.hitEnd = true;
+                      this.curScore += 1000; this.stats.perfect++; this.curCombo++;
+                      if (this.curCombo > this.maxCombo) this.maxCombo = this.curCombo;
+                      this.updateHUD(); this.showFeedback("PERFECT", "#fff");
+                      this.spawnParticles(n.lane, true);
+                    }
+                  }
+                }
+              }
+            });
+
+            this.particles = this.particles.filter(p => {
+              p.x += p.vx; p.y += p.vy; p.life -= 0.04;
+              return p.life > 0;
+            });
+
+            if (this.feedbackTimer > 0) this.feedbackTimer -= 0.016;
+
+            const w = this.canvas.width / window.devicePixelRatio;
+            const h = this.canvas.height / window.devicePixelRatio;
+            this.ctx.fillStyle = "#000"; this.ctx.fillRect(0,0,w,h);
+
+            const vanY = h * 0.15, hwH = h * 0.72, judY = vanY + hwH;
+            const topW = w * 0.28, botW = w * 0.76;
+
+            const getPt = (lane, prog) => {
+              const ease = Math.pow(prog, 1.35);
+              const cY = vanY + ease * hwH;
+              const cW = topW + ease * (botW - topW);
+              const sW = cW / this.LANES;
+              return { x: (w/2) - (cW/2) + lane*sW, y: cY, w: sW };
+            };
+
+            this.ctx.beginPath();
+            this.ctx.moveTo((w/2)-(topW/2), vanY); this.ctx.lineTo((w/2)+(topW/2), vanY);
+            this.ctx.lineTo((w/2)+(botW/2), judY); this.ctx.lineTo((w/2)-(botW/2), judY);
+            this.ctx.fillStyle = "#0c0a0a"; this.ctx.fill();
+
+            this.ctx.strokeStyle = "#ff3b30"; this.ctx.lineWidth = 3;
+            this.ctx.beginPath(); this.ctx.moveTo((w/2)-(topW/2), vanY); this.ctx.lineTo((w/2)-(botW/2), judY); this.ctx.stroke();
+            this.ctx.beginPath(); this.ctx.moveTo((w/2)+(topW/2), vanY); this.ctx.lineTo((w/2)+(botW/2), judY); this.ctx.stroke();
+            
+            for (let i = 1; i < this.LANES; i++) {
+              this.ctx.strokeStyle = "#221111"; this.ctx.lineWidth = 1.5;
+              this.ctx.beginPath();
+              this.ctx.moveTo((w/2)-(topW/2)+i*(topW/this.LANES), vanY);
+              this.ctx.lineTo((w/2)-(botW/2)+i*(botW/this.LANES), judY);
+              this.ctx.stroke();
+            }
+
+            for (let i = 0; i < this.LANES; i++) {
+              if (this.activeKeysHeld[i]) {
+                const pTop = getPt(i, 0), pBot = getPt(i, 1);
+                this.ctx.fillStyle = "rgba(255, 59, 48, 0.15)";
+                this.ctx.beginPath();
+                this.ctx.moveTo(pTop.x, pTop.y); this.ctx.lineTo(pTop.x+pTop.w, pTop.y);
+                this.ctx.lineTo(pBot.x+pBot.w, pBot.y); this.ctx.lineTo(pBot.x, pBot.y);
+                this.ctx.fill();
+              }
+            }
+
+            this.ctx.strokeStyle = "#ff3b30"; this.ctx.lineWidth = 4;
+            this.ctx.beginPath();
+            this.ctx.moveTo((w/2)-(botW/2), judY); this.ctx.lineTo((w/2)+(botW/2), judY);
+            this.ctx.stroke();
+
+            for (let i = 0; i < this.LANES; i++) {
+              const pt = getPt(i, 1);
+              const cX = pt.x + pt.w/2;
+              this.ctx.beginPath(); this.ctx.arc(cX, judY, 16, 0, Math.PI*2);
+              this.ctx.fillStyle = "#121212";
+              this.ctx.strokeStyle = this.activeKeysHeld[i] ? "#fff" : "#ff3b30";
+              this.ctx.lineWidth = this.activeKeysHeld[i] ? 4 : 2;
+              this.ctx.fill(); this.ctx.stroke();
+
+              this.ctx.fillStyle = this.activeKeysHeld[i] ? "#000" : "#fff";
+              if (this.activeKeysHeld[i]) {
+                this.ctx.beginPath(); this.ctx.arc(cX, judY, 14, 0, Math.PI*2);
+                this.ctx.fillStyle = "#fff"; this.ctx.fill();
+                this.ctx.fillStyle = "#000";
+              }
+              this.ctx.font = "bold 14px sans-serif";
+              this.ctx.textAlign = "center";
+              this.ctx.textBaseline = "middle";
+              this.ctx.fillText(this.KEY_LABELS[i], cX, judY + 1);
+            }
+
+            const win = 1.2 / this.laneApproachSpeed;
+            
+            for (let i = 0; i < this.chartNotes.length; i++) {
+              const n = this.chartNotes[i];
+              if (n.missed || !n.isLong || n.hitEnd) continue;
+              
+              const sDel = n.time - time, eDel = n.endTime - time;
+              if (sDel > win && eDel > win) continue;
+              if (eDel < -this.JUDGMENT.BAD) continue;
+
+              const pS = Math.max(0, Math.min(1.2, 1 - (sDel/win)));
+              const pE = Math.max(0, Math.min(1.2, 1 - (eDel/win)));
+
+              const cS = getPt(n.lane, pS), cE = getPt(n.lane, pE);
+              const wS = cS.w * 0.8, wE = cE.w * 0.8;
+              
+              this.ctx.fillStyle = n.holding ? "#e60000" : "#801010";
+              this.ctx.beginPath();
+              this.ctx.moveTo(cS.x+(cS.w-wS)/2, cS.y); this.ctx.lineTo(cS.x+(cS.w+wS)/2, cS.y);
+              this.ctx.lineTo(cE.x+(cE.w+wE)/2, cE.y); this.ctx.lineTo(cE.x+(cE.w-wE)/2, cE.y);
+              this.ctx.fill();
+            }
+
+            for (let i = 0; i < this.chartNotes.length; i++) {
+              const n = this.chartNotes[i];
+              if (n.missed) continue;
+
+              if (!n.isLong && !n.hitStart) {
+                const del = n.time - time;
+                if (del <= win && del >= -this.JUDGMENT.BAD) {
+                  const p = 1 - (del/win);
+                  if (p >= 0 && p <= 1.2) {
+                    const pt = getPt(n.lane, p);
+                    const nW = pt.w * 0.85, nH = 10 + p*15;
+                    this.ctx.fillStyle = "#fff"; this.ctx.strokeStyle = "#ff3b30"; this.ctx.lineWidth = 2 + p*2;
+                    this.ctx.beginPath();
+                    this.ctx.roundRect(pt.x+(pt.w-nW)/2, pt.y-nH/2, nW, nH, 6);
+                    this.ctx.fill(); this.ctx.stroke();
+                  }
+                }
+              } else if (n.isLong) {
+                if (!n.hitStart) {
+                  const del = n.time - time;
+                  if (del <= win && del >= -this.JUDGMENT.BAD) {
+                    const p = 1 - (del/win);
+                    const pt = getPt(n.lane, p);
+                    const nW = pt.w * 0.85, nH = 10 + p*15;
+                    this.ctx.fillStyle = "#ff3b30"; this.ctx.strokeStyle = "#fff"; this.ctx.lineWidth = 2;
+                    this.ctx.beginPath();
+                    this.ctx.roundRect(pt.x+(pt.w-nW)/2, pt.y-nH/2, nW, nH, 6);
+                    this.ctx.fill(); this.ctx.stroke();
+                  }
+                }
+                if (!n.hitEnd) {
+                  const del = n.endTime - time;
+                  if (del <= win && del >= -this.JUDGMENT.BAD) {
+                    const p = 1 - (del/win);
+                    const pt = getPt(n.lane, p);
+                    const nW = pt.w * 0.85, nH = 10 + p*15;
+                    this.ctx.fillStyle = "#ff3b30"; this.ctx.strokeStyle = "#000"; this.ctx.lineWidth = 3;
+                    this.ctx.beginPath();
+                    this.ctx.roundRect(pt.x+(pt.w-nW)/2, pt.y-nH/2, nW, nH, 6);
+                    this.ctx.fill(); this.ctx.stroke();
+                  }
+                }
+              }
+            }
+
+            this.particles.forEach(p => {
+              this.ctx.beginPath(); this.ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+              this.ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${p.life})`; this.ctx.fill();
+            });
+
+            if (this.feedbackTimer > 0) {
+              this.ctx.save();
+              this.ctx.translate(w/2, h*0.55);
+              if (this.feedbackScale > 1) this.feedbackScale -= 0.05;
+              this.ctx.scale(this.feedbackScale, this.feedbackScale);
+              this.ctx.font = "bold 28px sans-serif";
+              this.ctx.textAlign = "center";
+              this.ctx.textBaseline = "middle";
+              this.ctx.fillStyle = this.feedbackCol;
+              this.ctx.fillText(this.feedbackTxt, 0, 0);
+              this.ctx.restore();
+            }
+
+            if (this.audioPlayback.ended || time > this.audioBuffer.duration + 2.0) {
+              this.endGame(); return;
+            }
+            requestAnimationFrame(this.gameLoop.bind(this));
+          }
+
+          spawnParticles(lane, white) {
+            const w = this.canvas.width / window.devicePixelRatio;
+            const h = this.canvas.height / window.devicePixelRatio;
+            const botW = w * 0.76;
+            const sW = botW / this.LANES;
+            const cX = (w/2) - (botW/2) + lane*sW + sW/2;
+            const cY = h*0.15 + h*0.72;
+            const col = white ? [255,255,255] : [255,59,48];
+            for (let i = 0; i < 15; i++) {
+              this.particles.push({
+                x: cX, y: cY,
+                vx: (Math.random()-0.5)*8, vy: (Math.random()-0.8)*10 - 2,
+                size: Math.random()*3+2, r: col[0], g: col[1], b: col[2], life: 1
+              });
+            }
+          }
+
+          async endGame() {
+            this.isPlaying = false;
+            if (this.audioPlayback) this.audioPlayback.pause();
+            this.switchScreen('result');
+            
+            document.getElementById('rg-res-score').textContent = String(this.curScore).padStart(9, '0');
+            document.getElementById('rg-res-max-combo').textContent = this.maxCombo;
+            document.getElementById('rg-res-perfect').textContent = this.stats.perfect;
+            document.getElementById('rg-res-great').textContent = this.stats.great;
+            document.getElementById('rg-res-good').textContent = this.stats.good;
+            document.getElementById('rg-res-bad').textContent = this.stats.bad;
+            document.getElementById('rg-res-miss').textContent = this.stats.miss;
+
+            if (this.curScore > 0 && this.selectedSong) {
+              await fetchData('?action=save_rhythm_score', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  song_id: this.selectedSong.id,
+                  score: this.curScore,
+                  max_combo: this.maxCombo,
+                  perfect: this.stats.perfect,
+                  great: this.stats.great,
+                  good: this.stats.good,
+                  bad: this.stats.bad,
+                  miss: this.stats.miss
+                })
+              });
+              this.loadLeaderboard();
+            }
+          }
+        }
+        
+        // --- Photo Editor Engine ---
+        class EditorEngine {
+          constructor() {
+            this.layers = [];
+            this.activeLayer = null;
+            this.bgColor = '#0A0A0A';
+            this.canvasW = 800;
+            this.canvasH = 800;
+            this.isDragging = false;
+            this.dragType = null;
+            this.dragStart = { x: 0, y: 0 };
+            this.layerStart = {};
+            this.loadState();
+          }
+
+          initDOM() {
+            this.canvas = document.getElementById('pe-main-canvas');
+            if (!this.canvas) return; // Prevent crashes if not mounted
+            this.ctx = this.canvas.getContext('2d');
+            this.overlay = document.getElementById('pe-overlay-canvas');
+            this.overlayCtx = this.overlay.getContext('2d');
+            this.workspace = document.getElementById('pe-workspace');
+            this.textEditor = document.getElementById('pe-text-editor');
+            this.panel = document.getElementById('pe-properties-panel');
+            this.panelContent = document.getElementById('pe-panel-content');
+            this.propBtn = document.getElementById('pe-btn-properties');
+
+            this.resizeCanvas();
+            window.removeEventListener('resize', this._resizeHandler);
+            this._resizeHandler = () => this.resizeCanvas();
+            window.addEventListener('resize', this._resizeHandler);
+
+            document.getElementById('pe-upload-img').addEventListener('change', (e) => this.handleImageUpload(e));
+            document.getElementById('pe-btn-add-text').addEventListener('click', () => this.addText());
+            document.getElementById('pe-btn-add-shape').addEventListener('click', () => this.addShape());
+            
+            this.propBtn.addEventListener('click', () => {
+              if (this.panel.classList.contains('open')) {
+                this.closePanel();
+              } else {
+                if (this.activeLayer) {
+                  this.buildProperties();
+                } else {
+                  this.showCanvasSettings();
+                }
+                this.panel.classList.add('open');
+                this.propBtn.classList.add('active');
+              }
+            });
+            
+            document.getElementById('pe-btn-close-panel').addEventListener('click', () => this.closePanel());
+            
+            // FIXED: Bind event listeners to both the desktop and mobile buttons
+            const dExport = document.getElementById('pe-btn-export-desktop');
+            const mExport = document.getElementById('pe-btn-export-mobile');
+            if (dExport) dExport.addEventListener('click', () => this.exportImage());
+            if (mExport) mExport.addEventListener('click', () => this.exportImage());
+
+            this.bindEvents();
+            this.render();
+          }
+
+          saveState() {
+            let safeLayers = this.layers.map(l => {
+              const clone = { ...l };
+              if (l.type === 'image' && l.img) {
+                // Downscale massively large images for localStorage safety
+                if (l.img.src.length > 2000000) {
+                   const tmpCanvas = document.createElement('canvas');
+                   const tCtx = tmpCanvas.getContext('2d');
+                   tmpCanvas.width = l.img.width > 1200 ? 1200 : l.img.width;
+                   tmpCanvas.height = l.img.height * (tmpCanvas.width / l.img.width);
+                   tCtx.drawImage(l.img, 0, 0, tmpCanvas.width, tmpCanvas.height);
+                   clone.imgSrc = tmpCanvas.toDataURL('image/jpeg', 0.8);
+                } else {
+                   clone.imgSrc = l.img.src;
+                }
+              }
+              delete clone.img;
+              return clone;
+            });
+            const state = { bgColor: this.bgColor, canvasW: this.canvasW, canvasH: this.canvasH, layers: safeLayers };
+            try {
+              localStorage.setItem('phpMusic_photoEditorState', JSON.stringify(state));
+            } catch (e) {
+              console.warn('Could not save photo editor state (Quota exceeded).');
+            }
+          }
+
+          loadState() {
+            try {
+              const saved = localStorage.getItem('phpMusic_photoEditorState');
+              if (saved) {
+                const state = JSON.parse(saved);
+                this.bgColor = state.bgColor || '#0A0A0A';
+                this.canvasW = state.canvasW || 800;
+                this.canvasH = state.canvasH || 800;
+                this.layers = [];
+                
+                let pendingImages = 0;
+                state.layers.forEach(l => {
+                  if (l.type === 'image' && l.imgSrc) {
+                    pendingImages++;
+                    const img = new Image();
+                    img.onload = () => {
+                      l.img = img;
+                      this.layers.push(l);
+                      pendingImages--;
+                      if (pendingImages === 0 && this.ctx) {
+                        this.layers.sort((a,b) => a.id - b.id);
+                        this.render();
+                      }
+                    };
+                    img.onerror = () => pendingImages--;
+                    img.src = l.imgSrc;
+                  } else {
+                    this.layers.push(l);
+                  }
+                });
+              }
+            } catch (e) { console.warn('Failed to load photo editor state', e); }
+          }
+
+          resizeCanvas() {
+            if (!this.workspace) return;
+            const maxWidth = this.workspace.clientWidth - 40;
+            const maxHeight = this.workspace.clientHeight - 40;
+            const ratio = Math.min(maxWidth / this.canvasW, maxHeight / this.canvasH);
+            const finalW = this.canvasW * ratio;
+            const finalH = this.canvasH * ratio;
+            
+            this.canvas.width = this.canvasW;
+            this.canvas.height = this.canvasH;
+            this.canvas.style.width = `${finalW}px`;
+            this.canvas.style.height = `${finalH}px`;
+            
+            this.overlay.width = this.canvasW;
+            this.overlay.height = this.canvasH;
+            this.overlay.style.width = `${finalW}px`;
+            this.overlay.style.height = `${finalH}px`;
+
+            this.render();
+          }
+
+          bindEvents() {
+            const ov = this.overlay;
+            ov.addEventListener('pointerdown', (e) => this.onPointerDown(e));
+            window.addEventListener('pointermove', (e) => this.onPointerMove(e));
+            window.addEventListener('pointerup', (e) => this.onPointerUp(e));
+
+            let lastTap = 0;
+            ov.addEventListener('pointerdown', (e) => {
+              const now = Date.now();
+              if (now - lastTap < 300) this.onDoubleClick(e);
+              lastTap = now;
+            });
+
+            this.textEditor.addEventListener('blur', () => this.commitTextEdit());
+            this.textEditor.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter') { e.preventDefault(); this.commitTextEdit(); }
+            });
+          }
+
+          getCoords(e) {
+            const rect = this.overlay.getBoundingClientRect();
+            const scaleX = this.canvasW / rect.width;
+            const scaleY = this.canvasH / rect.height;
+            return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+          }
+
+          hitTest(x, y) {
+            if (this.activeLayer) {
+              const handle = this.hitTestHandles(x, y, this.activeLayer);
+              if (handle) return { layer: this.activeLayer, type: handle };
+            }
+            for (let i = this.layers.length - 1; i >= 0; i--) {
+              const l = this.layers[i];
+              const cx = l.x + l.w / 2;
+              const cy = l.y + l.h / 2;
+              const dx = x - cx;
+              const dy = y - cy;
+              const rad = -l.rotation * Math.PI / 180;
+              const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
+              const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
+
+              if (rx >= -l.w/2 && rx <= l.w/2 && ry >= -l.h/2 && ry <= l.h/2) {
+                return { layer: l, type: 'move' };
+              }
+            }
+            return null;
+          }
+
+          hitTestHandles(x, y, l) {
+            const hs = 30;
+            const cx = l.x + l.w / 2;
+            const cy = l.y + l.h / 2;
+            const dx = x - cx;
+            const dy = y - cy;
+            const rad = -l.rotation * Math.PI / 180;
+            const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
+            const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
+
+            if (Math.abs(rx - l.w/2) < hs && Math.abs(ry - l.h/2) < hs) return 'resize';
+            if (Math.abs(rx) < hs && Math.abs(ry + l.h/2 + 40) < hs) return 'rotate';
+            return null;
+          }
+
+          onPointerDown(e) {
+            if (e.target === this.textEditor) return;
+            const pos = this.getCoords(e);
+            const hit = this.hitTest(pos.x, pos.y);
+
+            if (hit) {
+              this.activeLayer = hit.layer;
+              this.isDragging = true;
+              this.dragType = hit.type;
+              this.dragStart = pos;
+              this.layerStart = { x: hit.layer.x, y: hit.layer.y, w: hit.layer.w, h: hit.layer.h, r: hit.layer.rotation };
+              if (this.panel.classList.contains('open')) this.buildProperties();
+            } else {
+              this.activeLayer = null;
+              if (this.panel.classList.contains('open')) this.showCanvasSettings();
+            }
+            this.render();
+          }
+
+          onPointerMove(e) {
+            if (!this.isDragging || !this.activeLayer) return;
+            const pos = this.getCoords(e);
+            const dx = pos.x - this.dragStart.x;
+            const dy = pos.y - this.dragStart.y;
+            const l = this.activeLayer;
+
+            if (this.dragType === 'move') {
+              l.x = this.layerStart.x + dx;
+              l.y = this.layerStart.y + dy;
+            } else if (this.dragType === 'resize') {
+              const rad = l.rotation * Math.PI / 180;
+              const rdx = dx * Math.cos(-rad) - dy * Math.sin(-rad);
+              const rdy = dx * Math.sin(-rad) + dy * Math.cos(-rad);
+              l.w = Math.max(20, this.layerStart.w + rdx);
+              l.h = Math.max(20, this.layerStart.h + rdy);
+            } else if (this.dragType === 'rotate') {
+              const cx = l.x + l.w / 2;
+              const cy = l.y + l.h / 2;
+              const angle = Math.atan2(pos.y - cy, pos.x - cx) + Math.PI / 2;
+              l.rotation = angle * 180 / Math.PI;
+            }
+            if (this.panel.classList.contains('open')) this.updateInputsIfOpen();
+            this.render();
+          }
+
+          onPointerUp(e) {
+            if (this.isDragging) {
+              this.isDragging = false;
+              this.saveState();
+            }
+          }
+
+          onDoubleClick(e) {
+            if (!this.activeLayer || this.activeLayer.type !== 'text') return;
+            const l = this.activeLayer;
+            const rect = this.overlay.getBoundingClientRect();
+            const scaleX = rect.width / this.canvasW;
+            const scaleY = rect.height / this.canvasH;
+            
+            this.textEditor.style.display = 'block';
+            this.textEditor.value = l.text;
+            
+            const screenX = rect.left + l.x * scaleX;
+            const screenY = rect.top + l.y * scaleY;
+            
+            this.textEditor.style.left = `${screenX}px`;
+            this.textEditor.style.top = `${screenY}px`;
+            this.textEditor.style.fontSize = `${l.fontSize * scaleY}px`;
+            this.textEditor.style.color = l.color;
+            this.textEditor.style.transform = `rotate(${l.rotation}deg)`;
+            
+            l.isEditing = true;
+            this.render();
+            this.textEditor.focus();
+            this.textEditor.select();
+          }
+
+          commitTextEdit() {
+            if (this.textEditor.style.display === 'none') return;
+            if (this.activeLayer && this.activeLayer.type === 'text') {
+              this.activeLayer.text = this.textEditor.value || 'Text';
+              this.ctx.font = `bold ${this.activeLayer.fontSize}px sans-serif`;
+              const metrics = this.ctx.measureText(this.activeLayer.text);
+              this.activeLayer.w = metrics.width;
+              this.activeLayer.h = this.activeLayer.fontSize;
+              this.activeLayer.isEditing = false;
+            }
+            this.textEditor.style.display = 'none';
+            if (this.panel.classList.contains('open')) this.buildProperties();
+            this.render();
+            this.saveState();
+          }
+
+          createLayer(type) {
+            return {
+              id: Date.now(), type, x: this.canvasW / 2 - 100, y: this.canvasH / 2 - 100,
+              w: 200, h: 200, rotation: 0, opacity: 1, flipX: false, flipY: false,
+              cornerRadius: 0, brightness: 100, contrast: 100, grayscale: 0, isEditing: false
+            };
+          }
+
+          handleImageUpload(e) {
+            const files = e.target.files;
+            if (!files) return;
+            Array.from(files).forEach(file => {
+              const reader = new FileReader();
+              reader.onload = (ev) => {
+                const img = new Image();
+                img.onload = () => {
+                  const layer = this.createLayer('image');
+                  layer.img = img;
+                  const ratio = img.height / img.width;
+                  layer.w = 300;
+                  layer.h = 300 * ratio;
+                  layer.x = (this.canvasW - layer.w) / 2;
+                  layer.y = (this.canvasH - layer.h) / 2;
+                  this.layers.push(layer);
+                  this.activeLayer = layer;
+                  if (this.panel.classList.contains('open')) this.buildProperties();
+                  this.render();
+                  this.saveState();
+                };
+                img.src = ev.target.result;
+              };
+              reader.readAsDataURL(file);
+            });
+            e.target.value = '';
+          }
+
+          addText() {
+            const layer = this.createLayer('text');
+            layer.text = 'Double Tap to Edit';
+            layer.fontSize = 64;
+            layer.color = '#FFFFFF';
+            this.ctx.font = `bold ${layer.fontSize}px sans-serif`;
+            layer.w = this.ctx.measureText(layer.text).width;
+            layer.h = layer.fontSize;
+            layer.x = (this.canvasW - layer.w) / 2;
+            layer.y = (this.canvasH - layer.h) / 2;
+            this.layers.push(layer);
+            this.activeLayer = layer;
+            if (this.panel.classList.contains('open')) this.buildProperties();
+            this.render();
+            this.saveState();
+          }
+
+          addShape() {
+            const layer = this.createLayer('shape');
+            layer.shapeType = 'rect';
+            layer.color = '#FF0000';
+            layer.cornerRadius = 16;
+            this.layers.push(layer);
+            this.activeLayer = layer;
+            if (this.panel.classList.contains('open')) this.buildProperties();
+            this.render();
+            this.saveState();
+          }
+
+          showCanvasSettings() {
+            document.getElementById('pe-panel-title').innerText = 'Canvas Settings';
+            this.panelContent.innerHTML = `
+              <div class="pe-control-group">
+                <label>Background Color</label>
+                <input type="color" value="${this.bgColor}" id="pe-inp-bg">
+              </div>
+              <div class="pe-grid-2 mt-4">
+                <div class="pe-control-group">
+                  <label>Canvas Width</label>
+                  <input type="number" value="${this.canvasW}" id="pe-inp-cw">
+                </div>
+                <div class="pe-control-group">
+                  <label>Canvas Height</label>
+                  <input type="number" value="${this.canvasH}" id="pe-inp-ch">
+                </div>
+              </div>
+            `;
+            document.getElementById('pe-inp-bg').addEventListener('input', (e) => { 
+              this.bgColor = e.target.value; 
+              this.render(); 
+              this.saveState();
+            });
+            const resize = () => {
+              this.canvasW = parseInt(document.getElementById('pe-inp-cw').value) || 800;
+              this.canvasH = parseInt(document.getElementById('pe-inp-ch').value) || 600;
+              this.resizeCanvas();
+              this.saveState();
+            };
+            document.getElementById('pe-inp-cw').addEventListener('change', resize);
+            document.getElementById('pe-inp-ch').addEventListener('change', resize);
+          }
+
+          buildProperties() {
+            if (!this.activeLayer) return;
+            const l = this.activeLayer;
+            document.getElementById('pe-panel-title').innerText = l.type.charAt(0).toUpperCase() + l.type.slice(1) + ' Edit';
+            
+            const makeSlider = (id, label, min, max, val) => `
+              <div class="pe-control-group pe-slider-group">
+                <div class="pe-control-header">
+                  <label>${label}</label>
+                  <span id="pe-val-${id}">${Math.round(val)}</span>
+                </div>
+                <input type="range" id="pe-${id}" min="${min}" max="${max}" value="${val}">
+              </div>
+            `;
+
+            let html = `
+              <div class="pe-grid-2">
+                <div class="pe-control-group"><label>X Position</label><input type="number" id="pe-prop-x" value="${Math.round(l.x)}"></div>
+                <div class="pe-control-group"><label>Y Position</label><input type="number" id="pe-prop-y" value="${Math.round(l.y)}"></div>
+                <div class="pe-control-group"><label>Width</label><input type="number" id="pe-prop-w" value="${Math.round(l.w)}"></div>
+                <div class="pe-control-group"><label>Height</label><input type="number" id="pe-prop-h" value="${Math.round(l.h)}"></div>
+              </div>
+              
+              ${makeSlider('prop-rot', 'Rotation', -180, 180, l.rotation)}
+              ${makeSlider('prop-op', 'Opacity', 0, 100, l.opacity * 100)}
+            `;
+
+            if (l.type === 'shape') {
+              html += `
+                <div class="pe-control-group" style="margin-bottom: 24px;">
+                  <label>Shape</label>
+                  <select id="pe-prop-stype" style="margin-top: 8px;">
+                    <option value="rect" ${l.shapeType === 'rect' ? 'selected' : ''}>Rectangle</option>
+                    <option value="circle" ${l.shapeType === 'circle' ? 'selected' : ''}>Ellipse</option>
+                  </select>
+                </div>
+                <div class="pe-control-group">
+                  <label>Color</label>
+                  <input type="color" id="pe-prop-col" value="${l.color}">
+                </div>
+              `;
+              if (l.shapeType === 'rect') html += makeSlider('prop-rad', 'Corner Radius', 0, 200, l.cornerRadius);
+            }
+
+            if (l.type === 'image') {
+              html += makeSlider('prop-rad', 'Corner Radius', 0, 200, l.cornerRadius);
+              html += makeSlider('prop-bri', 'Brightness', 0, 200, l.brightness);
+              html += makeSlider('prop-con', 'Contrast', 0, 200, l.contrast);
+              html += makeSlider('prop-gray', 'Grayscale', 0, 100, l.grayscale);
+            }
+
+            if (l.type === 'text') {
+              html += `
+                <div class="pe-control-group">
+                  <label>Color</label>
+                  <input type="color" id="pe-prop-col" value="${l.color}">
+                </div>
+              `;
+              html += makeSlider('prop-fs', 'Font Size', 10, 300, l.fontSize);
+            }
+
+            html += `
+              <div class="pe-action-buttons">
+                ${(l.type === 'image' || l.type === 'shape') ? `
+                <div class="pe-btn-row">
+                  <button class="pe-btn" id="pe-btn-flip-h">Flip Horizontal</button>
+                  <button class="pe-btn" id="pe-btn-flip-v">Flip Vertical</button>
+                </div>` : ''}
+                <div class="pe-btn-row">
+                  <button class="pe-btn" id="pe-btn-up">Bring Forward</button>
+                  <button class="pe-btn" id="pe-btn-down">Send Back</button>
+                </div>
+                <div class="pe-btn-row">
+                  <button class="pe-btn" id="pe-btn-dup">Duplicate Layer</button>
+                  <button class="pe-btn error" id="pe-btn-del">Delete Layer</button>
+                </div>
+              </div>
+            `;
+
+            this.panelContent.innerHTML = html;
+
+            const bind = (id, key, parser, cb) => {
+              const el = document.getElementById('pe-' + id);
+              const valEl = document.getElementById('pe-val-' + id);
+              if (el) {
+                el.addEventListener('input', (e) => { 
+                  if (valEl) valEl.innerText = Math.round(e.target.value);
+                  l[key] = parser(e.target.value); 
+                  if (cb) cb(); 
+                  this.render(); 
+                  this.saveState();
+                });
+              }
+            };
+            
+            bind('prop-x', 'x', parseFloat); 
+            bind('prop-y', 'y', parseFloat);
+            bind('prop-w', 'w', parseFloat); 
+            bind('prop-h', 'h', parseFloat);
+            bind('prop-rot', 'rotation', parseFloat);
+            bind('prop-op', 'opacity', (v) => parseFloat(v)/100);
+            bind('prop-rad', 'cornerRadius', parseFloat);
+            bind('prop-col', 'color', String);
+            
+            const stype = document.getElementById('pe-prop-stype');
+            if (stype) {
+              stype.addEventListener('input', (e) => {
+                l.shapeType = e.target.value;
+                this.buildProperties(); 
+                this.saveState();
+              });
+            }
+            
+            bind('prop-fs', 'fontSize', parseFloat, () => {
+              this.ctx.font = `bold ${l.fontSize}px sans-serif`;
+              l.w = this.ctx.measureText(l.text).width;
+              l.h = l.fontSize;
+            });
+
+            bind('prop-bri', 'brightness', parseFloat);
+            bind('prop-con', 'contrast', parseFloat);
+            bind('prop-gray', 'grayscale', parseFloat);
+
+            const flipH = document.getElementById('pe-btn-flip-h');
+            if (flipH) flipH.addEventListener('click', () => { l.flipX = !l.flipX; this.render(); this.saveState(); });
+            
+            const flipV = document.getElementById('pe-btn-flip-v');
+            if (flipV) flipV.addEventListener('click', () => { l.flipY = !l.flipY; this.render(); this.saveState(); });
+
+            document.getElementById('pe-btn-up').addEventListener('click', () => this.reorder(1));
+            document.getElementById('pe-btn-down').addEventListener('click', () => this.reorder(-1));
+            document.getElementById('pe-btn-del').addEventListener('click', () => this.deleteActive());
+            document.getElementById('pe-btn-dup').addEventListener('click', () => this.duplicateActive());
+          }
+
+          updateInputsIfOpen() {
+            if (!this.activeLayer) return;
+            const setVal = (id, val) => { 
+              const el = document.getElementById('pe-' + id); 
+              if (el) el.value = Math.round(val); 
+              const valEl = document.getElementById('pe-val-' + id);
+              if (valEl) valEl.innerText = Math.round(val);
+            };
+            setVal('prop-x', this.activeLayer.x);
+            setVal('prop-y', this.activeLayer.y);
+            setVal('prop-w', this.activeLayer.w);
+            setVal('prop-h', this.activeLayer.h);
+            setVal('prop-rot', this.activeLayer.rotation);
+          }
+
+          reorder(dir) {
+            const idx = this.layers.indexOf(this.activeLayer);
+            if (idx < 0) return;
+            const newIdx = idx + dir;
+            if (newIdx >= 0 && newIdx < this.layers.length) {
+              const temp = this.layers[newIdx];
+              this.layers[newIdx] = this.layers[idx];
+              this.layers[idx] = temp;
+              this.render();
+              this.saveState();
+            }
+          }
+
+          deleteActive() {
+            this.layers = this.layers.filter(l => l !== this.activeLayer);
+            this.activeLayer = null;
+            this.closePanel();
+            this.render();
+            this.saveState();
+          }
+
+          duplicateActive() {
+            const clone = JSON.parse(JSON.stringify(this.activeLayer));
+            clone.id = Date.now();
+            clone.x += 20; clone.y += 20;
+            if (clone.type === 'image') clone.img = this.activeLayer.img;
+            this.layers.push(clone);
+            this.activeLayer = clone;
+            if (this.panel.classList.contains('open')) this.buildProperties();
+            this.render();
+            this.saveState();
+          }
+
+          closePanel() {
+            this.panel.classList.remove('open');
+            this.propBtn.classList.remove('active');
+          }
+
+          render() {
+            if (!this.ctx) return;
+            this.ctx.clearRect(0, 0, this.canvasW, this.canvasH);
+            this.ctx.fillStyle = this.bgColor;
+            this.ctx.fillRect(0, 0, this.canvasW, this.canvasH);
+
+            this.layers.forEach(l => {
+              this.ctx.save();
+              this.ctx.globalAlpha = l.opacity;
+              this.ctx.translate(l.x + l.w/2, l.y + l.h/2);
+              this.ctx.rotate(l.rotation * Math.PI / 180);
+              this.ctx.scale(l.flipX ? -1 : 1, l.flipY ? -1 : 1);
+              
+              this.ctx.filter = `brightness(${l.brightness}%) contrast(${l.contrast}%) grayscale(${l.grayscale}%)`;
+
+              if (l.type === 'image') {
+                if (l.cornerRadius > 0) {
+                  this.ctx.beginPath();
+                  this.ctx.roundRect(-l.w/2, -l.h/2, l.w, l.h, l.cornerRadius);
+                  this.ctx.clip();
+                }
+                this.ctx.drawImage(l.img, -l.w/2, -l.h/2, l.w, l.h);
+              } 
+              else if (l.type === 'shape') {
+                this.ctx.fillStyle = l.color;
+                this.ctx.beginPath();
+                if (l.shapeType === 'rect') {
+                  this.ctx.roundRect(-l.w/2, -l.h/2, l.w, l.h, l.cornerRadius || 0);
+                } else {
+                  this.ctx.ellipse(0, 0, l.w/2, l.h/2, 0, 0, Math.PI * 2);
+                }
+                this.ctx.fill();
+              }
+              else if (l.type === 'text') {
+                if (l.text && !l.isEditing) {
+                  this.ctx.font = `bold ${l.fontSize}px sans-serif`;
+                  this.ctx.fillStyle = l.color;
+                  this.ctx.textBaseline = 'top';
+                  this.ctx.fillText(l.text, -l.w/2, -l.h/2);
+                }
+              }
+              this.ctx.restore();
+            });
+
+            this.renderOverlay();
+          }
+
+          renderOverlay() {
+            this.overlayCtx.clearRect(0, 0, this.canvasW, this.canvasH);
+            if (!this.activeLayer) return;
+            const l = this.activeLayer;
+            const ctx = this.overlayCtx;
+            
+            ctx.save();
+            ctx.translate(l.x + l.w/2, l.y + l.h/2);
+            ctx.rotate(l.rotation * Math.PI / 180);
+            
+            ctx.strokeStyle = '#FF0000';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(-l.w/2, -l.h/2, l.w, l.h);
+            
+            ctx.fillStyle = '#4A0000';
+            ctx.strokeStyle = '#FFFFFF';
+            
+            ctx.beginPath(); ctx.arc(l.w/2, l.h/2, 10, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+            ctx.beginPath(); ctx.arc(0, -l.h/2 - 30, 10, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+            
+            ctx.beginPath(); ctx.moveTo(0, -l.h/2); ctx.lineTo(0, -l.h/2 - 20); ctx.stroke();
+            ctx.restore();
+          }
+
+          exportImage() {
+            this.activeLayer = null;
+            this.render();
+            const link = document.createElement('a');
+            link.download = `pro-edit-${Date.now()}.png`;
+            link.href = this.canvas.toDataURL('image/png');
+            link.click();
           }
         }
 
