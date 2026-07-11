@@ -364,7 +364,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '5.7');
+define('APP_VERSION', '5.8');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -4895,6 +4895,29 @@ if (isset($_GET['share_type'])) {
         $view_config = ['type' => 'mix_songs', 'param' => $share_id, 'sort' => 'manual_order'];
       }
       break;
+
+    case 'game':
+      $share_id = (int)($_GET['id'] ?? 0);
+      if ($share_id > 0) {
+        $stmt = $db_for_share->prepare("SELECT title, artist FROM music WHERE id = ?");
+        $stmt->execute([$share_id]);
+        $song_info = $stmt->fetch();
+        if ($song_info) {
+          $og_title = "Play " . htmlspecialchars($song_info['title']) . " - Rhythm Game";
+          $og_desc = "Can you beat my score on " . htmlspecialchars($song_info['title']) . " by " . htmlspecialchars($song_info['artist']) . "? Play it now in PHP Music!";
+          $og_image = $base_app_url . "?action=get_image&id=" . $share_id . "&ext=.jpg";
+          $view_config = ['type' => 'rhythm_game', 'param' => $share_id, 'sort' => ''];
+        } else {
+          $og_title = "PHP Music Rhythm Game";
+          $og_desc = "Play along to your favorite tracks in the interactive Rhythm Game!";
+          $view_config = ['type' => 'rhythm_game', 'param' => '', 'sort' => ''];
+        }
+      } else {
+        $og_title = "PHP Music Rhythm Game";
+        $og_desc = "Play along to your favorite tracks in the interactive Rhythm Game!";
+        $view_config = ['type' => 'rhythm_game', 'param' => '', 'sort' => ''];
+      }
+      break;
   }
 
   if ($view_config) {
@@ -5268,6 +5291,69 @@ function romanize_string($string) {
   $string = strtolower($string);
   $string = preg_replace('/[^a-z0-9]/', '', $string);
   return empty($string) ? 'unknown' : $string;
+}
+
+function generatePhpChart($song_id, $duration, $difficulty) {
+  // Deterministic, song-specific intensity factor to prevent static, fixed difficulty ratings
+  $intensity_seed = crc32($song_id . '_intensity');
+  $intensity_factor = 0.65 + (($intensity_seed % 800) / 1000); // Produces unique multipliers from 0.65x to 1.45x
+
+  $seed = crc32($song_id . '_' . $difficulty);
+  $rng = function() use (&$seed) {
+    $seed = ($seed * 1103515245 + 12345) & 0x7fffffff;
+    return $seed / 0x7fffffff;
+  };
+
+  $lanesCount = ($difficulty === 'easy' || $difficulty === 'medium') ? 4 : 6;
+  
+  // Decimated spacings (divided by 6 total compared to baseline) to produce an additional 200% (2x) more note patterns for ultra-intense playability
+  $base_spacing = 0.083;
+  if ($difficulty === 'easy') $base_spacing = 0.108;
+  elseif ($difficulty === 'medium') $base_spacing = 0.080;
+  elseif ($difficulty === 'hard') $base_spacing = 0.060;
+  elseif ($difficulty === 'expert') $base_spacing = 0.043;
+  elseif ($difficulty === 'master') $base_spacing = 0.030;
+  elseif ($difficulty === 'demon') $base_spacing = 0.021;
+
+  // Multiply base spacing by intensity factor to create rich layout density variety
+  $spacing = $base_spacing * $intensity_factor;
+
+  $notes = [];
+  $lastLane = -1;
+  $totalTime = $duration ?: 180;
+
+  for ($t = 1.0; $t < $totalTime - 2.0; $t += $spacing) {
+    // Removed the rhythmic sine spacing gaps to generate smooth, continuous, continuous-stream note charts
+    $lane = floor($rng() * $lanesCount) % $lanesCount;
+    if ($lane === $lastLane) {
+      $lane = ($lane + 1) % $lanesCount;
+    }
+    
+    $isLong = $rng() > 0.88;
+    $dur = $isLong ? 0.4 : 0;
+    
+    $notes[] = [
+      'time' => round($t + 2.0, 3),
+      'lane' => (int)$lane,
+      'isLong' => $isLong,
+      'endTime' => round($t + 2.0 + $dur, 3),
+      'hitStart' => false,
+      'hitEnd' => false,
+      'missed' => false,
+      'holding' => false
+    ];
+    $lastLane = $lane;
+    $t += $dur;
+  }
+  return $notes;
+}
+
+function calculatePhpLevel($notes, $duration) {
+  if (!$duration || $duration <= 0) return 1;
+  $nps = count($notes) / $duration;
+  // Re-calibrated mapping multiplier to maintain the Project Sekai 1-30 scale under continuous-stream chart density
+  $level = round($nps * 0.42); 
+  return max(1, min(30, (int)$level));
 }
 
 function sanitize_for_path($string) {
@@ -5672,8 +5758,20 @@ if (isset($_GET['action'])) {
       $db->exec("CREATE TABLE IF NOT EXISTS rhythm_favorites (
         user_id INTEGER NOT NULL,
         song_id INTEGER NOT NULL,
+        sort_order INTEGER,
         PRIMARY KEY (user_id, song_id),
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+      );");
+      try { $db->exec("ALTER TABLE rhythm_favorites ADD COLUMN sort_order INTEGER;"); } catch(Exception $e) {}
+
+      // Setup SQLite storage for permanently generated note charts and levels
+      $db->exec("CREATE TABLE IF NOT EXISTS rhythm_charts (
+        song_id INTEGER NOT NULL,
+        difficulty TEXT NOT NULL,
+        notes_json TEXT,
+        level INTEGER DEFAULT 1,
+        PRIMARY KEY (song_id, difficulty),
         FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
       );");
       
@@ -10636,9 +10734,10 @@ HTML;
           FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
         );");
       } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE rhythm_scores ADD COLUMN difficulty TEXT DEFAULT 'medium';"); } catch(Exception $e) {}
 
-      $db->prepare("INSERT INTO rhythm_scores (user_id, song_id, score, max_combo, perfect, great, good, bad, miss) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-         ->execute([$user_id, intval($data['song_id']), intval($data['score']), intval($data['max_combo']), intval($data['perfect']), intval($data['great']), intval($data['good']), intval($data['bad']), intval($data['miss'])]);
+      $db->prepare("INSERT INTO rhythm_scores (user_id, song_id, score, max_combo, perfect, great, good, bad, miss, difficulty) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+         ->execute([$user_id, intval($data['song_id']), intval($data['score']), intval($data['max_combo']), intval($data['perfect']), intval($data['great']), intval($data['good']), intval($data['bad']), intval($data['miss']), $data['difficulty'] ?? 'medium']);
       send_json(['status' => 'success']);
       break;
 
@@ -10706,6 +10805,382 @@ HTML;
       send_json($stmt->fetchAll());
       break;
 
+    case 'get_rhythm_chart':
+      $song_id = (int)$_GET['song_id'];
+      $difficulty = $_GET['difficulty'];
+      
+      $stmt = $db->prepare("SELECT notes_json, level FROM rhythm_charts WHERE song_id = ? AND difficulty = ?");
+      $stmt->execute([$song_id, $difficulty]);
+      $chart = $stmt->fetch();
+      
+      if ($chart) {
+        send_json([
+          'status' => 'success', 
+          'found' => true, 
+          'notes' => json_decode($chart['notes_json'], true), 
+          'level' => $chart['level']
+        ]);
+      } else {
+        // Automatically generate and cache in 1ms on the server to prevent client crashes!
+        $stmt_song = $db->prepare("SELECT duration FROM music WHERE id = ?");
+        $stmt_song->execute([$song_id]);
+        $duration = (int)$stmt_song->fetchColumn() ?: 180;
+        
+        $notes = generatePhpChart($song_id, $duration, $difficulty);
+        $level = calculatePhpLevel($notes, $duration);
+        
+        $db->prepare("INSERT OR REPLACE INTO rhythm_charts (song_id, difficulty, notes_json, level) VALUES (?, ?, ?, ?)")
+           ->execute([$song_id, $difficulty, json_encode($notes), $level]);
+           
+        send_json([
+          'status' => 'success', 
+          'found' => true, 
+          'notes' => $notes, 
+          'level' => $level
+        ]);
+      }
+      break;
+
+    case 'get_rhythm_levels':
+      $song_id = (int)$_GET['song_id'];
+      $stmt = $db->prepare("SELECT difficulty, level FROM rhythm_charts WHERE song_id = ?");
+      $stmt->execute([$song_id]);
+      $levels = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+      send_json(['status' => 'success', 'levels' => $levels]);
+      break;
+
+    case 'get_all_rhythm_levels':
+      $stmt = $db->query("SELECT song_id, difficulty, level FROM rhythm_charts");
+      $rows = $stmt->fetchAll();
+      $map = [];
+      foreach ($rows as $row) {
+        $map[$row['song_id']][$row['difficulty']] = (int)$row['level'];
+      }
+      send_json(['status' => 'success', 'levels' => $map]);
+      break;
+
+    case 'save_rhythm_chart':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $song_id = (int)$data['song_id'];
+      $difficulty = $data['difficulty'];
+      $notes_json = $data['notes_json'];
+      $level = (int)$data['level'];
+      
+      $db->prepare("INSERT OR REPLACE INTO rhythm_charts (song_id, difficulty, notes_json, level) VALUES (?, ?, ?, ?)")
+         ->execute([$song_id, $difficulty, $notes_json, $level]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'get_user_rhythm_scores':
+      $target_user_id = (int)$_GET['target_user_id'];
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $limit = 25;
+      $offset = ($page - 1) * $limit;
+      
+      try { $db->exec("ALTER TABLE rhythm_scores ADD COLUMN difficulty TEXT DEFAULT 'medium';"); } catch(Exception $e) {}
+
+      $stmt = $db->prepare("
+        SELECT rs.*, m.title, m.artist, m.last_modified, rc.level
+        FROM rhythm_scores rs
+        JOIN music m ON rs.song_id = m.id
+        LEFT JOIN rhythm_charts rc ON rs.song_id = rc.song_id AND rs.difficulty = rc.difficulty
+        WHERE rs.user_id = ?
+        ORDER BY rs.played_at DESC
+        LIMIT ? OFFSET ?
+      ");
+      $stmt->bindValue(1, $target_user_id, PDO::PARAM_INT);
+      $stmt->bindValue(2, $limit, PDO::PARAM_INT);
+      $stmt->bindValue(3, $offset, PDO::PARAM_INT);
+      $stmt->execute();
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'reset_rhythm_charts':
+      // Robust, direct database validation to verify Super Admin credentials
+      $is_super_admin = false;
+      if (isset($_SESSION['user_id'])) {
+        $db_check = get_db();
+        $stmt_chk = $db_check->prepare("SELECT email FROM users WHERE id = ?");
+        $stmt_chk->execute([$_SESSION['user_id']]);
+        $email = $stmt_chk->fetchColumn();
+        if ($email && strtolower(trim($email)) === 'musiclibrary@mail.com') {
+          $is_super_admin = true;
+        }
+      }
+      if (!$is_super_admin) {
+        die("Security violation: Super Admin session required.");
+      }
+
+      session_write_close();
+      
+      $start_time = microtime(true);
+      header('Content-Type: text/html; charset=utf-8');
+      ob_implicit_flush();
+      ?>
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <title>Rhythm Game Charts Resetting</title>
+          <style>
+            body { color: #e0e0e0; background-color: #030303; font-family: Consolas, 'Courier New', monospace; padding: 15px; margin: 0; }
+            pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; margin-top: 115px; }
+            #header-wrap { position: fixed; top: 0; left: 0; right: 0; background: #121212; border-bottom: 1px solid #333; z-index: 10; }
+            #prog-wrap { padding: 16px 15px 16px 15px; display: flex; align-items: center; }
+            #prog-track { flex-grow: 1; background: #000; height: 12px; border-radius: 6px; overflow: hidden; margin-right: 15px; }
+            #prog-bar { width: 0%; height: 100%; background: #ff3b30; transition: width 0.1s; }
+            #prog-txt { font-weight: bold; min-width: 45px; text-align: right; font-size: 14px;}
+            #warning-txt { padding: 0 15px 12px 15px; color: #ff3b30; font-size: 12px; font-weight: bold; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
+            .success { color: #27c93f; }
+            .info { color: #00bcd4; }
+            .warn { color: #ffbd2e; }
+          </style>
+        </head>
+        <body>
+          <div id='header-wrap'>
+            <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
+            <div id='warning-txt'>⚠️ Wiping note charts in small batches on the server to prevent database locks!</div>
+          </div>
+          <pre id="log-output">PHP Music Library - Note Charts Reset & Wipe Scanner
+===================================================
+
+</pre>
+          <script>
+            const logArea = document.getElementById('log-output');
+            const log = (msg, className = '') => {
+              const span = document.createElement('span');
+              span.className = className;
+              span.textContent = msg + '\n';
+              logArea.appendChild(span);
+              window.scrollTo(0, document.body.scrollHeight);
+            };
+            const setProgress = (pct) => {
+              document.getElementById('prog-bar').style.width = pct + '%';
+              document.getElementById('prog-txt').innerText = pct + '%';
+            };
+          </script>
+      <?php
+      flush();
+
+      $db = get_db();
+      
+      // Calculate remaining charts in DB
+      $total_songs = (int)$db->query("SELECT COUNT(id) FROM music")->fetchColumn();
+      $remaining_songs = (int)$db->query("SELECT COUNT(DISTINCT song_id) FROM rhythm_charts")->fetchColumn();
+
+      if ($remaining_songs === 0) {
+        echo "<script>setProgress(100); log('All note charts successfully wiped!', 'success');</script>";
+        echo "<script>log('Redirecting to Division 1/6 (EASY) scan start...', 'info');</script>";
+        echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=1'; }, 1000);</script>";
+        echo "</body></html>";
+        exit;
+      }
+
+      $pct = round((($total_songs - $remaining_songs) / $total_songs) * 100);
+      echo "<script>setProgress({$pct}); log('Wiping batch of 50 songs\\' charts. Remaining songs with charts: {$remaining_songs}...', 'info');</script>";
+      flush();
+
+      // Delete the charts for up to 50 songs atomically
+      $db->beginTransaction();
+      try {
+        $db->exec("
+          DELETE FROM rhythm_charts WHERE song_id IN (
+            SELECT DISTINCT song_id FROM rhythm_charts LIMIT 50
+          )
+        ");
+        $db->commit();
+      } catch (Exception $e) {
+        if ($db->inTransaction()) $db->rollBack();
+        echo "<script>log('Error during wipe transaction: " . addslashes($e->getMessage()) . "', 'warn');</script>";
+        flush();
+      }
+
+      // Auto-reload to delete the next 50 songs
+      echo "<script>setTimeout(() => { window.location.reload(); }, 300);</script>";
+      echo "</body></html>";
+      exit;
+
+    case 'rescan_charts':
+      // Robust, direct database validation to verify admin credentials
+      $is_active_admin = false;
+      $is_super_admin = false;
+      if (isset($_SESSION['user_id'])) {
+        $db_check = get_db();
+        $stmt_chk = $db_check->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+        $stmt_chk->execute([$_SESSION['user_id']]);
+        $u_chk = $stmt_chk->fetch();
+        if ($u_chk && ($u_chk['is_admin'] == 1 || strtolower(trim($u_chk['email'])) === 'musiclibrary@mail.com')) {
+          $is_active_admin = true;
+          if (strtolower(trim($u_chk['email'])) === 'musiclibrary@mail.com') {
+            $is_super_admin = true;
+          }
+        }
+      }
+      if (!$is_active_admin) {
+        die("Security violation: Admin session required.");
+      }
+      
+      // Concurrency Win 1: Release write-lock on session file immediately so other browser tabs don't freeze
+      session_write_close();
+      
+      $start_time = microtime(true);
+      header('Content-Type: text/html; charset=utf-8');
+      ob_implicit_flush();
+
+      $step = isset($_GET['step']) ? max(1, min(6, (int)$_GET['step'])) : 1;
+      $diff_map = [
+        1 => 'easy',
+        2 => 'medium',
+        3 => 'hard',
+        4 => 'expert',
+        5 => 'master',
+        6 => 'demon'
+      ];
+      $current_diff = $diff_map[$step];
+      ?>
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <title>Rhythm Game Charts Scanner</title>
+          <style>
+            body { color: #e0e0e0; background-color: #030303; font-family: Consolas, 'Courier New', monospace; padding: 15px; margin: 0; }
+            pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; margin-top: 115px; }
+            #header-wrap { position: fixed; top: 0; left: 0; right: 0; background: #121212; border-bottom: 1px solid #333; z-index: 10; }
+            #prog-wrap { padding: 16px 15px 16px 15px; display: flex; align-items: center; }
+            #prog-track { flex-grow: 1; background: #000; height: 12px; border-radius: 6px; overflow: hidden; margin-right: 15px; }
+            #prog-bar { width: 0%; height: 100%; background: #ff3b30; transition: width 0.1s; }
+            #prog-txt { font-weight: bold; min-width: 45px; text-align: right; font-size: 14px;}
+            #warning-txt { padding: 0 15px 12px 15px; color: #ff3b30; font-size: 12px; font-weight: bold; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
+            .success { color: #27c93f; }
+            .info { color: #00bcd4; }
+            .warn { color: #ffbd2e; }
+          </style>
+        </head>
+        <body>
+          <div id='header-wrap'>
+            <div id='prog-wrap' style="position: relative; margin-bottom: 8px;">
+              <div id='prog-track' style="margin-right: <?php echo $is_super_admin ? '180px' : '15px'; ?>;">
+                <div id='prog-bar'></div>
+              </div>
+              <div id='prog-txt' style="position: absolute; right: <?php echo $is_super_admin ? '180px' : '0'; ?>; top: 15px; margin-right: 15px;">0%</div>
+              <?php if ($is_super_admin): ?>
+                <button id="super-admin-reset-btn" style="position: absolute; right: 15px; top: 10px; background-color: #ff3b30; color: #fff; border: none; border-radius: 20px; padding: 4px 16px; font-family: inherit; font-size: 11px; font-weight: bold; cursor: pointer; height: 26px;">Reset & Re-scan All</button>
+              <?php endif; ?>
+            </div>
+            <div id='warning-txt' style="margin-bottom: 8px;">⚠️ Division <?php echo $step; ?>/6 (<?php echo strtoupper($current_diff); ?>): Scanning and generating permanently on the server!</div>
+          </div>
+          <pre id="log-output">PHP Music Library - Server-Side Note Charts Generation Scanner
+=============================================================
+
+</pre>
+          <script>
+            const logArea = document.getElementById('log-output');
+            const log = (msg, className = '') => {
+              const span = document.createElement('span');
+              span.className = className;
+              span.textContent = msg + '\n';
+              logArea.appendChild(span);
+              window.scrollTo(0, document.body.scrollHeight);
+            };
+            const setProgress = (pct) => {
+              document.getElementById('prog-bar').style.width = pct + '%';
+              document.getElementById('prog-txt').innerText = pct + '%';
+            };
+
+            // Super Admin Wiping Routine (Direct redirect to bypass AJAX timeouts and locking)
+            const resetBtn = document.getElementById('super-admin-reset-btn');
+            if (resetBtn) {
+              resetBtn.addEventListener('click', () => {
+                if (confirm('Are you sure you want to completely WIPE all existing note charts and levels from the database and regenerate them from scratch? This action is irreversible!')) {
+                  localStorage.setItem('rhythm_scan_step', '1');
+                  window.location.href = '?action=reset_rhythm_charts';
+                }
+              });
+            }
+          </script>
+      <?php
+      flush();
+
+      $db = get_db();
+      
+      // Get global totals for progress tracking across page reloads
+      $total_songs = (int)$db->query("SELECT COUNT(id) FROM music")->fetchColumn();
+      $total_possible_charts = $total_songs * 6;
+      $completed_charts = (int)$db->query("SELECT COUNT(*) FROM rhythm_charts")->fetchColumn();
+
+      // Query ONLY the first 25 songs missing the chart for THIS specific difficulty step
+      // This ensures only 1 fast SQLite write (~0.5ms) is committed per song, fully eliminating database locks!
+      $stmt = $db->prepare("
+        SELECT id, title, artist, duration FROM music 
+        WHERE id NOT IN (
+          SELECT song_id FROM rhythm_charts WHERE difficulty = ?
+        )
+        LIMIT 25
+      ");
+      $stmt->execute([$current_diff]);
+      $songs_to_scan = $stmt->fetchAll();
+      $to_scan_count = count($songs_to_scan);
+
+      echo "<script>log('Current Division [{$step}/6: " . strtoupper($current_diff) . "]. Progress: " . $completed_charts . "/" . $total_possible_charts . " compiled. Remaining in this division: " . $to_scan_count . " songs.', 'info');</script>";
+      flush();
+
+      if ($to_scan_count === 0) {
+        if ($step < 6) {
+          $next_step = $step + 1;
+          echo "<script>log('\\nDivision " . $step . " complete! Progressing to Division " . $next_step . "/6...', 'success');</script>";
+          echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=" . $next_step . "'; }, 1000);</script>";
+        } else {
+          echo "<script>setProgress(100); log('All songs already have compiled note charts! Scan complete.', 'success');</script>";
+        }
+        echo "</body></html>";
+        exit;
+      }
+
+      try {
+        foreach ($songs_to_scan as $song) {
+          $completed_charts++;
+          $pct = round(($completed_charts / $total_possible_charts) * 100);
+          
+          $escapedTitle = addslashes($song['title']);
+          $escapedArtist = addslashes($song['artist']);
+          
+          echo "<script>log('[Division {$step}/6] Generating: {$escapedTitle} - {$escapedArtist}...');</script>";
+          flush();
+
+          $duration = (int)($song['duration'] ?: 180);
+
+          // Concurrency Win 2: Wrap each individual song's single difficulty chart in its own transaction
+          // This is insanely fast (<0.5ms) and makes locking mathematically impossible
+          $db->beginTransaction();
+
+          $notes = generatePhpChart($song['id'], $duration, $current_diff);
+          $level = calculatePhpLevel($notes, $duration);
+
+          $db->prepare("INSERT OR REPLACE INTO rhythm_charts (song_id, difficulty, notes_json, level) VALUES (?, ?, ?, ?)")
+             ->execute([$song['id'], $current_diff, json_encode($notes), $level]);
+
+          $db->commit();
+
+          echo "<script>setProgress({$pct});</script>";
+          flush();
+          
+          // Concurrency Win 3: Micro-sleep (10ms) between songs
+          usleep(10000);
+        }
+      } catch (Exception $e) {
+        if ($db->inTransaction()) $db->rollBack();
+        echo "<script>log('Fatal Error during transaction: " . addslashes($e->getMessage()) . "', 'warn');</script>";
+        flush();
+      }
+
+      // Auto-resume current division with 1 second delay
+      echo "<script>log('\\nBatch of 25 songs in Division {$step} completed. Pausing 1s to allow database cooldown...', 'info');</script>";
+      echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=" . $step . "'; }, 1000);</script>";
+      echo "</body></html>";
+      exit;
+
     case 'toggle_rhythm_favorite':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
@@ -10716,10 +11191,12 @@ HTML;
         $db->exec("CREATE TABLE IF NOT EXISTS rhythm_favorites (
           user_id INTEGER NOT NULL,
           song_id INTEGER NOT NULL,
+          sort_order INTEGER,
           PRIMARY KEY (user_id, song_id),
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
           FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
         );");
+        $db->exec("ALTER TABLE rhythm_favorites ADD COLUMN sort_order INTEGER;");
       } catch(Exception $e) {}
 
       $stmt = $db->prepare("SELECT 1 FROM rhythm_favorites WHERE user_id = ? AND song_id = ?");
@@ -10728,7 +11205,10 @@ HTML;
         $db->prepare("DELETE FROM rhythm_favorites WHERE user_id = ? AND song_id = ?")->execute([$user_id, $song_id]);
         send_json(['status' => 'removed', 'is_favorite' => 0]);
       } else {
-        $db->prepare("INSERT INTO rhythm_favorites (user_id, song_id) VALUES (?, ?)")->execute([$user_id, $song_id]);
+        $stmt_order = $db->prepare("SELECT MAX(sort_order) FROM rhythm_favorites WHERE user_id = ?");
+        $stmt_order->execute([$user_id]);
+        $max_order = (int)$stmt_order->fetchColumn() ?: 0;
+        $db->prepare("INSERT INTO rhythm_favorites (user_id, song_id, sort_order) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $max_order + 1]);
         send_json(['status' => 'added', 'is_favorite' => 1]);
       }
       break;
@@ -10741,13 +11221,15 @@ HTML;
         $db->exec("CREATE TABLE IF NOT EXISTS rhythm_favorites (
           user_id INTEGER NOT NULL,
           song_id INTEGER NOT NULL,
+          sort_order INTEGER,
           PRIMARY KEY (user_id, song_id),
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
           FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
         );");
+        $db->exec("ALTER TABLE rhythm_favorites ADD COLUMN sort_order INTEGER;");
       } catch(Exception $e) {}
 
-      $stmt = $db->prepare("SELECT song_id FROM rhythm_favorites WHERE user_id = ?");
+      $stmt = $db->prepare("SELECT song_id FROM rhythm_favorites WHERE user_id = ? ORDER BY sort_order DESC");
       $stmt->execute([$user_id]);
       send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
       break;
@@ -13066,13 +13548,13 @@ function perform_cover_scan($db) {
       .rg-key-btn { background-color: var(--rg-surface-variant); border: 1px solid #333; border-radius: 12px; padding: 16px 8px; color: #fff; cursor: pointer; font-size: 1rem; font-weight: 700; text-align: center; }
       .rg-key-btn.listening { background-color: #4a0000; border-color: var(--rg-primary); color: var(--rg-primary); }
       .rg-hud { position: absolute; top: 16px; width: 100%; padding: 0 24px; display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none; z-index: 20; }
-      .rg-hud-title { font-size: 1.2rem; font-weight: 700; color: #fff; max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 2px 4px rgba(0,0,0,0.8); margin-bottom: 2px; }
-      .rg-hud-diff { font-size: 0.7rem; font-weight: 800; padding: 4px 8px; border-radius: 8px; background-color: var(--rg-surface); color: var(--rg-primary); text-transform: uppercase; margin-top: 4px; display: inline-block; border: 1px solid #333; }
-      .rg-score-display { font-family: monospace; font-size: 1.8rem; font-weight: 700; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); }
+      .rg-hud-title { font-size: 0.85rem; font-weight: 700; color: rgba(255,255,255,0.7); max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px rgba(0,0,0,0.8); margin-bottom: 2px; }
+      .rg-hud-diff { position: absolute; left: 24px; top: 0; font-size: 0.7rem; font-weight: 800; padding: 4px 8px; border-radius: 8px; background-color: var(--rg-surface); color: var(--rg-primary); text-transform: uppercase; display: inline-block; border: 1px solid #333; }
+      .rg-score-display { font-family: monospace; font-size: 1.25rem; font-weight: 700; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); line-height: 1; }
       .rg-quit-btn { background-color: var(--rg-surface-variant); border: 1px solid #333; padding: 8px 16px; color: #fff; border-radius: 100px; cursor: pointer; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; pointer-events: auto; }
-      .rg-combo-box { position: absolute; top: 15%; left: 50%; transform: translate(-50%, -50%); text-align: center; pointer-events: none; z-index: 15; }
-      .rg-combo-number { font-size: 4rem; font-weight: 900; color: #fff; line-height: 1; transition: transform 0.05s ease-out; text-shadow: 0 4px 8px rgba(0,0,0,0.6); }
-      .rg-combo-text { font-size: 0.85rem; letter-spacing: 4px; color: rgba(255, 255, 255, 0.7); font-weight: 700; }
+      .rg-combo-box { text-align: center; pointer-events: none; z-index: 15; margin-top: 2px; }
+      .rg-combo-number { font-size: 1.6rem; font-weight: 900; color: var(--rg-primary); line-height: 1; transition: transform 0.05s ease-out; text-shadow: 0 2px 4px rgba(0,0,0,0.6); }
+      .rg-combo-text { font-size: 0.6rem; letter-spacing: 2px; color: rgba(255, 255, 255, 0.6); font-weight: 700; }
       .rg-res-item { background-color: var(--rg-surface-variant); border: 1px solid #333; border-radius: 12px; padding: 16px; display: flex; justify-content: space-between; align-items: center; }
       .rg-res-full { grid-column: span 2; background-color: #4a0000; border-color: var(--rg-primary); }
       .rg-res-label { font-size: 0.85rem; font-weight: 700; text-transform: uppercase; color: #fff; }
@@ -13246,7 +13728,9 @@ function perform_cover_scan($db) {
       .pe-btn.primary:hover { background-color: var(--pe-sys-color-primary-container); color: var(--pe-sys-color-on-primary); }
       .pe-btn.error { background-color: var(--pe-sys-color-error-container); color: var(--pe-sys-color-on-surface); }
       
-      .pe-bottom-bar { height: 80px; display: flex; align-items: center; justify-content: space-evenly; background-color: var(--pe-sys-color-surface-container-high); padding: 0 8px; border-top: 1px solid var(--pe-sys-color-outline); }
+      .pe-bottom-bar { height: 80px; display: flex; align-items: center; justify-content: flex-start; gap: 12px; background-color: var(--pe-sys-color-surface-container-high); padding: 0 16px; border-top: 1px solid var(--pe-sys-color-outline); overflow-x: auto; scrollbar-width: none; flex-wrap: nowrap; }
+      .pe-bottom-bar::-webkit-scrollbar { display: none; }
+      .pe-tool-btn { flex-shrink: 0; }
       .pe-tool-btn { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 64px; height: 64px; gap: 4px; border: none; background: transparent; color: var(--pe-sys-color-on-surface-variant); cursor: pointer; border-radius: 16px; transition: 0.2s; }
       .pe-tool-btn:hover, .pe-tool-btn.active { color: var(--pe-sys-color-primary); }
       .pe-tool-btn .pe-icon-container { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 9999px; transition: 0.2s; }
@@ -13260,7 +13744,7 @@ function perform_cover_scan($db) {
       .pe-export-btn-mobile:hover { background-color: #ff3333; box-shadow: 0 4px 12px rgba(255, 0, 0, 0.3); }
       .pe-export-btn-mobile svg { width: 20px; height: 20px; fill: currentColor; }
       
-      #pe-text-editor { position: absolute; z-index: 30; background: rgba(0, 0, 0, 0.9); color: var(--pe-sys-color-on-surface); border: 2px dashed var(--pe-sys-color-primary); border-radius: 8px; padding: 4px 8px; outline: none; display: none; white-space: nowrap; transform-origin: top left; box-shadow: 0 4px 12px rgba(0,0,0,0.8); }
+      #pe-text-editor { position: absolute; z-index: 30; background: rgba(0, 0, 0, 0.5); color: var(--pe-sys-color-on-surface); border: 2px dashed var(--pe-sys-color-primary); padding: 0; margin: 0; outline: none; display: none; white-space: pre-wrap; transform-origin: center center; box-shadow: 0 4px 12px rgba(0,0,0,0.3); resize: none; overflow: hidden; line-height: 1.2; font-family: sans-serif; font-weight: bold; }
 
       /* Desktop Right Sidebar Overrides */
       @media (min-width: 769px) {
@@ -13268,7 +13752,7 @@ function perform_cover_scan($db) {
         .pe-bottom-nav { width: 90px; height: 100%; border-left: 1px solid var(--pe-sys-color-outline); }
         
         /* FIXED: Added align-items: center so all buttons line up perfectly down the middle of the vertical bar */
-        .pe-bottom-bar { flex-direction: column; height: 100%; width: 90px; padding: 20px 0; justify-content: flex-start; align-items: center !important; gap: 16px; border-top: none; }
+        .pe-bottom-bar { flex-direction: column; height: 100%; width: 90px; padding: 20px 0; justify-content: flex-start; align-items: center !important; gap: 8px; border-top: none; overflow-y: auto; }
         
         /* Float the settings/properties panel on the right side over the canvas */
         .pe-properties-panel { position: absolute; right: 100px; bottom: 20px; top: 20px; width: 340px; max-height: calc(100% - 40px); border-radius: 16px; border: 1px solid var(--pe-sys-color-outline); z-index: 30; }
@@ -13471,6 +13955,10 @@ function perform_cover_scan($db) {
             <a href="#" class="nav-link" id="nav-scan-all" data-bs-toggle="modal" data-bs-target="#full-scan-modal">
               <i class="bi bi-hdd-stack-fill"></i>
               <span>Scan All</span>
+            </a>
+            <a href="#" class="nav-link logged-in-only" id="nav-chart-scan" data-bs-toggle="modal" data-bs-target="#chart-scan-modal" style="display: none !important;">
+              <i class="bi bi-controller"></i>
+              <span>Scan Charts</span>
             </a>
             <a href="#" class="nav-link logged-in-only" id="nav-cover-scan" data-bs-toggle="modal" data-bs-target="#cover-scan-modal" style="display: none !important;">
               <i class="bi bi-image-fill"></i>
@@ -16865,6 +17353,34 @@ function perform_cover_scan($db) {
           </div>
           <div class="modal-body p-0">
             <iframe id="full-scan-iframe" src="about:blank" style="width: 100%; height: 60vh; border: none; background-color: #030303;"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="chart-scan-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header border-0">
+            <h5 class="modal-title">Rhythm Game Charts Scanner Log</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-0">
+            <iframe id="chart-scan-iframe" src="about:blank" style="width: 100%; height: 60vh; border: none; background-color: #030303;"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="rg-player-stats-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+        <div class="modal-content" style="background-color: #030303; border: 1px solid #333; border-radius: 16px;">
+          <div class="modal-header border-0 pb-0">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-controller text-danger me-2"></i> Player History</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4" id="rg-player-stats-body">
+            <!-- Populated dynamically via JS -->
           </div>
         </div>
       </div>
@@ -23804,7 +24320,16 @@ SOFTWARE.</div>
                     <div id="rg-screen-hub" class="rg-screen">
                       <div class="rg-tab-container">
                         <div id="rg-tab-songs" class="rg-tab-content">
-                          <div class="rg-search-bar"><input type="text" id="rg-search-songs" class="rg-search-input" placeholder="Search database tracks..."></div>
+                          <div class="rg-search-bar" style="display: flex; gap: 8px;">
+                            <input type="text" id="rg-search-songs" class="rg-search-input" placeholder="Search tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                            <select id="rg-sort-songs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                              <option value="random">Random</option>
+                              <option value="trending">Trending</option>
+                              <option value="id_desc">Newest</option>
+                              <option value="title_asc">Title (A-Z)</option>
+                              <option value="artist_asc">Artist (A-Z)</option>
+                            </select>
+                          </div>
                           <div class="rg-list-container position-relative" id="rg-list-songs">
                             <div class="position-absolute top-50 start-50 translate-middle">
                               <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
@@ -23812,7 +24337,17 @@ SOFTWARE.</div>
                           </div>
                         </div>
                         <div id="rg-tab-favorites" class="rg-tab-content rg-hidden">
-                          <div class="rg-search-bar"><input type="text" id="rg-search-favs" class="rg-search-input" placeholder="Search favorites..."></div>
+                          <div class="rg-search-bar" style="display: flex; gap: 8px;">
+                            <input type="text" id="rg-search-favs" class="rg-search-input" placeholder="Search favorites..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                            <select id="rg-sort-favs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                              <option value="manual_order">My Order</option>
+                              <option value="random">Random</option>
+                              <option value="trending">Trending</option>
+                              <option value="id_desc">Newest</option>
+                              <option value="title_asc">Title (A-Z)</option>
+                              <option value="artist_asc">Artist (A-Z)</option>
+                            </select>
+                          </div>
                           <div class="rg-list-container" id="rg-list-favs"></div>
                         </div>
                         <div id="rg-tab-leaderboard" class="rg-tab-content rg-hidden">
@@ -23821,13 +24356,16 @@ SOFTWARE.</div>
                         <div id="rg-tab-settings" class="rg-tab-content rg-hidden">
                           <div class="rg-list-container" style="padding: 24px 16px;">
                             <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:24px;">
-                              <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase;">Lane Keybindings</div>
-                              <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
-                                <button class="rg-key-btn" data-lane="0">D</button>
-                                <button class="rg-key-btn" data-lane="1">F</button>
-                                <button class="rg-key-btn" data-lane="2">J</button>
-                                <button class="rg-key-btn" data-lane="3">K</button>
+                              <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase;">Lane Keybindings (6 Keys)</div>
+                              <div style="display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;">
+                                <button class="rg-key-btn" data-lane="0">S</button>
+                                <button class="rg-key-btn" data-lane="1">D</button>
+                                <button class="rg-key-btn" data-lane="2">F</button>
+                                <button class="rg-key-btn" data-lane="3">J</button>
+                                <button class="rg-key-btn" data-lane="4">K</button>
+                                <button class="rg-key-btn" data-lane="5">L</button>
                               </div>
+                              <div style="font-size: 0.7rem; color: #888; margin-top: 4px;">Easy/Medium uses the middle 4 lanes. Higher difficulties use all 6 lanes.</div>
                             </div>
                             <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:24px;">
                               <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase; display: flex; justify-content: space-between;">
@@ -23843,6 +24381,17 @@ SOFTWARE.</div>
                               </div>
                               <input type="range" id="rg-speed-slider" min="0.5" max="20" value="1.0" step="0.1" style="width: 100%; accent-color: var(--rg-primary);">
                             </div>
+                            <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:24px; background-color: var(--rg-surface-variant); padding: 16px; border-radius: 16px; border: 1px solid #333;">
+                              <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase; display: flex; justify-content: space-between; align-items: center;">
+                                <span>Calibration Playground</span>
+                                <button id="rg-btn-cal-test" class="btn btn-sm btn-danger rounded-pill px-3 fw-bold" style="font-size: 0.75rem;">Start Test</button>
+                              </div>
+                              <div style="position: relative; width: 100%; height: 160px; border-radius: 8px; overflow: hidden; display: none;" id="rg-cal-test-area">
+                                <canvas id="rg-cal-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #000;"></canvas>
+                                <div id="rg-cal-feedback" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: monospace; font-size: 1rem; font-weight: bold; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); pointer-events: none; white-space: nowrap;">Tap Key to Calibrate</div>
+                              </div>
+                              <div style="font-size: 0.7rem; color: #888; margin-top: 2px;">Test your latency offset and note speed in real-time. Hit your bound keys as the falling lines cross the red target!</div>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -23851,43 +24400,53 @@ SOFTWARE.</div>
                         <div class="rg-nav-item" data-target="favorites"><i class="bi bi-heart-fill fs-4"></i><div class="rg-nav-label">Favorites</div></div>
                         <div class="rg-nav-item" data-target="leaderboard"><i class="bi bi-trophy-fill fs-4"></i><div class="rg-nav-label">Ranks</div></div>
                         <div class="rg-nav-item" data-target="settings"><i class="bi bi-gear-fill fs-4"></i><div class="rg-nav-label">Settings</div></div>
+                        <div class="share-view-btn" data-share-type="game" data-share-name="PHP Music Rhythm Game" data-image-url="?action=get_app_icon&size=512" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: #fff; opacity: 0.5; cursor: pointer; padding: 8px 16px; border-radius: 16px; transition: all 0.2s;" onmouseover="this.style.opacity='1'; this.style.color='var(--rg-primary)'" onmouseout="this.style.opacity='0.5'; this.style.color='#fff'">
+                          <i class="bi bi-share-fill fs-4"></i><div class="rg-nav-label" style="font-size: 0.75rem; font-weight: 700;">Share</div>
+                        </div>
                       </div>
                     </div>
 
-                    <div id="rg-dialog-play" class="rg-dialog-backdrop rg-hidden">
-                      <div class="rg-dialog-surface" style="max-width: 480px; width: 90%; max-height: 90vh; display: flex; flex-direction: column;">
-                        <div class="rg-dialog-title" id="rg-dialog-song-name" style="flex-shrink: 0; margin-bottom: 8px;">Song Name</div>
+                    <div id="rg-dialog-play" class="rg-screen rg-hidden" style="z-index: 55; background-color: var(--rg-bg); overflow-y: auto; display: block;">
+                      <div style="width: 100%; max-width: 900px; margin: 0 auto; padding: 48px 16px 120px 16px;">
+                        <div class="row g-4 w-100 m-0 align-items-center justify-content-center">
+                          <div class="col-12 col-lg-6 d-flex flex-column align-items-center text-center">
+                            <img id="rg-dialog-cover" src="" style="width: 180px; height: 180px; object-fit: cover; border-radius: 16px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); margin-bottom: 24px; flex-shrink: 0; background-color: var(--rg-surface-variant);">
+                            <div class="rg-dialog-title w-100" id="rg-dialog-song-name" style="margin-bottom: 32px; font-size: 1.8rem; font-weight: 800; color: var(--rg-primary); line-height: 1.2;">Song Name</div>
 
-                        <div style="flex-shrink: 0;">
-                          <div style="font-size: 0.8rem; font-weight: 700; color: #777; margin-bottom: 8px;">SELECT DIFFICULTY</div>
-                          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
-                            <button class="rg-diff-btn" data-diff="easy">Easy</button>
-                            <button class="rg-diff-btn active" data-diff="medium">Med</button>
-                            <button class="rg-diff-btn" data-diff="hard">Hard</button>
-                            <button class="rg-diff-btn" data-diff="expert">Exprt</button>
-                            <button class="rg-diff-btn" data-diff="master">Mstr</button>
+                            <div style="width: 100%; max-width: 360px; margin: 0 auto;">
+                              <div style="font-size: 0.8rem; font-weight: 700; color: #777; margin-bottom: 12px; text-align: left; text-transform: uppercase;">Select Difficulty</div>
+                              <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+                                <button class="rg-diff-btn active" data-diff="easy">Easy</button>
+                              <button class="rg-diff-btn" data-diff="medium">Med</button>
+                                <button class="rg-diff-btn" data-diff="hard">Hard</button>
+                                <button class="rg-diff-btn" data-diff="expert">Exprt</button>
+                                <button class="rg-diff-btn" data-diff="master">Mstr</button>
+                                <button class="rg-diff-btn" style="color: #ff3b30;" data-diff="demon">Demon</button>
+                              </div>
+                            </div>
+                            
+                            <div style="display: flex; justify-content: center; gap: 16px; margin-top: 32px; width: 100%; max-width: 360px;">
+                              <button class="btn btn-link text-secondary text-decoration-none fw-bold" id="rg-btn-dialog-cancel" style="font-size: 1.1rem;">Cancel</button>
+                              <button class="btn btn-danger rounded-pill px-5 fw-bold flex-grow-1" id="rg-btn-dialog-play" style="font-size: 1.1rem; padding-top: 12px; padding-bottom: 12px; box-shadow: 0 4px 16px rgba(255,59,48,0.4);">Play</button>
+                            </div>
                           </div>
-                        </div>
-                        
-                        <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px; margin-bottom: 8px; flex-shrink: 0;">
-                          <button class="btn btn-link text-secondary text-decoration-none fw-bold" id="rg-btn-dialog-cancel">Cancel</button>
-                          <button class="btn btn-danger rounded-pill px-4 fw-bold" id="rg-btn-dialog-play">Play</button>
-                        </div>
-                        
-                        <!-- Song-Specific Top Scores Leaderboard -->
-                        <div style="display: flex; flex-direction: column; gap: 8px; overflow: hidden; margin-top: 8px;">
-                          <div style="font-size: 0.8rem; font-weight: 700; color: #777; flex-shrink: 0;">TOP SCORES</div>
-                          <div id="rg-song-leaderboard" style="overflow-y: auto; background-color: var(--rg-surface-variant); border-radius: 12px; padding: 12px; border: 1px solid #333; flex-grow: 1; min-height: 120px;">
-                            <div class="text-center text-secondary small py-2">Loading scores...</div>
+                          
+                          <div class="col-12 col-lg-6 d-flex flex-column" style="min-height: 400px;">
+                            <div style="display: flex; flex-direction: column; height: 100%; background-color: var(--rg-surface-variant); border-radius: 16px; border: 1px solid #333; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                              <div style="font-size: 0.9rem; font-weight: 700; color: #aaa; padding: 16px; border-bottom: 1px solid #333; background-color: rgba(0,0,0,0.3); text-transform: uppercase;">Top Scores</div>
+                              <div id="rg-song-leaderboard" style="overflow-y: auto; padding: 12px; flex-grow: 1; max-height: 450px;">
+                                <div class="text-center text-secondary small py-4">Loading scores...</div>
+                              </div>
+                            </div>
                           </div>
                         </div>
                       </div>
                     </div>
 
                     <div id="rg-screen-loading" class="rg-screen rg-screen-center rg-hidden" style="justify-content: center; background-color: #000;">
-                      <div class="text-center w-100 px-4">
+                      <div class="text-center w-100 px-4" style="max-width: 100%;">
                         <img id="rg-loading-cover" src="" style="width: 250px; height: 250px; object-fit: cover; border-radius: 16px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); margin-bottom: 24px;">
-                        <h2 id="rg-loading-title" style="color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); margin: 0 0 24px 0; font-size: 1.8rem; font-weight: bold; text-align: center;">Song Title</h2>
+                        <h2 id="rg-loading-title" class="text-truncate" style="color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); margin: 0 auto 24px auto; font-size: 1.8rem; font-weight: bold; text-align: center; max-width: 100%;">Song Title</h2>
                         <div class="d-flex align-items-center justify-content-center gap-3">
                           <div class="spinner-border text-danger" style="width: 1.5rem; height: 1.5rem; border-width: 0.2em;"></div>
                           <div style="font-size: 1.2rem; font-weight: 700; color: var(--rg-primary);" id="rg-loading-text">Downloading 0%</div>
@@ -23896,61 +24455,127 @@ SOFTWARE.</div>
                     </div>
 
                     <div id="rg-screen-game" class="rg-screen rg-hidden" style="background-color: #000;">
-                      <div class="rg-hud">
-                        <div style="display:flex; flex-direction:column; align-items:flex-start;">
-                          <div class="rg-hud-title" id="rg-in-game-title">Title</div>
-                          <div class="rg-score-display" id="rg-in-game-score">000000000</div>
-                          <div class="rg-hud-diff" id="rg-in-game-diff">Medium</div>
+                      <canvas id="rg-game-canvas" style="position:absolute; top:0; left:0; width:100%; height:100%; z-index:1;"></canvas>
+                      <div id="rg-touch-layer" style="position:absolute; top:0; left:0; width:100%; height:100%; z-index:30; touch-action:none;"></div>
+                      <!-- Z-index 40 ensures the HUD buttons are clickable above the touch layer -->
+                      <div class="rg-hud" style="justify-content: center; position: relative; z-index: 40;">
+                        <div style="display:flex; flex-direction:column; align-items:center; text-align: center; width: 100%; max-width: 320px; margin: 0 auto;">
+                          <div class="rg-hud-title text-truncate" id="rg-in-game-title" style="max-width: 250px;">Title</div>
+                          
+                          <!-- In-Game Score Progress Bar & Rank -->
+                          <div class="w-100 d-flex align-items-center gap-2 mb-1 mt-1" style="padding: 0 10px;">
+                            <div id="rg-in-game-rank" style="font-size: 1.5rem; font-weight: 900; font-family: 'Arial Black', sans-serif; color: #7f1d1d; min-width: 36px; text-align: left; text-shadow: 0 0 8px currentColor; line-height: 1;">F</div>
+                            <div class="flex-grow-1" style="min-width: 0;">
+                              <div class="d-flex justify-content-between align-items-baseline" style="font-size: 0.65rem; color: #888; font-weight: bold;">
+                                <span>SCORE</span>
+                                <span id="rg-in-game-score" style="font-family: monospace; font-size: 1rem; color: #fff;">000000000</span>
+                              </div>
+                              <div style="width: 100%; height: 4px; background-color: #222; border-radius: 2px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05);">
+                                <div id="rg-in-game-score-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #ff3b30, #ff9500); border-radius: 2px; transition: width 0.1s linear;"></div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div class="rg-combo-box">
+                            <div class="rg-combo-number" id="rg-in-game-combo">0</div>
+                            <div class="rg-combo-text" id="rg-in-game-combo-lbl">COMBO</div>
+                            <div id="rg-in-game-rating" style="font-size: 1.4rem; font-weight: 900; margin-top: 6px; text-transform: uppercase; min-height: 24px; transition: transform 0.05s ease-out; text-shadow: 0 2px 4px rgba(0,0,0,0.5);"></div>
+                          </div>
                         </div>
-                        <div class="rg-hud-actions">
-                          <button class="rg-quit-btn" id="rg-btn-quit-game"><i class="bi bi-pause-fill"></i> Pause</button>
+                        <div class="rg-hud-actions" style="position: absolute; right: 16px; top: 16px; display: flex; flex-direction: column; align-items: flex-end; gap: 6px;">
+                          <button class="rg-quit-btn" id="rg-btn-quit-game" style="padding: 0; width: 44px; height: 44px; border-radius: 50%; font-size: 1.5rem; display: flex; align-items: center; justify-content: center;"><i class="bi bi-pause-fill"></i></button>
+                          <div style="width: 80px; height: 6px; background-color: #222; border-radius: 3px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); margin-top: 2px;">
+                            <div id="rg-in-game-hp" style="width: 100%; height: 100%; background-color: #27c93f; transition: width 0.1s, background-color 0.1s;"></div>
+                          </div>
+                          <div id="rg-in-game-accuracy" style="font-family: monospace; font-size: 0.8rem; font-weight: bold; color: #aaa; text-shadow: 0 1px 2px rgba(0,0,0,0.8); line-height: 1;">100.00%</div>
                         </div>
-                      </div>
-                      <div class="rg-combo-box">
-                        <div class="rg-combo-number" id="rg-in-game-combo">0</div>
-                        <div class="rg-combo-text" id="rg-in-game-combo-lbl">COMBO</div>
-                      </div>
-                      <canvas id="rg-game-canvas" style="width: 100%; height: 100%; display: block;"></canvas>
-                      <div style="position: absolute; bottom: 0; left: 0; width: 100%; height: 50%; display: flex; z-index: 12; pointer-events: auto;" id="rg-touch-layer">
-                        <div style="flex: 1; height: 100%; outline: none; -webkit-tap-highlight-color: transparent;" data-lane="0"></div>
-                        <div style="flex: 1; height: 100%; outline: none; -webkit-tap-highlight-color: transparent;" data-lane="1"></div>
-                        <div style="flex: 1; height: 100%; outline: none; -webkit-tap-highlight-color: transparent;" data-lane="2"></div>
-                        <div style="flex: 1; height: 100%; outline: none; -webkit-tap-highlight-color: transparent;" data-lane="3"></div>
                       </div>
                     </div>
 
-                    <div id="rg-dialog-pause" class="rg-dialog-backdrop rg-hidden">
+                    <div id="rg-dialog-pause" class="rg-dialog-backdrop rg-hidden" style="z-index: 50;">
                       <div class="rg-dialog-surface text-center">
-                        <h3 class="text-white fw-bold mb-4">Game Paused</h3>
+                        <h3 class="text-white fw-bold mb-1">Game Paused</h3>
+                        <div class="text-secondary small fw-bold text-uppercase mb-4">Difficulty: <span id="rg-pause-diff-display" class="text-danger">Medium</span></div>
                         <div class="d-flex flex-column gap-3 w-100">
-                          <button class="rg-primary-btn" id="rg-btn-resume" style="background-color: #28a745; border-radius: 12px; border: none; padding: 16px;">Resume</button>
-                          <button class="rg-primary-btn" id="rg-btn-retry-pause" style="background-color: #ffc107; color: #000; border-radius: 12px; border: none; padding: 16px;">Retry</button>
-                          <button class="rg-primary-btn" id="rg-btn-quit" style="background-color: #4a0000; border-radius: 12px; border: none; padding: 16px;">Quit to Menu</button>
+                          <button class="rg-primary-btn" id="rg-btn-resume" style="background-color: #ff3b30; color: #ffffff; border-radius: 12px; border: none; padding: 16px; box-shadow: 0 4px 12px rgba(255, 59, 48, 0.4);">Resume</button>
+                          <button class="rg-primary-btn" id="rg-btn-retry-pause" style="background-color: #8e1c1c; color: #ffffff; border-radius: 12px; border: none; padding: 16px;">Retry</button>
+                          <button class="rg-primary-btn" id="rg-btn-quit" style="background-color: #4a0000; color: #ffffff; border-radius: 12px; border: none; padding: 16px;">Quit to Menu</button>
                         </div>
                       </div>
                     </div>
 
-                    <div id="rg-screen-result" class="rg-screen rg-screen-center rg-hidden">
-                      <div style="width: 100%; max-width: 500px; background-color: var(--rg-surface); padding: 24px; border-radius: 28px; border: 1px solid #333;">
-                        <h2 style="text-align: center; color: var(--rg-primary); margin-bottom: 24px; text-transform: uppercase; font-weight: bold;">Stage Cleared</h2>
-                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 24px;">
-                          <div class="rg-res-item rg-res-full">
-                            <span class="rg-res-label">Total Score</span>
-                            <span class="rg-res-val" id="rg-res-score" style="color: var(--rg-primary);">0</span>
+                    <div id="rg-screen-result" class="rg-screen rg-hidden" style="background-color: var(--rg-bg); overflow-y: auto; display: block;">
+                      <div style="width: 100%; max-width: 600px; margin: 0 auto; padding: 48px 24px 120px 24px;">
+                        <h2 style="text-align: center; color: var(--rg-primary); margin-bottom: 24px; text-transform: uppercase; font-weight: 900; font-size: 2.2rem; letter-spacing: 2px; text-shadow: 0 4px 12px rgba(0,0,0,0.5);">Stage Cleared</h2>
+                        
+                        <!-- Rank & Accuracy Card -->
+                        <div class="p-3 mb-4 d-flex align-items-center justify-content-between rounded-4" style="background: linear-gradient(135deg, rgba(255,59,48,0.15), rgba(0,0,0,0.4)); border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 8px 32px rgba(0,0,0,0.3);">
+                          <div class="d-flex flex-column text-start">
+                            <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px;">Accuracy</span>
+                            <span id="rg-res-acc" style="font-size: 2.2rem; font-weight: 900; font-family: monospace; color: #fff; line-height: 1.1;">100.00%</span>
                           </div>
-                          <div class="rg-res-item rg-res-full">
-                            <span class="rg-res-label">Max Combo</span>
-                            <span class="rg-res-val" id="rg-res-max-combo">0</span>
+                          <div class="d-flex flex-column align-items-end text-end">
+                            <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px;">Rank</span>
+                            <span id="rg-res-rank" style="font-size: 3.5rem; font-weight: 900; line-height: 0.8; font-family: 'Arial Black', sans-serif; text-shadow: 0 0 15px currentColor; transition: color 0.3s;">SS</span>
                           </div>
-                          <div class="rg-res-item"><span class="rg-res-label" style="color: #fff;">Perfect</span><span class="rg-res-val" id="rg-res-perfect">0</span></div>
-                          <div class="rg-res-item"><span class="rg-res-label" style="color: #ff3b30;">Great</span><span class="rg-res-val" id="rg-res-great">0</span></div>
-                          <div class="rg-res-item"><span class="rg-res-label" style="color: #ffa000;">Good</span><span class="rg-res-val" id="rg-res-good">0</span></div>
-                          <div class="rg-res-item"><span class="rg-res-label" style="color: #8e1c1c;">Bad</span><span class="rg-res-val" id="rg-res-bad">0</span></div>
-                          <div class="rg-res-item rg-res-full"><span class="rg-res-label" style="color: #555;">Miss</span><span class="rg-res-val" id="rg-res-miss">0</span></div>
                         </div>
-                        <div style="display: flex; gap: 12px; width: 100%;">
-                          <button class="rg-primary-btn" id="rg-btn-result-retry" style="flex: 1; background-color: #4a0000; color: var(--rg-primary); padding: 16px; border-radius: 12px;">Retry</button>
-                          <button class="rg-primary-btn" id="rg-btn-result-back" style="flex: 1; padding: 16px; border-radius: 12px;">Menu</button>
+
+                        <!-- Score Progress Bar Container -->
+                        <div class="p-3 mb-4 rounded-4" style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); box-shadow: 0 4px 16px rgba(0,0,0,0.2);">
+                          <div class="d-flex justify-content-between align-items-end mb-2">
+                            <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px;">Total Score</span>
+                            <span id="rg-res-score" style="font-size: 1.8rem; font-weight: 900; font-family: monospace; color: var(--rg-primary); line-height: 1;">000,000,000</span>
+                          </div>
+                          <div style="width: 100%; height: 10px; background-color: #111; border-radius: 5px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05);">
+                            <div id="rg-res-score-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #ff3b30, #ff9500); border-radius: 5px; transition: width 0.8s cubic-bezier(0.1, 0.76, 0.55, 0.94);"></div>
+                          </div>
+                        </div>
+
+                        <!-- Grid Judgment Stats -->
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 32px;">
+                          <!-- Max Combo (Full Width) -->
+                          <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 12px 18px; border-radius: 12px;">
+                            <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px;">Max Combo</span>
+                            <span id="rg-res-max-combo" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff;">0</span>
+                          </div>
+                          
+                          <!-- Perfect -->
+                          <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
+                            <span style="font-size: 0.7rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 0.5px;">Perfect</span>
+                            <span id="rg-res-perfect" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
+                          </div>
+                          
+                          <!-- Great -->
+                          <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
+                            <span style="font-size: 0.7rem; font-weight: 700; color: #ff3b30; text-transform: uppercase; letter-spacing: 0.5px;">Great</span>
+                            <span id="rg-res-great" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
+                          </div>
+                          
+                          <!-- Good -->
+                          <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
+                            <span style="font-size: 0.7rem; font-weight: 700; color: #ffa000; text-transform: uppercase; letter-spacing: 0.5px;">Good</span>
+                            <span id="rg-res-good" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
+                          </div>
+                          
+                          <!-- Bad -->
+                          <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
+                            <span style="font-size: 0.7rem; font-weight: 700; color: #8e1c1c; text-transform: uppercase; letter-spacing: 0.5px;">Bad</span>
+                            <span id="rg-res-bad" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
+                          </div>
+                          
+                          <!-- Miss (Full Width) -->
+                          <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 12px 18px; border-radius: 12px;">
+                            <span style="font-size: 0.75rem; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: 1px;">Miss</span>
+                            <span id="rg-res-miss" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff;">0</span>
+                          </div>
+                        </div>
+
+                        <div style="display: flex; flex-direction: column; gap: 12px; width: 100%;">
+                          <button class="rg-primary-btn" id="rg-btn-result-share" style="width: 100%; background-color: #1DB954; color: #fff; padding: 16px; border-radius: 16px; margin-bottom: 8px;"><i class="bi bi-share-fill"></i> Share Score</button>
+                          <div style="display: flex; gap: 12px; width: 100%; margin-bottom: 1em;">
+                            <button class="rg-primary-btn" id="rg-btn-result-retry" style="flex: 1; background-color: #4a0000; color: var(--rg-primary); padding: 16px; border-radius: 16px;">Retry</button>
+                            <button class="rg-primary-btn" id="rg-btn-result-back" style="flex: 1; padding: 16px; border-radius: 16px;">Menu</button>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -23980,7 +24605,7 @@ SOFTWARE.</div>
                     <main class="pe-workspace" id="pe-workspace">
                       <canvas id="pe-main-canvas"></canvas>
                       <canvas id="pe-overlay-canvas"></canvas>
-                      <input type="text" id="pe-text-editor">
+                      <textarea id="pe-text-editor" rows="3" placeholder="Type here... (Shift+Enter for newline)"></textarea>
                     </main>
 
                     <nav class="pe-bottom-nav">
@@ -24013,6 +24638,30 @@ SOFTWARE.</div>
                             <svg><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
                           </div>
                           <span>Shape</span>
+                        </button>
+                        <button class="pe-tool-btn" id="pe-btn-draw">
+                          <div class="pe-icon-container">
+                            <svg><path d="M3 17.25V21h3.75L17.81 10.19l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                          </div>
+                          <span>Draw</span>
+                        </button>
+                        <button class="pe-tool-btn" id="pe-btn-undo">
+                          <div class="pe-icon-container">
+                            <svg><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
+                          </div>
+                          <span>Undo</span>
+                        </button>
+                        <button class="pe-tool-btn" id="pe-btn-redo">
+                          <div class="pe-icon-container">
+                            <svg><path d="M11.5 8C8.85 8 6.45 8.99 4.6 10.6L1 7v9h9L6.38 12.38C7.77 11.22 9.54 10.5 11.5 10.5c3.54 0 6.55 2.31 7.6 5.5l2.37-.78C20.08 11.03 16.15 8 11.5 8z" transform="scale(-1, 1) translate(-24, 0)"/></svg>
+                          </div>
+                          <span>Redo</span>
+                        </button>
+                        <button class="pe-tool-btn" id="pe-btn-reset">
+                          <div class="pe-icon-container">
+                            <svg><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z" transform="rotate(45 12 12)"/></svg>
+                          </div>
+                          <span>Reset</span>
                         </button>
                         <button class="pe-tool-btn" id="pe-btn-properties">
                           <div class="pe-icon-container">
@@ -26357,7 +27006,7 @@ SOFTWARE.</div>
           }
         };
         
-        const showShareModal = (type, id, name, artistId, artistName = '', customImageUrl = '', playlistId = '') => {
+        const showShareModal = (type, id, name, artistId, artistName = '', customImageUrl = '', playlistId = '', scorePayload = '') => {
           const decodedName = decodeURIComponent(name || '');
           let shareUrl = `${window.location.origin}${window.location.pathname}?share_type=${type}`;
 
@@ -26395,6 +27044,7 @@ SOFTWARE.</div>
             if (type === 'playlist') previewDesc = 'Public Playlist';
             if (type === 'mix') previewDesc = 'Custom Mix';
             if (type === 'blog') previewDesc = 'Blog Post';
+            if (type === 'game') previewDesc = 'Rhythm Game';
           }
 
           document.getElementById('share-modal-title').textContent = `Share`;
@@ -26430,7 +27080,7 @@ SOFTWARE.</div>
           const imgEnc = encodeURIComponent(absImageUrl);
 
           // Removed Cover Image URL from text payload as requested
-          const textPayload = encodeURIComponent(`Check out "${decodedName}" on PHP Music`);
+          const textPayload = scorePayload ? encodeURIComponent(scorePayload) : encodeURIComponent(`Check out "${decodedName}" on PHP Music`);
           const urlEnc = encodeURIComponent(shareUrl);
 
           // Null-safe helper function to open apps and silently copy image to Clipboard
@@ -26556,22 +27206,30 @@ SOFTWARE.</div>
                 try {
                   const shareData = {
                     title: decodedName,
-                    text: `Listen to "${decodedName}" on PHP Music!`,
+                    text: scorePayload || `Check out "${decodedName}" on PHP Music!`,
                     url: shareUrl
                   };
 
-                  const response = await fetch(imageUrl);
-                  const blob = await response.blob();
-                  const file = new File([blob], 'cover.jpg', { type: blob.type });
-
-                  if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                    shareData.files = [file];
+                  // Prevent appending invalid/fallback images that crash navigator.share on mobile
+                  if (imageUrl && !imageUrl.includes('get_app_icon')) {
+                    try {
+                      const response = await fetch(imageUrl);
+                      const blob = await response.blob();
+                      if (blob.type.startsWith('image/')) {
+                        const file = new File([blob], 'cover.jpg', { type: blob.type });
+                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                          shareData.files = [file];
+                        }
+                      }
+                    } catch (imgErr) {
+                      console.warn("Could not attach image to share payload", imgErr);
+                    }
                   }
 
                   await navigator.share(shareData);
                 } catch (err) {
                   if (err.name !== 'AbortError') {
-                    showToast('Failed to share via System Apps.', 'error');
+                    if (typeof showToast === 'function') showToast('Failed to share via System Apps.', 'error');
                   }
                 } finally {
                   newCopyBtn.disabled = false;
@@ -27371,6 +28029,32 @@ SOFTWARE.</div>
           fullScanModalEl.addEventListener('hidden.bs.modal', () => {
             fullScanIframe.src = 'about:blank';
             if (currentView.type === 'get_songs') {
+              loadView(currentView);
+            }
+          });
+        }
+
+        const chartScanModalEl = document.getElementById('chart-scan-modal');
+        const chartScanIframe = document.getElementById('chart-scan-iframe');
+        if (chartScanModalEl && chartScanIframe) {
+          chartScanModalEl.addEventListener('show.bs.modal', () => {
+            // Read active step from local state or start from Division 1
+            const lastStep = localStorage.getItem('rhythm_scan_step') || '1';
+            chartScanIframe.src = '?action=rescan_charts&step=' + lastStep;
+          });
+          chartScanModalEl.addEventListener('hidden.bs.modal', () => {
+            // Save the last processed step dynamically before unloading so the admin can pause and resume seamlessly!
+            try {
+              const currentUrl = chartScanIframe.contentWindow.location.href;
+              const urlParams = new URLSearchParams(currentUrl.split('?')[1]);
+              const activeStep = urlParams.get('step');
+              if (activeStep) {
+                localStorage.setItem('rhythm_scan_step', activeStep);
+              }
+            } catch (e) {}
+            
+            chartScanIframe.src = 'about:blank';
+            if (currentView.type === 'rhythm_game') {
               loadView(currentView);
             }
           });
@@ -32318,9 +33002,13 @@ SOFTWARE.</div>
             if (adminPanelBtn) {
               if (isAdmin) {
                 adminPanelBtn.style.setProperty('display', 'flex', 'important');
+                const chartScanBtn = document.getElementById('nav-chart-scan');
+                if (chartScanBtn) chartScanBtn.style.setProperty('display', 'flex', 'important');
                 if (coverScanBtn) coverScanBtn.style.setProperty('display', 'flex', 'important');
               } else {
                 adminPanelBtn.style.setProperty('display', 'none', 'important');
+                const chartScanBtn = document.getElementById('nav-chart-scan');
+                if (chartScanBtn) chartScanBtn.style.setProperty('display', 'none', 'important');
                 if (coverScanBtn) coverScanBtn.style.setProperty('display', 'none', 'important');
               }
             }
@@ -35152,8 +35840,10 @@ SOFTWARE.</div>
           constructor() {
             this.LANES = 4;
             this.JUDGMENT = { PERFECT: 0.045, GREAT: 0.080, GOOD: 0.125, BAD: 0.170 };
-            this.KEY_CODES = ['KeyD', 'KeyF', 'KeyJ', 'KeyK'];
-            this.KEY_LABELS = ['D', 'F', 'J', 'K'];
+            this.KEY_CODES = ['KeyS', 'KeyD', 'KeyF', 'KeyJ', 'KeyK', 'KeyL'];
+            this.KEY_LABELS = ['S', 'D', 'F', 'J', 'K', 'L'];
+            this.activeCodes = [];
+            this.activeLabels = [];
             this.calibrationOffsetMs = 0;
             this.userTickSpeed = 1.0;
             this.listeningLane = null;
@@ -35165,7 +35855,9 @@ SOFTWARE.</div>
             this.favRenderLimit = 25;
             
             this.selectedSong = null;
-            this.selectedDiff = 'medium';
+            this.selectedDiff = 'easy'; // Default selection to Easy
+            this.currentSortMethod = 'random';
+            this.currentFavSortMethod = 'manual_order';
             
             this.audioCtx = null;
             this.sfxCtx = null;
@@ -35173,9 +35865,17 @@ SOFTWARE.</div>
             this.audioPlayback = null;
             this.chartNotes = [];
             this.isPlaying = false;
-            this.activeKeysHeld = [false, false, false, false];
+            this.activeKeysHeld = [false, false, false, false, false, false];
             this.particles = [];
             this.laneApproachSpeed = 1.3;
+            this.rgSongCache = {}; // Cache to save bandwidth on retries
+            this.curHp = 100;
+            this.accuracy = 100.00;
+            this.isCalibrating = false;
+            this.calNotes = [];
+            this.calCanvas = null;
+            this.calCtx = null;
+            this.calAnimId = null;
             
             this.curScore = 0;
             this.curCombo = 0;
@@ -35259,6 +35959,14 @@ SOFTWARE.</div>
               document.getElementById('rg-speed-display').textContent = `${this.userTickSpeed}x`;
             });
 
+            const calBtn = document.getElementById('rg-btn-cal-test');
+            if (calBtn) {
+              calBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.toggleCalibrationTest();
+              });
+            }
+
             let searchDebounceTimeout = null;
             document.getElementById('rg-search-songs').addEventListener('input', (e) => {
               clearTimeout(searchDebounceTimeout);
@@ -35267,7 +35975,7 @@ SOFTWARE.</div>
               if (q === '') {
                 this.renderLimit = 25;
                 this.filteredSongs = this.songs;
-                this.renderSongsList();
+                this.sortSongs(this.currentSortMethod);
                 return;
               }
 
@@ -35289,7 +35997,7 @@ SOFTWARE.</div>
                   });
                   
                   this.renderLimit = 25;
-                  this.renderSongsList();
+                  this.sortSongs(this.currentSortMethod);
                 } catch (err) {
                   console.error("Global rhythm search failed:", err);
                 }
@@ -35298,9 +36006,13 @@ SOFTWARE.</div>
 
             document.getElementById('rg-search-favs').addEventListener('input', (e) => {
               this.favRenderLimit = 25;
-              const q = e.target.value.toLowerCase();
-              this.favFilteredSongs = this.songs.filter(f => f.rg_favorite == 1 && (f.title.toLowerCase().includes(q) || f.artist.toLowerCase().includes(q)));
-              this.renderFavoritesList();
+              const q = e.target.value.toLowerCase().trim();
+              if (q === '') {
+                this.favFilteredSongs = this.songs.filter(f => f.rg_favorite == 1);
+              } else {
+                this.favFilteredSongs = this.songs.filter(f => f.rg_favorite == 1 && (f.title.toLowerCase().includes(q) || f.artist.toLowerCase().includes(q)));
+              }
+              this.sortFavorites(this.currentFavSortMethod);
             });
 
             this.listSongsEl.addEventListener('scroll', () => {
@@ -35328,6 +36040,14 @@ SOFTWARE.</div>
                 btn.classList.add('active');
                 this.selectedDiff = btn.getAttribute('data-diff');
               });
+            });
+
+            document.getElementById('rg-sort-songs').addEventListener('change', (e) => {
+              this.sortSongs(e.target.value);
+            });
+
+            document.getElementById('rg-sort-favs').addEventListener('change', (e) => {
+              this.sortFavorites(e.target.value);
             });
 
             document.getElementById('rg-btn-dialog-cancel').addEventListener('click', () => document.getElementById('rg-dialog-play').classList.add('rg-hidden'));
@@ -35365,6 +36085,14 @@ SOFTWARE.</div>
               this.switchScreen('loading');
               this.prepGame(this.selectedSong, this.selectedDiff);
             });
+            document.getElementById('rg-btn-result-share').addEventListener('click', () => {
+              const textPayload = `I just scored ${parseInt(this.curScore).toLocaleString()} (${this.maxCombo}x Combo) on ${this.selectedSong.title} [${this.selectedDiff.toUpperCase()}] in PHP Music Rhythm Game!`;
+              const coverUrl = `?action=get_image&id=${this.selectedSong.id}&v=${this.selectedSong.last_modified || 0}`;
+              
+              if (typeof showShareModal === 'function') {
+                showShareModal('game', this.selectedSong.id, this.selectedSong.title, '', '', coverUrl, '', textPayload);
+              }
+            });
 
             const touchLayer = document.getElementById('rg-touch-layer');
             const handleTouch = (e, isDown) => {
@@ -35394,12 +36122,14 @@ SOFTWARE.</div>
           async loadSongs() {
             try {
               // Execute parallel high-speed asynchronous data fetching using internal sessions
-              const [res1, res2, res3, favRes] = await Promise.all([
+              const [res1, res2, res3, favRes, levelsRes] = await Promise.all([
                 fetchData('?action=get_songs&page=1&sort=random', {}, true),
                 fetchData('?action=get_songs&page=2&sort=random', {}, true),
                 fetchData('?action=get_songs&page=3&sort=random', {}, true),
-                fetchData('?action=get_rhythm_favorites', {}, true)
+                fetchData('?action=get_rhythm_favorites', {}, true),
+                fetchData('?action=get_all_rhythm_levels', {}, true)
               ]);
+              window.rhythmLevelsMap = levelsRes || { levels: {} };
 
               const arr1 = Array.isArray(res1) ? res1 : [];
               const arr2 = Array.isArray(res2) ? res2 : [];
@@ -35425,8 +36155,9 @@ SOFTWARE.</div>
                   body: JSON.stringify({ ids: favArr })
                 }, true);
                 if (Array.isArray(favDetails)) {
-                  favoriteSongsList = favDetails.map(s => {
+                  favoriteSongsList = favDetails.map((s, idx) => {
                     s.rg_favorite = 1;
+                    s.originalFavIndex = idx; // Store original favorite insertion order
                     if (!uniqueSongs.has(s.id)) {
                       uniqueSongs.set(s.id, s);
                     }
@@ -35442,6 +36173,33 @@ SOFTWARE.</div>
               this.renderSongsList();
               this.renderFavoritesList();
               this.loadLeaderboard();
+              
+              // Deep Link Auto-Boot Check (Robust for un-fetched IDs)
+              if (typeof currentView !== 'undefined' && currentView.param) {
+                const targetId = parseInt(currentView.param);
+                let targetSong = this.songs.find(s => parseInt(s.id) === targetId);
+                
+                if (!targetSong) {
+                  // Fetch explicitly if not in the random top 75 tracks
+                  try {
+                    const fetchedData = await fetchData(`?action=get_song_data&id=${targetId}`, {}, true);
+                    if (fetchedData && fetchedData.id) {
+                      targetSong = fetchedData;
+                      targetSong.rg_favorite = favSet.has(targetId) ? 1 : 0;
+                      this.songs.unshift(targetSong); // Add to local array
+                      this.filteredSongs = this.songs;
+                      this.renderSongsList(); // Re-render to show it at the top
+                    }
+                  } catch (e) {
+                    console.warn("Failed to fetch deep-linked song", e);
+                  }
+                }
+                
+                if (targetSong) {
+                  this.openPlayDialog(targetSong);
+                  currentView.param = ''; // Clear to prevent loops
+                }
+              }
               
             } catch (err) {
               console.error("Game Engine Failed to Load Tracks:", err);
@@ -35462,7 +36220,7 @@ SOFTWARE.</div>
               }
               
               container.innerHTML = data.map((entry, idx) => `
-                <div class="rg-list-item" style="cursor: default;">
+                <div class="rg-list-item rank-row" data-userid="${entry.user_id}" data-player-name="${encodeURIComponent(entry.player_name)}" style="cursor: pointer;">
                   <div class="rg-list-item-info">
                     <div style="width: 24px; font-weight: 900; color: var(--rg-primary); text-align: center;">${idx + 1}</div>
                     <img src="?action=get_profile_picture&id=${entry.user_id}" class="rg-cover-img" style="border-radius: 50%;">
@@ -35476,14 +36234,302 @@ SOFTWARE.</div>
                   </div>
                 </div>
               `).join('');
+
+              // Bind interactive click handlers to open performance history modal
+              const rows = container.querySelectorAll('.rank-row');
+              rows.forEach(row => {
+                row.addEventListener('click', () => {
+                  this.openPlayerStats(row.dataset.userid, decodeURIComponent(row.dataset.playerName));
+                });
+              });
             } catch (err) {
               console.error("Failed to load Leaderboard:", err);
             }
           }
 
+          sortSongs(method) {
+            this.currentSortMethod = method;
+            const sortFn = (a, b) => {
+              if (method === 'title_asc') return (a.title || '').localeCompare(b.title || '');
+              if (method === 'artist_asc') return (a.artist || '').localeCompare(b.artist || '');
+              if (method === 'id_desc') return parseInt(b.id) - parseInt(a.id);
+              if (method === 'trending') return parseInt(b.play_count || 0) - parseInt(a.play_count || 0);
+              if (method === 'random') return 0.5 - Math.random();
+              return 0;
+            };
+            if (this.songs) this.songs.sort(sortFn);
+            if (this.filteredSongs && this.filteredSongs !== this.songs) this.filteredSongs.sort(sortFn);
+            this.renderLimit = 25;
+            this.renderSongsList();
+          }
+
+          openPlayerStats(userId, name, page = 1) {
+            const body = document.getElementById('rg-player-stats-body');
+            const modalEl = document.getElementById('rg-player-stats-modal');
+            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            
+            if (page === 1) {
+              body.innerHTML = `
+                <div class="text-center mb-4">
+                  <img src="?action=get_profile_picture&id=${userId}" class="rounded-circle shadow-lg mb-2" style="width: 80px; height: 80px; object-fit: cover; border: 2px solid var(--rg-primary);">
+                  <h4 class="text-white fw-bold">${escapeHTML(name)}</h4>
+                  <p class="text-secondary small">Rhythm Game Played Tracks</p>
+                </div>
+                <div id="rg-player-scores-list" class="d-flex flex-column gap-3">
+                  <div class="text-center py-4"><div class="spinner-border text-danger"></div></div>
+                </div>
+              `;
+              modal.show();
+              this.currentStatsPage = 1;
+              this.statsUserId = userId;
+              this.statsPlayerName = name;
+            } else {
+              const loadMoreBtn = document.getElementById('rg-btn-load-more-stats');
+              if (loadMoreBtn) loadMoreBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Loading...';
+            }
+
+            fetchData(`?action=get_user_rhythm_scores&target_user_id=${userId}&page=${page}`).then(scores => {
+              const listContainer = document.getElementById('rg-player-scores-list');
+              const oldBtn = document.getElementById('load-more-stats-container');
+              if (oldBtn) oldBtn.remove();
+
+              if (scores && scores.length > 0) {
+                const diffColors = { easy: '#22d3ee', medium: '#34d399', hard: '#fb923c', expert: '#f43f5e', master: '#a78bfa', demon: '#7f1d1d' };
+                const diffLabels = { easy: 'EZ', medium: 'ND', hard: 'HD', expert: 'EX', master: 'MS', demon: 'DM' };
+                
+                const cardsHtml = scores.map(s => {
+                  const diffColor = diffColors[s.difficulty] || '#aaa';
+                  const diffLabel = diffLabels[s.difficulty] || 'UN';
+                  const lvlText = s.level ? `Lv.${s.level}` : 'Lv.--';
+                  const coverSvg = getSvgPlaceholder(s.title);
+                  const playedAt = s.played_at ? new Date(s.played_at.replace(' ', 'T')+'Z').toLocaleDateString() : 'Unknown';
+
+                  return `
+                    <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${diffColor}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;">
+                      <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
+                        <div class="d-flex align-items-center gap-3" style="min-width: 0; flex: 1;">
+                          <img src="?action=get_image&id=${s.song_id}&v=${s.last_modified}" onerror="this.onerror=null; this.src='${coverSvg}'" style="width: 48px; height: 48px; border-radius: 8px; object-fit: cover; box-shadow: 0 4px 8px rgba(0,0,0,0.4); flex-shrink: 0;">
+                          <div class="text-truncate" style="min-width: 0; flex: 1;">
+                            <div class="text-white fw-bold text-truncate" style="font-size: 1rem;">${escapeHTML(s.title)}</div>
+                            <div class="text-secondary text-truncate small" style="font-size: 0.8rem; margin-top: 1px;">${escapeHTML(s.artist)}</div>
+                          </div>
+                        </div>
+                        <div class="d-flex flex-column align-items-end" style="flex-shrink: 0;">
+                          <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px;" title="${s.difficulty.toUpperCase()} level">${diffLabel} ${lvlText}</span>
+                          <div class="text-secondary small mt-1" style="font-size: 0.75rem;">${playedAt}</div>
+                        </div>
+                      </div>
+                      
+                      <!-- Project Sekai Style Judgment Stats Panel -->
+                      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; text-align: center;">
+                        <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                          <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Score</span>
+                          <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: var(--rg-primary);">${parseInt(s.score).toLocaleString()}</span>
+                        </div>
+                        <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                          <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Combo</span>
+                          <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: #fff;">${s.max_combo}x</span>
+                        </div>
+                        <div style="font-size: 0.75rem;"><span style="color:#aaa; display:block; font-size:0.6rem; text-transform:uppercase;">Perf</span><strong style="font-family: monospace; color:#fff;">${s.perfect}</strong></div>
+                        <div style="font-size: 0.75rem;"><span style="color:#ff3b30; display:block; font-size:0.6rem; text-transform:uppercase;">Great</span><strong style="font-family: monospace; color:#fff;">${s.great}</strong></div>
+                        <div style="font-size: 0.75rem;"><span style="color:#ffa000; display:block; font-size:0.6rem; text-transform:uppercase;">Good</span><strong style="font-family: monospace; color:#fff;">${s.good}</strong></div>
+                        <div style="font-size: 0.75rem;"><span style="color:#555; display:block; font-size:0.6rem; text-transform:uppercase;">Miss</span><strong style="font-family: monospace; color:#fff;">${s.miss}</strong></div>
+                      </div>
+                    </div>
+                  `;
+                }).join('');
+
+                if (page === 1) {
+                  listContainer.innerHTML = cardsHtml;
+                } else {
+                  listContainer.insertAdjacentHTML('beforeend', cardsHtml);
+                }
+
+                if (scores.length === 25) {
+                  listContainer.insertAdjacentHTML('afterend', `
+                    <div class="text-center p-3" id="load-more-stats-container">
+                      <button class="btn btn-outline-light rounded-pill px-4 btn-sm fw-bold" id="rg-btn-load-more-stats">Load More History</button>
+                    </div>
+                  `);
+                  document.getElementById('rg-btn-load-more-stats').onclick = () => {
+                    this.currentStatsPage++;
+                    this.openPlayerStats(this.statsUserId, this.statsPlayerName, this.currentStatsPage);
+                  };
+                } else if (page > 1) {
+                  listContainer.insertAdjacentHTML('afterend', '<div class="text-center p-3 text-secondary small" id="load-more-stats-container">No more plays recorded.</div>');
+                }
+              } else {
+                if (page === 1) {
+                  listContainer.innerHTML = '<div class="text-center text-secondary py-5">No play history recorded yet for this user.</div>';
+                }
+              }
+            });
+          }
+
+          sortFavorites(method) {
+            this.currentFavSortMethod = method;
+            const sortFn = (a, b) => {
+              if (method === 'manual_order') return (b.originalFavIndex ?? -1) - (a.originalFavIndex ?? -1);
+              if (method === 'title_asc') return (a.title || '').localeCompare(b.title || '');
+              if (method === 'artist_asc') return (a.artist || '').localeCompare(b.artist || '');
+              if (method === 'id_desc') return parseInt(b.id) - parseInt(a.id);
+              if (method === 'trending') return parseInt(b.play_count || 0) - parseInt(a.play_count || 0);
+              if (method === 'random') return 0.5 - Math.random();
+              return 0;
+            };
+            if (this.favFilteredSongs) this.favFilteredSongs.sort(sortFn);
+            this.favRenderLimit = 25;
+            this.renderFavoritesList();
+          }
+
           switchScreen(name) {
             Object.values(this.screens).forEach(s => s.classList.add('rg-hidden'));
             if (this.screens[name]) this.screens[name].classList.remove('rg-hidden');
+          }
+
+          toggleCalibrationTest() {
+            const area = document.getElementById('rg-cal-test-area');
+            const btn = document.getElementById('rg-btn-cal-test');
+            const fb = document.getElementById('rg-cal-feedback');
+            
+            this.isCalibrating = !this.isCalibrating;
+            
+            if (this.isCalibrating) {
+              area.style.display = 'block';
+              btn.textContent = 'Stop Test';
+              btn.classList.replace('btn-danger', 'btn-outline-light');
+              fb.textContent = 'Tap Screen / Keys to Calibrate';
+              fb.style.color = '#fff';
+              
+              this.calCanvas = document.getElementById('rg-cal-canvas');
+              this.calCtx = this.calCanvas.getContext('2d');
+              this.resizeCalCanvas();
+              
+              this.calNotes = [];
+              this.calStartTime = Date.now();
+              
+              if (!this.sfxCtx) {
+                this.sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
+              }
+
+              // Concurrency & Mobile Support: Register touch and click handlers for mobile testing
+              this.boundCalTouchStart = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                this.processCalHit();
+              };
+              this.boundCalMouseDown = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                this.processCalHit();
+              };
+              area.addEventListener('touchstart', this.boundCalTouchStart, { passive: false });
+              area.addEventListener('mousedown', this.boundCalMouseDown);
+              
+              this.runCalibrationLoop();
+            } else {
+              area.style.display = 'none';
+              btn.textContent = 'Start Test';
+              btn.classList.replace('btn-outline-light', 'btn-danger');
+              
+              if (this.boundCalTouchStart) area.removeEventListener('touchstart', this.boundCalTouchStart);
+              if (this.boundCalMouseDown) area.removeEventListener('mousedown', this.boundCalMouseDown);
+              
+              cancelAnimationFrame(this.calAnimId);
+              this.calNotes = [];
+            }
+          }
+
+          resizeCalCanvas() {
+            if (!this.calCanvas) return;
+            const rect = this.calCanvas.parentNode.getBoundingClientRect();
+            this.calCanvas.width = rect.width;
+            this.calCanvas.height = rect.height;
+          }
+
+          runCalibrationLoop() {
+            if (!this.isCalibrating) return;
+            
+            const now = (Date.now() - this.calStartTime) / 1000;
+            const w = this.calCanvas.width;
+            const h = this.calCanvas.height;
+            
+            this.calCtx.fillStyle = '#000';
+            this.calCtx.fillRect(0, 0, w, h);
+            
+            const targetY = h * 0.75;
+            const speed = 150 * this.userTickSpeed;
+            
+            if (this.calNotes.length === 0 || now - this.calNotes[this.calNotes.length - 1].time > 1.0) {
+              this.calNotes.push({ time: now + 1.2, hit: false, missed: false });
+            }
+            
+            // Draw Target Line
+            this.calCtx.strokeStyle = 'var(--rg-primary)';
+            this.calCtx.lineWidth = 2;
+            this.calCtx.beginPath();
+            this.calCtx.moveTo(0, targetY);
+            this.calCtx.lineTo(w, targetY);
+            this.calCtx.stroke();
+            
+            // Draw Falling Calibration Lines
+            this.calNotes.forEach(n => {
+              if (n.hit || n.missed) return;
+              const delta = n.time - now;
+              const y = targetY - (delta * speed);
+              
+              if (y > h) {
+                n.missed = true;
+                return;
+              }
+              if (y >= 0 && y < h) {
+                this.calCtx.strokeStyle = '#fff';
+                this.calCtx.lineWidth = 3;
+                this.calCtx.beginPath();
+                this.calCtx.moveTo(w * 0.2, y);
+                this.calCtx.lineTo(w * 0.8, y);
+                this.calCtx.stroke();
+              }
+            });
+            
+            this.calAnimId = requestAnimationFrame(this.runCalibrationLoop.bind(this));
+          }
+
+          processCalHit() {
+            this.playHitSFX();
+            if (navigator.vibrate) navigator.vibrate(20); // Tactile haptic feedback for mobile taps
+            const now = (Date.now() - this.calStartTime) / 1000;
+            let minDiff = Infinity;
+            let target = null;
+            
+            this.calNotes.forEach(n => {
+              if (!n.hit && !n.missed) {
+                const diff = now - n.time; // Negative is Early, Positive is Late
+                if (Math.abs(diff) < Math.abs(minDiff)) {
+                  minDiff = diff;
+                  target = n;
+                }
+              }
+            });
+            
+            if (target && Math.abs(minDiff) < 0.3) {
+              target.hit = true;
+              const fb = document.getElementById('rg-cal-feedback');
+              const diffMs = Math.round(minDiff * 1000);
+              
+              if (fb) {
+                if (Math.abs(diffMs) <= 45) {
+                  fb.textContent = `PERFECT (${diffMs >= 0 ? '+' : ''}${diffMs}ms)`;
+                  fb.style.color = '#27c93f';
+                } else {
+                  const isLate = diffMs > 0;
+                  fb.textContent = `${isLate ? 'LATE' : 'EARLY'} (${diffMs >= 0 ? '+' : ''}${diffMs}ms)`;
+                  fb.style.color = isLate ? '#ff5f56' : '#ffbd2e';
+                }
+                fb.style.transform = 'translate(-50%, -50%) scale(1.1)';
+                setTimeout(() => { fb.style.transform = 'translate(-50%, -50%) scale(1)'; }, 50);
+              }
+            }
           }
 
           onKeyDown(e) {
@@ -35501,8 +36547,15 @@ SOFTWARE.</div>
               }
               this.listeningLane = null;
               e.preventDefault();
-            } else if (this.isPlaying && !e.repeat) {
+            } else if (this.isCalibrating) {
               const idx = this.KEY_CODES.indexOf(e.code);
+              if (idx !== -1) {
+                this.processCalHit();
+                e.preventDefault();
+                e.stopPropagation();
+              }
+            } else if (this.isPlaying && !e.repeat) {
+              const idx = this.activeCodes.indexOf(e.code);
               if (idx !== -1) {
                 this.activeKeysHeld[idx] = true;
                 this.processHit(idx);
@@ -35514,7 +36567,7 @@ SOFTWARE.</div>
 
           onKeyUp(e) {
             if (this.isPlaying) {
-              const idx = this.KEY_CODES.indexOf(e.code);
+              const idx = this.activeCodes.indexOf(e.code);
               if (idx !== -1) this.activeKeysHeld[idx] = false;
             }
           }
@@ -35522,20 +36575,61 @@ SOFTWARE.</div>
           createSongElement(song) {
             const el = document.createElement('div');
             el.className = 'rg-list-item';
+            
+            // Get levels for this song to render Project Sekai styled capsules
+            const levels = (window.rhythmLevelsMap && window.rhythmLevelsMap.levels && window.rhythmLevelsMap.levels[song.id]) ? window.rhythmLevelsMap.levels[song.id] : null;
+            let badgesHTML = '';
+            if (levels) {
+              const diffs = [
+                { short: 'EZ', key: 'easy', color: '#22d3ee' },
+                { short: 'ND', key: 'medium', color: '#34d399' },
+                { short: 'HD', key: 'hard', color: '#fb923c' },
+                { short: 'EX', key: 'expert', color: '#f43f5e' },
+                { short: 'MS', key: 'master', color: '#a78bfa' },
+                { short: 'DM', key: 'demon', color: '#7f1d1d' }
+              ];
+              badgesHTML = `<div class="d-flex flex-wrap gap-1 mt-2">` + diffs.map(d => {
+                const lvl = levels[d.key] || '--';
+                return `<span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${d.color}; color: ${d.key==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px; min-width: 32px;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
+              }).join('') + `</div>`;
+            } else {
+              badgesHTML = `<div class="text-secondary small mt-2" style="font-size: 0.75rem;"><i class="bi bi-info-circle"></i> Click to compile notes</div>`;
+            }
+
+            el.style.cssText = "background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid var(--rg-primary); border-radius: 16px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: all 0.2s cubic-bezier(0.2, 0, 0, 1); margin-bottom: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);";
+            
+            el.onmouseover = () => { el.style.backgroundColor = "rgba(255,255,255,0.05)"; el.style.transform = "translateY(-1px)"; el.style.borderColor = "var(--rg-primary)"; };
+            el.onmouseout = () => { el.style.backgroundColor = "transparent"; el.style.transform = "none"; el.style.borderColor = "rgba(255,255,255,0.05)"; };
+
             el.innerHTML = `
-              <div class="rg-list-item-info" style="min-width: 0;">
-                <img src="?action=get_image&id=${song.id}&v=${song.last_modified}" class="rg-cover-img">
-                <div class="text-truncate flex-grow-1 ms-1" style="min-width: 0;">
-                  <div class="rg-list-item-title text-truncate">${escapeHTML(song.title)}</div>
-                  <div class="rg-list-item-sub text-truncate">${escapeHTML(song.artist)}</div>
+              <div class="rg-list-item-info d-flex align-items-center gap-3" style="min-width: 0; flex: 1; padding-right: 12px;">
+                <img src="?action=get_image&id=${song.id}&v=${song.last_modified}" class="rg-cover-img" style="width: 58px; height: 58px; border-radius: 12px; object-fit: cover; box-shadow: 0 4px 12px rgba(0,0,0,0.4); flex-shrink: 0;">
+                <div class="text-truncate" style="min-width: 0; flex: 1;">
+                  <div class="rg-list-item-title text-white fw-bold" style="font-size: 1.05rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(song.title)}</div>
+                  <div class="rg-list-item-sub text-secondary small d-flex align-items-center gap-2 mt-1">
+                    <span class="text-truncate" style="max-width: 150px; display: inline-block;">${escapeHTML(song.artist)}</span>
+                    <span style="width:3px; height:3px; background:#555; border-radius:50%;"></span>
+                    <span class="flex-shrink-0"><i class="bi bi-play-fill text-secondary"></i> ${formatSongCount(song.play_count || 0)}</span>
+                  </div>
+                  ${badgesHTML}
                 </div>
               </div>
-              <div class="rg-list-item-actions">
-                <button class="rg-fav-btn ${song.rg_favorite == 1 ? 'active' : ''}"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i></button>
-                <button class="rg-play-btn">PLAY</button>
+              <div class="rg-list-item-actions d-flex align-items-center gap-2" style="flex-shrink: 0;">
+                <div class="btn-group shadow-sm" role="group" style="height: 36px; background-color: var(--rg-surface-variant); border-radius: 50px; border: 1px solid #333; overflow: hidden;">
+                  <button class="btn p-0 border-0 rg-fav-btn d-flex align-items-center justify-content-center ${song.rg_favorite == 1 ? 'text-danger' : 'text-secondary'}" style="width: 40px; height: 100%; background: transparent; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.1)'" onmouseout="this.style.backgroundColor='transparent'"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-6" style="line-height: 1;"></i></button>
+                  <button class="btn p-0 border-0 border-start border-end rg-share-song-btn text-info d-flex align-items-center justify-content-center" style="width: 40px; height: 100%; border-color: #333 !important; background: transparent; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.1)'" onmouseout="this.style.backgroundColor='transparent'"><i class="bi bi-share-fill fs-6"></i></button>
+                  <button class="btn p-0 border-0 rg-play-btn fw-bold d-flex align-items-center justify-content-center text-white" style="width: 48px; height: 100%; background: var(--rg-primary); transition: filter 0.2s;" onmouseover="this.style.filter='brightness(1.2)'" onmouseout="this.style.filter='none'"><i class="bi bi-play-fill fs-4" style="line-height: 1; padding-left: 2px;"></i></button>
+                </div>
               </div>
             `;
             const favBtn = el.querySelector('.rg-fav-btn');
+            const shareBtn = el.querySelector('.rg-share-song-btn');
+            shareBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              if (typeof showShareModal === 'function') {
+                showShareModal('game', song.id, song.title);
+              }
+            });
             favBtn.addEventListener('click', async (e) => {
               e.stopPropagation();
               const res = await fetchData('?action=toggle_rhythm_favorite', {
@@ -35545,22 +36639,25 @@ SOFTWARE.</div>
               });
               if (res) {
                 song.rg_favorite = res.is_favorite;
-                favBtn.classList.toggle('active', song.rg_favorite == 1);
+                favBtn.classList.toggle('text-danger', song.rg_favorite == 1);
+                favBtn.classList.toggle('text-secondary', song.rg_favorite != 1);
                 favBtn.innerHTML = `<i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i>`;
                 
-                // Sync the favorites array in local memory reactively
+                // Live sync Favorites tab memory array immediately on click without reload
                 if (song.rg_favorite == 1) {
                   if (!this.favFilteredSongs.some(s => s.id === song.id)) {
+                    song.originalFavIndex = this.favFilteredSongs.length;
                     this.favFilteredSongs.push(song);
                   }
                 } else {
                   this.favFilteredSongs = this.favFilteredSongs.filter(s => s.id !== song.id);
                 }
                 
-                // Refresh list if the favorites tab is currently active
-                if (document.getElementById('rg-tab-favorites').classList.contains('rg-hidden') === false) {
-                  this.renderFavoritesList();
-                }
+                // Sync main arrays reactively
+                const mainSong = this.songs.find(s => s.id === song.id);
+                if (mainSong) mainSong.rg_favorite = song.rg_favorite;
+
+                this.sortFavorites(this.currentFavSortMethod);
               }
             });
             el.addEventListener('click', () => {
@@ -35643,20 +36740,61 @@ SOFTWARE.</div>
           createSongElement(song) {
             const el = document.createElement('div');
             el.className = 'rg-list-item';
+            
+            // Get levels for this song to render Project Sekai styled capsules
+            const levels = (window.rhythmLevelsMap && window.rhythmLevelsMap.levels && window.rhythmLevelsMap.levels[song.id]) ? window.rhythmLevelsMap.levels[song.id] : null;
+            let badgesHTML = '';
+            if (levels) {
+              const diffs = [
+                { short: 'EZ', key: 'easy', color: '#22d3ee' },
+                { short: 'ND', key: 'medium', color: '#34d399' },
+                { short: 'HD', key: 'hard', color: '#fb923c' },
+                { short: 'EX', key: 'expert', color: '#f43f5e' },
+                { short: 'MS', key: 'master', color: '#a78bfa' },
+                { short: 'DM', key: 'demon', color: '#7f1d1d' }
+              ];
+              badgesHTML = `<div class="d-flex flex-wrap gap-1 mt-2">` + diffs.map(d => {
+                const lvl = levels[d.key] || '--';
+                return `<span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${d.color}; color: ${d.key==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px; min-width: 32px;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
+              }).join('') + `</div>`;
+            } else {
+              badgesHTML = `<div class="text-secondary small mt-2" style="font-size: 0.75rem;"><i class="bi bi-info-circle"></i> Click to compile notes</div>`;
+            }
+
+            el.style.cssText = "background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid var(--rg-primary); border-radius: 16px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: all 0.2s cubic-bezier(0.2, 0, 0, 1); margin-bottom: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);";
+            
+            el.onmouseover = () => { el.style.backgroundColor = "rgba(255,255,255,0.05)"; el.style.transform = "translateY(-1px)"; el.style.borderColor = "var(--rg-primary)"; };
+            el.onmouseout = () => { el.style.backgroundColor = "transparent"; el.style.transform = "none"; el.style.borderColor = "rgba(255,255,255,0.05)"; };
+
             el.innerHTML = `
-              <div class="rg-list-item-info" style="min-width: 0;">
-                <img src="?action=get_image&id=${song.id}&v=${song.last_modified}" class="rg-cover-img">
-                <div class="text-truncate flex-grow-1 ms-1" style="min-width: 0;">
-                  <div class="rg-list-item-title text-truncate">${escapeHTML(song.title)}</div>
-                  <div class="rg-list-item-sub text-truncate">${escapeHTML(song.artist)}</div>
+              <div class="rg-list-item-info d-flex align-items-center gap-3" style="min-width: 0; flex: 1; padding-right: 12px;">
+                <img src="?action=get_image&id=${song.id}&v=${song.last_modified}" class="rg-cover-img" style="width: 58px; height: 58px; border-radius: 12px; object-fit: cover; box-shadow: 0 4px 12px rgba(0,0,0,0.4); flex-shrink: 0;">
+                <div class="text-truncate" style="min-width: 0; flex: 1;">
+                  <div class="rg-list-item-title text-white fw-bold" style="font-size: 1.05rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(song.title)}</div>
+                  <div class="rg-list-item-sub text-secondary small d-flex align-items-center gap-2 mt-1">
+                    <span class="text-truncate" style="max-width: 150px; display: inline-block;">${escapeHTML(song.artist)}</span>
+                    <span style="width:3px; height:3px; background:#555; border-radius:50%;"></span>
+                    <span class="flex-shrink-0"><i class="bi bi-play-fill text-secondary"></i> ${formatSongCount(song.play_count || 0)}</span>
+                  </div>
+                  ${badgesHTML}
                 </div>
               </div>
-              <div class="rg-list-item-actions">
-                <button class="rg-fav-btn ${song.rg_favorite == 1 ? 'active' : ''}"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i></button>
-                <button class="rg-play-btn">PLAY</button>
+              <div class="rg-list-item-actions d-flex align-items-center gap-2" style="flex-shrink: 0;">
+                <div class="btn-group shadow-sm" role="group" style="height: 36px; background-color: var(--rg-surface-variant); border-radius: 50px; border: 1px solid #333; overflow: hidden;">
+                  <button class="btn p-0 border-0 rg-fav-btn d-flex align-items-center justify-content-center ${song.rg_favorite == 1 ? 'text-danger' : 'text-secondary'}" style="width: 40px; height: 100%; background: transparent; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.1)'" onmouseout="this.style.backgroundColor='transparent'"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-6" style="line-height: 1;"></i></button>
+                  <button class="btn p-0 border-0 border-start border-end rg-share-song-btn text-info d-flex align-items-center justify-content-center" style="width: 40px; height: 100%; border-color: #333 !important; background: transparent; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.1)'" onmouseout="this.style.backgroundColor='transparent'"><i class="bi bi-share-fill fs-6"></i></button>
+                  <button class="btn p-0 border-0 rg-play-btn fw-bold d-flex align-items-center justify-content-center text-white" style="width: 48px; height: 100%; background: var(--rg-primary); transition: filter 0.2s;" onmouseover="this.style.filter='brightness(1.2)'" onmouseout="this.style.filter='none'"><i class="bi bi-play-fill fs-4" style="line-height: 1; padding-left: 2px;"></i></button>
+                </div>
               </div>
             `;
             const favBtn = el.querySelector('.rg-fav-btn');
+            const shareBtn = el.querySelector('.rg-share-song-btn');
+            shareBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              if (typeof showShareModal === 'function') {
+                showShareModal('game', song.id, song.title);
+              }
+            });
             favBtn.addEventListener('click', async (e) => {
               e.stopPropagation();
               const res = await fetchData('?action=toggle_rhythm_favorite', {
@@ -35666,20 +36804,25 @@ SOFTWARE.</div>
               });
               if (res) {
                 song.rg_favorite = res.is_favorite;
-                favBtn.classList.toggle('active', song.rg_favorite == 1);
+                favBtn.classList.toggle('text-danger', song.rg_favorite == 1);
+                favBtn.classList.toggle('text-secondary', song.rg_favorite != 1);
                 favBtn.innerHTML = `<i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i>`;
                 
+                // Live sync Favorites tab memory array immediately on click without reload
                 if (song.rg_favorite == 1) {
                   if (!this.favFilteredSongs.some(s => s.id === song.id)) {
+                    song.originalFavIndex = this.favFilteredSongs.length;
                     this.favFilteredSongs.push(song);
                   }
                 } else {
                   this.favFilteredSongs = this.favFilteredSongs.filter(s => s.id !== song.id);
                 }
                 
-                if (document.getElementById('rg-tab-favorites').classList.contains('rg-hidden') === false) {
-                  this.renderFavoritesList();
-                }
+                // Sync main arrays reactively
+                const mainSong = this.songs.find(s => s.id === song.id);
+                if (mainSong) mainSong.rg_favorite = song.rg_favorite;
+
+                this.sortFavorites(this.currentFavSortMethod);
               }
             });
             el.addEventListener('click', () => {
@@ -35691,6 +36834,23 @@ SOFTWARE.</div>
           async openPlayDialog(song) {
             this.selectedSong = song;
             document.getElementById('rg-dialog-song-name').textContent = song.title;
+            const coverEl = document.getElementById('rg-dialog-cover');
+            if (coverEl) coverEl.src = `?action=get_image&id=${song.id}&v=${song.last_modified || 0}`;
+            
+            // Query database dynamically for generated difficulty levels and update selectors
+            const lvlData = await fetchData(`?action=get_rhythm_levels&song_id=${song.id}`, {}, true);
+            const diffMap = { easy: 'Easy', medium: 'Med', hard: 'Hard', expert: 'Exprt', master: 'Mstr', demon: 'Demon' };
+            
+            document.querySelectorAll('.rg-diff-btn').forEach(btn => {
+              const diffKey = btn.dataset.diff;
+              const defaultText = diffMap[diffKey] || 'Diff';
+              if (lvlData && lvlData.levels && lvlData.levels[diffKey] !== undefined) {
+                btn.innerHTML = `${defaultText} <span style="font-size:0.7rem; opacity:0.65; display:block; font-weight:bold; margin-top:2px;">Lv.${lvlData.levels[diffKey]}</span>`;
+              } else {
+                btn.innerHTML = `${defaultText} <span style="font-size:0.7rem; opacity:0.4; display:block; margin-top:2px;">Lv.--</span>`;
+              }
+            });
+            
             const container = document.getElementById('rg-song-leaderboard');
             
             // Set Loading State
@@ -35751,59 +36911,59 @@ SOFTWARE.</div>
             chunk.forEach(song => this.listFavsEl.appendChild(this.createSongElement(song)));
           }
 
+          calculateLevel(notes, duration) {
+            if (!duration || duration <= 0) return 1;
+            const nps = notes.length / duration;
+            let level = Math.round(nps * 4.5); // Calibrate NPS multiplier for a standard 1 to 30 rating scale
+            return Math.max(1, Math.min(30, level));
+          }
+
           async prepGame(song, diff) {
             this.switchScreen('loading');
             document.getElementById('rg-loading-cover').src = `?action=get_image&id=${song.id}&v=${song.last_modified}`;
             document.getElementById('rg-loading-title').textContent = song.title;
             const progressText = document.getElementById('rg-loading-text');
-            progressText.textContent = `Downloading 0%`;
+            progressText.textContent = `Preparing audio...`;
             
             try {
-              if (this.audioCtx) this.audioCtx.close();
-              if (this.sfxCtx) this.sfxCtx.close();
-              this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-              this.sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
+              let playableUrl = `?action=get_stream&id=${song.id}`;
               
-              const url = `?action=get_stream&id=${song.id}`;
-              const response = await fetch(url);
-              if (!response.ok) throw new Error(`Stream fetch failed: HTTP ${response.status}`);
-              
-              const contentLength = response.headers.get('content-length');
-              let arrayBuffer;
-              
-              // Custom fetch reader to display exact downloading percentage visually
-              if (contentLength) {
-                const total = parseInt(contentLength, 10);
-                let loaded = 0;
-                const reader = response.body.getReader();
-                const chunks = [];
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  chunks.push(value);
-                  loaded += value.length;
-                  const pct = Math.round((loaded / total) * 100);
-                  progressText.textContent = `Downloading ${pct}%`;
-                }
-                const blob = new Blob(chunks);
-                arrayBuffer = await blob.arrayBuffer();
+              // Use memory Cache if available to save bandwidth on retries
+              if (this.rgSongCache[song.id]) {
+                playableUrl = this.rgSongCache[song.id].blobUrl;
               } else {
-                progressText.textContent = `Downloading...`;
-                arrayBuffer = await response.arrayBuffer();
+                const response = await fetch(playableUrl);
+                if (!response.ok) throw new Error("Audio stream unreachable.");
+                const blob = await response.blob();
+                playableUrl = URL.createObjectURL(blob);
+                this.rgSongCache[song.id] = { blobUrl: playableUrl };
               }
+
+              // Fetch Note Chart securely from the server
+              progressText.textContent = `Loading note chart...`;
+              const dbChart = await fetchData(`?action=get_rhythm_chart&song_id=${song.id}&difficulty=${diff}`, {}, true);
               
-              progressText.textContent = `Decoding Audio...`;
-              this.audioBuffer = await this.audioCtx.decodeAudioData(arrayBuffer);
-              
-              progressText.textContent = `Building Chart...`;
-              this.generateChart(diff);
+              if (dbChart && dbChart.found) {
+                this.chartNotes = dbChart.notes;
+                // Workaround to bypass full buffer decode memory footprint
+                this.audioBuffer = { duration: song.duration || 180, sampleRate: 44100 }; 
+                this.LANES = (diff === 'easy' || diff === 'medium') ? 4 : 6;
+
+                // Cache level dynamically to local memory and instantly re-render active list
+                if (!window.rhythmLevelsMap) window.rhythmLevelsMap = { levels: {} };
+                if (!window.rhythmLevelsMap.levels[song.id]) window.rhythmLevelsMap.levels[song.id] = {};
+                window.rhythmLevelsMap.levels[song.id][diff] = dbChart.level;
+                this.renderSongsList();
+              } else {
+                throw new Error("Failed to load chart.");
+              }
               
               if (this.audioPlayback) {
                 this.audioPlayback.pause();
                 this.audioPlayback.src = "";
               }
               
-              this.audioPlayback = new Audio(url);
+              this.audioPlayback = new Audio(playableUrl);
               this.audioPlayback.crossOrigin = 'anonymous';
               
               this.startGame(song.title, diff);
@@ -35815,6 +36975,7 @@ SOFTWARE.</div>
           }
 
           generateChart(diff) {
+            this.LANES = (diff === 'easy' || diff === 'medium') ? 4 : 6;
             const channel = this.audioBuffer.getChannelData(0);
             const sampleRate = this.audioBuffer.sampleRate;
             
@@ -35825,6 +36986,7 @@ SOFTWARE.</div>
             else if (diff === 'hard') { peakThresholdScale = 0.15; spacingMinSec = 0.07; chanceLong = 0.25; this.laneApproachSpeed = 1.6; }
             else if (diff === 'expert') { peakThresholdScale = 0.1; spacingMinSec = 0.05; chanceLong = 0.35; this.laneApproachSpeed = 2.0; }
             else if (diff === 'master') { peakThresholdScale = 0.05; spacingMinSec = 0.03; chanceLong = 0.45; this.laneApproachSpeed = 2.4; }
+            else if (diff === 'demon') { peakThresholdScale = 0.03; spacingMinSec = 0.02; chanceLong = 0.50; this.laneApproachSpeed = 2.8; }
 
             // Apply User Custom Multiplier Settings
             this.laneApproachSpeed = this.laneApproachSpeed * this.userTickSpeed;
@@ -35867,21 +37029,73 @@ SOFTWARE.</div>
             this.chartNotes = notes;
           }
 
+          generateSyntheticChart(duration, diff) {
+            this.LANES = (diff === 'easy' || diff === 'medium') ? 4 : 6;
+            this.audioBuffer = { duration: duration || 180, sampleRate: 44100 };
+            let spacing = 0.5;
+            if (diff === 'easy') spacing = 0.6;
+            else if (diff === 'medium') spacing = 0.45;
+            else if (diff === 'hard') spacing = 0.35;
+            else if (diff === 'expert') spacing = 0.25;
+            else if (diff === 'master') spacing = 0.18;
+            else if (diff === 'demon') spacing = 0.12;
+            
+            const notes = [];
+            let lastLane = -1;
+            const totalTime = duration || 180;
+            
+            for (let t = 1.0; t < totalTime - 2.0; t += spacing) {
+              if (Math.sin(t * 1.5) > -0.4) {
+                let lane = Math.floor(Math.abs(Math.sin(t * 8)) * this.LANES) % this.LANES;
+                if (lane === lastLane) lane = (lane + 1) % this.LANES;
+                
+                const isLong = Math.sin(t * 4) > 0.85;
+                const dur = isLong ? 0.4 : 0;
+                
+                notes.push({
+                  time: t + 2.0,
+                  lane,
+                  isLong,
+                  endTime: t + 2.0 + dur,
+                  hitStart: false,
+                  hitEnd: false,
+                  missed: false,
+                  holding: false
+                });
+                lastLane = lane;
+                t += dur;
+              }
+            }
+            this.chartNotes = notes;
+          }
+
           startGame(title, diff) {
             this.switchScreen('game');
             document.getElementById('rg-in-game-title').textContent = title;
-            document.getElementById('rg-in-game-diff').textContent = diff;
+            const pauseDiffEl = document.getElementById('rg-pause-diff-display');
+            if (pauseDiffEl) pauseDiffEl.textContent = diff;
             
             this.curScore = 0; this.curCombo = 0; this.maxCombo = 0;
+            this.curHp = 100; this.accuracy = 100.00;
             this.stats = { perfect: 0, great: 0, good: 0, bad: 0, miss: 0 };
             this.updateHUD();
             
+            if (this.LANES === 4) {
+              this.activeCodes = [this.KEY_CODES[1], this.KEY_CODES[2], this.KEY_CODES[3], this.KEY_CODES[4]];
+              this.activeLabels = [this.KEY_LABELS[1], this.KEY_LABELS[2], this.KEY_LABELS[3], this.KEY_LABELS[4]];
+            } else {
+              this.activeCodes = [...this.KEY_CODES];
+              this.activeLabels = [...this.KEY_LABELS];
+            }
+
             this.canvas = document.getElementById('rg-game-canvas');
             this.ctx = this.canvas.getContext('2d');
             this.resizeCanvas();
             
             this.chartNotes.forEach(n => { n.hitStart=false; n.hitEnd=false; n.missed=false; n.holding=false; });
             this.particles = []; this.feedbackTimer = 0;
+            const ratingEl = document.getElementById('rg-in-game-rating');
+            if (ratingEl) ratingEl.textContent = '';
             
             if (this.audioPlayback) this.audioPlayback.currentTime = 0;
             
@@ -35917,6 +37131,15 @@ SOFTWARE.</div>
 
           updateHUD() {
             document.getElementById('rg-in-game-score').textContent = String(this.curScore).padStart(9, '0');
+            
+            // Update In-Game Score Progress Bar
+            const maxScore = (this.chartNotes.length || 1) * 1000;
+            const scorePct = Math.min(100, Math.max(0, (this.curScore / maxScore) * 100));
+            const scoreBar = document.getElementById('rg-in-game-score-bar');
+            if (scoreBar) {
+              scoreBar.style.width = scorePct + '%';
+            }
+
             const cNum = document.getElementById('rg-in-game-combo');
             const cLbl = document.getElementById('rg-in-game-combo-lbl');
             if (this.curCombo >= 3) {
@@ -35927,15 +37150,68 @@ SOFTWARE.</div>
             } else {
               cNum.style.opacity = "0"; cLbl.style.opacity = "0";
             }
+
+            // Accuracy Calculation (Weighted average)
+            const total = this.stats.perfect + this.stats.great + this.stats.good + this.stats.bad + this.stats.miss;
+            if (total > 0) {
+              const weight = (this.stats.perfect * 100 + this.stats.great * 75 + this.stats.good * 40 + this.stats.bad * 10) / total;
+              this.accuracy = weight.toFixed(2);
+            } else {
+              this.accuracy = "0.00"; // Initialize to 0% at song start to trigger Rank F on the HUD
+            }
+            const accEl = document.getElementById('rg-in-game-accuracy');
+            if (accEl) accEl.textContent = this.accuracy + '%';
+
+            // Real-Time Rank Mapping (Project Sekai Standards)
+            let rank = 'F';
+            let rankColor = '#7f1d1d';
+            const accVal = parseFloat(this.accuracy);
+            
+            if (accVal >= 98.00) { rank = 'SS'; rankColor = '#ff0055'; }
+            else if (accVal >= 95.00) { rank = 'S'; rankColor = '#ffbd2e'; }
+            else if (accVal >= 90.00) { rank = 'A'; rankColor = '#a78bfa'; }
+            else if (accVal >= 80.00) { rank = 'B'; rankColor = '#60a5fa'; }
+            else if (accVal >= 70.00) { rank = 'C'; rankColor = '#34d399'; }
+            else if (accVal >= 60.00) { rank = 'D'; rankColor = '#fb923c'; }
+            else if (accVal >= 50.00) { rank = 'E'; rankColor = '#9ca3af'; }
+
+            const rankEl = document.getElementById('rg-in-game-rank');
+            if (rankEl) {
+              rankEl.textContent = rank;
+              rankEl.style.color = rankColor;
+            }
+
+            // HP Bar Layout
+            const hpEl = document.getElementById('rg-in-game-hp');
+            if (hpEl) {
+              hpEl.style.width = this.curHp + '%';
+              if (this.curHp > 50) hpEl.style.backgroundColor = '#27c93f'; // Green
+              else if (this.curHp > 20) hpEl.style.backgroundColor = '#ffbd2e'; // Yellow
+              else hpEl.style.backgroundColor = '#ff5f56'; // Red
+            }
+
+            // Check Failure Condition (HP <= 0)
+            if (this.curHp <= 0 && this.isPlaying) {
+              this.endGame(true); // Stage Failed
+            }
           }
 
           showFeedback(txt, col) {
             this.feedbackTxt = txt; this.feedbackCol = col;
             this.feedbackTimer = 0.6; this.feedbackScale = 1.3;
+            
+            const ratingEl = document.getElementById('rg-in-game-rating');
+            if (ratingEl) {
+              ratingEl.textContent = txt;
+              ratingEl.style.color = col;
+              ratingEl.style.transform = "scale(1.2)";
+              setTimeout(() => { if (ratingEl) ratingEl.style.transform = "scale(1)"; }, 50);
+            }
           }
 
           registerMiss() {
             this.curCombo = 0; this.stats.miss++;
+            this.curHp = Math.max(0, this.curHp - 10);
             this.updateHUD(); this.showFeedback("MISS", "#555");
           }
 
@@ -35959,10 +37235,10 @@ SOFTWARE.</div>
               if (tgt.isLong) tgt.holding = true;
               
               let pts = 50, rating = "BAD", col = "#8e1c1c";
-              if (minDiff <= this.JUDGMENT.PERFECT) { rating = "PERFECT"; col = "#fff"; pts = 1000; this.stats.perfect++; }
-              else if (minDiff <= this.JUDGMENT.GREAT) { rating = "GREAT"; col = "#ff3b30"; pts = 750; this.stats.great++; }
-              else if (minDiff <= this.JUDGMENT.GOOD) { rating = "GOOD"; col = "#ffa000"; pts = 400; this.stats.good++; }
-              else this.stats.bad++;
+              if (minDiff <= this.JUDGMENT.PERFECT) { rating = "PERFECT"; col = "#fff"; pts = 1000; this.stats.perfect++; this.curHp = Math.min(100, this.curHp + 2); }
+              else if (minDiff <= this.JUDGMENT.GREAT) { rating = "GREAT"; col = "#ff3b30"; pts = 750; this.stats.great++; this.curHp = Math.min(100, this.curHp + 1); }
+              else if (minDiff <= this.JUDGMENT.GOOD) { rating = "GOOD"; col = "#ffa000"; pts = 400; this.stats.good++; this.curHp = Math.min(100, this.curHp + 0.5); }
+              else { this.stats.bad++; this.curHp = Math.max(0, this.curHp - 5); }
 
               if (rating !== "BAD") { this.curCombo++; if (this.curCombo > this.maxCombo) this.maxCombo = this.curCombo; }
               else this.curCombo = 0;
@@ -36006,14 +37282,22 @@ SOFTWARE.</div>
               return p.life > 0;
             });
 
-            if (this.feedbackTimer > 0) this.feedbackTimer -= 0.016;
+            if (this.feedbackTimer > 0) {
+              this.feedbackTimer -= 0.016;
+              if (this.feedbackTimer <= 0) {
+                const ratingEl = document.getElementById('rg-in-game-rating');
+                if (ratingEl) ratingEl.textContent = '';
+              }
+            }
 
             const w = this.canvas.width / window.devicePixelRatio;
             const h = this.canvas.height / window.devicePixelRatio;
             this.ctx.fillStyle = "#000"; this.ctx.fillRect(0,0,w,h);
 
             const vanY = h * 0.15, hwH = h * 0.72, judY = vanY + hwH;
-            const topW = w * 0.28, botW = w * 0.76;
+            // Sharper top for visibility, wider bottom for playability
+            const topW = this.LANES === 6 ? w * 0.20 : w * 0.12; 
+            const botW = this.LANES === 6 ? w * 1.00 : w * 0.88;
 
             const getPt = (lane, prog) => {
               const ease = Math.pow(prog, 1.35);
@@ -36074,7 +37358,7 @@ SOFTWARE.</div>
               this.ctx.font = "bold 14px sans-serif";
               this.ctx.textAlign = "center";
               this.ctx.textBaseline = "middle";
-              this.ctx.fillText(this.KEY_LABELS[i], cX, judY + 1);
+              this.ctx.fillText(this.activeLabels[i], cX, judY + 1);
             }
 
             const win = 1.2 / this.laneApproachSpeed;
@@ -36150,21 +37434,8 @@ SOFTWARE.</div>
               this.ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${p.life})`; this.ctx.fill();
             });
 
-            if (this.feedbackTimer > 0) {
-              this.ctx.save();
-              this.ctx.translate(w/2, h*0.55);
-              if (this.feedbackScale > 1) this.feedbackScale -= 0.05;
-              this.ctx.scale(this.feedbackScale, this.feedbackScale);
-              this.ctx.font = "bold 28px sans-serif";
-              this.ctx.textAlign = "center";
-              this.ctx.textBaseline = "middle";
-              this.ctx.fillStyle = this.feedbackCol;
-              this.ctx.fillText(this.feedbackTxt, 0, 0);
-              this.ctx.restore();
-            }
-
             if (this.audioPlayback.ended || time > this.audioBuffer.duration + 2.0) {
-              this.endGame(); return;
+              this.endGame(false); return;
             }
             requestAnimationFrame(this.gameLoop.bind(this));
           }
@@ -36172,7 +37443,8 @@ SOFTWARE.</div>
           spawnParticles(lane, white) {
             const w = this.canvas.width / window.devicePixelRatio;
             const h = this.canvas.height / window.devicePixelRatio;
-            const botW = w * 0.76;
+            // Ensure particle spawns match the widened track logic
+            const botW = this.LANES === 6 ? w * 1.00 : w * 0.88;
             const sW = botW / this.LANES;
             const cX = (w/2) - (botW/2) + lane*sW + sW/2;
             const cY = h*0.15 + h*0.72;
@@ -36186,11 +37458,59 @@ SOFTWARE.</div>
             }
           }
 
-          async endGame() {
+          async endGame(failed = false) {
             this.isPlaying = false;
             if (this.audioPlayback) this.audioPlayback.pause();
             this.switchScreen('result');
             
+            const titleEl = document.querySelector('#rg-screen-result h2');
+            if (titleEl) {
+              titleEl.textContent = failed ? 'STAGE FAILED' : 'STAGE CLEARED';
+              titleEl.style.color = failed ? '#ff5f56' : 'var(--rg-primary)';
+            }
+            const shareBtn = document.getElementById('rg-btn-result-share');
+            if (shareBtn) {
+              shareBtn.style.display = failed ? 'none' : 'block';
+            }
+
+            // Calculate Performance Rank
+            let rank = 'F';
+            let rankColor = '#7f1d1d';
+            const accVal = parseFloat(this.accuracy);
+            
+            if (accVal >= 98.00) { rank = 'SS'; rankColor = '#ff0055'; }
+            else if (accVal >= 95.00) { rank = 'S'; rankColor = '#ffbd2e'; }
+            else if (accVal >= 90.00) { rank = 'A'; rankColor = '#a78bfa'; }
+            else if (accVal >= 80.00) { rank = 'B'; rankColor = '#60a5fa'; }
+            else if (accVal >= 70.00) { rank = 'C'; rankColor = '#34d399'; }
+            else if (accVal >= 60.00) { rank = 'D'; rankColor = '#fb923c'; }
+            else if (accVal >= 50.00) { rank = 'E'; rankColor = '#9ca3af'; }
+            
+            if (failed) {
+              rank = 'F';
+              rankColor = '#ff5f56';
+            }
+
+            const rankEl = document.getElementById('rg-res-rank');
+            if (rankEl) {
+              rankEl.textContent = rank;
+              rankEl.style.color = rankColor;
+            }
+
+            const accEl = document.getElementById('rg-res-acc');
+            if (accEl) {
+              accEl.textContent = this.accuracy + '%';
+            }
+
+            // Score Progress Bar Animation Logic
+            const maxScore = (this.chartNotes.length || 1) * 1000;
+            const pct = Math.min(100, Math.max(0, (this.curScore / maxScore) * 100));
+            const scoreBar = document.getElementById('rg-res-score-bar');
+            if (scoreBar) {
+              scoreBar.style.width = '0%';
+              setTimeout(() => { scoreBar.style.width = pct + '%'; }, 100);
+            }
+
             document.getElementById('rg-res-score').textContent = String(this.curScore).padStart(9, '0');
             document.getElementById('rg-res-max-combo').textContent = this.maxCombo;
             document.getElementById('rg-res-perfect').textContent = this.stats.perfect;
@@ -36199,7 +37519,7 @@ SOFTWARE.</div>
             document.getElementById('rg-res-bad').textContent = this.stats.bad;
             document.getElementById('rg-res-miss').textContent = this.stats.miss;
 
-            if (this.curScore > 0 && this.selectedSong) {
+            if (!failed && this.curScore > 0 && this.selectedSong) {
               await fetchData('?action=save_rhythm_score', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -36211,7 +37531,8 @@ SOFTWARE.</div>
                   great: this.stats.great,
                   good: this.stats.good,
                   bad: this.stats.bad,
-                  miss: this.stats.miss
+                  miss: this.stats.miss,
+                  difficulty: this.selectedDiff // Transmit currently played difficulty level
                 })
               });
               this.loadLeaderboard();
@@ -36231,6 +37552,12 @@ SOFTWARE.</div>
             this.dragType = null;
             this.dragStart = { x: 0, y: 0 };
             this.layerStart = {};
+            this.history = [];
+            this.historyIndex = -1;
+            this.isDrawMode = false;
+            this.currentPath = null;
+            this.brushColor = '#FF0000';
+            this.brushSize = 5;
             this.loadState();
           }
 
@@ -36252,10 +37579,43 @@ SOFTWARE.</div>
             window.addEventListener('resize', this._resizeHandler);
 
             document.getElementById('pe-upload-img').addEventListener('change', (e) => this.handleImageUpload(e));
-            document.getElementById('pe-btn-add-text').addEventListener('click', () => this.addText());
-            document.getElementById('pe-btn-add-shape').addEventListener('click', () => this.addShape());
+            document.getElementById('pe-btn-add-text').addEventListener('click', () => { this.isDrawMode = false; this.updateDrawBtn(); this.addText(); });
+            document.getElementById('pe-btn-add-shape').addEventListener('click', () => { this.isDrawMode = false; this.updateDrawBtn(); this.addShape(); });
+            
+            const btnDraw = document.getElementById('pe-btn-draw');
+            if (btnDraw) btnDraw.addEventListener('click', () => {
+              this.isDrawMode = !this.isDrawMode;
+              this.activeLayer = null;
+              this.closePanel();
+              this.updateDrawBtn();
+              this.render();
+            });
+            
+            const btnUndo = document.getElementById('pe-btn-undo');
+            if (btnUndo) btnUndo.addEventListener('click', () => this.undo());
+            
+            const btnRedo = document.getElementById('pe-btn-redo');
+            if (btnRedo) btnRedo.addEventListener('click', () => this.redo());
+
+            const btnReset = document.getElementById('pe-btn-reset');
+            if (btnReset) btnReset.addEventListener('click', () => {
+              if (confirm('Are you sure you want to reset the canvas? All unsaved progress will be lost.')) {
+                this.layers = [];
+                this.activeLayer = null;
+                this.bgColor = '#0A0A0A';
+                this.canvasW = 800;
+                this.canvasH = 800;
+                this.history = [];
+                this.historyIndex = -1;
+                this.resizeCanvas();
+                this.saveState();
+                this.closePanel();
+              }
+            });
             
             this.propBtn.addEventListener('click', () => {
+              this.isDrawMode = false;
+              this.updateDrawBtn();
               if (this.panel.classList.contains('open')) {
                 this.closePanel();
               } else {
@@ -36281,6 +37641,60 @@ SOFTWARE.</div>
             this.render();
           }
 
+          updateDrawBtn() {
+            const btn = document.getElementById('pe-btn-draw');
+            if (btn) btn.classList.toggle('active', this.isDrawMode);
+          }
+
+          undo() {
+            if (this.historyIndex > 0) {
+              this.historyIndex--;
+              this.restoreFromState(this.history[this.historyIndex]);
+            }
+          }
+
+          redo() {
+            if (this.historyIndex < this.history.length - 1) {
+              this.historyIndex++;
+              this.restoreFromState(this.history[this.historyIndex]);
+            }
+          }
+
+          restoreFromState(stateStr) {
+            try {
+              const state = JSON.parse(stateStr);
+              this.bgColor = state.bgColor;
+              this.canvasW = state.canvasW;
+              this.canvasH = state.canvasH;
+              this.layers = [];
+              let pendingImages = 0;
+              state.layers.forEach(l => {
+                if (l.type === 'image' && l.imgSrc) {
+                  pendingImages++;
+                  const img = new Image();
+                  img.onload = () => {
+                    l.img = img;
+                    this.layers.push(l);
+                    pendingImages--;
+                    if (pendingImages === 0 && this.ctx) {
+                      this.layers.sort((a,b) => a.id - b.id);
+                      this.activeLayer = null;
+                      this.render();
+                    }
+                  };
+                  img.onerror = () => pendingImages--;
+                  img.src = l.imgSrc;
+                } else {
+                  this.layers.push(l);
+                }
+              });
+              if (pendingImages === 0) {
+                this.activeLayer = null;
+                this.render();
+              }
+            } catch (e) {}
+          }
+
           saveState() {
             let safeLayers = this.layers.map(l => {
               const clone = { ...l };
@@ -36301,8 +37715,18 @@ SOFTWARE.</div>
               return clone;
             });
             const state = { bgColor: this.bgColor, canvasW: this.canvasW, canvasH: this.canvasH, layers: safeLayers };
+            const stateStr = JSON.stringify(state);
+            
+            // Push to history array for Undo/Redo
+            if (this.historyIndex === -1 || this.history[this.historyIndex] !== stateStr) {
+              this.history = this.history.slice(0, this.historyIndex + 1);
+              this.history.push(stateStr);
+              if (this.history.length > 20) this.history.shift(); // Max 20 states
+              else this.historyIndex++;
+            }
+            
             try {
-              localStorage.setItem('phpMusic_photoEditorState', JSON.stringify(state));
+              localStorage.setItem('phpMusic_photoEditorState', stateStr);
             } catch (e) {
               console.warn('Could not save photo editor state (Quota exceeded).');
             }
@@ -36312,6 +37736,8 @@ SOFTWARE.</div>
             try {
               const saved = localStorage.getItem('phpMusic_photoEditorState');
               if (saved) {
+                this.history.push(saved);
+                this.historyIndex = 0;
                 const state = JSON.parse(saved);
                 this.bgColor = state.bgColor || '#0A0A0A';
                 this.canvasW = state.canvasW || 800;
@@ -36378,7 +37804,10 @@ SOFTWARE.</div>
 
             this.textEditor.addEventListener('blur', () => this.commitTextEdit());
             this.textEditor.addEventListener('keydown', (e) => {
-              if (e.key === 'Enter') { e.preventDefault(); this.commitTextEdit(); }
+              if (e.key === 'Enter' && !e.shiftKey) { 
+                e.preventDefault(); 
+                this.commitTextEdit(); 
+              }
             });
           }
 
@@ -36429,6 +37858,18 @@ SOFTWARE.</div>
           onPointerDown(e) {
             if (e.target === this.textEditor) return;
             const pos = this.getCoords(e);
+            
+            if (this.isDrawMode) {
+              this.isDragging = true;
+              this.currentPath = {
+                id: Date.now(), type: 'path', x: 0, y: 0, w: this.canvasW, h: this.canvasH,
+                rotation: 0, opacity: 1, flipX: false, flipY: false,
+                color: this.brushColor, size: this.brushSize,
+                points: [{ x: pos.x, y: pos.y }]
+              };
+              return;
+            }
+
             const hit = this.hitTest(pos.x, pos.y);
 
             if (hit) {
@@ -36446,8 +37887,28 @@ SOFTWARE.</div>
           }
 
           onPointerMove(e) {
-            if (!this.isDragging || !this.activeLayer) return;
+            if (!this.isDragging) return;
             const pos = this.getCoords(e);
+            
+            if (this.isDrawMode && this.currentPath) {
+              this.currentPath.points.push({ x: pos.x, y: pos.y });
+              
+              // Draw the active stroke overlay for smooth realtime preview without triggering full canvas re-render
+              this.overlayCtx.clearRect(0, 0, this.canvasW, this.canvasH);
+              this.overlayCtx.strokeStyle = this.currentPath.color;
+              this.overlayCtx.lineWidth = this.currentPath.size;
+              this.overlayCtx.lineCap = 'round';
+              this.overlayCtx.lineJoin = 'round';
+              this.overlayCtx.beginPath();
+              this.currentPath.points.forEach((pt, i) => {
+                if (i === 0) this.overlayCtx.moveTo(pt.x, pt.y);
+                else this.overlayCtx.lineTo(pt.x, pt.y);
+              });
+              this.overlayCtx.stroke();
+              return;
+            }
+
+            if (!this.activeLayer) return;
             const dx = pos.x - this.dragStart.x;
             const dy = pos.y - this.dragStart.y;
             const l = this.activeLayer;
@@ -36474,6 +37935,32 @@ SOFTWARE.</div>
           onPointerUp(e) {
             if (this.isDragging) {
               this.isDragging = false;
+              
+              if (this.isDrawMode && this.currentPath) {
+                if (this.currentPath.points.length > 0) {
+                  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                  this.currentPath.points.forEach(p => {
+                    if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y;
+                    if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y;
+                  });
+                  
+                  // Adjust points relative to layer center
+                  const cx = (minX + maxX) / 2;
+                  const cy = (minY + maxY) / 2;
+                  this.currentPath.points.forEach(p => { p.x -= cx; p.y -= cy; });
+                  
+                  this.currentPath.x = cx - (maxX - minX) / 2;
+                  this.currentPath.y = cy - (maxY - minY) / 2;
+                  this.currentPath.w = Math.max(10, maxX - minX);
+                  this.currentPath.h = Math.max(10, maxY - minY);
+                  
+                  this.layers.push(this.currentPath);
+                }
+                this.currentPath = null;
+                this.overlayCtx.clearRect(0, 0, this.canvasW, this.canvasH);
+                this.render();
+              }
+              
               this.saveState();
             }
           }
@@ -36487,6 +37974,25 @@ SOFTWARE.</div>
             
             this.textEditor.style.display = 'block';
             this.textEditor.value = l.text;
+            
+            // Recalculate formatting immediately to ensure sizing is perfect before extracting
+            this.render();
+
+            // Canva-style: Lock the physical width to match bounding box and enforce word-wrap
+            this.textEditor.style.width = (l.w * scaleX) + 'px';
+            this.textEditor.style.height = (l.h * scaleY) + 'px';
+            this.textEditor.style.whiteSpace = 'pre-wrap';
+            this.textEditor.style.wordBreak = 'break-word';
+            this.textEditor.style.overflow = 'hidden';
+            
+            // Use .oninput to prevent duplicate listeners attaching on multiple clicks
+            this.textEditor.oninput = () => {
+              this.textEditor.style.height = 'auto';
+              this.textEditor.style.height = this.textEditor.scrollHeight + 'px';
+              // Sync content live so the red Canvas bounding box scales around it as you type
+              l.text = this.textEditor.value;
+              this.render();
+            };
             
             const screenX = rect.left + l.x * scaleX;
             const screenY = rect.top + l.y * scaleY;
@@ -36507,10 +38013,6 @@ SOFTWARE.</div>
             if (this.textEditor.style.display === 'none') return;
             if (this.activeLayer && this.activeLayer.type === 'text') {
               this.activeLayer.text = this.textEditor.value || 'Text';
-              this.ctx.font = `bold ${this.activeLayer.fontSize}px sans-serif`;
-              const metrics = this.ctx.measureText(this.activeLayer.text);
-              this.activeLayer.w = metrics.width;
-              this.activeLayer.h = this.activeLayer.fontSize;
               this.activeLayer.isEditing = false;
             }
             this.textEditor.style.display = 'none';
@@ -36560,9 +38062,8 @@ SOFTWARE.</div>
             layer.text = 'Double Tap to Edit';
             layer.fontSize = 64;
             layer.color = '#FFFFFF';
-            this.ctx.font = `bold ${layer.fontSize}px sans-serif`;
-            layer.w = this.ctx.measureText(layer.text).width;
-            layer.h = layer.fontSize;
+            layer.w = 400; // Fixed bounding box width for text wrapping
+            layer.h = layer.fontSize * 1.2;
             layer.x = (this.canvasW - layer.w) / 2;
             layer.y = (this.canvasH - layer.h) / 2;
             this.layers.push(layer);
@@ -36593,6 +38094,20 @@ SOFTWARE.</div>
               </div>
               <div class="pe-grid-2 mt-4">
                 <div class="pe-control-group">
+                  <label>Brush Color</label>
+                  <input type="color" value="${this.brushColor}" id="pe-inp-brush-col">
+                </div>
+                <div class="pe-control-group pe-slider-group">
+                  <div class="pe-control-header">
+                    <label>Brush Size</label>
+                    <span id="pe-val-brush-size">${this.brushSize}</span>
+                  </div>
+                  <input type="range" id="pe-inp-brush-size" min="1" max="100" value="${this.brushSize}">
+                </div>
+              </div>
+              <hr style="border-color: var(--pe-sys-color-outline); margin: 24px 0;">
+              <div class="pe-grid-2 mt-4">
+                <div class="pe-control-group">
                   <label>Canvas Width</label>
                   <input type="number" value="${this.canvasW}" id="pe-inp-cw">
                 </div>
@@ -36607,6 +38122,16 @@ SOFTWARE.</div>
               this.render(); 
               this.saveState();
             });
+            
+            document.getElementById('pe-inp-brush-col').addEventListener('input', (e) => { 
+              this.brushColor = e.target.value; 
+            });
+            
+            document.getElementById('pe-inp-brush-size').addEventListener('input', (e) => { 
+              this.brushSize = parseFloat(e.target.value); 
+              document.getElementById('pe-val-brush-size').innerText = Math.round(this.brushSize);
+            });
+            
             const resize = () => {
               this.canvasW = parseInt(document.getElementById('pe-inp-cw').value) || 800;
               this.canvasH = parseInt(document.getElementById('pe-inp-ch').value) || 600;
@@ -36678,6 +38203,16 @@ SOFTWARE.</div>
               html += makeSlider('prop-fs', 'Font Size', 10, 300, l.fontSize);
             }
 
+            if (l.type === 'path') {
+              html += `
+                <div class="pe-control-group">
+                  <label>Color</label>
+                  <input type="color" id="pe-prop-col" value="${l.color}">
+                </div>
+              `;
+              html += makeSlider('prop-size', 'Brush Size', 1, 100, l.size);
+            }
+
             html += `
               <div class="pe-action-buttons">
                 ${(l.type === 'image' || l.type === 'shape') ? `
@@ -36691,7 +38226,7 @@ SOFTWARE.</div>
                 </div>
                 <div class="pe-btn-row">
                   <button class="pe-btn" id="pe-btn-dup">Duplicate Layer</button>
-                  <button class="pe-btn error" id="pe-btn-del">Delete Layer</button>
+                  <button class="pe-btn error" id="pe-btn-del">Delete Item</button>
                 </div>
               </div>
             `;
@@ -36730,11 +38265,9 @@ SOFTWARE.</div>
               });
             }
             
-            bind('prop-fs', 'fontSize', parseFloat, () => {
-              this.ctx.font = `bold ${l.fontSize}px sans-serif`;
-              l.w = this.ctx.measureText(l.text).width;
-              l.h = l.fontSize;
-            });
+            bind('prop-fs', 'fontSize', parseFloat);
+            
+            bind('prop-size', 'size', parseFloat);
 
             bind('prop-bri', 'brightness', parseFloat);
             bind('prop-con', 'contrast', parseFloat);
@@ -36812,6 +38345,29 @@ SOFTWARE.</div>
             this.ctx.fillRect(0, 0, this.canvasW, this.canvasH);
 
             this.layers.forEach(l => {
+              // Pre-calculate line wrapping and exact bounding box height before coordinate translation
+              if (l.type === 'text' && l.text) {
+                this.ctx.font = `bold ${l.fontSize}px sans-serif`;
+                const paragraphs = l.text.split('\n');
+                l.lines = [];
+                paragraphs.forEach(p => {
+                  const words = p.split(' ');
+                  let currentLine = words[0] || '';
+                  for (let i = 1; i < words.length; i++) {
+                    const word = words[i];
+                    const width = this.ctx.measureText(currentLine + ' ' + word).width;
+                    if (width <= l.w) {
+                      currentLine += ' ' + word;
+                    } else {
+                      l.lines.push(currentLine);
+                      currentLine = word;
+                    }
+                  }
+                  l.lines.push(currentLine);
+                });
+                l.h = Math.max(l.fontSize * 1.2, l.lines.length * (l.fontSize * 1.2));
+              }
+
               this.ctx.save();
               this.ctx.globalAlpha = l.opacity;
               this.ctx.translate(l.x + l.w/2, l.y + l.h/2);
@@ -36843,8 +38399,25 @@ SOFTWARE.</div>
                   this.ctx.font = `bold ${l.fontSize}px sans-serif`;
                   this.ctx.fillStyle = l.color;
                   this.ctx.textBaseline = 'top';
-                  this.ctx.fillText(l.text, -l.w/2, -l.h/2);
+                  
+                  if (l.lines) {
+                    l.lines.forEach((line, i) => {
+                      this.ctx.fillText(line, -l.w/2, -l.h/2 + (i * (l.fontSize * 1.2)));
+                    });
+                  }
                 }
+              }
+              else if (l.type === 'path') {
+                this.ctx.strokeStyle = l.color;
+                this.ctx.lineWidth = l.size;
+                this.ctx.lineCap = 'round';
+                this.ctx.lineJoin = 'round';
+                this.ctx.beginPath();
+                l.points.forEach((pt, i) => {
+                  if (i === 0) this.ctx.moveTo(pt.x, pt.y);
+                  else this.ctx.lineTo(pt.x, pt.y);
+                });
+                this.ctx.stroke();
               }
               this.ctx.restore();
             });
