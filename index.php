@@ -10969,16 +10969,18 @@ HTML;
       $total_songs = (int)$db->query("SELECT COUNT(id) FROM music")->fetchColumn();
       $remaining_songs = (int)$db->query("SELECT COUNT(DISTINCT song_id) FROM rhythm_charts")->fetchColumn();
 
+      $density_multiplier = isset($_GET['density']) ? max(0.1, min(10.0, (float)$_GET['density'])) : 1.0;
       if ($remaining_songs === 0) {
         echo "<script>setProgress(100); log('All note charts successfully wiped!', 'success');</script>";
         echo "<script>log('Redirecting to Division 1/6 (EASY) scan start...', 'info');</script>";
-        echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=1'; }, 1000);</script>";
+        echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=1&density=" . $density_multiplier . "'; }, 1000);</script>";
         echo "</body></html>";
         exit;
       }
 
+      $density_multiplier = isset($_GET['density']) ? max(0.1, min(10.0, (float)$_GET['density'])) : 1.0;
       $pct = round((($total_songs - $remaining_songs) / $total_songs) * 100);
-      echo "<script>setProgress({$pct}); log('Wiping batch of 50 songs\\' charts. Remaining songs with charts: {$remaining_songs}...', 'info');</script>";
+      echo "<script>setProgress({$pct}); log('Wiping batch of 50 songs\' charts. Remaining songs with charts: {$remaining_songs}...', 'info');</script>";
       flush();
 
       // Delete the charts for up to 50 songs atomically
@@ -10996,8 +10998,8 @@ HTML;
         flush();
       }
 
-      // Auto-reload to delete the next 50 songs
-      echo "<script>setTimeout(() => { window.location.reload(); }, 300);</script>";
+      // Auto-reload to delete the next 50 songs, maintaining the density parameter safely
+      echo "<script>setTimeout(() => { window.location.href = '?action=reset_rhythm_charts&density=" . $density_multiplier . "'; }, 300);</script>";
       echo "</body></html>";
       exit;
 
@@ -11021,66 +11023,15 @@ HTML;
         die("Security violation: Admin session required.");
       }
       
-      // Release session lock early
+      // Concurrency Win 1: Release write-lock on session file immediately so other browser tabs don't freeze
       session_write_close();
-
-      $is_run = isset($_GET['run']) && $_GET['run'] == '1';
-      $density_multiplier = isset($_GET['density']) ? max(0.1, min(10.0, (float)$_GET['density'])) : 1.0;
-
-      if (!$is_run) {
-        header('Content-Type: text/html; charset=utf-8');
-        ?>
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <meta charset="utf-8">
-            <title>Chart Scanner Config</title>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
-            <style>
-              body { background-color: #030303; color: #fff; font-family: sans-serif; padding: 20px; }
-              .config-card { background: #0c0c0c; border: 1px solid #333; border-radius: 16px; max-width: 480px; margin: 40px auto; padding: 24px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
-              .form-select { background-color: #1e1e1e !important; border-color: #444 !important; color: #fff !important; }
-              .form-select option { background-color: #121212 !important; }
-            </style>
-          </head>
-          <body>
-            <div class="config-card text-center">
-              <i class="bi bi-sliders text-danger" style="font-size: 3rem;"></i>
-              <h4 class="fw-bold mt-3 mb-2 text-white">Rhythm Charts Scanner</h4>
-              <p class="text-secondary small mb-4">Configure custom note density multipliers before beginning the server-side permanent note-chart generation loop.</p>
-              
-              <form method="GET" action="">
-                <input type="hidden" name="action" value="rescan_charts">
-                <input type="hidden" name="step" value="1">
-                <input type="hidden" name="run" value="1">
-                
-                <div class="text-start mb-4">
-                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">CHART DENSITY MODIFIER</label>
-                  <select name="density" class="form-select py-2 fw-semibold">
-                    <option value="0.5">0.5x (Very Sparse - Casual)</option>
-                    <option value="0.8">0.8x (Sparse)</option>
-                    <option value="1.0" selected>1.0x (Neutral / Standard 3x Baseline)</option>
-                    <option value="1.2">1.2x (Dense)</option>
-                    <option value="1.5">1.5x (Very Dense)</option>
-                    <option value="2.0">2.0x (Extreme / 6x Baseline)</option>
-                  </select>
-                  <div class="text-secondary small mt-2" style="font-size: 0.75rem;">Adjusting this multiplier will dynamically scale note density. Rating levels (Lv. 1-30) will auto-calibrate beautifully to match.</div>
-                </div>
-                
-                <button type="submit" class="btn btn-danger w-100 fw-bold py-2 rounded-pill shadow-lg">Start Server-Side Generation</button>
-              </form>
-            </div>
-          </body>
-        </html>
-        <?php
-        exit;
-      }
       
       $start_time = microtime(true);
       header('Content-Type: text/html; charset=utf-8');
       ob_implicit_flush();
 
       $step = isset($_GET['step']) ? max(1, min(6, (int)$_GET['step'])) : 1;
+      $density_multiplier = isset($_GET['density']) ? max(0.1, min(10.0, (float)$_GET['density'])) : 1.0;
       $diff_map = [
         1 => 'easy',
         2 => 'medium',
@@ -11147,7 +11098,10 @@ HTML;
               resetBtn.addEventListener('click', () => {
                 if (confirm('Are you sure you want to completely WIPE all existing note charts and levels from the database and regenerate them from scratch? This action is irreversible!')) {
                   localStorage.setItem('rhythm_scan_step', '1');
-                  window.location.href = '?action=reset_rhythm_charts';
+                  const currentUrl = window.location.href;
+                  const urlParams = new URLSearchParams(currentUrl.split('?')[1]);
+                  const activeDensity = urlParams.get('density') || '1.0';
+                  window.location.href = '?action=reset_rhythm_charts&density=' + activeDensity;
                 }
               });
             }
@@ -14011,6 +13965,10 @@ function perform_cover_scan($db) {
             <a href="#" class="nav-link logged-in-only" id="nav-chart-scan" data-bs-toggle="modal" data-bs-target="#chart-scan-modal" style="display: none !important;">
               <i class="bi bi-controller"></i>
               <span>Scan Charts</span>
+            </a>
+            <a href="#" class="nav-link logged-in-only" id="nav-chart-config" data-bs-toggle="modal" data-bs-target="#chart-config-modal" style="display: none !important;">
+              <i class="bi bi-sliders"></i>
+              <span>Adjust Chart Scan</span>
             </a>
             <a href="#" class="nav-link logged-in-only" id="nav-cover-scan" data-bs-toggle="modal" data-bs-target="#cover-scan-modal" style="display: none !important;">
               <i class="bi bi-image-fill"></i>
@@ -17419,6 +17377,32 @@ function perform_cover_scan($db) {
           </div>
           <div class="modal-body p-0">
             <iframe id="chart-scan-iframe" src="about:blank" style="width: 100%; height: 60vh; border: none; background-color: #030303;"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="chart-config-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-sliders text-danger me-2"></i> Adjust Chart Scan</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4 text-white">
+            <label class="form-label text-secondary small fw-bold mb-2">CHART DENSITY MODIFIER</label>
+            <div style="position: relative; display: flex; align-items: center; margin-bottom: 1.5rem;">
+              <select id="rhythm-global-density-select" class="form-control bg-dark text-white border-secondary" style="appearance: none; -webkit-appearance: none; padding-right: 48px; cursor: pointer; z-index: 1; height: 45px; font-weight: 500;">
+                <option value="0.5">0.5x (Very Sparse - Casual)</option>
+                <option value="0.8">0.8x (Sparse)</option>
+                <option value="1.0">1.0x (Neutral / Standard 3x)</option>
+                <option value="1.2">1.2x (Dense)</option>
+                <option value="1.5">1.5x (Very Dense)</option>
+                <option value="2.0">2.0x (Extreme / 6x)</option>
+              </select>
+              <i class="bi bi-chevron-down text-secondary" style="position: absolute; right: 16px; pointer-events: none; font-size: 1.2rem; z-index: 2;"></i>
+            </div>
+            <button type="button" class="btn btn-danger w-100 fw-bold" id="save-rhythm-global-density-btn" style="height: 45px;">Save Settings</button>
           </div>
         </div>
       </div>
@@ -28086,14 +28070,39 @@ SOFTWARE.</div>
           });
         }
 
+        const saveDensityBtn = document.getElementById('save-rhythm-global-density-btn');
+        if (saveDensityBtn) {
+          const densitySelect = document.getElementById('rhythm-global-density-select');
+          if (densitySelect) {
+            densitySelect.value = localStorage.getItem('rhythm_scan_density') || '1.0';
+          }
+          saveDensityBtn.addEventListener('click', () => {
+            localStorage.setItem('rhythm_scan_density', densitySelect.value);
+            showToast('Global scanner density updated!', 'success');
+            bootstrap.Modal.getInstance(document.getElementById('chart-config-modal')).hide();
+          });
+        }
+
         const chartScanModalEl = document.getElementById('chart-scan-modal');
         const chartScanIframe = document.getElementById('chart-scan-iframe');
         if (chartScanModalEl && chartScanIframe) {
           chartScanModalEl.addEventListener('show.bs.modal', () => {
-            // Unconditionally load the Control Panel first so they can configure custom density
-            chartScanIframe.src = '?action=rescan_charts';
+            // Read active progress parameters and immediately boot the automated scanner
+            const lastStep = localStorage.getItem('rhythm_scan_step') || '1';
+            const density = localStorage.getItem('rhythm_scan_density') || '1.0';
+            chartScanIframe.src = `?action=rescan_charts&step=${lastStep}&run=1&density=${density}`;
           });
           chartScanModalEl.addEventListener('hidden.bs.modal', () => {
+            // Save current progress dynamically before unloading
+            try {
+              const currentUrl = chartScanIframe.contentWindow.location.href;
+              const urlParams = new URLSearchParams(currentUrl.split('?')[1]);
+              const activeStep = urlParams.get('step');
+              if (activeStep) {
+                localStorage.setItem('rhythm_scan_step', activeStep);
+              }
+            } catch (e) {}
+
             chartScanIframe.src = 'about:blank';
             if (currentView.type === 'rhythm_game') {
               loadView(currentView);
@@ -33045,11 +33054,15 @@ SOFTWARE.</div>
                 adminPanelBtn.style.setProperty('display', 'flex', 'important');
                 const chartScanBtn = document.getElementById('nav-chart-scan');
                 if (chartScanBtn) chartScanBtn.style.setProperty('display', 'flex', 'important');
+                const chartConfigBtn = document.getElementById('nav-chart-config');
+                if (chartConfigBtn) chartConfigBtn.style.setProperty('display', 'flex', 'important');
                 if (coverScanBtn) coverScanBtn.style.setProperty('display', 'flex', 'important');
               } else {
                 adminPanelBtn.style.setProperty('display', 'none', 'important');
                 const chartScanBtn = document.getElementById('nav-chart-scan');
                 if (chartScanBtn) chartScanBtn.style.setProperty('display', 'none', 'important');
+                const chartConfigBtn = document.getElementById('nav-chart-config');
+                if (chartConfigBtn) chartConfigBtn.style.setProperty('display', 'none', 'important');
                 if (coverScanBtn) coverScanBtn.style.setProperty('display', 'none', 'important');
               }
             }
