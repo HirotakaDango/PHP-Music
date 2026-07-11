@@ -5293,7 +5293,7 @@ function romanize_string($string) {
   return empty($string) ? 'unknown' : $string;
 }
 
-function generatePhpChart($song_id, $duration, $difficulty) {
+function generatePhpChart($song_id, $duration, $difficulty, $density_multiplier = 1.0) {
   // Deterministic, song-specific intensity factor to prevent static, fixed difficulty ratings
   $intensity_seed = crc32($song_id . '_intensity');
   $intensity_factor = 0.65 + (($intensity_seed % 800) / 1000); // Produces unique multipliers from 0.65x to 1.45x
@@ -5306,17 +5306,17 @@ function generatePhpChart($song_id, $duration, $difficulty) {
 
   $lanesCount = ($difficulty === 'easy' || $difficulty === 'medium') ? 4 : 6;
   
-  // Decimated spacings (divided by 6 total compared to baseline) to produce an additional 200% (2x) more note patterns for ultra-intense playability
-  $base_spacing = 0.083;
-  if ($difficulty === 'easy') $base_spacing = 0.108;
-  elseif ($difficulty === 'medium') $base_spacing = 0.080;
-  elseif ($difficulty === 'hard') $base_spacing = 0.060;
-  elseif ($difficulty === 'expert') $base_spacing = 0.043;
-  elseif ($difficulty === 'master') $base_spacing = 0.030;
-  elseif ($difficulty === 'demon') $base_spacing = 0.021;
+  // Spacing set to 3x density (reduced by 2x compared to ultra-dense 6x values) for optimized, readable gameplay
+  $base_spacing = 0.166;
+  if ($difficulty === 'easy') $base_spacing = 0.216;
+  elseif ($difficulty === 'medium') $base_spacing = 0.160;
+  elseif ($difficulty === 'hard') $base_spacing = 0.120;
+  elseif ($difficulty === 'expert') $base_spacing = 0.086;
+  elseif ($difficulty === 'master') $base_spacing = 0.060;
+  elseif ($difficulty === 'demon') $base_spacing = 0.043;
 
-  // Multiply base spacing by intensity factor to create rich layout density variety
-  $spacing = $base_spacing * $intensity_factor;
+  // Multiply base spacing by intensity factor and divide by custom density multiplier (higher density = tighter spacing)
+  $spacing = ($base_spacing * $intensity_factor) / max(0.1, min(10.0, $density_multiplier));
 
   $notes = [];
   $lastLane = -1;
@@ -5348,11 +5348,11 @@ function generatePhpChart($song_id, $duration, $difficulty) {
   return $notes;
 }
 
-function calculatePhpLevel($notes, $duration) {
+function calculatePhpLevel($notes, $duration, $density_multiplier = 1.0) {
   if (!$duration || $duration <= 0) return 1;
   $nps = count($notes) / $duration;
-  // Re-calibrated mapping multiplier to maintain the Project Sekai 1-30 scale under continuous-stream chart density
-  $level = round($nps * 0.42); 
+  // Re-calibrated mapping multiplier dynamically divided by density multiplier to preserve the 1-30 scale under any custom speed bounds
+  $level = round($nps * (0.84 / max(0.1, min(10.0, $density_multiplier)))); 
   return max(1, min(30, (int)$level));
 }
 
@@ -10821,13 +10821,13 @@ HTML;
           'level' => $chart['level']
         ]);
       } else {
-        // Automatically generate and cache in 1ms on the server to prevent client crashes!
+        // Automatically generate and cache in 1ms on the server to prevent client crashes! (Defaults to 1.0x spacing)
         $stmt_song = $db->prepare("SELECT duration FROM music WHERE id = ?");
         $stmt_song->execute([$song_id]);
         $duration = (int)$stmt_song->fetchColumn() ?: 180;
         
-        $notes = generatePhpChart($song_id, $duration, $difficulty);
-        $level = calculatePhpLevel($notes, $duration);
+        $notes = generatePhpChart($song_id, $duration, $difficulty, 1.0);
+        $level = calculatePhpLevel($notes, $duration, 1.0);
         
         $db->prepare("INSERT OR REPLACE INTO rhythm_charts (song_id, difficulty, notes_json, level) VALUES (?, ?, ?, ?)")
            ->execute([$song_id, $difficulty, json_encode($notes), $level]);
@@ -11021,8 +11021,60 @@ HTML;
         die("Security violation: Admin session required.");
       }
       
-      // Concurrency Win 1: Release write-lock on session file immediately so other browser tabs don't freeze
+      // Release session lock early
       session_write_close();
+
+      $is_run = isset($_GET['run']) && $_GET['run'] == '1';
+      $density_multiplier = isset($_GET['density']) ? max(0.1, min(10.0, (float)$_GET['density'])) : 1.0;
+
+      if (!$is_run) {
+        header('Content-Type: text/html; charset=utf-8');
+        ?>
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Chart Scanner Config</title>
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+            <style>
+              body { background-color: #030303; color: #fff; font-family: sans-serif; padding: 20px; }
+              .config-card { background: #0c0c0c; border: 1px solid #333; border-radius: 16px; max-width: 480px; margin: 40px auto; padding: 24px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+              .form-select { background-color: #1e1e1e !important; border-color: #444 !important; color: #fff !important; }
+              .form-select option { background-color: #121212 !important; }
+            </style>
+          </head>
+          <body>
+            <div class="config-card text-center">
+              <i class="bi bi-sliders text-danger" style="font-size: 3rem;"></i>
+              <h4 class="fw-bold mt-3 mb-2 text-white">Rhythm Charts Scanner</h4>
+              <p class="text-secondary small mb-4">Configure custom note density multipliers before beginning the server-side permanent note-chart generation loop.</p>
+              
+              <form method="GET" action="">
+                <input type="hidden" name="action" value="rescan_charts">
+                <input type="hidden" name="step" value="1">
+                <input type="hidden" name="run" value="1">
+                
+                <div class="text-start mb-4">
+                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">CHART DENSITY MODIFIER</label>
+                  <select name="density" class="form-select py-2 fw-semibold">
+                    <option value="0.5">0.5x (Very Sparse - Casual)</option>
+                    <option value="0.8">0.8x (Sparse)</option>
+                    <option value="1.0" selected>1.0x (Neutral / Standard 3x Baseline)</option>
+                    <option value="1.2">1.2x (Dense)</option>
+                    <option value="1.5">1.5x (Very Dense)</option>
+                    <option value="2.0">2.0x (Extreme / 6x Baseline)</option>
+                  </select>
+                  <div class="text-secondary small mt-2" style="font-size: 0.75rem;">Adjusting this multiplier will dynamically scale note density. Rating levels (Lv. 1-30) will auto-calibrate beautifully to match.</div>
+                </div>
+                
+                <button type="submit" class="btn btn-danger w-100 fw-bold py-2 rounded-pill shadow-lg">Start Server-Side Generation</button>
+              </form>
+            </div>
+          </body>
+        </html>
+        <?php
+        exit;
+      }
       
       $start_time = microtime(true);
       header('Content-Type: text/html; charset=utf-8');
@@ -11130,7 +11182,7 @@ HTML;
         if ($step < 6) {
           $next_step = $step + 1;
           echo "<script>log('\\nDivision " . $step . " complete! Progressing to Division " . $next_step . "/6...', 'success');</script>";
-          echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=" . $next_step . "'; }, 1000);</script>";
+          echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=" . $next_step . "&run=1&density=" . $density_multiplier . "'; }, 1000);</script>";
         } else {
           echo "<script>setProgress(100); log('All songs already have compiled note charts! Scan complete.', 'success');</script>";
         }
@@ -11155,8 +11207,8 @@ HTML;
           // This is insanely fast (<0.5ms) and makes locking mathematically impossible
           $db->beginTransaction();
 
-          $notes = generatePhpChart($song['id'], $duration, $current_diff);
-          $level = calculatePhpLevel($notes, $duration);
+          $notes = generatePhpChart($song['id'], $duration, $current_diff, $density_multiplier);
+          $level = calculatePhpLevel($notes, $duration, $density_multiplier);
 
           $db->prepare("INSERT OR REPLACE INTO rhythm_charts (song_id, difficulty, notes_json, level) VALUES (?, ?, ?, ?)")
              ->execute([$song['id'], $current_diff, json_encode($notes), $level]);
@@ -28038,21 +28090,10 @@ SOFTWARE.</div>
         const chartScanIframe = document.getElementById('chart-scan-iframe');
         if (chartScanModalEl && chartScanIframe) {
           chartScanModalEl.addEventListener('show.bs.modal', () => {
-            // Read active step from local state or start from Division 1
-            const lastStep = localStorage.getItem('rhythm_scan_step') || '1';
-            chartScanIframe.src = '?action=rescan_charts&step=' + lastStep;
+            // Unconditionally load the Control Panel first so they can configure custom density
+            chartScanIframe.src = '?action=rescan_charts';
           });
           chartScanModalEl.addEventListener('hidden.bs.modal', () => {
-            // Save the last processed step dynamically before unloading so the admin can pause and resume seamlessly!
-            try {
-              const currentUrl = chartScanIframe.contentWindow.location.href;
-              const urlParams = new URLSearchParams(currentUrl.split('?')[1]);
-              const activeStep = urlParams.get('step');
-              if (activeStep) {
-                localStorage.setItem('rhythm_scan_step', activeStep);
-              }
-            } catch (e) {}
-            
             chartScanIframe.src = 'about:blank';
             if (currentView.type === 'rhythm_game') {
               loadView(currentView);
