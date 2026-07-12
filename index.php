@@ -13650,9 +13650,26 @@ function perform_cover_scan($db) {
       .rg-fav-btn.active { color: var(--rg-primary); }
       .rg-play-btn { background-color: #4a0000; color: var(--rg-primary); border: none; padding: 8px 16px; border-radius: 100px; font-weight: 700; cursor: pointer; text-transform: uppercase; }
       .rg-bottom-nav { height: 80px; background-color: var(--rg-surface); border-top: 1px solid #333; display: flex; justify-content: space-around; align-items: center; flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom, 0); }
-      .rg-nav-item { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #fff; opacity: 0.5; cursor: pointer; padding: 8px 16px; border-radius: 16px; transition: all 0.2s; }
+      .rg-bottom-nav { height: 80px; background-color: var(--rg-surface); border-top: 1px solid #333; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; padding: 0 8px; padding-bottom: env(safe-area-inset-bottom, 0); }
+      .rg-nav-item { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #fff; opacity: 0.5; cursor: pointer; padding: 6px 2px; border-radius: 12px; transition: all 0.2s; flex: 1 1 0%; min-width: 0; text-align: center; }
+      .rg-nav-label { font-size: 0.7rem; font-weight: 700; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .rg-nav-item.active { opacity: 1; color: var(--rg-primary); }
-      .rg-nav-label { font-size: 0.75rem; font-weight: 700; }
+
+      /* Force Share button inside bottom nav to match fit metrics */
+      .rg-bottom-nav .share-view-btn {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 4px !important;
+        flex: 1 1 0% !important;
+        min-width: 0 !important;
+        padding: 6px 2px !important;
+        border-radius: 12px !important;
+        transition: all 0.2s !important;
+        text-align: center !important;
+      }
+
       .rg-primary-btn { background-color: var(--rg-primary); color: #fff; border: none; padding: 16px 32px; border-radius: 100px; font-weight: 700; font-size: 1.1rem; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; transition: transform 0.1s; text-align: center; }
       .rg-primary-btn:active { transform: scale(0.95); }
       .rg-dialog-backdrop { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.85); display: flex; justify-content: center; align-items: center; z-index: 50; }
@@ -37082,20 +37099,20 @@ SOFTWARE.</div>
                 { short: 'MS', key: 'master', bg: '#A78BFA', text: '#FFFFFF' },
                 { short: 'DM', key: 'demon', bg: '#4C1D95', text: '#FFFFFF' }
               ];
-              badgesHTML = `<div class="d-flex flex-wrap gap-1 mt-2">` + diffs.map(d => {
+              badgesHTML = `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 8px; max-width: 175px;">` + diffs.map(d => {
                 const lvl = levels[d.key];
                 if (!lvl) return ''; 
-                return `<span class="badge d-flex align-items-center justify-content-center px-2 py-1 shadow-sm" style="font-family: 'Arial Black', sans-serif; font-size: 0.7rem; font-weight: 900; background-color: ${d.bg}; color: ${d.text}; border-radius: 6px; letter-spacing: 0.5px;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
+                return `<span class="badge d-flex align-items-center justify-content-center px-2 py-1 shadow-sm" style="font-family: 'Arial Black', sans-serif; font-size: 0.7rem; font-weight: 900; background-color: ${d.bg}; color: ${d.text}; border-radius: 6px; letter-spacing: 0.5px; width: 90%; text-align: center;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
               }).join('') + `</div>`;
               
               if (badgesHTML === `<div class="d-flex flex-wrap gap-1 mt-2"></div>`) {
-                  badgesHTML = `<div class="text-secondary small mt-2 fw-bold" style="font-size: 0.75rem;"><i class="bi bi-cpu-fill me-1"></i>Tap to compile notes</div>`;
+                badgesHTML = `<div class="text-secondary small mt-2 fw-bold" style="font-size: 0.75rem;"><i class="bi bi-cpu-fill me-1"></i>Tap to compile notes</div>`;
               }
             } else {
               badgesHTML = `<div class="text-secondary small mt-2 fw-bold" style="font-size: 0.75rem;"><i class="bi bi-cpu-fill me-1"></i>Tap to compile notes</div>`;
             }
 
-            el.style.cssText = "background: linear-gradient(90deg, rgba(30, 30, 30, 0.9) 0%, rgba(15, 15, 15, 0.95) 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 16px 14px; display: flex; align-items: center; gap: 14px; cursor: pointer; position: relative; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s, border-color 0.2s; margin-bottom: 0.25em; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); min-height: 126px;";
+            el.style.cssText = "background: linear-gradient(90deg, rgba(30, 30, 30, 0.9) 0%, rgba(15, 15, 15, 0.95) 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 16px 14px; display: flex; align-items: center; gap: 14px; cursor: pointer; position: relative; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s, border-color 0.2s; margin-bottom: 0.25em; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); min-height: 10em;";
             
             el.onmouseover = () => { el.style.transform = "scale(1.02) translateY(-2px)"; el.style.borderColor = "var(--rg-primary)"; el.style.boxShadow = "0 10px 25px rgba(255,59,48,0.2)"; };
             el.onmouseout = () => { el.style.transform = "none"; el.style.borderColor = "rgba(255,255,255,0.08)"; el.style.boxShadow = "0 6px 16px rgba(0,0,0,0.4)"; };
@@ -37119,7 +37136,7 @@ SOFTWARE.</div>
                 <div class="d-flex flex-column align-items-end justify-content-between ms-2" style="flex-shrink: 0; align-self: stretch; min-height: 84px; gap: 8px;">
                   <div class="d-flex gap-2">
                     <button class="btn p-1 border-0 rg-fav-btn ${song.rg_favorite == 1 ? 'text-danger' : 'text-secondary'}" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i></button>
-                    <button class="btn p-1 border-0 rg-share-song-btn text-info" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-share-fill fs-5"></i></button>
+                    <button class="btn p-1 border-0 rg-share-song-btn text-light" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-share-fill fs-5"></i></button>
                   </div>
                   <button class="btn p-0 border-0 rounded-circle rg-play-btn d-flex align-items-center justify-content-center mt-auto" style="width: 42px; height: 42px; background: linear-gradient(135deg, var(--rg-primary), #ff0055); box-shadow: 0 4px 12px rgba(255,59,48,0.5); transition: transform 0.2s;">
                     <i class="bi bi-play-fill text-white" style="font-size: 1.8rem; margin-left: 3px;"></i>
@@ -37453,16 +37470,24 @@ SOFTWARE.</div>
           }
 
           playHitSFX() {
-            if (!this.sfxCtx || this.sfxVolume <= 0) return;
-            if (this.sfxCtx.state === 'suspended') this.sfxCtx.resume();
-            const osc = this.sfxCtx.createOscillator();
-            const gain = this.sfxCtx.createGain();
-            osc.connect(gain); gain.connect(this.sfxCtx.destination);
-            osc.frequency.setValueAtTime(800, this.sfxCtx.currentTime);
-            osc.frequency.exponentialRampToValueAtTime(100, this.sfxCtx.currentTime + 0.05);
-            gain.gain.setValueAtTime(this.sfxVolume, this.sfxCtx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.01, this.sfxCtx.currentTime + 0.05);
-            osc.start(); osc.stop(this.sfxCtx.currentTime + 0.05);
+            if (this.sfxVolume <= 0) return;
+            try {
+              if (!this.sfxCtx) {
+                this.sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
+              }
+              if (this.sfxCtx.state === 'suspended') this.sfxCtx.resume();
+              
+              const osc = this.sfxCtx.createOscillator();
+              const gain = this.sfxCtx.createGain();
+              osc.connect(gain); gain.connect(this.sfxCtx.destination);
+              osc.frequency.setValueAtTime(800, this.sfxCtx.currentTime);
+              osc.frequency.exponentialRampToValueAtTime(100, this.sfxCtx.currentTime + 0.05);
+              gain.gain.setValueAtTime(this.sfxVolume, this.sfxCtx.currentTime);
+              gain.gain.exponentialRampToValueAtTime(0.01, this.sfxCtx.currentTime + 0.05);
+              osc.start(); osc.stop(this.sfxCtx.currentTime + 0.05);
+            } catch(e) {
+              console.warn("SFX AudioContext failed to initialize:", e);
+            }
           }
 
           updateHUD() {
@@ -37894,7 +37919,9 @@ SOFTWARE.</div>
             let displayRank = 'F';
             let rankColor = '#555';
 
-            if (isUser && artistUserId) {
+            const activePlayerId = (typeof currentUser !== 'undefined' && currentUser) ? currentUser.id : null;
+
+            if (isUser && artistUserId && activePlayerId) {
               // Fetch the artist's personal overall play history of ALL songs they played
               artistScores = await fetchData(`?action=get_user_rhythm_scores&target_user_id=${artistUserId}&page=1`, {}, true) || [];
               
