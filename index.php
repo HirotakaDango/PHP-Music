@@ -1,4 +1,16 @@
 <?php
+// Emergency session clearance hook (Runs even if database is offline or missing)
+if (isset($_GET['action']) && $_GET['action'] === 'clear_session_emergency') {
+  if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+  }
+  session_destroy();
+  setcookie('admin_session_token', '', time() - 3600, '/');
+  setcookie('admin_email', '', time() - 3600, '/');
+  header('Location: ./');
+  exit;
+}
+
 // Bypass Gzip compression for heavy files, streaming, and uploads to prevent memory exhaustion and play crashes
 $raw_uri_gzip = $_SERVER['REQUEST_URI'] ?? '';
 $is_gzip_bypass = preg_match('/action=(stream|thumb|get_stream|download_song|upload|batch)/i', $raw_uri_gzip) || isset($_GET['download']) || isset($_GET['batch']);
@@ -364,7 +376,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '5.8');
+define('APP_VERSION', '5.9');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -407,7 +419,33 @@ function get_db() {
 
     return $db;
   } catch (PDOException $e) {
-    die("Database connection failed: " . $e->getMessage());
+    // Elegant, styled emergency modal fallback if connection fails or database file is missing/locked
+    header('HTTP/1.1 500 Internal Server Error');
+    ?>
+    <!DOCTYPE html>
+    <html lang="en" data-bs-theme="dark">
+      <head>
+        <meta charset="UTF-8">
+        <title>Emergency Recovery - PHP Music</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+        <style>
+          body { background-color: #030303; color: #fff; height: 100vh; display: flex; align-items: center; justify-content: center; font-family: sans-serif; }
+          .recovery-card { background: #121212; border: 1px solid #333; border-radius: 16px; padding: 32px; max-width: 450px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }
+        </style>
+      </head>
+      <body>
+        <div class="recovery-card">
+          <i class="bi bi-exclamation-triangle-fill text-danger" style="font-size: 4rem;"></i>
+          <h4 class="fw-bold mt-3 mb-2">Connection Failure</h4>
+          <p class="text-secondary small mb-4">The database is either missing, corrupted, or locked. If you recently reset the server, please clear your session cookies to recover.</p>
+          <a href="?action=clear_session_emergency" class="btn btn-danger w-100 fw-bold py-2 rounded-pill mb-2">Clear Session & Recover</a>
+          <a href="./" class="btn btn-outline-light w-100 fw-bold py-2 rounded-pill">Retry Connection</a>
+        </div>
+      </body>
+    </html>
+    <?php
+    exit;
   }
 }
 
@@ -1991,14 +2029,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     $total_reps = $db->query("SELECT COUNT(id) FROM user_reports WHERE status = 'pending'")->fetchColumn();
                     $total_rep_pages = ceil($total_reps / $rep_limit);
                     
-                    $reps = $db->query("
+                    $stmt_reps = $db->prepare("
                       SELECT r.*, u1.artist as reporter_name, u1.email as reporter_email, u2.artist as reported_name, u2.email as reported_email, u2.banned as is_banned 
                       FROM user_reports r
                       JOIN users u1 ON r.reporter_id = u1.id
                       JOIN users u2 ON r.reported_id = u2.id
                       WHERE r.status = 'pending'
-                      ORDER BY r.created_at DESC LIMIT $rep_limit OFFSET $rep_offset
-                    ")->fetchAll();
+                      ORDER BY r.created_at DESC LIMIT ? OFFSET ?
+                    ");
+                    $stmt_reps->bindValue(1, (int)$rep_limit, PDO::PARAM_INT);
+                    $stmt_reps->bindValue(2, (int)$rep_offset, PDO::PARAM_INT);
+                    $stmt_reps->execute();
+                    $reps = $stmt_reps->fetchAll();
                     
                     if (empty($reps)): ?>
                       <tr><td colspan="5" class="text-center py-4 text-secondary">No pending user reports found. All clean!</td></tr>
@@ -2072,7 +2114,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     $total_logs = get_db()->query("SELECT COUNT(id) FROM admin_logs")->fetchColumn();
                     $total_log_pages = ceil($total_logs / $log_limit);
                     
-                    $logs = get_db()->query("SELECT * FROM admin_logs ORDER BY created_at DESC LIMIT $log_limit OFFSET $log_offset")->fetchAll();
+                    $stmt_logs = get_db()->prepare("SELECT * FROM admin_logs ORDER BY created_at DESC LIMIT ? OFFSET ?");
+                    $stmt_logs->bindValue(1, (int)$log_limit, PDO::PARAM_INT);
+                    $stmt_logs->bindValue(2, (int)$log_offset, PDO::PARAM_INT);
+                    $stmt_logs->execute();
+                    $logs = $stmt_logs->fetchAll();
                     if (empty($logs)): ?>
                       <tr><td colspan="4" class="text-center py-4 text-secondary">No recent admin activity found.</td></tr>
                   <?php else: foreach ($logs as $log): ?>
@@ -2182,8 +2228,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     if ($api_sort === 'oldest') $order_sql = "a.created_at ASC";
                     elseif ($api_sort === 'modified') $order_sql = "a.updated_at DESC";
 
-                    $stmt_keys = $db->prepare("SELECT a.*, u.email as user_email FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql ORDER BY CASE WHEN a.status = 'pending' THEN 0 ELSE 1 END, $order_sql LIMIT $api_limit OFFSET $api_offset");
-                    $stmt_keys->execute($params);
+                    $stmt_keys = $db->prepare("SELECT a.*, u.email as user_email FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql ORDER BY CASE WHEN a.status = 'pending' THEN 0 ELSE 1 END, $order_sql LIMIT ? OFFSET ?");
+                    $param_idx = 1;
+                    foreach ($params as $pval) {
+                      $stmt_keys->bindValue($param_idx++, $pval, PDO::PARAM_STR);
+                    }
+                    $stmt_keys->bindValue($param_idx++, (int)$api_limit, PDO::PARAM_INT);
+                    $stmt_keys->bindValue($param_idx++, (int)$api_offset, PDO::PARAM_INT);
+                    $stmt_keys->execute();
                     $keys = $stmt_keys->fetchAll();
                     
                     if (empty($keys)): ?>
@@ -4898,7 +4950,22 @@ if (isset($_GET['share_type'])) {
 
     case 'game':
       $share_id = (int)($_GET['id'] ?? 0);
-      if ($share_id > 0) {
+      $artist_id = isset($_GET['artist_id']) ? (int)$_GET['artist_id'] : null;
+      $artist_name = $_GET['artist_name'] ?? null;
+
+      if ($artist_id || $artist_name) {
+        $og_title = "Play " . htmlspecialchars($artist_name ?: 'Artist') . " - Rhythm Game";
+        $og_desc = "Challenge my scores on " . htmlspecialchars($artist_name ?: 'Artist') . " in PHP Music Rhythm Game!";
+        if ($artist_id) {
+          $og_image = $base_app_url . "?action=get_profile_picture&id=" . (int)$artist_id . "&ext=.jpg";
+        }
+        $view_config = [
+          'type' => 'rhythm_game',
+          'artist_id' => $artist_id,
+          'artist_name' => $artist_name,
+          'sort' => ''
+        ];
+      } elseif ($share_id > 0) {
         $stmt = $db_for_share->prepare("SELECT title, artist FROM music WHERE id = ?");
         $stmt->execute([$share_id]);
         $song_info = $stmt->fetch();
@@ -6545,10 +6612,38 @@ HTML;
       break;
 
     case 'full_scan':
+      // Lock down backend scanner endpoint to prevent unauthorized CPU exhaustion
+      $is_active_admin = false;
+      if (isset($_SESSION['user_id'])) {
+        $db_check = get_db();
+        $stmt_chk = $db_check->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+        $stmt_chk->execute([$_SESSION['user_id']]);
+        $u_chk = $stmt_chk->fetch();
+        if ($u_chk && ($u_chk['is_admin'] == 1 || strtolower(trim($u_chk['email'])) === 'musiclibrary@mail.com')) {
+          $is_active_admin = true;
+        }
+      }
+      if (!$is_active_admin) {
+        die("Security violation: Admin session required.");
+      }
       perform_full_scan($db);
       exit;
 
     case 'rescan_covers':
+      // Lock down backend cover scanner endpoint
+      $is_active_admin = false;
+      if (isset($_SESSION['user_id'])) {
+        $db_check = get_db();
+        $stmt_chk = $db_check->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+        $stmt_chk->execute([$_SESSION['user_id']]);
+        $u_chk = $stmt_chk->fetch();
+        if ($u_chk && ($u_chk['is_admin'] == 1 || strtolower(trim($u_chk['email'])) === 'musiclibrary@mail.com')) {
+          $is_active_admin = true;
+        }
+      }
+      if (!$is_active_admin) {
+        die("Security violation: Admin session required.");
+      }
       perform_cover_scan($db);
       exit;
 
@@ -8447,8 +8542,8 @@ HTML;
       $mediaType = 'image/webp';
       
       if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
-        if ($_FILES['image']['size'] > 10 * 1024 * 1024) {
-          send_json(['status' => 'error', 'message' => 'File exceeds 10MB limit.']);
+        if ($_FILES['image']['size'] > 50 * 1024 * 1024) {
+          send_json(['status' => 'error', 'message' => 'File exceeds 50MB limit.']);
         }
         
         $mime = strtolower($_FILES['image']['type'] ?? '');
@@ -10762,7 +10857,14 @@ HTML;
       } catch(Exception $e) {}
 
       $stmt = $db->query("
-        SELECT rs.user_id, u.artist as player_name, SUM(rs.score) as total_score, COUNT(rs.id) as total_plays
+        SELECT rs.user_id, u.artist as player_name, 
+        SUM(rs.score) as total_score, 
+        COUNT(rs.id) as total_plays,
+        SUM(rs.perfect) as total_perfect,
+        SUM(rs.great) as total_great,
+        SUM(rs.good) as total_good,
+        SUM(rs.bad) as total_bad,
+        SUM(rs.miss) as total_miss
         FROM rhythm_scores rs
         JOIN users u ON rs.user_id = u.id
         GROUP BY rs.user_id
@@ -11235,9 +11337,16 @@ HTML;
         $db->exec("ALTER TABLE rhythm_favorites ADD COLUMN sort_order INTEGER;");
       } catch(Exception $e) {}
 
-      $stmt = $db->prepare("SELECT song_id FROM rhythm_favorites WHERE user_id = ? ORDER BY sort_order DESC");
-      $stmt->execute([$user_id]);
-      send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
+      try {
+        $stmt = $db->prepare("SELECT song_id FROM rhythm_favorites WHERE user_id = ? ORDER BY sort_order DESC");
+        $stmt->execute([$user_id]);
+        send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
+      } catch (Exception $e) {
+        // Robust fallback to prevent 500 crashes if older database files haven't fully committed column updates
+        $stmt = $db->prepare("SELECT song_id FROM rhythm_favorites WHERE user_id = ?");
+        $stmt->execute([$user_id]);
+        send_json($stmt->fetchAll(PDO::FETCH_COLUMN));
+      }
       break;
 
     case 'get_recommendations':
@@ -13958,15 +14067,15 @@ function perform_cover_scan($db) {
               <i class="bi bi-cloud-upload-fill"></i>
               <span>Upload Song</span>
             </a>
-            <a href="#" class="nav-link" id="nav-scan-all" data-bs-toggle="modal" data-bs-target="#full-scan-modal">
+            <a href="#" class="nav-link" id="nav-scan-all" data-bs-toggle="modal" data-bs-target="#full-scan-modal" style="display: none !important;">
               <i class="bi bi-hdd-stack-fill"></i>
               <span>Scan All</span>
             </a>
-            <a href="#" class="nav-link logged-in-only" id="nav-chart-scan" data-bs-toggle="modal" data-bs-target="#chart-scan-modal" style="display: none !important;">
+            <a href="#" class="nav-link logged-in-only" id="nav-chart-scan" style="display: none !important;">
               <i class="bi bi-controller"></i>
               <span>Scan Charts</span>
             </a>
-            <a href="#" class="nav-link logged-in-only" id="nav-chart-config" data-bs-toggle="modal" data-bs-target="#chart-config-modal" style="display: none !important;">
+            <a href="#" class="nav-link logged-in-only" id="nav-chart-config" style="display: none !important;">
               <i class="bi bi-sliders"></i>
               <span>Adjust Chart Scan</span>
             </a>
@@ -15375,7 +15484,8 @@ function perform_cover_scan($db) {
     <div class="modal fade" id="media-preview-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-fullscreen bg-black bg-opacity-75">
         <div class="modal-content bg-transparent border-0 h-100">
-          <div class="modal-header border-0 justify-content-end p-3 position-absolute w-100 z-3" style="top: 0;">
+          <div class="modal-header border-0 justify-content-end p-3 position-absolute w-100 z-3" style="top: 0; gap: 10px;">
+            <button id="media-preview-download-btn" class="btn btn-dark rounded-circle d-flex align-items-center justify-content-center" style="width: 44px; height: 44px; background-color: rgba(0,0,0,0.6); border: none; color: #fff;" title="Download Media"><i class="bi bi-download fs-5"></i></button>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" style="background-color: rgba(0,0,0,0.6); border-radius: 50%; padding: 12px;"></button>
           </div>
           <div class="modal-body text-center p-0 d-flex align-items-center justify-content-center h-100 overflow-auto" id="media-preview-body">
@@ -20529,8 +20639,8 @@ SOFTWARE.</div>
           // Chat Media Preview logic
           window.handleChatImageSelection = (file) => {
             if (file) {
-              if (file.size > 10 * 1024 * 1024) {
-                showToast('File exceeds 10MB limit.', 'error');
+              if (file.size > 50 * 1024 * 1024) {
+                showToast('File exceeds 50MB limit.', 'error');
                 return;
               }
               const dataTransfer = new DataTransfer();
@@ -22066,6 +22176,23 @@ SOFTWARE.</div>
           } else {
             body.innerHTML = `<img src="${url}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
           }
+          
+          // Setup direct download button action in modal header
+          const dlBtn = document.getElementById('media-preview-download-btn');
+          if (dlBtn) {
+            const newDlBtn = dlBtn.cloneNode(true);
+            dlBtn.parentNode.replaceChild(newDlBtn, dlBtn);
+            newDlBtn.addEventListener('click', () => {
+              const a = document.createElement('a');
+              a.href = url;
+              const ext = type.startsWith('video/') ? 'mp4' : 'webp';
+              a.download = `media_${Date.now()}.${ext}`;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+            });
+          }
+          
           bootstrap.Modal.getOrCreateInstance(document.getElementById('media-preview-modal')).show();
         };
 
@@ -24389,10 +24516,59 @@ SOFTWARE.</div>
                         <div id="rg-tab-leaderboard" class="rg-tab-content rg-hidden">
                           <div class="rg-list-container" id="rg-list-leaderboard"></div>
                         </div>
+                        <!-- Artist Detail Profile Page (Keeps bottom bar active) -->
+                        <div id="rg-tab-artist-detail" class="rg-tab-content rg-hidden">
+                          <div class="rg-list-container modern-custom-scroll" style="padding: 16px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto;">
+                            <!-- Profile Header (Populated dynamically with avatar, name, and aggregated stats) -->
+                            <div id="rg-artist-detail-header" class="p-3 rounded-4" style="background: linear-gradient(135deg, rgba(255,59,48,0.15) 0%, rgba(0,0,0,0.4) 100%); border: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 16px;"></div>
+
+                            <!-- Sub Navigation Tabs -->
+                            <ul class="nav nav-tabs border-secondary border-0 d-flex gap-2" id="rg-artist-detail-tabs" style="margin-bottom: 8px;">
+                              <li class="nav-item"><button class="nav-link active" id="rg-art-tab-tracks" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important;">Tracks</button></li>
+                              <li class="nav-item"><button class="nav-link" id="rg-art-tab-history" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important;">History</button></li>
+                            </ul>
+
+                            <!-- Tracks Pane -->
+                            <div id="rg-art-pane-tracks" class="d-flex flex-column gap-2">
+                              <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
+                                <input type="text" id="rg-search-artist-songs" class="rg-search-input" placeholder="Search tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                                <select id="rg-sort-artist-songs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                                  <option value="random">Random</option>
+                                  <option value="trending">Trending</option>
+                                  <option value="id_desc">Newest</option>
+                                  <option value="title_asc">Title (A-Z)</option>
+                                  <option value="album_asc">Album (A-Z)</option>
+                                </select>
+                              </div>
+                              <div id="rg-list-artist-songs" class="d-flex flex-column gap-2"></div>
+                            </div>
+
+                            <!-- History Pane -->
+                            <div id="rg-art-pane-history" class="d-none flex-column gap-2">
+                              <div id="rg-list-artist-history" class="d-flex flex-column gap-3"></div>
+                            </div>
+                          </div>
+                        </div>
+                        <!-- Artists Tab List -->
+                        <div id="rg-tab-artists" class="rg-tab-content rg-hidden">
+                          <div class="rg-search-bar" style="display: flex; gap: 8px;">
+                            <input type="text" id="rg-search-artists" class="rg-search-input" placeholder="Search artists..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                            <select id="rg-sort-artists" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                              <option value="name_asc">Name (A-Z)</option>
+                              <option value="name_desc">Name (Z-A)</option>
+                              <option value="count_desc">Most Tracks</option>
+                            </select>
+                          </div>
+                          <div class="rg-list-container" id="rg-list-artists"></div>
+                        </div>
+
                         <div id="rg-tab-settings" class="rg-tab-content rg-hidden">
-                          <div class="rg-list-container" style="padding: 24px 16px;">
-                            <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:24px;">
-                              <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase;">Lane Keybindings (6 Keys)</div>
+                          <div class="rg-list-container modern-custom-scroll" style="padding: 24px 16px;">
+                            <h2 style="color: var(--rg-primary); font-weight: 900; text-transform: uppercase; margin-bottom: 20px; font-size: 1.6rem; text-shadow: 0 2px 8px rgba(255,59,48,0.4);"><i class="bi bi-gear-fill me-2"></i> Settings</h2>
+
+                            <!-- Keybindings Card -->
+                            <div style="background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid var(--rg-primary); border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+                              <div style="font-size: 0.9rem; font-weight: 800; color: #fff; text-transform: uppercase; margin-bottom: 16px; display: flex; align-items: center; gap: 8px;"><i class="bi bi-keyboard text-danger fs-5"></i> Lane Keybindings</div>
                               <div style="display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;">
                                 <button class="rg-key-btn" data-lane="0">S</button>
                                 <button class="rg-key-btn" data-lane="1">D</button>
@@ -24401,38 +24577,56 @@ SOFTWARE.</div>
                                 <button class="rg-key-btn" data-lane="4">K</button>
                                 <button class="rg-key-btn" data-lane="5">L</button>
                               </div>
-                              <div style="font-size: 0.7rem; color: #888; margin-top: 4px;">Easy/Medium uses the middle 4 lanes. Higher difficulties use all 6 lanes.</div>
+                              <div style="font-size: 0.75rem; color: #888; margin-top: 12px;"><i class="bi bi-info-circle me-1"></i>Tap a key to rebind. Easy/Med use 4 center lanes.</div>
                             </div>
-                            <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:24px;">
-                              <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase; display: flex; justify-content: space-between;">
-                                <span>Audio Latency Offset</span>
-                                <span id="rg-offset-display" class="text-white">0ms</span>
+
+                            <!-- Gameplay Sliders Card -->
+                            <div style="background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid #a78bfa; border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+                              <div style="font-size: 0.9rem; font-weight: 800; color: #fff; text-transform: uppercase; margin-bottom: 24px; display: flex; align-items: center; gap: 8px;"><i class="bi bi-sliders text-info fs-5"></i> Gameplay Options</div>
+                              
+                              <div style="margin-bottom: 24px;">
+                                <div style="font-size: 0.8rem; font-weight: 700; color: #aaa; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                  <span>Audio Latency Offset</span>
+                                  <span id="rg-offset-display" style="color: #a78bfa; font-family: monospace; font-size: 0.95rem;">0ms</span>
+                                </div>
+                                <input type="range" id="rg-offset-slider" min="-250" max="250" value="0" step="5" style="width: 100%; accent-color: #a78bfa;">
                               </div>
-                              <input type="range" id="rg-offset-slider" min="-250" max="250" value="0" step="5" style="width: 100%; accent-color: var(--rg-primary);">
+                              
+                              <div style="margin-bottom: 24px;">
+                                <div style="font-size: 0.8rem; font-weight: 700; color: #aaa; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                  <span>Note Speed (Tick)</span>
+                                  <span id="rg-speed-display" style="color: #a78bfa; font-family: monospace; font-size: 0.95rem;">1.0x</span>
+                                </div>
+                                <input type="range" id="rg-speed-slider" min="0.5" max="20" value="1.0" step="0.1" style="width: 100%; accent-color: #a78bfa;">
+                              </div>
+
+                              <div>
+                                <div style="font-size: 0.8rem; font-weight: 700; color: #aaa; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                  <span>Hit SFX Volume</span>
+                                  <span id="rg-sfx-display" style="color: #a78bfa; font-family: monospace; font-size: 0.95rem;">30%</span>
+                                </div>
+                                <input type="range" id="rg-sfx-slider" min="0" max="1" value="0.3" step="0.05" style="width: 100%; accent-color: #a78bfa;">
+                              </div>
                             </div>
-                            <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:24px;">
-                              <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase; display: flex; justify-content: space-between;">
-                                <span>Note Speed (Tick)</span>
-                                <span id="rg-speed-display" class="text-white">1.0x</span>
+
+                            <!-- Calibration Card -->
+                            <div style="background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid #34d399; border-radius: 16px; padding: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+                              <div style="font-size: 0.9rem; font-weight: 800; color: #fff; text-transform: uppercase; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
+                                <div style="display: flex; align-items: center; gap: 8px;"><i class="bi bi-crosshair text-success fs-5"></i> Calibration Tool</div>
+                                <button id="rg-btn-cal-test" class="btn btn-sm btn-danger rounded-pill px-3 fw-bold shadow-sm" style="font-size: 0.75rem;">Start Test</button>
                               </div>
-                              <input type="range" id="rg-speed-slider" min="0.5" max="20" value="1.0" step="0.1" style="width: 100%; accent-color: var(--rg-primary);">
-                            </div>
-                            <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:24px; background-color: var(--rg-surface-variant); padding: 16px; border-radius: 16px; border: 1px solid #333;">
-                              <div style="font-size: 0.85rem; font-weight: 700; color: var(--rg-primary); text-transform: uppercase; display: flex; justify-content: space-between; align-items: center;">
-                                <span>Calibration Playground</span>
-                                <button id="rg-btn-cal-test" class="btn btn-sm btn-danger rounded-pill px-3 fw-bold" style="font-size: 0.75rem;">Start Test</button>
+                              <div style="position: relative; width: 100%; height: 160px; border-radius: 12px; overflow: hidden; display: none; margin-bottom: 12px; box-shadow: inset 0 0 20px rgba(0,0,0,0.8);" id="rg-cal-test-area">
+                                <canvas id="rg-cal-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #050505;"></canvas>
+                                <div id="rg-cal-feedback" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: 'Arial Black', sans-serif; font-size: 1.2rem; color: #fff; text-shadow: 0 4px 8px rgba(0,0,0,0.8); pointer-events: none; white-space: nowrap; transition: transform 0.05s ease-out;">Tap Key to Calibrate</div>
                               </div>
-                              <div style="position: relative; width: 100%; height: 160px; border-radius: 8px; overflow: hidden; display: none;" id="rg-cal-test-area">
-                                <canvas id="rg-cal-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #000;"></canvas>
-                                <div id="rg-cal-feedback" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: monospace; font-size: 1rem; font-weight: bold; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); pointer-events: none; white-space: nowrap;">Tap Key to Calibrate</div>
-                              </div>
-                              <div style="font-size: 0.7rem; color: #888; margin-top: 2px;">Test your latency offset and note speed in real-time. Hit your bound keys as the falling lines cross the red target!</div>
+                              <div style="font-size: 0.75rem; color: #888; line-height: 1.4;"><i class="bi bi-info-circle me-1"></i>Test your latency offset and note speed in real-time. Hit your bound keys as the falling lines cross the red target!</div>
                             </div>
                           </div>
                         </div>
                       </div>
                       <div class="rg-bottom-nav">
                         <div class="rg-nav-item active" data-target="songs"><i class="bi bi-music-note-list fs-4"></i><div class="rg-nav-label">Songs</div></div>
+                        <div class="rg-nav-item" data-target="artists"><i class="bi bi-people-fill fs-4"></i><div class="rg-nav-label">Artists</div></div>
                         <div class="rg-nav-item" data-target="favorites"><i class="bi bi-heart-fill fs-4"></i><div class="rg-nav-label">Favorites</div></div>
                         <div class="rg-nav-item" data-target="leaderboard"><i class="bi bi-trophy-fill fs-4"></i><div class="rg-nav-label">Ranks</div></div>
                         <div class="rg-nav-item" data-target="settings"><i class="bi bi-gear-fill fs-4"></i><div class="rg-nav-label">Settings</div></div>
@@ -24495,16 +24689,16 @@ SOFTWARE.</div>
                       <div id="rg-touch-layer" style="position:absolute; top:0; left:0; width:100%; height:100%; z-index:30; touch-action:none;"></div>
                       <!-- Z-index 40 ensures the HUD buttons are clickable above the touch layer -->
                       <div class="rg-hud" style="justify-content: center; position: relative; z-index: 40;">
-                        <div style="display:flex; flex-direction:column; align-items:center; text-align: center; width: 100%; max-width: 320px; margin: 0 auto;">
-                          <div class="rg-hud-title text-truncate" id="rg-in-game-title" style="max-width: 250px;">Title</div>
+                        <div style="display:flex; flex-direction:column; align-items:center; text-align: center; width: 100%; max-width: 210px; margin: 0 auto;">
+                          <div class="rg-hud-title text-truncate" id="rg-in-game-title" style="max-width: 140px;">Title</div>
                           
                           <!-- In-Game Score Progress Bar & Rank -->
-                          <div class="w-100 d-flex align-items-center gap-2 mb-1 mt-1" style="padding: 0 10px;">
-                            <div id="rg-in-game-rank" style="font-size: 1.5rem; font-weight: 900; font-family: 'Arial Black', sans-serif; color: #7f1d1d; min-width: 36px; text-align: left; text-shadow: 0 0 8px currentColor; line-height: 1;">F</div>
+                          <div class="w-100 d-flex align-items-center gap-2 mb-1 mt-1" style="padding: 0 6px;">
+                            <div id="rg-in-game-rank" style="font-size: 1.3rem; font-weight: 900; font-family: 'Arial Black', sans-serif; color: #7f1d1d; min-width: 28px; text-align: left; text-shadow: 0 0 8px currentColor; line-height: 1;">F</div>
                             <div class="flex-grow-1" style="min-width: 0;">
-                              <div class="d-flex justify-content-between align-items-baseline" style="font-size: 0.65rem; color: #888; font-weight: bold;">
+                              <div class="d-flex justify-content-between align-items-baseline" style="font-size: 0.6rem; color: #888; font-weight: bold; letter-spacing: 0.5px;">
                                 <span>SCORE</span>
-                                <span id="rg-in-game-score" style="font-family: monospace; font-size: 1rem; color: #fff;">000000000</span>
+                                <span id="rg-in-game-score" style="font-family: monospace; font-size: 0.85rem; color: #fff;">000000000</span>
                               </div>
                               <div style="width: 100%; height: 4px; background-color: #222; border-radius: 2px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05);">
                                 <div id="rg-in-game-score-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #ff3b30, #ff9500); border-radius: 2px; transition: width 0.1s linear;"></div>
@@ -24521,7 +24715,7 @@ SOFTWARE.</div>
                         <div class="rg-hud-actions" style="position: absolute; right: 16px; top: 16px; display: flex; flex-direction: column; align-items: flex-end; gap: 6px;">
                           <button class="rg-quit-btn" id="rg-btn-quit-game" style="padding: 0; width: 44px; height: 44px; border-radius: 50%; font-size: 1.5rem; display: flex; align-items: center; justify-content: center;"><i class="bi bi-pause-fill"></i></button>
                           <div style="width: 80px; height: 6px; background-color: #222; border-radius: 3px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); margin-top: 2px;">
-                            <div id="rg-in-game-hp" style="width: 100%; height: 100%; background-color: #27c93f; transition: width 0.1s, background-color 0.1s;"></div>
+                            <div id="rg-in-game-hp" style="width: 100%; height: 100%; background-color: #27c93f; transition: width 0.1s, background-color: 0.1s;"></div>
                           </div>
                           <div id="rg-in-game-accuracy" style="font-family: monospace; font-size: 0.8rem; font-weight: bold; color: #aaa; text-shadow: 0 1px 2px rgba(0,0,0,0.8); line-height: 1;">100.00%</div>
                         </div>
@@ -27066,6 +27260,16 @@ SOFTWARE.</div>
             } else {
               previewDesc = 'Album';
             }
+          } else if (type === 'game' && finalArtistId !== '') {
+            // New format for sharing Rhythm Game Artist Profiles
+            shareUrl += `&artist_id=${finalArtistId}`;
+            if (cleanArtistName !== '') {
+              const decodedArtistName = decodeURIComponent(cleanArtistName);
+              shareUrl += `&artist_name=${encodeURIComponent(decodedArtistName)}`;
+              previewDesc = `${decodedArtistName} - Rhythm Game Profile`;
+            } else {
+              previewDesc = 'Artist - Rhythm Game Profile';
+            }
           } else {
             if (cleanId !== '') {
               shareUrl += `&id=${cleanId}`;
@@ -28086,12 +28290,6 @@ SOFTWARE.</div>
         const chartScanModalEl = document.getElementById('chart-scan-modal');
         const chartScanIframe = document.getElementById('chart-scan-iframe');
         if (chartScanModalEl && chartScanIframe) {
-          chartScanModalEl.addEventListener('show.bs.modal', () => {
-            // Read active progress parameters and immediately boot the automated scanner
-            const lastStep = localStorage.getItem('rhythm_scan_step') || '1';
-            const density = localStorage.getItem('rhythm_scan_density') || '1.0';
-            chartScanIframe.src = `?action=rescan_charts&step=${lastStep}&run=1&density=${density}`;
-          });
           chartScanModalEl.addEventListener('hidden.bs.modal', () => {
             // Save current progress dynamically before unloading
             try {
@@ -28109,6 +28307,45 @@ SOFTWARE.</div>
             }
           });
         }
+
+        // Custom validation binders for both Scanner and Configurator to prevent empty database loops
+        const bindRhythmAdminControls = () => {
+          const scanBtn = document.getElementById('nav-chart-scan');
+          const configBtn = document.getElementById('nav-chart-config');
+          
+          const validateAndOpen = async (modalId, loadIframe) => {
+            try {
+              const songs = await fetchData('?access=api&action=get_songs&page=1&all=1&limit=1&api_key=ADMIN_SESSION_BYPASS', {}, true);
+              if (!songs || !Array.isArray(songs) || songs.length === 0) {
+                alert("Your library is empty! Please run the 'Scan All' (Full Library Scan) tool first to populate your database with songs.");
+                return;
+              }
+              const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById(modalId));
+              if (loadIframe && chartScanIframe) {
+                const lastStep = localStorage.getItem('rhythm_scan_step') || '1';
+                const density = localStorage.getItem('rhythm_scan_density') || '1.0';
+                chartScanIframe.src = `?action=rescan_charts&step=${lastStep}&run=1&density=${density}`;
+              }
+              modal.show();
+            } catch (err) {
+              alert("Network error. Could not verify library state.");
+            }
+          };
+
+          if (scanBtn) {
+            scanBtn.addEventListener('click', (e) => {
+              e.preventDefault(); e.stopPropagation();
+              validateAndOpen('chart-scan-modal', true);
+            });
+          }
+          if (configBtn) {
+            configBtn.addEventListener('click', (e) => {
+              e.preventDefault(); e.stopPropagation();
+              validateAndOpen('chart-config-modal', false);
+            });
+          }
+        };
+        bindRhythmAdminControls();
 
         const coverScanModalEl = document.getElementById('cover-scan-modal');
         const coverScanIframe = document.getElementById('cover-scan-iframe');
@@ -33052,6 +33289,8 @@ SOFTWARE.</div>
             if (adminPanelBtn) {
               if (isAdmin) {
                 adminPanelBtn.style.setProperty('display', 'flex', 'important');
+                const scanAllBtn = document.getElementById('nav-scan-all');
+                if (scanAllBtn) scanAllBtn.style.setProperty('display', 'flex', 'important');
                 const chartScanBtn = document.getElementById('nav-chart-scan');
                 if (chartScanBtn) chartScanBtn.style.setProperty('display', 'flex', 'important');
                 const chartConfigBtn = document.getElementById('nav-chart-config');
@@ -33059,6 +33298,8 @@ SOFTWARE.</div>
                 if (coverScanBtn) coverScanBtn.style.setProperty('display', 'flex', 'important');
               } else {
                 adminPanelBtn.style.setProperty('display', 'none', 'important');
+                const scanAllBtn = document.getElementById('nav-scan-all');
+                if (scanAllBtn) scanAllBtn.style.setProperty('display', 'none', 'important');
                 const chartScanBtn = document.getElementById('nav-chart-scan');
                 if (chartScanBtn) chartScanBtn.style.setProperty('display', 'none', 'important');
                 const chartConfigBtn = document.getElementById('nav-chart-config');
@@ -35894,22 +36135,31 @@ SOFTWARE.</div>
           constructor() {
             this.LANES = 4;
             this.JUDGMENT = { PERFECT: 0.045, GREAT: 0.080, GOOD: 0.125, BAD: 0.170 };
-            this.KEY_CODES = ['KeyS', 'KeyD', 'KeyF', 'KeyJ', 'KeyK', 'KeyL'];
-            this.KEY_LABELS = ['S', 'D', 'F', 'J', 'K', 'L'];
+            
+            // Load saved settings and keybindings from local storage cache
+            this.KEY_CODES = JSON.parse(localStorage.getItem('rg_key_codes')) || ['KeyS', 'KeyD', 'KeyF', 'KeyJ', 'KeyK', 'KeyL'];
+            this.KEY_LABELS = JSON.parse(localStorage.getItem('rg_key_labels')) || ['S', 'D', 'F', 'J', 'K', 'L'];
+            this.calibrationOffsetMs = localStorage.getItem('rg_cal_offset') !== null ? parseInt(localStorage.getItem('rg_cal_offset')) : 0;
+            this.userTickSpeed = localStorage.getItem('rg_tick_speed') !== null ? parseFloat(localStorage.getItem('rg_tick_speed')) : 1.0;
+            this.sfxVolume = localStorage.getItem('rg_sfx_volume') !== null ? parseFloat(localStorage.getItem('rg_sfx_volume')) : 0.3;
+            
             this.activeCodes = [];
             this.activeLabels = [];
-            this.calibrationOffsetMs = 0;
-            this.userTickSpeed = 1.0;
             this.listeningLane = null;
             
             this.songs = [];
             this.filteredSongs = [];
             this.favFilteredSongs = [];
+            this.artists = [];
+            this.filteredArtists = [];
+            this.activeArtistDetailName = '';
+            this.artistDetailSongs = [];
+            this.artistDetailFilteredSongs = [];
             this.renderLimit = 25;
             this.favRenderLimit = 25;
             
             this.selectedSong = null;
-            this.selectedDiff = 'easy'; // Default selection to Easy
+            this.selectedDiff = 'easy';
             this.currentSortMethod = 'random';
             this.currentFavSortMethod = 'manual_order';
             
@@ -35922,7 +36172,7 @@ SOFTWARE.</div>
             this.activeKeysHeld = [false, false, false, false, false, false];
             this.particles = [];
             this.laneApproachSpeed = 1.3;
-            this.rgSongCache = {}; // Cache to save bandwidth on retries
+            this.rgSongCache = {};
             this.curHp = 100;
             this.accuracy = 100.00;
             this.isCalibrating = false;
@@ -35941,24 +36191,40 @@ SOFTWARE.</div>
             this.feedbackTimer = 0;
             this.feedbackScale = 1;
             
-            // Event bindings
             this.handleKeyDown = this.onKeyDown.bind(this);
             this.handleKeyUp = this.onKeyUp.bind(this);
             this.handleResize = this.resizeCanvas.bind(this);
           }
 
           destroy() {
-            this.isPlaying = false;
-            if (this.audioPlayback) {
-              this.audioPlayback.pause();
-              this.audioPlayback.src = "";
-            }
-            if (this.audioCtx && this.audioCtx.state !== 'closed') this.audioCtx.close();
-            if (this.sfxCtx && this.sfxCtx.state !== 'closed') this.sfxCtx.close();
-            
+            // 1. Remove active global window listeners
             window.removeEventListener('keydown', this.handleKeyDown);
             window.removeEventListener('keyup', this.handleKeyUp);
             window.removeEventListener('resize', this.handleResize);
+
+            // 2. Shut down active audio playback safely
+            if (this.audioPlayback) {
+              this.audioPlayback.pause();
+              this.audioPlayback.src = "";
+              this.audioPlayback = null;
+            }
+
+            // 3. Kill background gameplay and calibration loops
+            this.isPlaying = false;
+            this.isCalibrating = false;
+            if (this.calAnimId) {
+              cancelAnimationFrame(this.calAnimId);
+            }
+
+            // 4. Release local calibration touch bindings
+            const area = document.getElementById('rg-cal-test-area');
+            if (area) {
+              if (this.boundCalTouchStart) area.removeEventListener('touchstart', this.boundCalTouchStart);
+              if (this.boundCalMouseDown) area.removeEventListener('mousedown', this.boundCalMouseDown);
+            }
+
+            // 5. Clean up main reference memory
+            window.rhythmGameInstance = null;
           }
 
           initDOM() {
@@ -35970,6 +36236,8 @@ SOFTWARE.</div>
             };
             this.tabs = {
               songs: document.getElementById('rg-tab-songs'),
+              artists: document.getElementById('rg-tab-artists'),
+              artistDetail: document.getElementById('rg-tab-artist-detail'),
               favorites: document.getElementById('rg-tab-favorites'),
               leaderboard: document.getElementById('rg-tab-leaderboard'),
               settings: document.getElementById('rg-tab-settings')
@@ -35977,7 +36245,6 @@ SOFTWARE.</div>
             this.listSongsEl = document.getElementById('rg-list-songs');
             this.listFavsEl = document.getElementById('rg-list-favs');
             
-            // Automatically launch directly into hub on load
             setTimeout(() => {
               this.switchScreen('hub');
               this.loadSongs();
@@ -35989,13 +36256,69 @@ SOFTWARE.</div>
                 navItems.forEach(n => n.classList.remove('active'));
                 item.classList.add('active');
                 const target = item.getAttribute('data-target');
-                Object.values(this.tabs).forEach(t => t.classList.add('rg-hidden'));
-                this.tabs[target].classList.remove('rg-hidden');
+                
+                // Cache active tab choice to survive page reloads
+                localStorage.setItem('rg_active_tab', target);
+                
+                Object.values(this.tabs).forEach(t => {
+                  if (t) t.classList.add('rg-hidden');
+                });
+                if (this.tabs[target]) {
+                  this.tabs[target].classList.remove('rg-hidden');
+                }
+                if (target === 'artists') {
+                  localStorage.removeItem('rg_active_artist');
+                  this.loadArtists();
+                } else {
+                  localStorage.removeItem('rg_active_artist');
+                }
               });
             });
 
+            // Artists Search & Sort (Null-safe)
+            const rgSearchArtists = document.getElementById('rg-search-artists');
+            if (rgSearchArtists) {
+              rgSearchArtists.addEventListener('input', (e) => {
+                const q = e.target.value.toLowerCase().trim();
+                this.filteredArtists = q === '' ? this.artists : this.artists.filter(a => a.name.toLowerCase().includes(q));
+                this.sortArtists(document.getElementById('rg-sort-artists').value);
+              });
+            }
+            const rgSortArtists = document.getElementById('rg-sort-artists');
+            if (rgSortArtists) {
+              rgSortArtists.addEventListener('change', (e) => {
+                this.sortArtists(e.target.value);
+              });
+            }
+
+            // Artist Songs Search & Sort (Null-safe)
+            const rgSearchArtistSongs = document.getElementById('rg-search-artist-songs');
+            if (rgSearchArtistSongs) {
+              rgSearchArtistSongs.addEventListener('input', (e) => {
+                const q = e.target.value.toLowerCase().trim();
+                this.artistDetailFilteredSongs = q === '' ? this.artistDetailSongs : this.artistDetailSongs.filter(s => s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q));
+                this.sortArtistSongs(document.getElementById('rg-sort-artist-songs').value);
+              });
+            }
+            const rgSortArtistSongs = document.getElementById('rg-sort-artist-songs');
+            if (rgSortArtistSongs) {
+              rgSortArtistSongs.addEventListener('change', (e) => {
+                this.sortArtistSongs(e.target.value);
+              });
+            }
+
+            // Cancel Multi-Artist Dialog Click (Null-safe)
+            const rgBtnArtistChoiceCancel = document.getElementById('rg-btn-artist-choice-cancel');
+            if (rgBtnArtistChoiceCancel) {
+              rgBtnArtistChoiceCancel.addEventListener('click', () => {
+                const dialogChoice = document.getElementById('rg-dialog-artist-choice');
+                if (dialogChoice) dialogChoice.classList.add('rg-hidden');
+              });
+            }
+
             const keyBtns = document.querySelectorAll('.rg-key-btn');
-            keyBtns.forEach(btn => {
+            keyBtns.forEach((btn, idx) => {
+              if (this.KEY_LABELS[idx]) btn.textContent = this.KEY_LABELS[idx];
               btn.addEventListener('click', () => {
                 keyBtns.forEach(b => b.classList.remove('listening'));
                 this.listeningLane = parseInt(btn.getAttribute('data-lane'));
@@ -36003,15 +36326,42 @@ SOFTWARE.</div>
               });
             });
 
-            document.getElementById('rg-offset-slider').addEventListener('input', (e) => {
-              this.calibrationOffsetMs = parseInt(e.target.value);
+            const offsetSlider = document.getElementById('rg-offset-slider');
+            if (offsetSlider) {
+              offsetSlider.value = this.calibrationOffsetMs;
               document.getElementById('rg-offset-display').textContent = `${this.calibrationOffsetMs >= 0 ? '+' : ''}${this.calibrationOffsetMs}ms`;
-            });
+              offsetSlider.addEventListener('input', (e) => {
+                this.calibrationOffsetMs = parseInt(e.target.value);
+                document.getElementById('rg-offset-display').textContent = `${this.calibrationOffsetMs >= 0 ? '+' : ''}${this.calibrationOffsetMs}ms`;
+                localStorage.setItem('rg_cal_offset', this.calibrationOffsetMs);
+              });
+            }
             
-            document.getElementById('rg-speed-slider').addEventListener('input', (e) => {
-              this.userTickSpeed = parseFloat(e.target.value);
+            const speedSlider = document.getElementById('rg-speed-slider');
+            if (speedSlider) {
+              speedSlider.value = this.userTickSpeed;
               document.getElementById('rg-speed-display').textContent = `${this.userTickSpeed}x`;
-            });
+              speedSlider.addEventListener('input', (e) => {
+                this.userTickSpeed = parseFloat(e.target.value);
+                document.getElementById('rg-speed-display').textContent = `${this.userTickSpeed}x`;
+                localStorage.setItem('rg_tick_speed', this.userTickSpeed);
+              });
+            }
+
+            const sfxSlider = document.getElementById('rg-sfx-slider');
+            if (sfxSlider) {
+              sfxSlider.value = this.sfxVolume;
+              document.getElementById('rg-sfx-display').textContent = Math.round(this.sfxVolume * 100) + '%';
+              sfxSlider.addEventListener('input', (e) => {
+                this.sfxVolume = parseFloat(e.target.value);
+                document.getElementById('rg-sfx-display').textContent = Math.round(this.sfxVolume * 100) + '%';
+                localStorage.setItem('rg_sfx_volume', this.sfxVolume);
+                if (this.sfxVolume > 0 && !this.sfxCtx) {
+                  this.sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                this.playHitSFX();
+              });
+            }
 
             const calBtn = document.getElementById('rg-btn-cal-test');
             if (calBtn) {
@@ -36025,14 +36375,12 @@ SOFTWARE.</div>
             document.getElementById('rg-search-songs').addEventListener('input', (e) => {
               clearTimeout(searchDebounceTimeout);
               const q = e.target.value.trim();
-              
               if (q === '') {
                 this.renderLimit = 25;
                 this.filteredSongs = this.songs;
                 this.sortSongs(this.currentSortMethod);
                 return;
               }
-
               searchDebounceTimeout = setTimeout(async () => {
                 try {
                   const searchData = await fetchData(`?action=search&q=${encodeURIComponent(q)}`, {}, true);
@@ -36041,15 +36389,12 @@ SOFTWARE.</div>
                     const songShelf = searchData.shelves.find(s => s.type === 'songs_list' || s.type === 'songs');
                     results = songShelf ? songShelf.items : [];
                   }
-                  
                   const favData = await fetchData('?action=get_rhythm_favorites', {}, true) || [];
                   const favSet = new Set(Array.isArray(favData) ? favData.map(id => parseInt(id)) : []);
-
                   this.filteredSongs = results.map(s => {
                     s.rg_favorite = favSet.has(parseInt(s.id)) ? 1 : 0;
                     return s;
                   });
-                  
                   this.renderLimit = 25;
                   this.sortSongs(this.currentSortMethod);
                 } catch (err) {
@@ -36110,7 +36455,6 @@ SOFTWARE.</div>
               this.prepGame(this.selectedSong, this.selectedDiff);
             });
 
-            // PAUSE MENU LOGIC
             const pauseDialog = document.getElementById('rg-dialog-pause');
             document.getElementById('rg-btn-quit-game').addEventListener('click', () => {
               this.isPlaying = false;
@@ -36133,7 +36477,6 @@ SOFTWARE.</div>
               this.switchScreen('hub');
             });
 
-            // RESULTS MENU LOGIC
             document.getElementById('rg-btn-result-back').addEventListener('click', () => this.switchScreen('hub'));
             document.getElementById('rg-btn-result-retry').addEventListener('click', () => {
               this.switchScreen('loading');
@@ -36142,7 +36485,6 @@ SOFTWARE.</div>
             document.getElementById('rg-btn-result-share').addEventListener('click', () => {
               const textPayload = `I just scored ${parseInt(this.curScore).toLocaleString()} (${this.maxCombo}x Combo) on ${this.selectedSong.title} [${this.selectedDiff.toUpperCase()}] in PHP Music Rhythm Game!`;
               const coverUrl = `?action=get_image&id=${this.selectedSong.id}&v=${this.selectedSong.last_modified || 0}`;
-              
               if (typeof showShareModal === 'function') {
                 showShareModal('game', this.selectedSong.id, this.selectedSong.title, '', '', coverUrl, '', textPayload);
               }
@@ -36175,7 +36517,6 @@ SOFTWARE.</div>
 
           async loadSongs() {
             try {
-              // Execute parallel high-speed asynchronous data fetching using internal sessions
               const [res1, res2, res3, favRes, levelsRes] = await Promise.all([
                 fetchData('?action=get_songs&page=1&sort=random', {}, true),
                 fetchData('?action=get_songs&page=2&sort=random', {}, true),
@@ -36189,11 +36530,9 @@ SOFTWARE.</div>
               const arr2 = Array.isArray(res2) ? res2 : [];
               const arr3 = Array.isArray(res3) ? res3 : [];
               const favArr = Array.isArray(favRes) ? favRes.map(id => parseInt(id)) : [];
-
               const favSet = new Set(favArr);
               const uniqueSongs = new Map();
 
-              // Merge random library songs
               [...arr1, ...arr2, ...arr3].forEach(s => {
                 if (s && s.id && !uniqueSongs.has(s.id)) {
                   s.rg_favorite = favSet.has(parseInt(s.id)) ? 1 : 0;
@@ -36211,8 +36550,12 @@ SOFTWARE.</div>
                 if (Array.isArray(favDetails)) {
                   favoriteSongsList = favDetails.map((s, idx) => {
                     s.rg_favorite = 1;
-                    s.originalFavIndex = idx; // Store original favorite insertion order
-                    if (!uniqueSongs.has(s.id)) {
+                    s.originalFavIndex = idx;
+                    if (uniqueSongs.has(s.id)) {
+                      const existing = uniqueSongs.get(s.id);
+                      existing.rg_favorite = 1;
+                      existing.originalFavIndex = idx;
+                    } else {
                       uniqueSongs.set(s.id, s);
                     }
                     return s;
@@ -36227,22 +36570,38 @@ SOFTWARE.</div>
               this.renderSongsList();
               this.renderFavoritesList();
               this.loadLeaderboard();
+
+              // Restore last viewed sub-tab or deep-linked artist from local storage cache
+              const savedTab = localStorage.getItem('rg_active_tab') || 'songs';
+              const savedArtist = localStorage.getItem('rg_active_artist');
               
-              // Deep Link Auto-Boot Check (Robust for un-fetched IDs)
-              if (typeof currentView !== 'undefined' && currentView.param) {
+              if (savedTab === 'artistDetail' && savedArtist) {
+                this.openArtistDetail(savedArtist);
+              } else {
+                const activeNavItem = document.querySelector(`.rg-nav-item[data-target="${savedTab}"]`);
+                if (activeNavItem) {
+                  activeNavItem.click();
+                }
+              }
+              
+              if (typeof currentView !== 'undefined' && currentView.artist_name) {
+                // Instantly open the deep-linked artist profile on page boot-up
+                this.openArtistDetail(currentView.artist_name);
+                delete currentView.artist_name;
+                if (currentView.artist_id) delete currentView.artist_id;
+              } else if (typeof currentView !== 'undefined' && currentView.param) {
                 const targetId = parseInt(currentView.param);
                 let targetSong = this.songs.find(s => parseInt(s.id) === targetId);
                 
                 if (!targetSong) {
-                  // Fetch explicitly if not in the random top 75 tracks
                   try {
                     const fetchedData = await fetchData(`?action=get_song_data&id=${targetId}`, {}, true);
                     if (fetchedData && fetchedData.id) {
                       targetSong = fetchedData;
                       targetSong.rg_favorite = favSet.has(targetId) ? 1 : 0;
-                      this.songs.unshift(targetSong); // Add to local array
+                      this.songs.unshift(targetSong);
                       this.filteredSongs = this.songs;
-                      this.renderSongsList(); // Re-render to show it at the top
+                      this.renderSongsList();
                     }
                   } catch (e) {
                     console.warn("Failed to fetch deep-linked song", e);
@@ -36251,10 +36610,9 @@ SOFTWARE.</div>
                 
                 if (targetSong) {
                   this.openPlayDialog(targetSong);
-                  currentView.param = ''; // Clear to prevent loops
+                  currentView.param = '';
                 }
               }
-              
             } catch (err) {
               console.error("Game Engine Failed to Load Tracks:", err);
               if (this.listSongsEl) {
@@ -36273,23 +36631,29 @@ SOFTWARE.</div>
                 return;
               }
               
-              container.innerHTML = data.map((entry, idx) => `
-                <div class="rg-list-item rank-row" data-userid="${entry.user_id}" data-player-name="${encodeURIComponent(entry.player_name)}" style="cursor: pointer;">
-                  <div class="rg-list-item-info">
-                    <div style="width: 24px; font-weight: 900; color: var(--rg-primary); text-align: center;">${idx + 1}</div>
-                    <img src="?action=get_profile_picture&id=${entry.user_id}" class="rg-cover-img" style="border-radius: 50%;">
-                    <div>
-                      <div class="rg-list-item-title">${escapeHTML(entry.player_name)}</div>
-                      <div class="rg-list-item-sub" style="color: var(--rg-primary);">
-                        Total Score: ${parseInt(entry.total_score).toLocaleString()} 
-                        <span style="color:#aaa; font-size:0.75rem; margin-left:8px;">(${entry.total_plays} Plays)</span>
+              container.innerHTML = data.map((entry, idx) => {
+                const jud = this.getRankFromStats(entry.total_perfect || 0, entry.total_great || 0, entry.total_good || 0, entry.total_bad || 0, entry.total_miss || 0);
+                const cacheBuster = Math.floor(Date.now() / 60000);
+                return `
+                  <div class="rg-list-item rank-row" data-userid="${entry.user_id}" data-player-name="${encodeURIComponent(entry.player_name)}" style="cursor: pointer; display: flex; align-items: center; justify-content: space-between;">
+                    <div class="rg-list-item-info" style="min-width: 0; flex: 1;">
+                      <div style="width: 24px; font-weight: 900; color: var(--rg-primary); text-align: center;">${idx + 1}</div>
+                      <img src="?action=get_profile_picture&id=${entry.user_id}&v=${cacheBuster}" class="rg-cover-img" style="border-radius: 50%;">
+                      <div style="min-width: 0; flex: 1; margin-right: 12px;">
+                        <div class="rg-list-item-title text-truncate">${escapeHTML(entry.player_name)}</div>
+                        <div class="rg-list-item-sub text-truncate" style="color: var(--rg-primary); font-size: 0.8rem; font-weight: 700;">
+                          Total Score: ${parseInt(entry.total_score).toLocaleString()} 
+                          <span style="color:#aaa; font-size:0.75rem; margin-left:8px;">(${entry.total_plays} Plays)</span>
+                        </div>
                       </div>
                     </div>
+                    <div class="d-flex align-items-center gap-2" style="flex-shrink: 0;">
+                      <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.75rem; font-weight: 900; background-color: ${jud.color}; color: #000; height: 26px; min-width: 32px; border-radius: 6px; box-shadow: 0 2px 8px ${jud.color}40;" title="AVERAGE RANK">${jud.rank}</span>
+                    </div>
                   </div>
-                </div>
-              `).join('');
+                `;
+              }).join('');
 
-              // Bind interactive click handlers to open performance history modal
               const rows = container.querySelectorAll('.rank-row');
               rows.forEach(row => {
                 row.addEventListener('click', () => {
@@ -36301,20 +36665,84 @@ SOFTWARE.</div>
             }
           }
 
-          sortSongs(method) {
-            this.currentSortMethod = method;
-            const sortFn = (a, b) => {
-              if (method === 'title_asc') return (a.title || '').localeCompare(b.title || '');
-              if (method === 'artist_asc') return (a.artist || '').localeCompare(b.artist || '');
-              if (method === 'id_desc') return parseInt(b.id) - parseInt(a.id);
-              if (method === 'trending') return parseInt(b.play_count || 0) - parseInt(a.play_count || 0);
-              if (method === 'random') return 0.5 - Math.random();
-              return 0;
-            };
-            if (this.songs) this.songs.sort(sortFn);
-            if (this.filteredSongs && this.filteredSongs !== this.songs) this.filteredSongs.sort(sortFn);
-            this.renderLimit = 25;
-            this.renderSongsList();
+          async openPlayDialog(song) {
+            this.selectedSong = song;
+            document.getElementById('rg-dialog-song-name').textContent = song.title;
+            const coverEl = document.getElementById('rg-dialog-cover');
+            if (coverEl) coverEl.src = `?action=get_image&id=${song.id}&v=${song.last_modified || 0}`;
+            
+            const lvlData = await fetchData(`?action=get_rhythm_levels&song_id=${song.id}`, {}, true);
+            const diffMap = { easy: 'Easy', medium: 'Med', hard: 'Hard', expert: 'Exprt', master: 'Mstr', demon: 'Demon' };
+            
+            document.querySelectorAll('.rg-diff-btn').forEach(btn => {
+              const diffKey = btn.dataset.diff;
+              const defaultText = diffMap[diffKey] || 'Diff';
+              if (lvlData && lvlData.levels && lvlData.levels[diffKey] !== undefined) {
+                btn.innerHTML = `${defaultText} <span style="font-size:0.7rem; opacity:0.65; display:block; font-weight:bold; margin-top:2px;">Lv.${lvlData.levels[diffKey]}</span>`;
+              } else {
+                btn.innerHTML = `${defaultText} <span style="font-size:0.7rem; opacity:0.4; display:block; margin-top:2px;">Lv.--</span>`;
+              }
+            });
+            
+            const container = document.getElementById('rg-song-leaderboard');
+            container.innerHTML = '<div class="text-center text-secondary small py-2"><div class="spinner-border spinner-border-sm text-danger" style="border-width: 0.15em;"></div> Loading scores...</div>';
+            document.getElementById('rg-dialog-play').classList.remove('rg-hidden');
+
+            try {
+              const data = await fetchData(`?action=get_song_rhythm_leaderboard&song_id=${song.id}`, {}, true);
+              if (!Array.isArray(data) || data.length === 0) {
+                container.innerHTML = '<div class="text-center text-secondary small py-4">No scores recorded yet. Be the first!</div>';
+                return;
+              }
+
+              container.innerHTML = data.map((entry, idx) => {
+                const jud = this.getRankFromStats(entry.perfect, entry.great, entry.good, entry.bad, entry.miss);
+                const pfpUrl = `?action=get_profile_picture&id=${entry.user_id}`;
+                const isFullCombo = parseInt(entry.miss || 0) === 0 && parseInt(entry.bad || 0) === 0;
+                const fcBadge = isFullCombo ? '<span class="badge bg-success ms-2" style="font-size: 0.65rem; padding: 2px 6px;">FC</span>' : '';
+                
+                return `
+                  <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${jud.color}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default; margin-bottom: 8px; text-align: left;">
+                    <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
+                      <div style="font-size: 1.1rem; font-weight: 900; color: var(--rg-primary); width: 24px; text-align: center; font-family: monospace;">${idx + 1}</div>
+                      <div class="flex-grow-1" style="min-width: 0; display: flex; align-items: center; justify-content: space-between;">
+                        <div class="d-flex flex-column align-items-start">
+                          <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Accuracy</span>
+                          <span style="font-size: 1.1rem; font-weight: 800; font-family: monospace; color: #fff;">${jud.acc}%</span>
+                        </div>
+                        <div class="d-flex flex-column align-items-end">
+                          <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Rank</span>
+                          <span style="font-size: 1.8rem; font-weight: 900; font-family: 'Arial Black', sans-serif; color: ${jud.color}; text-shadow: 0 0 8px ${jud.color}; line-height: 1;">${jud.rank}</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; text-align: center;">
+                      <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                        <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Score</span>
+                        <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: var(--rg-primary);">${parseInt(entry.score).toLocaleString()}</span>
+                      </div>
+                      <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                        <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Combo</span>
+                        <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: #fff;">${entry.max_combo}x${fcBadge}</span>
+                      </div>
+                      <div style="font-size: 0.75rem;"><span style="color:#aaa; display:block; font-size:0.6rem; text-transform:uppercase;">Perf</span><strong style="font-family: monospace; color:#fff;">${entry.perfect}</strong></div>
+                      <div style="font-size: 0.75rem;"><span style="color:#ff3b30; display:block; font-size:0.6rem; text-transform:uppercase;">Great</span><strong style="font-family: monospace; color:#fff;">${entry.great}</strong></div>
+                      <div style="font-size: 0.75rem;"><span style="color:#ffa000; display:block; font-size:0.6rem; text-transform:uppercase;">Good</span><strong style="font-family: monospace; color:#fff;">${entry.good}</strong></div>
+                      <div style="font-size: 0.75rem;"><span style="color:#555; display:block; font-size:0.6rem; text-transform:uppercase;">Miss</span><strong style="font-family: monospace; color:#fff;">${entry.miss}</strong></div>
+                    </div>
+
+                    <div style="display: flex; align-items: center; gap: 8px; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; width: 100%;">
+                      <img src="${pfpUrl}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;">
+                      <span class="text-white text-truncate fw-medium" style="font-size: 0.85rem; max-width: 220px;">${escapeHTML(entry.player_name)}</span>
+                    </div>
+                  </div>
+                `;
+              }).join('');
+            } catch (err) {
+              console.error("Failed to load song specific leaderboard:", err);
+              container.innerHTML = '<div class="text-center text-danger small py-2">Failed to load scores.</div>';
+            }
           }
 
           openPlayerStats(userId, name, page = 1) {
@@ -36352,6 +36780,7 @@ SOFTWARE.</div>
                 const diffLabels = { easy: 'EZ', medium: 'ND', hard: 'HD', expert: 'EX', master: 'MS', demon: 'DM' };
                 
                 const cardsHtml = scores.map(s => {
+                  const jud = this.getRankFromStats(s.perfect, s.great, s.good, s.bad, s.miss);
                   const diffColor = diffColors[s.difficulty] || '#aaa';
                   const diffLabel = diffLabels[s.difficulty] || 'UN';
                   const lvlText = s.level ? `Lv.${s.level}` : 'Lv.--';
@@ -36369,12 +36798,14 @@ SOFTWARE.</div>
                           </div>
                         </div>
                         <div class="d-flex flex-column align-items-end" style="flex-shrink: 0;">
-                          <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px;" title="${s.difficulty.toUpperCase()} level">${diffLabel} ${lvlText}</span>
+                          <div class="d-flex align-items-center gap-1">
+                            <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px;" title="${s.difficulty.toUpperCase()} level">${diffLabel} ${lvlText}</span>
+                            <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${jud.color}; color: #000;" title="RANK">${jud.rank}</span>
+                          </div>
                           <div class="text-secondary small mt-1" style="font-size: 0.75rem;">${playedAt}</div>
                         </div>
                       </div>
                       
-                      <!-- Project Sekai Style Judgment Stats Panel -->
                       <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; text-align: center;">
                         <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
                           <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Score</span>
@@ -36418,6 +36849,22 @@ SOFTWARE.</div>
                 }
               }
             });
+          }
+
+          sortSongs(method) {
+            this.currentSortMethod = method;
+            const sortFn = (a, b) => {
+              if (method === 'title_asc') return (a.title || '').localeCompare(b.title || '');
+              if (method === 'artist_asc') return (a.artist || '').localeCompare(b.artist || '');
+              if (method === 'id_desc') return parseInt(b.id) - parseInt(a.id);
+              if (method === 'trending') return parseInt(b.play_count || 0) - parseInt(a.play_count || 0);
+              if (method === 'random') return 0.5 - Math.random();
+              return 0;
+            };
+            if (this.songs) this.songs.sort(sortFn);
+            if (this.filteredSongs && this.filteredSongs !== this.songs) this.filteredSongs.sort(sortFn);
+            this.renderLimit = 25;
+            this.renderSongsList();
           }
 
           sortFavorites(method) {
@@ -36466,7 +36913,6 @@ SOFTWARE.</div>
                 this.sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
               }
 
-              // Concurrency & Mobile Support: Register touch and click handlers for mobile testing
               this.boundCalTouchStart = (e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -36518,7 +36964,6 @@ SOFTWARE.</div>
               this.calNotes.push({ time: now + 1.2, hit: false, missed: false });
             }
             
-            // Draw Target Line
             this.calCtx.strokeStyle = 'var(--rg-primary)';
             this.calCtx.lineWidth = 2;
             this.calCtx.beginPath();
@@ -36526,7 +36971,6 @@ SOFTWARE.</div>
             this.calCtx.lineTo(w, targetY);
             this.calCtx.stroke();
             
-            // Draw Falling Calibration Lines
             this.calNotes.forEach(n => {
               if (n.hit || n.missed) return;
               const delta = n.time - now;
@@ -36551,14 +36995,14 @@ SOFTWARE.</div>
 
           processCalHit() {
             this.playHitSFX();
-            if (navigator.vibrate) navigator.vibrate(20); // Tactile haptic feedback for mobile taps
+            if (navigator.vibrate) navigator.vibrate(20);
             const now = (Date.now() - this.calStartTime) / 1000;
             let minDiff = Infinity;
             let target = null;
             
             this.calNotes.forEach(n => {
               if (!n.hit && !n.missed) {
-                const diff = now - n.time; // Negative is Early, Positive is Late
+                const diff = now - n.time;
                 if (Math.abs(diff) < Math.abs(minDiff)) {
                   minDiff = diff;
                   target = n;
@@ -36594,177 +37038,8 @@ SOFTWARE.</div>
               else if (e.code === 'Space') label = 'SPC';
               this.KEY_LABELS[this.listeningLane] = label;
               
-              const btn = document.querySelector(`.rg-key-btn[data-lane="${this.listeningLane}"]`);
-              if (btn) {
-                btn.textContent = label;
-                btn.classList.remove('listening');
-              }
-              this.listeningLane = null;
-              e.preventDefault();
-            } else if (this.isCalibrating) {
-              const idx = this.KEY_CODES.indexOf(e.code);
-              if (idx !== -1) {
-                this.processCalHit();
-                e.preventDefault();
-                e.stopPropagation();
-              }
-            } else if (this.isPlaying && !e.repeat) {
-              const idx = this.activeCodes.indexOf(e.code);
-              if (idx !== -1) {
-                this.activeKeysHeld[idx] = true;
-                this.processHit(idx);
-                e.preventDefault();
-                e.stopPropagation();
-              }
-            }
-          }
-
-          onKeyUp(e) {
-            if (this.isPlaying) {
-              const idx = this.activeCodes.indexOf(e.code);
-              if (idx !== -1) this.activeKeysHeld[idx] = false;
-            }
-          }
-
-          createSongElement(song) {
-            const el = document.createElement('div');
-            el.className = 'rg-list-item';
-            
-            // Get levels for this song to render Project Sekai styled capsules
-            const levels = (window.rhythmLevelsMap && window.rhythmLevelsMap.levels && window.rhythmLevelsMap.levels[song.id]) ? window.rhythmLevelsMap.levels[song.id] : null;
-            let badgesHTML = '';
-            if (levels) {
-              const diffs = [
-                { short: 'EZ', key: 'easy', color: '#22d3ee' },
-                { short: 'ND', key: 'medium', color: '#34d399' },
-                { short: 'HD', key: 'hard', color: '#fb923c' },
-                { short: 'EX', key: 'expert', color: '#f43f5e' },
-                { short: 'MS', key: 'master', color: '#a78bfa' },
-                { short: 'DM', key: 'demon', color: '#7f1d1d' }
-              ];
-              badgesHTML = `<div class="d-flex flex-wrap gap-1 mt-2">` + diffs.map(d => {
-                const lvl = levels[d.key] || '--';
-                return `<span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${d.color}; color: ${d.key==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px; min-width: 32px;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
-              }).join('') + `</div>`;
-            } else {
-              badgesHTML = `<div class="text-secondary small mt-2" style="font-size: 0.75rem;"><i class="bi bi-info-circle"></i> Click to compile notes</div>`;
-            }
-
-            el.style.cssText = "background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid var(--rg-primary); border-radius: 16px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: all 0.2s cubic-bezier(0.2, 0, 0, 1); margin-bottom: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);";
-            
-            el.onmouseover = () => { el.style.backgroundColor = "rgba(255,255,255,0.05)"; el.style.transform = "translateY(-1px)"; el.style.borderColor = "var(--rg-primary)"; };
-            el.onmouseout = () => { el.style.backgroundColor = "transparent"; el.style.transform = "none"; el.style.borderColor = "rgba(255,255,255,0.05)"; };
-
-            el.innerHTML = `
-              <div class="rg-list-item-info d-flex align-items-center gap-3" style="min-width: 0; flex: 1; padding-right: 12px;">
-                <img src="?action=get_image&id=${song.id}&v=${song.last_modified}" class="rg-cover-img" style="width: 58px; height: 58px; border-radius: 12px; object-fit: cover; box-shadow: 0 4px 12px rgba(0,0,0,0.4); flex-shrink: 0;">
-                <div class="text-truncate" style="min-width: 0; flex: 1;">
-                  <div class="rg-list-item-title text-white fw-bold" style="font-size: 1.05rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(song.title)}</div>
-                  <div class="rg-list-item-sub text-secondary small d-flex align-items-center gap-2 mt-1">
-                    <span class="text-truncate" style="max-width: 150px; display: inline-block;">${escapeHTML(song.artist)}</span>
-                    <span style="width:3px; height:3px; background:#555; border-radius:50%;"></span>
-                    <span class="flex-shrink-0"><i class="bi bi-play-fill text-secondary"></i> ${formatSongCount(song.play_count || 0)}</span>
-                  </div>
-                  ${badgesHTML}
-                </div>
-              </div>
-              <div class="rg-list-item-actions d-flex align-items-center gap-2" style="flex-shrink: 0;">
-                <div class="btn-group shadow-sm" role="group" style="height: 36px; background-color: var(--rg-surface-variant); border-radius: 50px; border: 1px solid #333; overflow: hidden;">
-                  <button class="btn p-0 border-0 rg-fav-btn d-flex align-items-center justify-content-center ${song.rg_favorite == 1 ? 'text-danger' : 'text-secondary'}" style="width: 40px; height: 100%; background: transparent; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.1)'" onmouseout="this.style.backgroundColor='transparent'"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-6" style="line-height: 1;"></i></button>
-                  <button class="btn p-0 border-0 border-start border-end rg-share-song-btn text-info d-flex align-items-center justify-content-center" style="width: 40px; height: 100%; border-color: #333 !important; background: transparent; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.1)'" onmouseout="this.style.backgroundColor='transparent'"><i class="bi bi-share-fill fs-6"></i></button>
-                  <button class="btn p-0 border-0 rg-play-btn fw-bold d-flex align-items-center justify-content-center text-white" style="width: 48px; height: 100%; background: var(--rg-primary); transition: filter 0.2s;" onmouseover="this.style.filter='brightness(1.2)'" onmouseout="this.style.filter='none'"><i class="bi bi-play-fill fs-4" style="line-height: 1; padding-left: 2px;"></i></button>
-                </div>
-              </div>
-            `;
-            const favBtn = el.querySelector('.rg-fav-btn');
-            const shareBtn = el.querySelector('.rg-share-song-btn');
-            shareBtn.addEventListener('click', (e) => {
-              e.stopPropagation();
-              if (typeof showShareModal === 'function') {
-                showShareModal('game', song.id, song.title);
-              }
-            });
-            favBtn.addEventListener('click', async (e) => {
-              e.stopPropagation();
-              const res = await fetchData('?action=toggle_rhythm_favorite', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ song_id: song.id })
-              });
-              if (res) {
-                song.rg_favorite = res.is_favorite;
-                favBtn.classList.toggle('text-danger', song.rg_favorite == 1);
-                favBtn.classList.toggle('text-secondary', song.rg_favorite != 1);
-                favBtn.innerHTML = `<i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i>`;
-                
-                // Live sync Favorites tab memory array immediately on click without reload
-                if (song.rg_favorite == 1) {
-                  if (!this.favFilteredSongs.some(s => s.id === song.id)) {
-                    song.originalFavIndex = this.favFilteredSongs.length;
-                    this.favFilteredSongs.push(song);
-                  }
-                } else {
-                  this.favFilteredSongs = this.favFilteredSongs.filter(s => s.id !== song.id);
-                }
-                
-                // Sync main arrays reactively
-                const mainSong = this.songs.find(s => s.id === song.id);
-                if (mainSong) mainSong.rg_favorite = song.rg_favorite;
-
-                this.sortFavorites(this.currentFavSortMethod);
-              }
-            });
-            el.addEventListener('click', () => {
-              this.openPlayDialog(song);
-            });
-            return el;
-          }
-
-          async openPlayDialog(song) {
-            this.selectedSong = song;
-            document.getElementById('rg-dialog-song-name').textContent = song.title;
-            const container = document.getElementById('rg-song-leaderboard');
-            container.innerHTML = '<div class="text-center text-secondary small py-2"><div class="spinner-border spinner-border-sm text-danger" style="border-width: 0.15em;"></div> Loading scores...</div>';
-            document.getElementById('rg-dialog-play').classList.remove('rg-hidden');
-
-            try {
-              const data = await fetchData(`?action=get_song_rhythm_leaderboard&song_id=${song.id}`, {}, true);
-              if (!Array.isArray(data) || data.length === 0) {
-                container.innerHTML = '<div class="text-center text-secondary small py-2">No scores recorded yet. Be the first!</div>';
-                return;
-              }
-
-              container.innerHTML = data.map((entry, idx) => {
-                const isFullCombo = parseInt(entry.miss) === 0 && parseInt(entry.bad) === 0;
-                const fcBadge = isFullCombo ? '<span class="badge bg-success ms-2" style="font-size: 0.65rem; padding: 2px 6px;">FC</span>' : '';
-                return `
-                  <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem;">
-                    <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
-                      <span style="font-weight: 900; color: var(--rg-primary); width: 16px;">${idx + 1}</span>
-                      <img src="?action=get_profile_picture&id=${entry.user_id}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;">
-                      <span class="text-white text-truncate fw-medium" style="max-width: 140px;">${escapeHTML(entry.player_name)}</span>
-                      ${fcBadge}
-                    </div>
-                    <div class="text-end" style="font-family: monospace;">
-                      <span class="text-white" style="font-weight: 700;">${parseInt(entry.score).toLocaleString()}</span>
-                      <div style="font-size: 0.7rem; color: #aaa;">Max Combo: ${entry.max_combo}x</div>
-                    </div>
-                  </div>
-                `;
-              }).join('');
-            } catch (err) {
-              console.error("Failed to load song specific leaderboard:", err);
-              container.innerHTML = '<div class="text-center text-danger small py-2">Failed to load scores.</div>';
-            }
-          }
-
-          onKeyDown(e) {
-            if (this.listeningLane !== null) {
-              this.KEY_CODES[this.listeningLane] = e.code;
-              let label = e.key.toUpperCase();
-              if (e.code.startsWith('Key')) label = e.code.replace('Key', '');
-              else if (e.code === 'Space') label = 'SPC';
-              this.KEY_LABELS[this.listeningLane] = label;
+              localStorage.setItem('rg_key_codes', JSON.stringify(this.KEY_CODES));
+              localStorage.setItem('rg_key_labels', JSON.stringify(this.KEY_LABELS));
               
               const btn = document.querySelector(`.rg-key-btn[data-lane="${this.listeningLane}"]`);
               if (btn) {
@@ -36793,62 +37068,77 @@ SOFTWARE.</div>
 
           createSongElement(song) {
             const el = document.createElement('div');
-            el.className = 'rg-list-item';
+            el.className = 'rg-list-item position-relative overflow-hidden';
             
-            // Get levels for this song to render Project Sekai styled capsules
             const levels = (window.rhythmLevelsMap && window.rhythmLevelsMap.levels && window.rhythmLevelsMap.levels[song.id]) ? window.rhythmLevelsMap.levels[song.id] : null;
             let badgesHTML = '';
+            
             if (levels) {
               const diffs = [
-                { short: 'EZ', key: 'easy', color: '#22d3ee' },
-                { short: 'ND', key: 'medium', color: '#34d399' },
-                { short: 'HD', key: 'hard', color: '#fb923c' },
-                { short: 'EX', key: 'expert', color: '#f43f5e' },
-                { short: 'MS', key: 'master', color: '#a78bfa' },
-                { short: 'DM', key: 'demon', color: '#7f1d1d' }
+                { short: 'EZ', key: 'easy', bg: '#6EE7B7', text: '#064E3B' },
+                { short: 'NM', key: 'medium', bg: '#60A5FA', text: '#1E3A8A' },
+                { short: 'HD', key: 'hard', bg: '#FBBF24', text: '#78350F' },
+                { short: 'EX', key: 'expert', bg: '#F43F5E', text: '#FFFFFF' },
+                { short: 'MS', key: 'master', bg: '#A78BFA', text: '#FFFFFF' },
+                { short: 'DM', key: 'demon', bg: '#4C1D95', text: '#FFFFFF' }
               ];
               badgesHTML = `<div class="d-flex flex-wrap gap-1 mt-2">` + diffs.map(d => {
-                const lvl = levels[d.key] || '--';
-                return `<span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${d.color}; color: ${d.key==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px; min-width: 32px;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
+                const lvl = levels[d.key];
+                if (!lvl) return ''; 
+                return `<span class="badge d-flex align-items-center justify-content-center px-2 py-1 shadow-sm" style="font-family: 'Arial Black', sans-serif; font-size: 0.7rem; font-weight: 900; background-color: ${d.bg}; color: ${d.text}; border-radius: 6px; letter-spacing: 0.5px;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
               }).join('') + `</div>`;
+              
+              if (badgesHTML === `<div class="d-flex flex-wrap gap-1 mt-2"></div>`) {
+                  badgesHTML = `<div class="text-secondary small mt-2 fw-bold" style="font-size: 0.75rem;"><i class="bi bi-cpu-fill me-1"></i>Tap to compile notes</div>`;
+              }
             } else {
-              badgesHTML = `<div class="text-secondary small mt-2" style="font-size: 0.75rem;"><i class="bi bi-info-circle"></i> Click to compile notes</div>`;
+              badgesHTML = `<div class="text-secondary small mt-2 fw-bold" style="font-size: 0.75rem;"><i class="bi bi-cpu-fill me-1"></i>Tap to compile notes</div>`;
             }
 
-            el.style.cssText = "background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid var(--rg-primary); border-radius: 16px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: all 0.2s cubic-bezier(0.2, 0, 0, 1); margin-bottom: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);";
+            el.style.cssText = "background: linear-gradient(90deg, rgba(30, 30, 30, 0.9) 0%, rgba(15, 15, 15, 0.95) 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 16px 14px; display: flex; align-items: center; gap: 14px; cursor: pointer; position: relative; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s, border-color 0.2s; margin-bottom: 0.25em; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); min-height: 126px;";
             
-            el.onmouseover = () => { el.style.backgroundColor = "rgba(255,255,255,0.05)"; el.style.transform = "translateY(-1px)"; el.style.borderColor = "var(--rg-primary)"; };
-            el.onmouseout = () => { el.style.backgroundColor = "transparent"; el.style.transform = "none"; el.style.borderColor = "rgba(255,255,255,0.05)"; };
+            el.onmouseover = () => { el.style.transform = "scale(1.02) translateY(-2px)"; el.style.borderColor = "var(--rg-primary)"; el.style.boxShadow = "0 10px 25px rgba(255,59,48,0.2)"; };
+            el.onmouseout = () => { el.style.transform = "none"; el.style.borderColor = "rgba(255,255,255,0.08)"; el.style.boxShadow = "0 6px 16px rgba(0,0,0,0.4)"; };
 
             el.innerHTML = `
-              <div class="rg-list-item-info d-flex align-items-center gap-3" style="min-width: 0; flex: 1; padding-right: 12px;">
-                <img src="?action=get_image&id=${song.id}&v=${song.last_modified}" class="rg-cover-img" style="width: 58px; height: 58px; border-radius: 12px; object-fit: cover; box-shadow: 0 4px 12px rgba(0,0,0,0.4); flex-shrink: 0;">
-                <div class="text-truncate" style="min-width: 0; flex: 1;">
-                  <div class="rg-list-item-title text-white fw-bold" style="font-size: 1.05rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(song.title)}</div>
-                  <div class="rg-list-item-sub text-secondary small d-flex align-items-center gap-2 mt-1">
-                    <span class="text-truncate" style="max-width: 150px; display: inline-block;">${escapeHTML(song.artist)}</span>
-                    <span style="width:3px; height:3px; background:#555; border-radius:50%;"></span>
-                    <span class="flex-shrink-0"><i class="bi bi-play-fill text-secondary"></i> ${formatSongCount(song.play_count || 0)}</span>
+              <div class="d-flex align-items-center gap-3 w-100" style="min-width: 0;">
+                <div class="position-relative" style="width: 80px; height: 80px; flex-shrink: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.6);">
+                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified}&size=small" onerror="this.onerror=null; this.src='${getSvgPlaceholder(song.title)}';" style="width: 100%; height: 100%; object-fit: cover;">
+                  <div class="position-absolute bottom-0 start-0 w-100 h-50" style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);"></div>
+                  <div class="position-absolute bottom-0 start-0 w-100 p-1 d-flex align-items-center justify-content-center gap-1 text-white" style="font-size: 0.65rem; font-weight: bold;">
+                    <i class="bi bi-play-fill text-danger"></i> ${formatSongCount(song.play_count || 0)}
                   </div>
+                </div>
+                
+                <div class="d-flex flex-column justify-content-center" style="min-width: 0; flex-grow: 1; gap: 2px;">
+                  <div class="text-white fw-bolder text-truncate" style="font-size: 1.15rem; letter-spacing: -0.2px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${escapeHTML(song.title)}</div>
+                  <div class="text-secondary fw-bold text-truncate artist-link" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id || ''}" style="font-size: 0.85rem; color: #a1a1aa !important; margin-top: -2px;">${escapeHTML(song.artist)}</div>
                   ${badgesHTML}
                 </div>
-              </div>
-              <div class="rg-list-item-actions d-flex align-items-center gap-2" style="flex-shrink: 0;">
-                <div class="btn-group shadow-sm" role="group" style="height: 36px; background-color: var(--rg-surface-variant); border-radius: 50px; border: 1px solid #333; overflow: hidden;">
-                  <button class="btn p-0 border-0 rg-fav-btn d-flex align-items-center justify-content-center ${song.rg_favorite == 1 ? 'text-danger' : 'text-secondary'}" style="width: 40px; height: 100%; background: transparent; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.1)'" onmouseout="this.style.backgroundColor='transparent'"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-6" style="line-height: 1;"></i></button>
-                  <button class="btn p-0 border-0 border-start border-end rg-share-song-btn text-info d-flex align-items-center justify-content-center" style="width: 40px; height: 100%; border-color: #333 !important; background: transparent; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.1)'" onmouseout="this.style.backgroundColor='transparent'"><i class="bi bi-share-fill fs-6"></i></button>
-                  <button class="btn p-0 border-0 rg-play-btn fw-bold d-flex align-items-center justify-content-center text-white" style="width: 48px; height: 100%; background: var(--rg-primary); transition: filter 0.2s;" onmouseover="this.style.filter='brightness(1.2)'" onmouseout="this.style.filter='none'"><i class="bi bi-play-fill fs-4" style="line-height: 1; padding-left: 2px;"></i></button>
+                
+                <div class="d-flex flex-column align-items-end justify-content-between ms-2" style="flex-shrink: 0; align-self: stretch; min-height: 84px; gap: 8px;">
+                  <div class="d-flex gap-2">
+                    <button class="btn p-1 border-0 rg-fav-btn ${song.rg_favorite == 1 ? 'text-danger' : 'text-secondary'}" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i></button>
+                    <button class="btn p-1 border-0 rg-share-song-btn text-info" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-share-fill fs-5"></i></button>
+                  </div>
+                  <button class="btn p-0 border-0 rounded-circle rg-play-btn d-flex align-items-center justify-content-center mt-auto" style="width: 42px; height: 42px; background: linear-gradient(135deg, var(--rg-primary), #ff0055); box-shadow: 0 4px 12px rgba(255,59,48,0.5); transition: transform 0.2s;">
+                    <i class="bi bi-play-fill text-white" style="font-size: 1.8rem; margin-left: 3px;"></i>
+                  </button>
                 </div>
               </div>
             `;
+            
             const favBtn = el.querySelector('.rg-fav-btn');
             const shareBtn = el.querySelector('.rg-share-song-btn');
+            const playBtn = el.querySelector('.rg-play-btn');
+            
             shareBtn.addEventListener('click', (e) => {
               e.stopPropagation();
               if (typeof showShareModal === 'function') {
                 showShareModal('game', song.id, song.title);
               }
             });
+            
             favBtn.addEventListener('click', async (e) => {
               e.stopPropagation();
               const res = await fetchData('?action=toggle_rhythm_favorite', {
@@ -36862,7 +37152,6 @@ SOFTWARE.</div>
                 favBtn.classList.toggle('text-secondary', song.rg_favorite != 1);
                 favBtn.innerHTML = `<i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i>`;
                 
-                // Live sync Favorites tab memory array immediately on click without reload
                 if (song.rg_favorite == 1) {
                   if (!this.favFilteredSongs.some(s => s.id === song.id)) {
                     song.originalFavIndex = this.favFilteredSongs.length;
@@ -36872,84 +37161,57 @@ SOFTWARE.</div>
                   this.favFilteredSongs = this.favFilteredSongs.filter(s => s.id !== song.id);
                 }
                 
-                // Sync main arrays reactively
                 const mainSong = this.songs.find(s => s.id === song.id);
                 if (mainSong) mainSong.rg_favorite = song.rg_favorite;
 
                 this.sortFavorites(this.currentFavSortMethod);
               }
             });
-            el.addEventListener('click', () => {
-              this.openPlayDialog(song);
-            });
-            return el;
-          }
-
-          async openPlayDialog(song) {
-            this.selectedSong = song;
-            document.getElementById('rg-dialog-song-name').textContent = song.title;
-            const coverEl = document.getElementById('rg-dialog-cover');
-            if (coverEl) coverEl.src = `?action=get_image&id=${song.id}&v=${song.last_modified || 0}`;
             
-            // Query database dynamically for generated difficulty levels and update selectors
-            const lvlData = await fetchData(`?action=get_rhythm_levels&song_id=${song.id}`, {}, true);
-            const diffMap = { easy: 'Easy', medium: 'Med', hard: 'Hard', expert: 'Exprt', master: 'Mstr', demon: 'Demon' };
-            
-            document.querySelectorAll('.rg-diff-btn').forEach(btn => {
-              const diffKey = btn.dataset.diff;
-              const defaultText = diffMap[diffKey] || 'Diff';
-              if (lvlData && lvlData.levels && lvlData.levels[diffKey] !== undefined) {
-                btn.innerHTML = `${defaultText} <span style="font-size:0.7rem; opacity:0.65; display:block; font-weight:bold; margin-top:2px;">Lv.${lvlData.levels[diffKey]}</span>`;
-              } else {
-                btn.innerHTML = `${defaultText} <span style="font-size:0.7rem; opacity:0.4; display:block; margin-top:2px;">Lv.--</span>`;
-              }
-            });
-            
-            const container = document.getElementById('rg-song-leaderboard');
-            
-            // Set Loading State
-            container.innerHTML = '<div class="text-center text-secondary small py-2"><div class="spinner-border spinner-border-sm text-danger" style="border-width: 0.15em;"></div> Loading scores...</div>';
-            document.getElementById('rg-dialog-play').classList.remove('rg-hidden');
-
-            try {
-              // Fetch up to 25 scores for this specific song
-              const data = await fetchData(`?action=get_song_rhythm_leaderboard&song_id=${song.id}`, {}, true);
-              
-              if (!Array.isArray(data) || data.length === 0) {
-                container.innerHTML = '<div class="text-center text-secondary small py-2">No scores recorded yet. Be the first!</div>';
-                return;
-              }
-
-              // Render the leaderboard
-              container.innerHTML = data.map((entry, idx) => {
-                const isFullCombo = parseInt(entry.miss) === 0 && parseInt(entry.bad) === 0;
-                const fcBadge = isFullCombo ? '<span class="badge bg-success ms-2" style="font-size: 0.65rem; padding: 2px 6px;">FC</span>' : '';
-                return `
-                  <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem;">
-                    <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
-                      <span style="font-weight: 900; color: var(--rg-primary); width: 16px;">${idx + 1}</span>
-                      <img src="?action=get_profile_picture&id=${entry.user_id}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;">
-                      <span class="text-white text-truncate fw-medium" style="max-width: 140px;">${escapeHTML(entry.player_name)}</span>
-                      ${fcBadge}
-                    </div>
-                    <div class="text-end" style="font-family: monospace;">
-                      <span class="text-white" style="font-weight: 700;">${parseInt(entry.score).toLocaleString()}</span>
-                      <div style="font-size: 0.7rem; color: #aaa;">Max Combo: ${entry.max_combo}x</div>
-                    </div>
-                  </div>
-                `;
-              }).join('');
-            } catch (err) {
-              console.error("Failed to load song specific leaderboard:", err);
-              container.innerHTML = '<div class="text-center text-danger small py-2">Failed to load scores.</div>';
+            // Bind Artist navigation when clicking the artist label
+            const artistLink = el.querySelector('.artist-link');
+            if (artistLink) {
+              artistLink.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const rawArtist = song.artist || 'Unknown';
+                const parts = rawArtist.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).map(p => p.trim()).filter(p => p !== '');
+                if (parts.length > 1) {
+                  this.openArtistChoiceDialog(parts);
+                } else if (parts.length === 1) {
+                  this.openArtistDetail(parts[0]);
+                }
+              });
             }
+
+            // Allow playing by clicking anywhere on the card OR directly on the play button
+            const initiatePlay = () => this.openPlayDialog(song);
+            playBtn.addEventListener('click', (e) => { e.stopPropagation(); initiatePlay(); });
+            el.addEventListener('click', (e) => {
+              if (e.target.closest('.artist-link')) return;
+              initiatePlay();
+            });
+            
+            return el;
           }
 
           renderSongsList() {
             this.listSongsEl.innerHTML = '';
+            
+            if (window.rhythmLevelsMap && window.rhythmLevelsMap.levels && Object.keys(window.rhythmLevelsMap.levels).length === 0) {
+              const isAdmin = currentUser && (currentUser.is_admin == 1 || currentUser.email === 'musiclibrary@mail.com');
+              this.listSongsEl.insertAdjacentHTML('beforeend', `
+                <div style="background: rgba(255, 59, 48, 0.1); border: 1px solid var(--rg-primary); border-radius: 16px; padding: 20px; margin-bottom: 16px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+                  <i class="bi bi-exclamation-triangle-fill text-danger d-block mb-2" style="font-size: 2.5rem;"></i>
+                  <h6 class="text-white fw-bold text-uppercase mb-2" style="letter-spacing: 1px;">No Charts Generated</h6>
+                  <p class="text-secondary small mb-3">The database currently has no pre-compiled note charts. Songs will generate on-the-fly when clicked, which may cause a slight initial delay.</p>
+                  ${isAdmin ? `<button class="btn btn-danger rounded-pill fw-bold px-4 py-2 shadow-sm" onclick="document.getElementById('nav-chart-scan').click();"><i class="bi bi-open-chart-scan me-1"></i> Run Server Scanner Now</button>` : `<div class="badge bg-dark border border-secondary text-secondary p-2"><i class="bi bi-lock-fill me-1"></i> Contact Admin to Run Scanner</div>`}
+                </div>
+              `);
+            }
+
             const chunk = this.filteredSongs.slice(0, this.renderLimit);
             if (chunk.length === 0) {
-              this.listSongsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: #aaa;">No songs found.</div>';
+              this.listSongsEl.insertAdjacentHTML('beforeend', '<div style="text-align:center; padding: 24px; color: #aaa;">No songs found.</div>');
               return;
             }
             chunk.forEach(song => this.listSongsEl.appendChild(this.createSongElement(song)));
@@ -36968,8 +37230,23 @@ SOFTWARE.</div>
           calculateLevel(notes, duration) {
             if (!duration || duration <= 0) return 1;
             const nps = notes.length / duration;
-            let level = Math.round(nps * 4.5); // Calibrate NPS multiplier for a standard 1 to 30 rating scale
+            const level = Math.round(nps * 0.42); 
             return Math.max(1, Math.min(30, level));
+          }
+
+          getRankFromStats(perfect, great, good, bad, miss) {
+            const total = parseInt(perfect || 0) + parseInt(great || 0) + parseInt(good || 0) + parseInt(bad || 0) + parseInt(miss || 0);
+            if (total === 0) return { rank: 'F', color: '#7f1d1d', acc: '0.00' };
+            const accVal = (parseInt(perfect || 0) * 100 + parseInt(great || 0) * 75 + parseInt(good || 0) * 40 + parseInt(bad || 0) * 10) / total;
+            
+            if (accVal >= 98.00) return { rank: 'SS', color: '#ff0055', acc: accVal.toFixed(2) };
+            if (accVal >= 95.00) return { rank: 'S', color: '#ffbd2e', acc: accVal.toFixed(2) };
+            if (accVal >= 90.00) return { rank: 'A', color: '#a78bfa', acc: accVal.toFixed(2) };
+            if (accVal >= 80.00) return { rank: 'B', color: '#60a5fa', acc: accVal.toFixed(2) };
+            if (accVal >= 70.00) return { rank: 'C', color: '#34d399', acc: accVal.toFixed(2) };
+            if (accVal >= 60.00) return { rank: 'D', color: '#fb923c', acc: accVal.toFixed(2) };
+            if (accVal >= 50.00) return { rank: 'E', color: '#9ca3af', acc: accVal.toFixed(2) };
+            return { rank: 'F', color: '#7f1d1d', acc: accVal.toFixed(2) };
           }
 
           async prepGame(song, diff) {
@@ -36982,7 +37259,6 @@ SOFTWARE.</div>
             try {
               let playableUrl = `?action=get_stream&id=${song.id}`;
               
-              // Use memory Cache if available to save bandwidth on retries
               if (this.rgSongCache[song.id]) {
                 playableUrl = this.rgSongCache[song.id].blobUrl;
               } else {
@@ -36993,17 +37269,24 @@ SOFTWARE.</div>
                 this.rgSongCache[song.id] = { blobUrl: playableUrl };
               }
 
-              // Fetch Note Chart securely from the server
               progressText.textContent = `Loading note chart...`;
               const dbChart = await fetchData(`?action=get_rhythm_chart&song_id=${song.id}&difficulty=${diff}`, {}, true);
               
               if (dbChart && dbChart.found) {
                 this.chartNotes = dbChart.notes;
-                // Workaround to bypass full buffer decode memory footprint
                 this.audioBuffer = { duration: song.duration || 180, sampleRate: 44100 }; 
                 this.LANES = (diff === 'easy' || diff === 'medium') ? 4 : 6;
+                
+                // Calculate and apply Note Speed effect
+                let baseSpeed = 1.3;
+                if (diff === 'easy') baseSpeed = 1.0;
+                else if (diff === 'medium') baseSpeed = 1.3;
+                else if (diff === 'hard') baseSpeed = 1.6;
+                else if (diff === 'expert') baseSpeed = 2.0;
+                else if (diff === 'master') baseSpeed = 2.4;
+                else if (diff === 'demon') baseSpeed = 2.8;
+                this.laneApproachSpeed = baseSpeed * this.userTickSpeed;
 
-                // Cache level dynamically to local memory and instantly re-render active list
                 if (!window.rhythmLevelsMap) window.rhythmLevelsMap = { levels: {} };
                 if (!window.rhythmLevelsMap.levels[song.id]) window.rhythmLevelsMap.levels[song.id] = {};
                 window.rhythmLevelsMap.levels[song.id][diff] = dbChart.level;
@@ -37042,7 +37325,6 @@ SOFTWARE.</div>
             else if (diff === 'master') { peakThresholdScale = 0.05; spacingMinSec = 0.03; chanceLong = 0.45; this.laneApproachSpeed = 2.4; }
             else if (diff === 'demon') { peakThresholdScale = 0.03; spacingMinSec = 0.02; chanceLong = 0.50; this.laneApproachSpeed = 2.8; }
 
-            // Apply User Custom Multiplier Settings
             this.laneApproachSpeed = this.laneApproachSpeed * this.userTickSpeed;
 
             const frameSize = Math.floor(sampleRate * 0.025);
@@ -37171,14 +37453,14 @@ SOFTWARE.</div>
           }
 
           playHitSFX() {
-            if (!this.sfxCtx) return;
+            if (!this.sfxCtx || this.sfxVolume <= 0) return;
             if (this.sfxCtx.state === 'suspended') this.sfxCtx.resume();
             const osc = this.sfxCtx.createOscillator();
             const gain = this.sfxCtx.createGain();
             osc.connect(gain); gain.connect(this.sfxCtx.destination);
             osc.frequency.setValueAtTime(800, this.sfxCtx.currentTime);
             osc.frequency.exponentialRampToValueAtTime(100, this.sfxCtx.currentTime + 0.05);
-            gain.gain.setValueAtTime(0.3, this.sfxCtx.currentTime);
+            gain.gain.setValueAtTime(this.sfxVolume, this.sfxCtx.currentTime);
             gain.gain.exponentialRampToValueAtTime(0.01, this.sfxCtx.currentTime + 0.05);
             osc.start(); osc.stop(this.sfxCtx.currentTime + 0.05);
           }
@@ -37186,7 +37468,6 @@ SOFTWARE.</div>
           updateHUD() {
             document.getElementById('rg-in-game-score').textContent = String(this.curScore).padStart(9, '0');
             
-            // Update In-Game Score Progress Bar
             const maxScore = (this.chartNotes.length || 1) * 1000;
             const scorePct = Math.min(100, Math.max(0, (this.curScore / maxScore) * 100));
             const scoreBar = document.getElementById('rg-in-game-score-bar');
@@ -37205,18 +37486,16 @@ SOFTWARE.</div>
               cNum.style.opacity = "0"; cLbl.style.opacity = "0";
             }
 
-            // Accuracy Calculation (Weighted average)
             const total = this.stats.perfect + this.stats.great + this.stats.good + this.stats.bad + this.stats.miss;
             if (total > 0) {
               const weight = (this.stats.perfect * 100 + this.stats.great * 75 + this.stats.good * 40 + this.stats.bad * 10) / total;
               this.accuracy = weight.toFixed(2);
             } else {
-              this.accuracy = "0.00"; // Initialize to 0% at song start to trigger Rank F on the HUD
+              this.accuracy = "0.00"; 
             }
             const accEl = document.getElementById('rg-in-game-accuracy');
             if (accEl) accEl.textContent = this.accuracy + '%';
 
-            // Real-Time Rank Mapping (Project Sekai Standards)
             let rank = 'F';
             let rankColor = '#7f1d1d';
             const accVal = parseFloat(this.accuracy);
@@ -37235,18 +37514,16 @@ SOFTWARE.</div>
               rankEl.style.color = rankColor;
             }
 
-            // HP Bar Layout
             const hpEl = document.getElementById('rg-in-game-hp');
             if (hpEl) {
               hpEl.style.width = this.curHp + '%';
-              if (this.curHp > 50) hpEl.style.backgroundColor = '#27c93f'; // Green
-              else if (this.curHp > 20) hpEl.style.backgroundColor = '#ffbd2e'; // Yellow
-              else hpEl.style.backgroundColor = '#ff5f56'; // Red
+              if (this.curHp > 50) hpEl.style.backgroundColor = '#27c93f'; 
+              else if (this.curHp > 20) hpEl.style.backgroundColor = '#ffbd2e'; 
+              else hpEl.style.backgroundColor = '#ff5f56'; 
             }
 
-            // Check Failure Condition (HP <= 0)
             if (this.curHp <= 0 && this.isPlaying) {
-              this.endGame(true); // Stage Failed
+              this.endGame(true); 
             }
           }
 
@@ -37349,9 +37626,10 @@ SOFTWARE.</div>
             this.ctx.fillStyle = "#000"; this.ctx.fillRect(0,0,w,h);
 
             const vanY = h * 0.15, hwH = h * 0.72, judY = vanY + hwH;
-            // Sharper top for visibility, wider bottom for playability
-            const topW = this.LANES === 6 ? w * 0.20 : w * 0.12; 
-            const botW = this.LANES === 6 ? w * 1.00 : w * 0.88;
+            const isPortrait = h > w;
+            
+            const topW = this.LANES === 6 ? (isPortrait ? w * 0.40 : w * 0.20) : (isPortrait ? w * 0.35 : w * 0.12);
+            const botW = this.LANES === 6 ? (isPortrait ? w * 1.15 : w * 1.00) : (isPortrait ? w * 0.98 : w * 0.88);
 
             const getPt = (lane, prog) => {
               const ease = Math.pow(prog, 1.35);
@@ -37497,8 +37775,9 @@ SOFTWARE.</div>
           spawnParticles(lane, white) {
             const w = this.canvas.width / window.devicePixelRatio;
             const h = this.canvas.height / window.devicePixelRatio;
-            // Ensure particle spawns match the widened track logic
-            const botW = this.LANES === 6 ? w * 1.00 : w * 0.88;
+            const isPortrait = h > w;
+            
+            const botW = this.LANES === 6 ? (isPortrait ? w * 1.15 : w * 1.00) : (isPortrait ? w * 0.98 : w * 0.88);
             const sW = botW / this.LANES;
             const cX = (w/2) - (botW/2) + lane*sW + sW/2;
             const cY = h*0.15 + h*0.72;
@@ -37510,6 +37789,295 @@ SOFTWARE.</div>
                 size: Math.random()*3+2, r: col[0], g: col[1], b: col[2], life: 1
               });
             }
+          }
+
+          loadArtists() {
+            const artistMap = new Map();
+            this.songs.forEach(song => {
+              if (!song.artist) return;
+              const parts = song.artist.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i);
+              parts.forEach(p => {
+                const name = p.trim();
+                if (name === '') return;
+                const key = name.toLowerCase();
+                if (!artistMap.has(key)) {
+                  artistMap.set(key, { name, id: song.id, count: 1 });
+                } else {
+                  artistMap.get(key).count++;
+                }
+              });
+            });
+            this.artists = Array.from(artistMap.values());
+            this.filteredArtists = [...this.artists];
+            this.sortArtists(document.getElementById('rg-sort-artists').value);
+          }
+
+          sortArtists(method) {
+            if (method === 'name_asc') {
+              this.filteredArtists.sort((a, b) => a.name.localeCompare(b.name));
+            } else if (method === 'name_desc') {
+              this.filteredArtists.sort((a, b) => b.name.localeCompare(a.name));
+            } else if (method === 'count_desc') {
+              this.filteredArtists.sort((a, b) => b.count - a.count);
+            }
+            this.renderArtistsList();
+          }
+
+          renderArtistsList() {
+            const container = document.getElementById('rg-list-artists');
+            container.innerHTML = '';
+            if (this.filteredArtists.length === 0) {
+              container.innerHTML = '<div style="text-align:center; padding: 24px; color: #888;">No artists found.</div>';
+              return;
+            }
+            this.filteredArtists.forEach(artist => {
+              container.appendChild(this.createArtistElement(artist));
+            });
+          }
+
+          createArtistElement(artist) {
+            const el = document.createElement('div');
+            el.className = 'rg-list-item';
+            el.style.cssText = "background: linear-gradient(90deg, rgba(25, 25, 25, 0.95) 0%, rgba(10, 10, 10, 0.98) 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s; margin-bottom: 12px; min-height: 80px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);";
+            
+            el.onmouseover = () => { el.style.transform = "scale(1.02) translateY(-2px)"; el.style.borderColor = "var(--rg-primary)"; };
+            el.onmouseout = () => { el.style.transform = "none"; el.style.borderColor = "rgba(255, 255, 255, 0.08)"; };
+            
+            el.innerHTML = `
+              <div class="d-flex align-items-center gap-3">
+                <img src="?action=get_image&id=${artist.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-sm" style="width: 50px; height: 50px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
+                <div>
+                  <div class="text-white fw-bold" style="font-size: 1.1rem;">${escapeHTML(artist.name)}</div>
+                  <div class="text-secondary small mt-1 fw-bold" style="font-size: 0.8rem;"><i class="bi bi-music-note-beamed text-danger"></i> ${artist.count} Tracks</div>
+                </div>
+              </div>
+              <i class="bi bi-chevron-right text-secondary fs-5 pe-1"></i>
+            `;
+            
+            el.addEventListener('click', () => {
+              this.openArtistDetail(artist.name);
+            });
+            return el;
+          }
+
+          async openArtistDetail(artistName) {
+            this.activeArtistDetailName = artistName;
+            
+            // Cache current state to survive page reloads
+            localStorage.setItem('rg_active_artist', artistName);
+            localStorage.setItem('rg_active_tab', 'artistDetail');
+
+            // 1. Client-side exact filtering for all tracks by/featuring this artist
+            this.artistDetailSongs = this.songs.filter(song => {
+              if (!song.artist) return false;
+              const parts = song.artist.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).map(p => p.trim().toLowerCase());
+              return parts.includes(artistName.toLowerCase());
+            });
+            this.artistDetailFilteredSongs = [...this.artistDetailSongs];
+
+            // 2. Determine if the artist is a registered user to fetch overall stats
+            const sampleSong = this.artistDetailSongs[0] || { id: 0 };
+            let artistUserId = null;
+            let isUser = false;
+            
+            // Look up artist user ID in our registered users database
+            if (window.rhythmLevelsMap) {
+              const uStmt = await fetchData(`?action=get_view_data&type=artist&name=${encodeURIComponent(artistName)}`, {}, true);
+              if (uStmt && uStmt.details && uStmt.details.is_user) {
+                artistUserId = uStmt.details.user_id;
+                isUser = true;
+              }
+            }
+
+            let totalScore = 0;
+            let artistScores = [];
+            let displayRank = 'F';
+            let rankColor = '#555';
+
+            if (isUser && artistUserId) {
+              // Fetch the artist's personal overall play history of ALL songs they played
+              artistScores = await fetchData(`?action=get_user_rhythm_scores&target_user_id=${artistUserId}&page=1`, {}, true) || [];
+              
+              let totalPerfect = 0, totalGreat = 0, totalGood = 0, totalBad = 0, totalMiss = 0;
+              artistScores.forEach(s => {
+                totalScore += parseInt(s.score || 0);
+                totalPerfect += parseInt(s.perfect || 0);
+                totalGreat += parseInt(s.great || 0);
+                totalGood += parseInt(s.good || 0);
+                totalBad += parseInt(s.bad || 0);
+                totalMiss += parseInt(s.miss || 0);
+              });
+              
+              const rankInfo = this.getRankFromStats(totalPerfect, totalGreat, totalGood, totalBad, totalMiss);
+              displayRank = artistScores.length > 0 ? rankInfo.rank : 'F';
+              rankColor = artistScores.length > 0 ? rankInfo.color : '#555';
+            }
+
+            // Render Header with statistical metrics & dynamic Share Button
+            const headerContainer = document.getElementById('rg-artist-detail-header');
+            if (isUser && artistUserId) {
+              headerContainer.innerHTML = `
+                <img src="?action=get_image&id=${sampleSong.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-lg border border-secondary" style="width: 72px; height: 72px; object-fit: cover; flex-shrink: 0;">
+                <div class="d-flex flex-column justify-content-center flex-grow-1" style="min-width: 0; text-align: left;">
+                  <h4 class="text-white fw-bold mb-1 text-truncate" style="font-size: 1.4rem;">${escapeHTML(artistName)}</h4>
+                  <div class="d-flex align-items-center gap-3 text-secondary small flex-wrap" style="font-weight: 500;">
+                    <span>Played: <b class="text-white">${artistScores.length}</b> times</span>
+                    <span>Score: <b class="text-white">${totalScore.toLocaleString()}</b></span>
+                    <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold border-secondary text-secondary" id="rg-btn-share-artist" style="font-size: 0.7rem; height: 24px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s;"><i class="bi bi-share-fill"></i> Share</button>
+                  </div>
+                </div>
+                <div class="d-flex flex-column align-items-end flex-shrink-0">
+                  <span class="badge d-flex align-items-center justify-content-center" style="font-family: 'Arial Black', sans-serif; font-size: 1.1rem; font-weight: 900; background-color: ${rankColor}; color: #000; height: 42px; min-width: 48px; border-radius: 8px; box-shadow: 0 4px 12px ${rankColor}40;" title="AVERAGE RANK">${displayRank}</span>
+                </div>
+              `;
+              
+              document.getElementById('rg-btn-share-artist').onclick = (e) => {
+                e.stopPropagation();
+                showShareModal('game', '', artistName, artistUserId, artistName);
+              };
+            } else {
+              headerContainer.innerHTML = `
+                <img src="?action=get_image&id=${sampleSong.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-lg border border-secondary" style="width: 72px; height: 72px; object-fit: cover; flex-shrink: 0;">
+                <div class="d-flex flex-column justify-content-center flex-grow-1" style="min-width: 0; text-align: left;">
+                  <h4 class="text-white fw-bold mb-1 text-truncate" style="font-size: 1.4rem;">${escapeHTML(artistName)}</h4>
+                  <div class="d-flex align-items-center gap-3 text-secondary small flex-wrap" style="font-weight: 500;">
+                    <span class="badge bg-dark border border-secondary text-secondary">Guest Artist</span>
+                    <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold border-secondary text-secondary" id="rg-btn-share-artist" style="font-size: 0.7rem; height: 24px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s;"><i class="bi bi-share-fill"></i> Share</button>
+                  </div>
+                </div>
+              `;
+              
+              document.getElementById('rg-btn-share-artist').onclick = (e) => {
+                e.stopPropagation();
+                showShareModal('game', '', artistName, '', artistName); // No User ID for guest artists
+              };
+            }
+
+            // Render History list for this artist's personal plays
+            const histContainer = document.getElementById('rg-list-artist-history');
+            if (!isUser || artistScores.length === 0) {
+              histContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-person-x-fill d-block fs-1 mb-2"></i>Only registered artist user accounts have an active play history.</div>`;
+            } else {
+              const diffColors = { easy: '#22d3ee', medium: '#34d399', hard: '#fb923c', expert: '#f43f5e', master: '#a78bfa', demon: '#7f1d1d' };
+              const diffLabels = { easy: 'EZ', medium: 'ND', hard: 'HD', expert: 'EX', master: 'MS', demon: 'DM' };
+              
+              histContainer.innerHTML = artistScores.map(s => {
+                const jud = this.getRankFromStats(s.perfect, s.great, s.good, s.bad, s.miss);
+                const diffColor = diffColors[s.difficulty] || '#aaa';
+                const diffLabel = diffLabels[s.difficulty] || 'UN';
+                const lvlText = s.level ? `Lv.${s.level}` : 'Lv.--';
+                const coverSvg = getSvgPlaceholder(s.title);
+                const playedAt = s.played_at ? new Date(s.played_at.replace(' ', 'T')+'Z').toLocaleDateString() : 'Unknown';
+
+                return `
+                  <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${diffColor}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;">
+                    <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
+                      <div class="d-flex align-items-center gap-3" style="min-width: 0; flex: 1;">
+                        <img src="?action=get_image&id=${s.song_id}&v=${s.last_modified}" onerror="this.onerror=null; this.src='${coverSvg}'" style="width: 44px; height: 44px; border-radius: 8px; object-fit: cover; box-shadow: 0 4px 8px rgba(0,0,0,0.4); flex-shrink: 0;">
+                        <div class="text-truncate text-start" style="min-width: 0; flex: 1;">
+                          <div class="text-white fw-bold text-truncate" style="font-size: 0.95rem;">${escapeHTML(s.title)}</div>
+                          <div class="text-secondary small mt-1" style="font-size: 0.75rem;">by ${escapeHTML(s.artist)}</div>
+                        </div>
+                      </div>
+                      <div class="d-flex align-items-center gap-1" style="flex-shrink: 0;">
+                        <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px;">${diffLabel} ${lvlText}</span>
+                        <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${jud.color}; color: #000;">${jud.rank}</span>
+                      </div>
+                    </div>
+                    
+                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; text-align: center;">
+                      <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                        <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Score</span>
+                        <span style="font-size: 0.9rem; font-weight: 900; font-family: monospace; color: var(--rg-primary);">${parseInt(s.score).toLocaleString()}</span>
+                      </div>
+                      <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                        <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Combo</span>
+                        <span style="font-size: 0.9rem; font-weight: 900; font-family: monospace; color: #fff;">${s.max_combo}x</span>
+                      </div>
+                    </div>
+                  </div>
+                `;
+              }).join('');
+            }
+
+            document.getElementById('rg-search-artist-songs').value = '';
+            
+            // Hide ALL active tabs first to prevent vertical overlapping conflicts
+            Object.values(this.tabs).forEach(t => {
+              if (t) t.classList.add('rg-hidden');
+            });
+            
+            // Show only the artist detail view
+            if (this.tabs.artistDetail) {
+              this.tabs.artistDetail.classList.remove('rg-hidden');
+            }
+            
+            // Sync bottom navigation highlight to "Artists"
+            document.querySelectorAll('.rg-nav-item').forEach(n => {
+              n.classList.toggle('active', n.getAttribute('data-target') === 'artists');
+            });
+            
+            // Default to Tracks sub-tab
+            const artTabTracks = document.getElementById('rg-art-tab-tracks');
+            if (artTabTracks) artTabTracks.click();
+            
+            this.sortArtistSongs(document.getElementById('rg-sort-artist-songs').value);
+          }
+
+          sortArtistSongs(method) {
+            const sortFn = (a, b) => {
+              if (method === 'title_asc') return (a.title || '').localeCompare(b.title || '');
+              if (method === 'album_asc') return (a.album || '').localeCompare(b.album || '');
+              if (method === 'id_desc') return parseInt(b.id) - parseInt(a.id);
+              if (method === 'trending') return parseInt(b.play_count || 0) - parseInt(a.play_count || 0);
+              if (method === 'random') return 0.5 - Math.random();
+              return 0;
+            };
+            this.artistDetailFilteredSongs.sort(sortFn);
+            this.renderArtistSongsList();
+          }
+
+          renderArtistSongsList() {
+            const container = document.getElementById('rg-list-artist-songs');
+            container.innerHTML = '';
+            if (this.artistDetailFilteredSongs.length === 0) {
+              container.innerHTML = '<div style="text-align:center; padding: 24px; color: #888;">No tracks found.</div>';
+              return;
+            }
+            this.artistDetailFilteredSongs.forEach(song => {
+              container.appendChild(this.createSongElement(song));
+            });
+          }
+
+          openArtistChoiceDialog(artistsList) {
+            const body = document.getElementById('artists-modal-body');
+            if (!body) return;
+            
+            const modalEl = document.getElementById('artists-modal');
+            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            
+            const modalTitle = modalEl.querySelector('.modal-title');
+            if (modalTitle) modalTitle.textContent = 'Artists';
+            
+            body.innerHTML = `
+              <div class="list-group list-group-flush rounded">
+                ${artistsList.map(a => `
+                  <button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary rhythm-artist-modal-item py-3 text-start px-4" style="border-left: none; border-right: none;" data-artist="${encodeURIComponent(a)}">
+                    ${a}
+                  </button>
+                `).join('')}
+              </div>
+            `;
+            
+            // Re-bind clicks directly to open the selected artist profile
+            body.querySelectorAll('.rhythm-artist-modal-item').forEach(btn => {
+              btn.addEventListener('click', () => {
+                modal.hide();
+                this.openArtistDetail(decodeURIComponent(btn.dataset.artist));
+              });
+            });
+
+            modal.show();
           }
 
           async endGame(failed = false) {
@@ -37527,7 +38095,6 @@ SOFTWARE.</div>
               shareBtn.style.display = failed ? 'none' : 'block';
             }
 
-            // Calculate Performance Rank
             let rank = 'F';
             let rankColor = '#7f1d1d';
             const accVal = parseFloat(this.accuracy);
@@ -37556,7 +38123,6 @@ SOFTWARE.</div>
               accEl.textContent = this.accuracy + '%';
             }
 
-            // Score Progress Bar Animation Logic
             const maxScore = (this.chartNotes.length || 1) * 1000;
             const pct = Math.min(100, Math.max(0, (this.curScore / maxScore) * 100));
             const scoreBar = document.getElementById('rg-res-score-bar');
@@ -37586,7 +38152,7 @@ SOFTWARE.</div>
                   good: this.stats.good,
                   bad: this.stats.bad,
                   miss: this.stats.miss,
-                  difficulty: this.selectedDiff // Transmit currently played difficulty level
+                  difficulty: this.selectedDiff
                 })
               });
               this.loadLeaderboard();
