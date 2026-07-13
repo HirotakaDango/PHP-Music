@@ -352,6 +352,10 @@ header('Content-Type: text/html; charset=utf-8');
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
 header('Expires: 0');
+// STRICT HTTP FIREWALL: Blocks bookmarklet payloads, eval(), and unauthorized script injections natively at the browser level
+header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' https://cdn.jsdelivr.net https://fonts.gstatic.com; media-src 'self' blob: https: data:; connect-src 'self' blob: https:; frame-src 'self' https://www.youtube.com; object-src 'none'; base-uri 'self';");
+header("X-Content-Type-Options: nosniff");
+header("X-XSS-Protection: 1; mode=block");
 ini_set('session.gc_maxlifetime', 31536000); // 1 year
 ini_set('session.cookie_lifetime', 31536000);
 session_start([
@@ -376,7 +380,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '5.9');
+define('APP_VERSION', '6.0');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1636,6 +1640,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$del_uid, $del_uid]);
       $db->prepare("DELETE FROM starred_messages WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM user_statuses WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM rhythm_scores WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM rhythm_favorites WHERE user_id = ?")->execute([$del_uid]);
       
       $new_email = 'deleted_' . $del_uid . '_' . time() . '@mail.com';
       $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL, banned = 1 WHERE id = ?")->execute([$new_email, $del_uid]);
@@ -1655,6 +1661,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       }
       $db->prepare("DELETE FROM starred_messages WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM user_statuses WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM rhythm_scores WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM rhythm_favorites WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM users WHERE id = ?")->execute([$del_uid]);
       log_admin_activity($db, $_SESSION['admin_email'], 'Permanently Deleted User', $del_uid);
       header('Location: ' . $_SERVER['REQUEST_URI']);
@@ -1776,8 +1784,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       .page-header { padding: 1.5rem 2rem 1.5rem 2rem; }
       .content-title { font-size: 2rem; font-weight: 700; margin-bottom: 0; }
       .user-list { display: flex; flex-direction: column; gap: 12px; }
-      .user-list-header { display: grid; grid-template-columns: 60px 40px 2fr 2fr 180px 100px 80px 60px; align-items: center; gap: 1rem; padding: 0 1rem; font-weight: 600; color: var(--ytm-secondary-text); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; }
-      .user-item { display: grid; grid-template-columns: 60px 40px 2fr 2fr 180px 100px 80px 60px; align-items: center; gap: 1rem; padding: 1rem; background-color: var(--ytm-surface); border: 1px solid var(--ytm-surface-2); border-radius: 12px; transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s; color: var(--ytm-primary-text); }
+      .user-list-header { display: grid; grid-template-columns: 60px 40px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 80px 60px; align-items: center; gap: 1rem; padding: 0 1rem; font-weight: 600; color: var(--ytm-secondary-text); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; }
+      .user-item { display: grid; grid-template-columns: 60px 40px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 80px 60px; align-items: center; gap: 1rem; padding: 1rem; background-color: var(--ytm-surface); border: 1px solid var(--ytm-surface-2); border-radius: 12px; transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s; color: var(--ytm-primary-text); }
       .user-item:hover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,0.5); border-color: #555; background-color: #181818; }
       .user-item .badge { font-size: 0.75rem; padding: 0.4em 0.6em; letter-spacing: 0.5px; }
       .user-item .dropdown-menu { font-size: 0.85rem; border: 1px solid #555; border-radius: 10px; }
@@ -1809,7 +1817,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         .user-item-id, .user-item-email-desktop, .user-item-artist-desktop, .user-item-verified-desktop, .user-item-last-up-desktop, .user-item-count-desktop { display: none; }
         .user-item-avatar { grid-area: avatar; display: flex; align-items: center; justify-content: center; align-self: center; }
         .user-item-avatar img { width: 45px !important; height: 45px !important; }
-        .user-item-main { grid-area: main; display: flex; flex-direction: column; gap: 0.25rem; justify-content: center; }
+        .user-item-main { grid-area: main; display: flex; flex-direction: column; gap: 0.25rem; justify-content: center; min-width: 0; }
         .user-item-main .user-id-mobile { font-size: 0.8rem; color: var(--ytm-secondary-text); }
         .user-item-main .user-email { font-weight: 500; }
         .user-item-main .user-artist { font-size: 0.9rem; color: var(--ytm-secondary-text); }
@@ -6547,6 +6555,8 @@ HTML;
       $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$user_id, $user_id]);
       $db->prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM rhythm_scores WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM rhythm_favorites WHERE user_id = ?")->execute([$user_id]);
 
       $new_email = 'deleted_' . $user_id . '_' . time() . '@mail.com';
       $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL WHERE id = ?")->execute([$new_email, $user_id]);
@@ -7175,12 +7185,21 @@ HTML;
         $where_clauses[] = 'm.genre = ?';
         $params[] = $_GET['genre'];
       }
+      if (!empty($_GET['q'])) {
+        $where_clauses[] = "(m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
+        $q_param = '%' . $_GET['q'] . '%';
+        $params[] = $q_param;
+        $params[] = $q_param;
+        $params[] = $q_param;
+      }
       if (!empty($_GET['filter_user_id'])) {
         $where_clauses[] = 'm.user_id = ?';
         $params[] = $_GET['filter_user_id'];
       }
+          
       $where_clauses[] = "(m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
       $params[] = $user_id;
+      
       $where_sql = 'WHERE ' . implode(' AND ', $where_clauses);
       
       $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . $limit_clause);
@@ -10710,20 +10729,26 @@ HTML;
         for ($attempt = 0; $attempt < $max_retries; $attempt++) {
           try {
             $db->beginTransaction();
-      
-            $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS history_user_song_idx ON history(user_id, song_id);");
             
-            $db->prepare("
-              INSERT INTO history (user_id, song_id, played_at) VALUES (?, ?, ?)
-              ON CONFLICT(user_id, song_id) DO UPDATE SET played_at = excluded.played_at
-            ")->execute([$user_id, $song_id, $played_at_iso]);
+            // 1. Update or Insert History safely without relying on a UNIQUE index
+            $stmt_check = $db->prepare("SELECT id FROM history WHERE user_id = ? AND song_id = ? LIMIT 1");
+            $stmt_check->execute([$user_id, $song_id]);
+            $hist_id = $stmt_check->fetchColumn();
+            if ($hist_id) {
+              $db->prepare("UPDATE history SET played_at = ? WHERE id = ?")->execute([$played_at_iso, $hist_id]);
+            } else {
+              $db->prepare("INSERT INTO history (user_id, song_id, played_at) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $played_at_iso]);
+            }
       
-            $db->prepare("
-              INSERT INTO play_counts (user_id, song_id, play_count, last_played) VALUES (?, ?, 1, ?)
-              ON CONFLICT(user_id, song_id) DO UPDATE SET
-                play_count = play_count + 1,
-                last_played = excluded.last_played
-            ")->execute([$user_id, $song_id, $played_at_iso]);
+            // 2. Update or Insert Play Counts safely
+            $stmt_pc = $db->prepare("SELECT play_count FROM play_counts WHERE user_id = ? AND song_id = ? LIMIT 1");
+            $stmt_pc->execute([$user_id, $song_id]);
+            $pc_exists = $stmt_pc->fetchColumn();
+            if ($pc_exists !== false) {
+              $db->prepare("UPDATE play_counts SET play_count = play_count + 1, last_played = ? WHERE user_id = ? AND song_id = ?")->execute([$played_at_iso, $user_id, $song_id]);
+            } else {
+              $db->prepare("INSERT INTO play_counts (user_id, song_id, play_count, last_played) VALUES (?, ?, 1, ?)")->execute([$user_id, $song_id, $played_at_iso]);
+            }
             
             $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'listened to', (SELECT title FROM music WHERE id = ?))")->execute([$user_id, $song_id]);
 
@@ -10837,6 +10862,9 @@ HTML;
       break;
 
     case 'get_rhythm_leaderboard':
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * PAGE_SIZE;
+      $limit_clause = " LIMIT " . PAGE_SIZE . " OFFSET " . $offset;
       // Force-create table on demand to bypass any session installation cache
       try {
         $db->exec("CREATE TABLE IF NOT EXISTS rhythm_scores (
@@ -10869,7 +10897,7 @@ HTML;
         JOIN users u ON rs.user_id = u.id
         GROUP BY rs.user_id
         ORDER BY total_score DESC
-        LIMIT 25
+        $limit_clause
       ");
       send_json($stmt->fetchAll());
       break;
@@ -10908,6 +10936,18 @@ HTML;
       break;
 
     case 'get_rhythm_chart':
+      // Force-create table on demand to bypass any session installation cache
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_charts (
+          song_id INTEGER NOT NULL,
+          difficulty TEXT NOT NULL,
+          notes_json TEXT,
+          level INTEGER DEFAULT 1,
+          PRIMARY KEY (song_id, difficulty),
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+      } catch(Exception $e) {}
+
       $song_id = (int)$_GET['song_id'];
       $difficulty = $_GET['difficulty'];
       
@@ -10944,6 +10984,17 @@ HTML;
       break;
 
     case 'get_rhythm_levels':
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_charts (
+          song_id INTEGER NOT NULL,
+          difficulty TEXT NOT NULL,
+          notes_json TEXT,
+          level INTEGER DEFAULT 1,
+          PRIMARY KEY (song_id, difficulty),
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+      } catch(Exception $e) {}
+
       $song_id = (int)$_GET['song_id'];
       $stmt = $db->prepare("SELECT difficulty, level FROM rhythm_charts WHERE song_id = ?");
       $stmt->execute([$song_id]);
@@ -10951,7 +11002,92 @@ HTML;
       send_json(['status' => 'success', 'levels' => $levels]);
       break;
 
+    case 'get_rhythm_artists':
+      $sort_key = $_GET['sort'] ?? 'name_asc';
+      $search = $_GET['q'] ?? '';
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * PAGE_SIZE;
+      $limit_clause = " LIMIT " . PAGE_SIZE . " OFFSET " . $offset;
+      $is_super_admin = 0;
+      $is_admin = 0;
+      if (isset($_SESSION['user_id'])) {
+        $stmt_admin = $db->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+        $stmt_admin->execute([$_SESSION['user_id']]);
+        $admin_row = $stmt_admin->fetch();
+        if ($admin_row) {
+          if (strtolower(trim($admin_row['email'])) === 'musiclibrary@mail.com') $is_super_admin = 1;
+          if ($admin_row['is_admin'] == 1 || $is_super_admin) $is_admin = 1;
+        }
+      }
+
+      $where = "WHERE u.email NOT LIKE 'deleted_%' AND u.banned = 0";
+      $params = [$_SESSION['user_id'] ?? 0];
+
+      if ($search !== '') {
+        $where .= " AND u.artist LIKE ? COLLATE NOCASE";
+        $params[] = "%$search%";
+      }
+
+      // Fetch all registered players and song creators, computing stats natively via SQL
+      $sql = "
+        SELECT 
+          u.id as user_id,
+          u.artist as name,
+          (SELECT id FROM music WHERE match_artist(artist, u.artist) = 1 ORDER BY id DESC LIMIT 1) as id,
+          (SELECT COUNT(*) FROM music WHERE match_artist(artist, u.artist) = 1 AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1)) as count,
+          COALESCE(SUM(rs.score), 0) as score,
+          COALESCE(COUNT(rs.id), 0) as plays,
+          COALESCE(SUM(rs.perfect), 0) as perfect,
+          COALESCE(SUM(rs.great), 0) as great,
+          COALESCE(SUM(rs.good), 0) as good,
+          COALESCE(SUM(rs.bad), 0) as bad,
+          COALESCE(SUM(rs.miss), 0) as miss,
+          (SELECT COUNT(*) FROM follows WHERE following_id = u.id) as followers
+        FROM users u
+        LEFT JOIN rhythm_scores rs ON u.id = rs.user_id
+        $where
+        GROUP BY u.id, u.artist
+      ";
+
+      // Parse sorting natively in SQLite
+      if ($sort_key === 'name_desc') {
+        $sql .= " ORDER BY u.artist COLLATE NOCASE DESC";
+      } elseif ($sort_key === 'count_desc') {
+        $sql .= " ORDER BY count DESC, u.artist COLLATE NOCASE ASC";
+      } elseif ($sort_key === 'followers_desc') {
+        $sql .= " ORDER BY followers DESC, u.artist COLLATE NOCASE ASC";
+      } elseif ($sort_key === 'score_desc') {
+        $sql .= " ORDER BY score DESC, u.artist COLLATE NOCASE ASC";
+      } elseif ($sort_key === 'rank_desc') {
+        $sql .= " ORDER BY (
+          (COALESCE(SUM(rs.perfect), 0) * 100.0 + COALESCE(SUM(rs.great), 0) * 75.0 + COALESCE(SUM(rs.good), 0) * 40.0 + COALESCE(SUM(rs.bad), 0) * 10.0) / 
+          NULLIF(COALESCE(SUM(rs.perfect), 0) + COALESCE(SUM(rs.great), 0) + COALESCE(SUM(rs.good), 0) + COALESCE(SUM(rs.bad), 0) + COALESCE(SUM(rs.miss), 0), 0)
+        ) DESC NULLS LAST, score DESC";
+      } elseif ($sort_key === 'random') {
+        $sql .= " ORDER BY RANDOM()";
+      } else {
+        $sql .= " ORDER BY u.artist COLLATE NOCASE ASC";
+      }
+
+      $sql .= $limit_clause;
+
+      $stmt = $db->prepare($sql);
+      $stmt->execute($params);
+      send_json($stmt->fetchAll());
+      break;
+
     case 'get_all_rhythm_levels':
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_charts (
+          song_id INTEGER NOT NULL,
+          difficulty TEXT NOT NULL,
+          notes_json TEXT,
+          level INTEGER DEFAULT 1,
+          PRIMARY KEY (song_id, difficulty),
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+      } catch(Exception $e) {}
+
       $stmt = $db->query("SELECT song_id, difficulty, level FROM rhythm_charts");
       $rows = $stmt->fetchAll();
       $map = [];
@@ -10959,6 +11095,22 @@ HTML;
         $map[$row['song_id']][$row['difficulty']] = (int)$row['level'];
       }
       send_json(['status' => 'success', 'levels' => $map]);
+      break;
+
+    case 'get_rhythm_artists_stats':
+      // Optimized bulk aggregator: returns followers, scores, and judgment metrics for all players
+      $stmt = $db->query("
+        SELECT u.id, u.artist as name,
+        (SELECT COUNT(*) FROM follows WHERE following_id = u.id) as followers,
+        (SELECT SUM(score) FROM rhythm_scores WHERE user_id = u.id) as total_score,
+        (SELECT SUM(perfect) FROM rhythm_scores WHERE user_id = u.id) as total_perfect,
+        (SELECT SUM(great) FROM rhythm_scores WHERE user_id = u.id) as total_great,
+        (SELECT SUM(good) FROM rhythm_scores WHERE user_id = u.id) as total_good,
+        (SELECT SUM(bad) FROM rhythm_scores WHERE user_id = u.id) as total_bad,
+        (SELECT SUM(miss) FROM rhythm_scores WHERE user_id = u.id) as total_miss
+        FROM users u WHERE u.banned = 0 AND u.email NOT LIKE 'deleted_%'
+      ");
+      send_json($stmt->fetchAll());
       break;
 
     case 'save_rhythm_chart':
@@ -10976,24 +11128,37 @@ HTML;
 
     case 'get_user_rhythm_scores':
       $target_user_id = (int)$_GET['target_user_id'];
-      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
-      $limit = 25;
-      $offset = ($page - 1) * $limit;
+      $is_all = isset($_GET['all']) && $_GET['all'] == '1';
       
       try { $db->exec("ALTER TABLE rhythm_scores ADD COLUMN difficulty TEXT DEFAULT 'medium';"); } catch(Exception $e) {}
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_charts (
+          song_id INTEGER NOT NULL,
+          difficulty TEXT NOT NULL,
+          notes_json TEXT,
+          level INTEGER DEFAULT 1,
+          PRIMARY KEY (song_id, difficulty),
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+      } catch(Exception $e) {}
 
-      $stmt = $db->prepare("
+      $sql = "
         SELECT rs.*, m.title, m.artist, m.last_modified, rc.level
         FROM rhythm_scores rs
         JOIN music m ON rs.song_id = m.id
         LEFT JOIN rhythm_charts rc ON rs.song_id = rc.song_id AND rs.difficulty = rc.difficulty
         WHERE rs.user_id = ?
         ORDER BY rs.played_at DESC
-        LIMIT ? OFFSET ?
-      ");
+      ";
+      if (!$is_all) {
+        $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+        $limit = 25;
+        $offset = ($page - 1) * $limit;
+        $sql .= " LIMIT " . (int)$limit . " OFFSET " . (int)$offset;
+      }
+      
+      $stmt = $db->prepare($sql);
       $stmt->bindValue(1, $target_user_id, PDO::PARAM_INT);
-      $stmt->bindValue(2, $limit, PDO::PARAM_INT);
-      $stmt->bindValue(3, $offset, PDO::PARAM_INT);
       $stmt->execute();
       send_json($stmt->fetchAll());
       break;
@@ -11319,6 +11484,62 @@ HTML;
         $db->prepare("INSERT INTO rhythm_favorites (user_id, song_id, sort_order) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $max_order + 1]);
         send_json(['status' => 'added', 'is_favorite' => 1]);
       }
+      break;
+
+    case 'get_rhythm_favorite_songs':
+      if (!$user_id) { send_json([]); }
+      
+      // Force-create table and safely alter column on demand to bypass database migration gaps
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_favorites (
+          user_id INTEGER NOT NULL,
+          song_id INTEGER NOT NULL,
+          sort_order INTEGER,
+          PRIMARY KEY (user_id, song_id),
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+      } catch(Exception $e) {}
+      try {
+        $db->exec("ALTER TABLE rhythm_favorites ADD COLUMN sort_order INTEGER;");
+      } catch(Exception $e) {}
+
+      $sort_key = $_GET['sort'] ?? 'manual_order';
+      $search = $_GET['q'] ?? '';
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * PAGE_SIZE;
+      $limit_clause = " LIMIT " . PAGE_SIZE . " OFFSET " . $offset;
+
+      $sort_map = [
+        'manual_order' => 'ORDER BY rf.sort_order DESC',
+        'random' => 'ORDER BY RANDOM()',
+        'trending' => 'ORDER BY play_count DESC',
+        'id_desc' => 'ORDER BY m.id DESC',
+        'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
+        'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC',
+      ];
+      $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
+
+      $target_id = !empty($_GET['target_user_id']) ? (int)$_GET['target_user_id'] : $user_id;
+      $where = "WHERE rf.user_id = ?";
+      $params = [$target_id];
+      if ($search !== '') {
+        $where .= " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE)";
+        $q_param = '%' . $search . '%';
+        $params[] = $q_param;
+        $params[] = $q_param;
+      }
+
+      $stmt = $db->prepare("
+        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified,
+        1 AS rg_favorite,
+        (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
+        FROM music m
+        JOIN rhythm_favorites rf ON m.id = rf.song_id
+        $where $order_by $limit_clause
+      ");
+      $stmt->execute($params);
+      send_json($stmt->fetchAll());
       break;
 
     case 'get_rhythm_favorites':
@@ -12495,10 +12716,10 @@ function perform_cover_scan($db) {
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
       window.adminAutoToken = '<?php echo $is_super_admin ? "musiclibrary@mail.com" : ""; ?>';
-      // ANTI-INSPECT: Block Eruda/vConsole, with Super Admin Bypass
+      // ANTI-INSPECT: Block Eruda/vConsole/Bookmarklets, with Super Admin Bypass
       (function() {
         const blockInspect = () => {
-          document.documentElement.innerHTML = '<div style="background-color:#030303; color:#ff0000; font-family:sans-serif; padding: 5rem 1rem; text-align:center; height:100vh; width:100vw; z-index:999999; position:fixed; top:0; left:0;"><h3>Security Violation</h3><p>Inspection tools are strictly forbidden on this application.</p></div>';
+          document.documentElement.innerHTML = '<div style="background-color:#030303; color:#ff0000; font-family:sans-serif; padding: 5rem 1rem; text-align:center; height:100vh; width:100vw; z-index:999999; position:fixed; top:0; left:0;"><h3>Security Violation</h3><p>Inspection tools and unauthorized scripts are strictly forbidden on this application.</p></div>';
           setTimeout(() => { window.location.replace('about:blank'); }, 500);
         };
 
@@ -12513,17 +12734,93 @@ function perform_cover_scan($db) {
         const checkBypass = () => {
           if (window.adminAutoToken === 'musiclibrary@mail.com') return true;
           if (isValidDevToken(localStorage.getItem('dev_mode_token'))) return true;
-          const pwd = prompt("Developer tools locked. Enter API Key or Admin password:");
+          const pwd = prompt("Developer tools locked. Enter API Key or Admin password to execute this script:");
           if (isValidDevToken(pwd)) {
             localStorage.setItem('dev_mode_token', pwd);
             return true;
           }
           if (pwd !== null) {
-            alert("Password incorrect. You want to try exploit the site?");
+            alert("Password incorrect. Access permanently locked.");
+            blockInspect();
           }
           return false;
         };
+
+        // 1. STRICT PROTOTYPE CHAIN LOCKDOWN (Blocks Bookmarklet Script Injection)
+        const originalAppend = Node.prototype.appendChild;
+        Node.prototype.appendChild = function(el) {
+          if (el && el.tagName && el.tagName.toUpperCase() === 'SCRIPT') {
+            const src = el.src || el.getAttribute('src') || '';
+            const isTrusted = src === '' || src.startsWith(window.location.origin) || src.includes('cdn.jsdelivr.net') || src.includes('cdnjs.cloudflare.com');
+            if (!isTrusted) {
+              if (!checkBypass()) {
+                console.warn('Blocked unauthorized bookmarklet script injection:', src);
+                blockInspect();
+                return el; // Return without appending
+              }
+            }
+          }
+          return originalAppend.apply(this, arguments);
+        };
         
+        const originalInsert = Node.prototype.insertBefore;
+        Node.prototype.insertBefore = function(el, reference) {
+          if (el && el.tagName && el.tagName.toUpperCase() === 'SCRIPT') {
+            const src = el.src || el.getAttribute('src') || '';
+            const isTrusted = src === '' || src.startsWith(window.location.origin) || src.includes('cdn.jsdelivr.net') || src.includes('cdnjs.cloudflare.com');
+            if (!isTrusted) {
+              if (!checkBypass()) {
+                console.warn('Blocked unauthorized bookmarklet script insertion:', src);
+                blockInspect();
+                return el;
+              }
+            }
+          }
+          return originalInsert.apply(this, arguments);
+        };
+
+        // 2. INTERCEPT DYNAMIC SRC MODIFICATIONS
+        const originalScriptSrc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+        if (originalScriptSrc) {
+          Object.defineProperty(HTMLScriptElement.prototype, 'src', {
+            set: function(val) {
+              if (val && !val.startsWith(window.location.origin) && !val.includes('cdn.jsdelivr.net') && !val.includes('cdnjs.cloudflare.com')) {
+                if (!checkBypass()) {
+                  console.warn("Blocked unauthorized script src modification:", val);
+                  blockInspect();
+                  return;
+                }
+              }
+              return originalScriptSrc.set.call(this, val);
+            },
+            get: function() {
+              return originalScriptSrc.get.call(this);
+            }
+          });
+        }
+
+        // 3. LOCK DOWN EXECUTION ENGINES
+        const originalEval = window.eval;
+        window.eval = function() {
+          if (!checkBypass()) {
+            console.warn('Blocked unauthorized eval() execution.');
+            blockInspect();
+            return;
+          }
+          return originalEval.apply(this, arguments);
+        };
+
+        const originalFunction = window.Function;
+        window.Function = function() {
+          if (!checkBypass()) {
+            console.warn('Blocked unauthorized Function() instantiation.');
+            blockInspect();
+            return function(){};
+          }
+          return originalFunction.apply(this, arguments);
+        };
+
+        // 4. BLOCK KNOWN DEBUGGERS
         let _eruda, _vConsole;
         try {
           Object.defineProperty(window, 'eruda', { 
@@ -13609,6 +13906,87 @@ function perform_cover_scan($db) {
         white-space: normal !important;
         min-width: 250px;
         line-height: 1.5;
+      }
+
+      body.rg-session-active .sidebar { display: none !important; }
+      body.rg-session-active .mobile-header { display: none !important; }
+      body.rg-session-active .page-header { display: none !important; }
+      body.rg-session-active .content-wrapper { margin-left: 0 !important; padding: 0 !important; }
+      body.rg-session-active .main-content { padding-top: 0 !important; }
+      body.rg-session-active #player-bar { display: none !important; }
+      
+      /* Responsive Artist Rhythm Page Layout */
+      .rg-artist-layout { display: flex; flex-direction: column; gap: 16px; width: 100%; height: 100%; overflow-y: auto; padding: 16px; }
+      .rg-artist-left { display: flex; flex-direction: column; gap: 16px; width: 100%; flex-shrink: 0; }
+      .rg-artist-right { display: flex; flex-direction: column; gap: 16px; width: 100%; flex-grow: 1; }
+      
+      @media (min-width: 992px) {
+        .rg-artist-layout {
+          flex-direction: row !important;
+          align-items: stretch !important; /* Stretches left & right columns to full page height */
+          gap: 24px;
+          overflow-y: hidden !important; /* Disables main layout page scrolling */
+        }
+        .rg-artist-left {
+          width: 350px;
+          height: 100%;
+          display: flex !important;
+          flex-direction: column !important;
+          gap: 16px;
+        }
+        .rg-artist-right {
+          width: calc(100% - 374px);
+          height: 100%;
+          display: flex !important;
+          flex-direction: column !important;
+        }
+        
+        /* Hide Tracks Tab button on Desktop since it's permanently shown on the right */
+        #rg-art-tab-tracks { display: none !important; }
+        
+        /* Force the right Tracks pane to take up full height and flex vertically */
+        #rg-art-pane-tracks {
+          display: flex !important;
+          flex-direction: column !important;
+          height: 100%;
+          min-height: 0;
+        }
+            
+        /* Lock the Search and Sort Bar statically at the top of the panes */
+        #rg-art-pane-tracks .rg-search-bar, #rg-art-pane-favs .rg-search-bar {
+          flex-shrink: 0;
+        }
+        
+        /* Make the actual songs list scroll independently on the right column */
+        #rg-list-artist-songs {
+          overflow-y: auto !important;
+          flex-grow: 1;
+          min-height: 0;
+          scrollbar-width: thin;
+          padding-right: 4px;
+        }
+
+        /* Force left sub-panes (History/Favorites) to fill height below tabs */
+        #rg-art-pane-history, #rg-art-pane-favs {
+          flex-grow: 1;
+          min-height: 0;
+          display: flex;
+          flex-direction: column;
+        }
+
+        /* Make the inner History and Favorites lists scroll independently on the left column */
+        #rg-list-artist-history, #rg-list-artist-favs {
+          overflow-y: auto !important;
+          flex-grow: 1;
+          min-height: 0;
+          scrollbar-width: thin;
+          padding-right: 4px;
+        }
+
+        /* Overwrite hidden states for Desktop */
+        #rg-art-pane-history.d-none, #rg-art-pane-favs.d-none {
+          display: none !important;
+        }
       }
 
       /* Rhythm Game Scoped Styles */
@@ -24465,6 +24843,13 @@ SOFTWARE.</div>
               mainContentEl.style.display = 'flex';
               mainContentEl.style.flexDirection = 'column';
             }
+            if (currentView.type === 'rhythm_game') {
+              if (isPlaying && typeof togglePlayPause === 'function') {
+                togglePlayPause();
+              }
+              if (playerBar) playerBar.classList.add('d-none');
+              document.body.classList.remove('player-visible');
+            }
           } else {
             if (pageHeaderEl) pageHeaderEl.classList.remove('d-none');
             contentArea.style.padding = '';
@@ -24475,6 +24860,10 @@ SOFTWARE.</div>
             if (mainContentEl) {
               mainContentEl.style.height = '';
               mainContentEl.style.overflow = '';
+            }
+            if (playerBar && currentSong) {
+              playerBar.classList.remove('d-none');
+              document.body.classList.add('player-visible');
             }
           }
           
@@ -24510,8 +24899,8 @@ SOFTWARE.</div>
                               <option value="artist_asc">Artist (A-Z)</option>
                             </select>
                           </div>
-                          <div class="rg-list-container position-relative" id="rg-list-songs">
-                            <div class="position-absolute top-50 start-50 translate-middle">
+                          <div class="rg-list-container" id="rg-list-songs">
+                            <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
                               <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
                             </div>
                           </div>
@@ -24535,34 +24924,57 @@ SOFTWARE.</div>
                         </div>
                         <!-- Artist Detail Profile Page (Keeps bottom bar active) -->
                         <div id="rg-tab-artist-detail" class="rg-tab-content rg-hidden">
-                          <div class="rg-list-container modern-custom-scroll" style="padding: 16px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto;">
-                            <!-- Profile Header (Populated dynamically with avatar, name, and aggregated stats) -->
-                            <div id="rg-artist-detail-header" class="p-3 rounded-4" style="background: linear-gradient(135deg, rgba(255,59,48,0.15) 0%, rgba(0,0,0,0.4) 100%); border: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 16px;"></div>
+                          <div class="rg-artist-layout modern-custom-scroll">
+                            <!-- Left Sidebar: Profile Header, Tabs & Active Left Panes -->
+                            <div class="rg-artist-left">
+                              <!-- Profile Header (Populated dynamically) -->
+                              <div id="rg-artist-detail-header" class="p-3 rounded-4" style="background: linear-gradient(135deg, rgba(255,59,48,0.15) 0%, rgba(0,0,0,0.4) 100%); border: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 16px;"></div>
 
-                            <!-- Sub Navigation Tabs -->
-                            <ul class="nav nav-tabs border-secondary border-0 d-flex gap-2" id="rg-artist-detail-tabs" style="margin-bottom: 8px;">
-                              <li class="nav-item"><button class="nav-link active" id="rg-art-tab-tracks" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important;">Tracks</button></li>
-                              <li class="nav-item"><button class="nav-link" id="rg-art-tab-history" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important;">History</button></li>
-                            </ul>
+                              <!-- Sub Navigation Tabs -->
+                              <ul class="nav nav-tabs border-secondary border-0 d-flex gap-2" id="rg-artist-detail-tabs" style="margin-bottom: 8px;">
+                                <li class="nav-item"><button class="nav-link active" id="rg-art-tab-tracks" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important;">Tracks</button></li>
+                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-history" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important;">History</button></li>
+                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-favs" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important;">Favorites</button></li>
+                              </ul>
 
-                            <!-- Tracks Pane -->
-                            <div id="rg-art-pane-tracks" class="d-flex flex-column gap-2">
-                              <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
-                                <input type="text" id="rg-search-artist-songs" class="rg-search-input" placeholder="Search tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
-                                <select id="rg-sort-artist-songs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
-                                  <option value="random">Random</option>
-                                  <option value="trending">Trending</option>
-                                  <option value="id_desc">Newest</option>
-                                  <option value="title_asc">Title (A-Z)</option>
-                                  <option value="album_asc">Album (A-Z)</option>
-                                </select>
+                              <!-- History Pane -->
+                              <div id="rg-art-pane-history" class="d-none flex-column gap-2 w-100">
+                                <div id="rg-list-artist-history" class="d-flex flex-column gap-3"></div>
                               </div>
-                              <div id="rg-list-artist-songs" class="d-flex flex-column gap-2"></div>
+
+                              <!-- Favorites Pane -->
+                              <div id="rg-art-pane-favs" class="d-none flex-column gap-2 w-100">
+                                <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
+                                  <input type="text" id="rg-search-artist-favs" class="rg-search-input" placeholder="Search favorites..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                                  <select id="rg-sort-artist-favs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                                    <option value="manual_order">My Order</option>
+                                    <option value="random">Random</option>
+                                    <option value="trending">Trending</option>
+                                    <option value="id_desc">Newest</option>
+                                    <option value="title_asc">Title (A-Z)</option>
+                                    <option value="artist_asc">Artist (A-Z)</option>
+                                  </select>
+                                </div>
+                                <div id="rg-list-artist-favs" class="d-flex flex-column gap-2"></div>
+                              </div>
                             </div>
 
-                            <!-- History Pane -->
-                            <div id="rg-art-pane-history" class="d-none flex-column gap-2">
-                              <div id="rg-list-artist-history" class="d-flex flex-column gap-3"></div>
+                            <!-- Right Sidebar: Tracks Pane -->
+                            <div class="rg-artist-right">
+                              <!-- Tracks Pane -->
+                              <div id="rg-art-pane-tracks" class="d-flex flex-column gap-2 w-100">
+                                <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
+                                  <input type="text" id="rg-search-artist-songs" class="rg-search-input" placeholder="Search tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                                  <select id="rg-sort-artist-songs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                                    <option value="random">Random</option>
+                                    <option value="trending">Trending</option>
+                                    <option value="id_desc">Newest</option>
+                                    <option value="title_asc">Title (A-Z)</option>
+                                    <option value="album_asc">Album (A-Z)</option>
+                                  </select>
+                                </div>
+                                <div id="rg-list-artist-songs" class="d-flex flex-column gap-2"></div>
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -24574,6 +24986,10 @@ SOFTWARE.</div>
                               <option value="name_asc">Name (A-Z)</option>
                               <option value="name_desc">Name (Z-A)</option>
                               <option value="count_desc">Most Tracks</option>
+                              <option value="followers_desc">Most Followers</option>
+                              <option value="score_desc">Most Scores</option>
+                              <option value="rank_desc">Most Ranks</option>
+                              <option value="random">Random</option>
                             </select>
                           </div>
                           <div class="rg-list-container" id="rg-list-artists"></div>
@@ -24646,6 +25062,7 @@ SOFTWARE.</div>
                         <div class="rg-nav-item" data-target="artists"><i class="bi bi-people-fill fs-4"></i><div class="rg-nav-label">Artists</div></div>
                         <div class="rg-nav-item" data-target="favorites"><i class="bi bi-heart-fill fs-4"></i><div class="rg-nav-label">Favorites</div></div>
                         <div class="rg-nav-item" data-target="leaderboard"><i class="bi bi-trophy-fill fs-4"></i><div class="rg-nav-label">Ranks</div></div>
+                        <div class="rg-nav-item" id="rg-nav-my-profile"><i class="bi bi-person-fill fs-4"></i><div class="rg-nav-label">Profile</div></div>
                         <div class="rg-nav-item" data-target="settings"><i class="bi bi-gear-fill fs-4"></i><div class="rg-nav-label">Settings</div></div>
                         <div class="share-view-btn" data-share-type="game" data-share-name="PHP Music Rhythm Game" data-image-url="?action=get_app_icon&size=512" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: #fff; opacity: 0.5; cursor: pointer; padding: 8px 16px; border-radius: 16px; transition: all 0.2s;" onmouseover="this.style.opacity='1'; this.style.color='var(--rg-primary)'" onmouseout="this.style.opacity='0.5'; this.style.color='#fff'">
                           <i class="bi bi-share-fill fs-4"></i><div class="rg-nav-label" style="font-size: 0.75rem; font-weight: 700;">Share</div>
@@ -27027,7 +27444,7 @@ SOFTWARE.</div>
 
         const updatePlayerUI = () => {
           if (!currentSong) return;
-          if (playerBar.classList.contains('d-none')) {
+          if (playerBar.classList.contains('d-none') && currentView.type !== 'rhythm_game') {
             playerBar.classList.remove('d-none');
             document.body.classList.add('player-visible');
           }
@@ -35463,6 +35880,10 @@ SOFTWARE.</div>
         });
 
         document.addEventListener('keydown', async e => {
+          // Prevent global player/site hotkeys during active gameplay
+          if (document.body.classList.contains('rg-session-active') || (window.rhythmGameInstance && window.rhythmGameInstance.isPlaying)) {
+            return;
+          }
           // Anti-inspect
           if (e.key === 'F12' || 
           (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'C' || e.key === 'J')) || 
@@ -36169,11 +36590,32 @@ SOFTWARE.</div>
             this.favFilteredSongs = [];
             this.artists = [];
             this.filteredArtists = [];
-            this.activeArtistDetailName = '';
             this.artistDetailSongs = [];
             this.artistDetailFilteredSongs = [];
-            this.renderLimit = 25;
-            this.favRenderLimit = 25;
+            
+            this.songsPage = 1;
+            this.favsPage = 1;
+            this.artistsPage = 1;
+            this.artistSongsPage = 1;
+            this.artistFavsPage = 1;
+            this.leaderboardPage = 1;
+            
+            this.allSongsLoaded = false;
+            this.allFavsLoaded = false;
+            this.allArtistsLoaded = false;
+            this.allArtistSongsLoaded = false;
+            this.allArtistFavsLoaded = false;
+            this.allLeaderboardLoaded = false;
+            
+            this.isLoadingSongs = false;
+            this.isLoadingFavs = false;
+            this.isLoadingArtists = false;
+            this.isLoadingArtistSongs = false;
+            this.isLoadingArtistFavs = false;
+            this.isLoadingLeaderboard = false;
+            
+            this.activeArtistDetailName = '';
+            this.activeArtistDetailId = null;
             
             this.selectedSong = null;
             this.selectedDiff = 'easy';
@@ -36218,6 +36660,8 @@ SOFTWARE.</div>
             window.removeEventListener('keydown', this.handleKeyDown);
             window.removeEventListener('keyup', this.handleKeyUp);
             window.removeEventListener('resize', this.handleResize);
+
+            if (this.startGameTimeout) clearTimeout(this.startGameTimeout);
 
             // 2. Shut down active audio playback safely
             if (this.audioPlayback) {
@@ -36274,53 +36718,73 @@ SOFTWARE.</div>
                 item.classList.add('active');
                 const target = item.getAttribute('data-target');
                 
-                // Cache active tab choice to survive page reloads
-                localStorage.setItem('rg_active_tab', target);
-                
-                Object.values(this.tabs).forEach(t => {
-                  if (t) t.classList.add('rg-hidden');
-                });
-                if (this.tabs[target]) {
-                  this.tabs[target].classList.remove('rg-hidden');
-                }
-                if (target === 'artists') {
-                  localStorage.removeItem('rg_active_artist');
-                  this.loadArtists();
-                } else {
-                  localStorage.removeItem('rg_active_artist');
+                if (target) {
+                  // Cache active tab choice to survive page reloads
+                  localStorage.setItem('rg_active_tab', target);
+                  
+                  Object.values(this.tabs).forEach(t => {
+                    if (t) t.classList.add('rg-hidden');
+                  });
+                  if (this.tabs[target]) {
+                    this.tabs[target].classList.remove('rg-hidden');
+                  }
+                  if (target === 'artists') {
+                    localStorage.removeItem('rg_active_artist');
+                    this.loadArtists();
+                  } else if (target === 'favorites') {
+                    localStorage.removeItem('rg_active_artist');
+                    this.loadFavorites();
+                  } else {
+                    localStorage.removeItem('rg_active_artist');
+                  }
                 }
               });
             });
 
+            const myProfileBtn = document.getElementById('rg-nav-my-profile');
+            if (myProfileBtn) {
+              myProfileBtn.addEventListener('click', () => {
+                if (typeof currentUser !== 'undefined' && currentUser && currentUser.artist) {
+                  this.openArtistDetail(currentUser.artist);
+                } else {
+                  showToast('Please log in to view your profile.', 'error');
+                }
+              });
+            }
+
             // Artists Search & Sort (Null-safe)
+            let searchArtistDebounce = null;
             const rgSearchArtists = document.getElementById('rg-search-artists');
             if (rgSearchArtists) {
               rgSearchArtists.addEventListener('input', (e) => {
-                const q = e.target.value.toLowerCase().trim();
-                this.filteredArtists = q === '' ? this.artists : this.artists.filter(a => a.name.toLowerCase().includes(q));
-                this.sortArtists(document.getElementById('rg-sort-artists').value);
+                clearTimeout(searchArtistDebounce);
+                searchArtistDebounce = setTimeout(() => {
+                  this.loadArtists();
+                }, 300);
               });
             }
             const rgSortArtists = document.getElementById('rg-sort-artists');
             if (rgSortArtists) {
               rgSortArtists.addEventListener('change', (e) => {
-                this.sortArtists(e.target.value);
+                this.loadArtists();
               });
             }
 
             // Artist Songs Search & Sort (Null-safe)
+            let searchArtistSongsDebounce = null;
             const rgSearchArtistSongs = document.getElementById('rg-search-artist-songs');
             if (rgSearchArtistSongs) {
               rgSearchArtistSongs.addEventListener('input', (e) => {
-                const q = e.target.value.toLowerCase().trim();
-                this.artistDetailFilteredSongs = q === '' ? this.artistDetailSongs : this.artistDetailSongs.filter(s => s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q));
-                this.sortArtistSongs(document.getElementById('rg-sort-artist-songs').value);
+                clearTimeout(searchArtistSongsDebounce);
+                searchArtistSongsDebounce = setTimeout(() => {
+                  this.loadArtistSongs(this.activeArtistDetailName);
+                }, 300);
               });
             }
             const rgSortArtistSongs = document.getElementById('rg-sort-artist-songs');
             if (rgSortArtistSongs) {
               rgSortArtistSongs.addEventListener('change', (e) => {
-                this.sortArtistSongs(e.target.value);
+                this.loadArtistSongs(this.activeArtistDetailName);
               });
             }
 
@@ -36391,63 +36855,102 @@ SOFTWARE.</div>
             let searchDebounceTimeout = null;
             document.getElementById('rg-search-songs').addEventListener('input', (e) => {
               clearTimeout(searchDebounceTimeout);
-              const q = e.target.value.trim();
-              if (q === '') {
-                this.renderLimit = 25;
-                this.filteredSongs = this.songs;
-                this.sortSongs(this.currentSortMethod);
-                return;
-              }
-              searchDebounceTimeout = setTimeout(async () => {
-                try {
-                  const searchData = await fetchData(`?action=search&q=${encodeURIComponent(q)}`, {}, true);
-                  let results = [];
-                  if (searchData && searchData.shelves) {
-                    const songShelf = searchData.shelves.find(s => s.type === 'songs_list' || s.type === 'songs');
-                    results = songShelf ? songShelf.items : [];
-                  }
-                  const favData = await fetchData('?action=get_rhythm_favorites', {}, true) || [];
-                  const favSet = new Set(Array.isArray(favData) ? favData.map(id => parseInt(id)) : []);
-                  this.filteredSongs = results.map(s => {
-                    s.rg_favorite = favSet.has(parseInt(s.id)) ? 1 : 0;
-                    return s;
-                  });
-                  this.renderLimit = 25;
-                  this.sortSongs(this.currentSortMethod);
-                } catch (err) {
-                  console.error("Global rhythm search failed:", err);
-                }
+              searchDebounceTimeout = setTimeout(() => {
+                this.loadSongs();
               }, 300);
             });
 
+            let favSearchDebounceTimeout = null;
             document.getElementById('rg-search-favs').addEventListener('input', (e) => {
-              this.favRenderLimit = 25;
-              const q = e.target.value.toLowerCase().trim();
-              if (q === '') {
-                this.favFilteredSongs = this.songs.filter(f => f.rg_favorite == 1);
-              } else {
-                this.favFilteredSongs = this.songs.filter(f => f.rg_favorite == 1 && (f.title.toLowerCase().includes(q) || f.artist.toLowerCase().includes(q)));
-              }
-              this.sortFavorites(this.currentFavSortMethod);
+              clearTimeout(favSearchDebounceTimeout);
+              favSearchDebounceTimeout = setTimeout(() => {
+                this.loadFavorites();
+              }, 300);
             });
 
             this.listSongsEl.addEventListener('scroll', () => {
-              if (this.listSongsEl.scrollTop + this.listSongsEl.clientHeight >= this.listSongsEl.scrollHeight - 20) {
-                if (this.renderLimit < this.filteredSongs.length) {
-                  this.renderLimit += 25;
-                  this.renderSongsList();
+              if (this.listSongsEl.scrollTop + this.listSongsEl.clientHeight >= this.listSongsEl.scrollHeight - 50) {
+                if (!this.isLoadingSongs && !this.allSongsLoaded) {
+                  this.songsPage++;
+                  this.loadSongs(true);
                 }
               }
             });
 
             this.listFavsEl.addEventListener('scroll', () => {
-              if (this.listFavsEl.scrollTop + this.listFavsEl.clientHeight >= this.listFavsEl.scrollHeight - 20) {
-                if (this.favRenderLimit < this.favFilteredSongs.length) {
-                  this.favRenderLimit += 25;
-                  this.renderFavoritesList();
+              if (this.listFavsEl.scrollTop + this.listFavsEl.clientHeight >= this.listFavsEl.scrollHeight - 50) {
+                if (!this.isLoadingFavs && !this.allFavsLoaded) {
+                  this.favsPage++;
+                  this.loadFavorites(true);
                 }
               }
             });
+
+            const listArtistsEl = document.getElementById('rg-list-artists');
+            if (listArtistsEl) {
+              listArtistsEl.addEventListener('scroll', () => {
+                if (listArtistsEl.scrollTop + listArtistsEl.clientHeight >= listArtistsEl.scrollHeight - 50) {
+                  if (!this.isLoadingArtists && !this.allArtistsLoaded) {
+                    this.artistsPage++;
+                    this.loadArtists(true);
+                  }
+                }
+              });
+            }
+
+            const listArtistSongsEl = document.getElementById('rg-list-artist-songs');
+            if (listArtistSongsEl) {
+              listArtistSongsEl.addEventListener('scroll', () => {
+                if (listArtistSongsEl.scrollTop + listArtistSongsEl.clientHeight >= listArtistSongsEl.scrollHeight - 50) {
+                  if (!this.isLoadingArtistSongs && !this.allArtistSongsLoaded) {
+                    this.artistSongsPage++;
+                    this.loadArtistSongs(this.activeArtistDetailName, true);
+                  }
+                }
+              });
+            }
+
+            // Artist Favorites Search & Sort (Null-safe)
+            let searchArtistFavsDebounce = null;
+            const rgSearchArtistFavs = document.getElementById('rg-search-artist-favs');
+            if (rgSearchArtistFavs) {
+              rgSearchArtistFavs.addEventListener('input', (e) => {
+                clearTimeout(searchArtistFavsDebounce);
+                searchArtistFavsDebounce = setTimeout(() => {
+                  this.loadArtistFavorites(this.activeArtistDetailId);
+                }, 300);
+              });
+            }
+            const rgSortArtistFavs = document.getElementById('rg-sort-artist-favs');
+            if (rgSortArtistFavs) {
+              rgSortArtistFavs.addEventListener('change', (e) => {
+                this.loadArtistFavorites(this.activeArtistDetailId);
+              });
+            }
+
+            const listArtistFavsEl = document.getElementById('rg-list-artist-favs');
+            if (listArtistFavsEl) {
+              listArtistFavsEl.addEventListener('scroll', () => {
+                if (listArtistFavsEl.scrollTop + listArtistFavsEl.clientHeight >= listArtistFavsEl.scrollHeight - 50) {
+                  if (!this.isLoadingArtistFavs && !this.allArtistFavsLoaded) {
+                    this.artistFavsPage++;
+                    this.loadArtistFavorites(this.activeArtistDetailId, true);
+                  }
+                }
+              });
+            }
+
+            const listLeaderboardEl = document.getElementById('rg-list-leaderboard');
+            if (listLeaderboardEl) {
+              listLeaderboardEl.addEventListener('scroll', () => {
+                if (listLeaderboardEl.scrollTop + listLeaderboardEl.clientHeight >= listLeaderboardEl.scrollHeight - 50) {
+                  if (!this.isLoadingLeaderboard && !this.allLeaderboardLoaded) {
+                    this.leaderboardPage++;
+                    this.loadLeaderboard(true);
+                  }
+                }
+              });
+            }
 
             const diffBtns = document.querySelectorAll('.rg-diff-btn');
             diffBtns.forEach(btn => {
@@ -36459,11 +36962,11 @@ SOFTWARE.</div>
             });
 
             document.getElementById('rg-sort-songs').addEventListener('change', (e) => {
-              this.sortSongs(e.target.value);
+              this.loadSongs();
             });
 
             document.getElementById('rg-sort-favs').addEventListener('change', (e) => {
-              this.sortFavorites(e.target.value);
+              this.loadFavorites();
             });
 
             document.getElementById('rg-btn-dialog-cancel').addEventListener('click', () => document.getElementById('rg-dialog-play').classList.add('rg-hidden'));
@@ -36527,159 +37030,235 @@ SOFTWARE.</div>
             touchLayer.addEventListener('touchstart', e => handleTouch(e, true), {passive: false});
             touchLayer.addEventListener('touchend', e => handleTouch(e, false), {passive: false});
 
+            const setupArtistTabs = () => {
+              const tabs = ['tracks', 'history', 'favs'];
+              tabs.forEach(tab => {
+                const btn = document.getElementById(`rg-art-tab-${tab}`);
+                if (btn) {
+                  btn.addEventListener('click', () => {
+                    tabs.forEach(t => {
+                      document.getElementById(`rg-art-tab-${t}`).classList.remove('active');
+                      document.getElementById(`rg-art-pane-${t}`).classList.replace('d-flex', 'd-none');
+                    });
+                    btn.classList.add('active');
+                    document.getElementById(`rg-art-pane-${tab}`).classList.replace('d-none', 'd-flex');
+                  });
+                }
+              });
+            };
+            setupArtistTabs();
+
             window.addEventListener('keydown', this.handleKeyDown);
             window.addEventListener('keyup', this.handleKeyUp);
             window.addEventListener('resize', this.handleResize);
           }
 
-          async loadSongs() {
+          async loadSongs(append = false) {
+            if (!append) {
+              this.songsPage = 1;
+              if (this.listSongsEl) {
+                this.listSongsEl.innerHTML = `
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>`;
+              }
+              this.allSongsLoaded = false;
+            }
+            if (this.allSongsLoaded) return;
+            this.isLoadingSongs = true;
+            
+            const sort = document.getElementById('rg-sort-songs').value;
+            const q = document.getElementById('rg-search-songs').value.trim();
+            
+            let url = `?action=get_songs&page=${this.songsPage}&sort=${sort}&rhythm_game=1`;
+            if (q) url += `&q=${encodeURIComponent(q)}`;
+            
             try {
-              const [res1, res2, res3, favRes, levelsRes] = await Promise.all([
-                fetchData('?action=get_songs&page=1&sort=random', {}, true),
-                fetchData('?action=get_songs&page=2&sort=random', {}, true),
-                fetchData('?action=get_songs&page=3&sort=random', {}, true),
-                fetchData('?action=get_rhythm_favorites', {}, true),
-                fetchData('?action=get_all_rhythm_levels', {}, true)
-              ]);
-              window.rhythmLevelsMap = levelsRes || { levels: {} };
-
-              const arr1 = Array.isArray(res1) ? res1 : [];
-              const arr2 = Array.isArray(res2) ? res2 : [];
-              const arr3 = Array.isArray(res3) ? res3 : [];
-              const favArr = Array.isArray(favRes) ? favRes.map(id => parseInt(id)) : [];
-              const favSet = new Set(favArr);
-              const uniqueSongs = new Map();
-
-              [...arr1, ...arr2, ...arr3].forEach(s => {
-                if (s && s.id && !uniqueSongs.has(s.id)) {
-                  s.rg_favorite = favSet.has(parseInt(s.id)) ? 1 : 0;
-                  uniqueSongs.set(s.id, s);
-                }
-              });
-
-              let favoriteSongsList = [];
-              if (favArr.length > 0) {
-                const favDetails = await fetchData('?action=get_queue_songs', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ ids: favArr })
-                }, true);
-                if (Array.isArray(favDetails)) {
-                  favoriteSongsList = favDetails.map((s, idx) => {
-                    s.rg_favorite = 1;
-                    s.originalFavIndex = idx;
-                    if (uniqueSongs.has(s.id)) {
-                      const existing = uniqueSongs.get(s.id);
-                      existing.rg_favorite = 1;
-                      existing.originalFavIndex = idx;
-                    } else {
-                      uniqueSongs.set(s.id, s);
-                    }
-                    return s;
-                  });
-                }
+              if (!window.rhythmLevelsMap) {
+                 const levelsRes = await fetchData('?action=get_all_rhythm_levels', {}, true);
+                 window.rhythmLevelsMap = levelsRes || { levels: {} };
               }
-
-              this.songs = Array.from(uniqueSongs.values());
-              this.filteredSongs = this.songs;
-              this.favFilteredSongs = favoriteSongsList;
+              // Sequential pacing (50ms) prevents shared-hosting concurrent socket blocks
+              await new Promise(r => setTimeout(r, 50));
+              const favData = await fetchData('?action=get_rhythm_favorites', {}, true) || [];
+              const favSet = new Set(Array.isArray(favData) ? favData.map(id => parseInt(id)) : []);
               
-              this.renderSongsList();
-              this.renderFavoritesList();
-              this.loadLeaderboard();
-
-              // Restore last viewed sub-tab or deep-linked artist from local storage cache
-              const savedTab = localStorage.getItem('rg_active_tab') || 'songs';
-              const savedArtist = localStorage.getItem('rg_active_artist');
+              await new Promise(r => setTimeout(r, 50));
+              const res = await fetchData(url, {}, true);
               
-              if (savedTab === 'artistDetail' && savedArtist) {
-                this.openArtistDetail(savedArtist);
+              if (!Array.isArray(res) || res.length === 0) {
+                if (!append && this.listSongsEl) this.listSongsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: #aaa;">No songs found.</div>';
+                this.allSongsLoaded = true;
               } else {
-                const activeNavItem = document.querySelector(`.rg-nav-item[data-target="${savedTab}"]`);
-                if (activeNavItem) {
-                  activeNavItem.click();
+                if (!append && this.listSongsEl) {
+                  this.listSongsEl.innerHTML = '';
+                  if (window.rhythmLevelsMap && window.rhythmLevelsMap.levels && Object.keys(window.rhythmLevelsMap.levels).length === 0 && !q) {
+                    const isAdmin = currentUser && (currentUser.is_admin == 1 || currentUser.email === 'musiclibrary@mail.com');
+                    this.listSongsEl.insertAdjacentHTML('beforeend', `
+                      <div style="background: rgba(255, 59, 48, 0.1); border: 1px solid var(--rg-primary); border-radius: 16px; padding: 20px; margin-bottom: 16px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+                        <i class="bi bi-exclamation-triangle-fill text-danger d-block mb-2" style="font-size: 2.5rem;"></i>
+                        <h6 class="text-white fw-bold text-uppercase mb-2" style="letter-spacing: 1px;">No Charts Generated</h6>
+                        <p class="text-secondary small mb-3">The database currently has no pre-compiled note charts. Songs will generate on-the-fly when clicked, which may cause a slight initial delay.</p>
+                        ${isAdmin ? `<button class="btn btn-danger rounded-pill fw-bold px-4 py-2 shadow-sm" onclick="document.getElementById('nav-chart-scan').click();"><i class="bi bi-open-chart-scan me-1"></i> Run Server Scanner Now</button>` : `<div class="badge bg-dark border border-secondary text-secondary p-2"><i class="bi bi-lock-fill me-1"></i> Contact Admin to Run Scanner</div>`}
+                      </div>
+                    `);
+                  }
                 }
+                res.forEach(song => {
+                  song.rg_favorite = favSet.has(parseInt(song.id)) ? 1 : 0;
+                  if (this.listSongsEl) this.listSongsEl.appendChild(this.createSongElement(song));
+                });
+                if (res.length < 25) this.allSongsLoaded = true;
               }
               
-              if (typeof currentView !== 'undefined' && currentView.artist_name) {
-                // Instantly open the deep-linked artist profile on page boot-up
-                this.openArtistDetail(currentView.artist_name);
-                delete currentView.artist_name;
-                if (currentView.artist_id) delete currentView.artist_id;
-              } else if (typeof currentView !== 'undefined' && currentView.param) {
-                const targetId = parseInt(currentView.param);
-                let targetSong = this.songs.find(s => parseInt(s.id) === targetId);
-                
-                if (!targetSong) {
+              if (!append) {
+                this.loadFavorites();
+                this.loadLeaderboard();
+                const savedTab = localStorage.getItem('rg_active_tab') || 'songs';
+                const savedArtist = localStorage.getItem('rg_active_artist');
+                if (savedTab === 'artistDetail' && savedArtist) {
+                  this.openArtistDetail(savedArtist);
+                } else {
+                  const activeNavItem = document.querySelector(`.rg-nav-item[data-target="${savedTab}"]`);
+                  if (activeNavItem) {
+                    document.querySelectorAll('.rg-nav-item').forEach(n => n.classList.remove('active'));
+                    activeNavItem.classList.add('active');
+                    Object.values(this.tabs).forEach(t => { if (t) t.classList.add('rg-hidden'); });
+                    if (this.tabs[savedTab]) this.tabs[savedTab].classList.remove('rg-hidden');
+                    
+                    if (savedTab === 'artists') {
+                      this.loadArtists();
+                    } else if (savedTab === 'favorites') {
+                      this.loadFavorites();
+                    }
+                  }
+                }
+                if (typeof currentView !== 'undefined' && currentView.artist_name) {
+                  this.openArtistDetail(currentView.artist_name);
+                  delete currentView.artist_name;
+                  if (currentView.artist_id) delete currentView.artist_id;
+                } else if (typeof currentView !== 'undefined' && currentView.param) {
+                  const targetId = parseInt(currentView.param);
                   try {
                     const fetchedData = await fetchData(`?action=get_song_data&id=${targetId}`, {}, true);
                     if (fetchedData && fetchedData.id) {
-                      targetSong = fetchedData;
-                      targetSong.rg_favorite = favSet.has(targetId) ? 1 : 0;
-                      this.songs.unshift(targetSong);
-                      this.filteredSongs = this.songs;
-                      this.renderSongsList();
+                      fetchedData.rg_favorite = favSet.has(targetId) ? 1 : 0;
+                      this.openPlayDialog(fetchedData);
+                      currentView.param = '';
                     }
-                  } catch (e) {
-                    console.warn("Failed to fetch deep-linked song", e);
-                  }
-                }
-                
-                if (targetSong) {
-                  this.openPlayDialog(targetSong);
-                  currentView.param = '';
+                  } catch (e) {}
                 }
               }
-            } catch (err) {
-              console.error("Game Engine Failed to Load Tracks:", err);
-              if (this.listSongsEl) {
+            } catch (e) {
+              console.error("Game Engine Failed to Load Tracks:", e);
+              if (!append && this.listSongsEl) {
                 this.listSongsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: var(--rg-error, #ffb4ab);">Error establishing database connection.</div>';
               }
             }
+            this.isLoadingSongs = false;
           }
 
-          async loadLeaderboard() {
+          async loadFavorites(append = false) {
+            if (!append) {
+              this.favsPage = 1;
+              if (this.listFavsEl) {
+                this.listFavsEl.innerHTML = `
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>`;
+              }
+              this.allFavsLoaded = false;
+            }
+            if (this.allFavsLoaded) return;
+            this.isLoadingFavs = true;
+
+            const sort = document.getElementById('rg-sort-favs').value;
+            const q = document.getElementById('rg-search-favs').value.trim();
+
+            let url = `?action=get_rhythm_favorite_songs&page=${this.favsPage}&sort=${sort}`;
+            if (q) url += `&q=${encodeURIComponent(q)}`;
+
             try {
-              const data = await fetchData('?action=get_rhythm_leaderboard', {}, true);
+              const res = await fetchData(url, {}, true);
+              if (!Array.isArray(res) || res.length === 0) {
+                if (!append && this.listFavsEl) this.listFavsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite songs yet. Add some!</div>';
+                this.allFavsLoaded = true;
+              } else {
+                if (!append && this.listFavsEl) this.listFavsEl.innerHTML = '';
+                res.forEach(song => {
+                  song.rg_favorite = 1;
+                  if (this.listFavsEl) this.listFavsEl.appendChild(this.createSongElement(song));
+                });
+                if (res.length < 25) this.allFavsLoaded = true;
+              }
+            } catch (e) { console.error(e); }
+            this.isLoadingFavs = false;
+          }
+
+          async loadLeaderboard(append = false) {
+            if (!append) {
+              this.leaderboardPage = 1;
+              const container = document.getElementById('rg-list-leaderboard');
+              if (container) {
+                container.innerHTML = `
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>`;
+              }
+              this.allLeaderboardLoaded = false;
+            }
+            if (this.allLeaderboardLoaded) return;
+            this.isLoadingLeaderboard = true;
+
+            try {
+              const data = await fetchData(`?action=get_rhythm_leaderboard&page=${this.leaderboardPage}`, {}, true);
               const container = document.getElementById('rg-list-leaderboard');
               
               if (!Array.isArray(data) || data.length === 0) {
-                container.innerHTML = '<div style="text-align:center; padding:24px; color:#aaa;">No scores recorded yet. Be the first to play!</div>';
-                return;
-              }
-              
-              container.innerHTML = data.map((entry, idx) => {
-                const jud = this.getRankFromStats(entry.total_perfect || 0, entry.total_great || 0, entry.total_good || 0, entry.total_bad || 0, entry.total_miss || 0);
-                const cacheBuster = Math.floor(Date.now() / 60000);
-                return `
-                  <div class="rg-list-item rank-row" data-userid="${entry.user_id}" data-player-name="${encodeURIComponent(entry.player_name)}" style="cursor: pointer; display: flex; align-items: center; justify-content: space-between;">
-                    <div class="rg-list-item-info" style="min-width: 0; flex: 1;">
-                      <div style="width: 24px; font-weight: 900; color: var(--rg-primary); text-align: center;">${idx + 1}</div>
-                      <img src="?action=get_profile_picture&id=${entry.user_id}&v=${cacheBuster}" class="rg-cover-img" style="border-radius: 50%;">
-                      <div style="min-width: 0; flex: 1; margin-right: 12px;">
-                        <div class="rg-list-item-title text-truncate">${escapeHTML(entry.player_name)}</div>
-                        <div class="rg-list-item-sub text-truncate" style="color: var(--rg-primary); font-size: 0.8rem; font-weight: 700;">
-                          Total Score: ${parseInt(entry.total_score).toLocaleString()} 
-                          <span style="color:#aaa; font-size:0.75rem; margin-left:8px;">(${entry.total_plays} Plays)</span>
+                if (!append && container) container.innerHTML = '<div style="text-align:center; padding:24px; color:#aaa;">No scores recorded yet. Be the first to play!</div>';
+                this.allLeaderboardLoaded = true;
+              } else {
+                if (!append && container) container.innerHTML = '';
+                const html = data.map((entry, idx) => {
+                  const globalIdx = (this.leaderboardPage - 1) * 25 + idx + 1;
+                  const jud = this.getRankFromStats(entry.total_perfect || 0, entry.total_great || 0, entry.total_good || 0, entry.total_bad || 0, entry.total_miss || 0);
+                  const cacheBuster = Math.floor(Date.now() / 60000);
+                  return `
+                    <div class="rg-list-item rank-row" data-userid="${entry.user_id}" data-player-name="${encodeURIComponent(entry.player_name)}" style="cursor: pointer; display: flex; align-items: center; justify-content: space-between;">
+                      <div class="rg-list-item-info" style="min-width: 0; flex: 1;">
+                        <div style="width: 24px; font-weight: 900; color: var(--rg-primary); text-align: center;">${globalIdx}</div>
+                        <img src="?action=get_profile_picture&id=${entry.user_id}&v=${cacheBuster}" class="rg-cover-img" style="border-radius: 50%;">
+                        <div style="min-width: 0; flex: 1; margin-right: 12px;">
+                          <div class="rg-list-item-title text-truncate">${escapeHTML(entry.player_name)}</div>
+                          <div class="rg-list-item-sub text-truncate" style="color: var(--rg-primary); font-size: 0.8rem; font-weight: 700;">
+                            Total Score: ${parseInt(entry.total_score).toLocaleString()} 
+                            <span style="color:#aaa; font-size:0.75rem; margin-left:8px;">(${entry.total_plays} Plays)</span>
+                          </div>
                         </div>
                       </div>
+                      <div class="d-flex align-items-center gap-2" style="flex-shrink: 0;">
+                        <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.75rem; font-weight: 900; background-color: ${jud.color}; color: #000; height: 26px; min-width: 32px; border-radius: 6px; box-shadow: 0 2px 8px ${jud.color}40;" title="AVERAGE RANK">${jud.rank}</span>
+                      </div>
                     </div>
-                    <div class="d-flex align-items-center gap-2" style="flex-shrink: 0;">
-                      <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.75rem; font-weight: 900; background-color: ${jud.color}; color: #000; height: 26px; min-width: 32px; border-radius: 6px; box-shadow: 0 2px 8px ${jud.color}40;" title="AVERAGE RANK">${jud.rank}</span>
-                    </div>
-                  </div>
-                `;
-              }).join('');
-
-              const rows = container.querySelectorAll('.rank-row');
-              rows.forEach(row => {
-                row.addEventListener('click', () => {
-                  this.openPlayerStats(row.dataset.userid, decodeURIComponent(row.dataset.playerName));
-                });
-              });
+                  `;
+                }).join('');
+                
+                if (container) {
+                  container.insertAdjacentHTML('beforeend', html);
+                  const rows = container.querySelectorAll('.rank-row:not(.bound)');
+                  rows.forEach(row => {
+                    row.classList.add('bound');
+                    row.addEventListener('click', () => {
+                      this.openPlayerStats(row.dataset.userid, decodeURIComponent(row.dataset.playerName), 1);
+                    });
+                  });
+                }
+                if (data.length < 25) this.allLeaderboardLoaded = true;
+              }
             } catch (err) {
               console.error("Failed to load Leaderboard:", err);
             }
+            this.isLoadingLeaderboard = false;
           }
 
           async openPlayDialog(song) {
@@ -36868,41 +37447,28 @@ SOFTWARE.</div>
             });
           }
 
-          sortSongs(method) {
-            this.currentSortMethod = method;
-            const sortFn = (a, b) => {
-              if (method === 'title_asc') return (a.title || '').localeCompare(b.title || '');
-              if (method === 'artist_asc') return (a.artist || '').localeCompare(b.artist || '');
-              if (method === 'id_desc') return parseInt(b.id) - parseInt(a.id);
-              if (method === 'trending') return parseInt(b.play_count || 0) - parseInt(a.play_count || 0);
-              if (method === 'random') return 0.5 - Math.random();
-              return 0;
-            };
-            if (this.songs) this.songs.sort(sortFn);
-            if (this.filteredSongs && this.filteredSongs !== this.songs) this.filteredSongs.sort(sortFn);
-            this.renderLimit = 25;
-            this.renderSongsList();
-          }
-
-          sortFavorites(method) {
-            this.currentFavSortMethod = method;
-            const sortFn = (a, b) => {
-              if (method === 'manual_order') return (b.originalFavIndex ?? -1) - (a.originalFavIndex ?? -1);
-              if (method === 'title_asc') return (a.title || '').localeCompare(b.title || '');
-              if (method === 'artist_asc') return (a.artist || '').localeCompare(b.artist || '');
-              if (method === 'id_desc') return parseInt(b.id) - parseInt(a.id);
-              if (method === 'trending') return parseInt(b.play_count || 0) - parseInt(a.play_count || 0);
-              if (method === 'random') return 0.5 - Math.random();
-              return 0;
-            };
-            if (this.favFilteredSongs) this.favFilteredSongs.sort(sortFn);
-            this.favRenderLimit = 25;
-            this.renderFavoritesList();
-          }
+          sortSongs(method) {}
+          renderSongsList() {}
+          sortFavorites(method) {}
+          renderFavoritesList() {}
 
           switchScreen(name) {
             Object.values(this.screens).forEach(s => s.classList.add('rg-hidden'));
             if (this.screens[name]) this.screens[name].classList.remove('rg-hidden');
+            
+            if (name === 'game' || name === 'loading') {
+              document.body.classList.add('rg-session-active');
+            } else {
+              document.body.classList.remove('rg-session-active');
+              if (name === 'hub') {
+                if (this.audioPlayback) {
+                  this.audioPlayback.pause();
+                  this.audioPlayback.src = "";
+                }
+                if (this.startGameTimeout) clearTimeout(this.startGameTimeout);
+                this.isPlaying = false;
+              }
+            }
           }
 
           toggleCalibrationTest() {
@@ -37169,19 +37735,16 @@ SOFTWARE.</div>
                 favBtn.classList.toggle('text-secondary', song.rg_favorite != 1);
                 favBtn.innerHTML = `<i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i>`;
                 
-                if (song.rg_favorite == 1) {
-                  if (!this.favFilteredSongs.some(s => s.id === song.id)) {
-                    song.originalFavIndex = this.favFilteredSongs.length;
-                    this.favFilteredSongs.push(song);
+                // If unfavorited and currently viewing the Favorites tab, fade out and remove card immediately
+                if (song.rg_favorite != 1) {
+                  const activeTab = localStorage.getItem('rg_active_tab') || 'songs';
+                  if (activeTab === 'favorites') {
+                    el.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
+                    el.style.opacity = '0';
+                    el.style.transform = 'scale(0.95)';
+                    setTimeout(() => el.remove(), 200);
                   }
-                } else {
-                  this.favFilteredSongs = this.favFilteredSongs.filter(s => s.id !== song.id);
                 }
-                
-                const mainSong = this.songs.find(s => s.id === song.id);
-                if (mainSong) mainSong.rg_favorite = song.rg_favorite;
-
-                this.sortFavorites(this.currentFavSortMethod);
               }
             });
             
@@ -37267,6 +37830,7 @@ SOFTWARE.</div>
           }
 
           async prepGame(song, diff) {
+            if (this.startGameTimeout) clearTimeout(this.startGameTimeout);
             this.switchScreen('loading');
             document.getElementById('rg-loading-cover').src = `?action=get_image&id=${song.id}&v=${song.last_modified}`;
             document.getElementById('rg-loading-title').textContent = song.title;
@@ -37307,9 +37871,8 @@ SOFTWARE.</div>
                 if (!window.rhythmLevelsMap) window.rhythmLevelsMap = { levels: {} };
                 if (!window.rhythmLevelsMap.levels[song.id]) window.rhythmLevelsMap.levels[song.id] = {};
                 window.rhythmLevelsMap.levels[song.id][diff] = dbChart.level;
-                this.renderSongsList();
               } else {
-                throw new Error("Failed to load chart.");
+                throw new Error("Note chart generation failed on the server.");
               }
               
               if (this.audioPlayback) {
@@ -37323,7 +37886,7 @@ SOFTWARE.</div>
               this.startGame(song.title, diff);
             } catch (err) {
               console.error("Game prep failed:", err);
-              showToast("Failed to process audio engine. The track format may be unsupported.", "error");
+              showToast(err.message || "Failed to process audio engine. The track format may be unsupported.", "error");
               this.switchScreen('hub');
             }
           }
@@ -37452,7 +38015,8 @@ SOFTWARE.</div>
             
             if (this.audioPlayback) this.audioPlayback.currentTime = 0;
             
-            setTimeout(() => {
+            if (this.startGameTimeout) clearTimeout(this.startGameTimeout);
+            this.startGameTimeout = setTimeout(() => {
               if (this.audioPlayback) this.audioPlayback.play().catch(e => console.warn(e));
               this.isPlaying = true;
               requestAnimationFrame(this.gameLoop.bind(this));
@@ -37816,36 +38380,62 @@ SOFTWARE.</div>
             }
           }
 
-          loadArtists() {
-            const artistMap = new Map();
-            this.songs.forEach(song => {
-              if (!song.artist) return;
-              const parts = song.artist.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i);
-              parts.forEach(p => {
-                const name = p.trim();
-                if (name === '') return;
-                const key = name.toLowerCase();
-                if (!artistMap.has(key)) {
-                  artistMap.set(key, { name, id: song.id, count: 1 });
-                } else {
-                  artistMap.get(key).count++;
-                }
-              });
-            });
-            this.artists = Array.from(artistMap.values());
-            this.filteredArtists = [...this.artists];
-            this.sortArtists(document.getElementById('rg-sort-artists').value);
+          async loadArtists(append = false) {
+            if (!append) {
+              this.artistsPage = 1;
+              const container = document.getElementById('rg-list-artists');
+              if (container) {
+                container.innerHTML = `
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>`;
+              }
+              this.allArtistsLoaded = false;
+            }
+            if (this.allArtistsLoaded) return;
+            this.isLoadingArtists = true;
+
+            const sort = document.getElementById('rg-sort-artists').value;
+            const q = document.getElementById('rg-search-artists').value.trim();
+
+            let url = `?action=get_rhythm_artists&page=${this.artistsPage}&sort=${sort}`;
+            if (q) url += `&q=${encodeURIComponent(q)}`;
+
+            try {
+              const res = await fetchData(url, {}, true);
+              const container = document.getElementById('rg-list-artists');
+              
+              if (!Array.isArray(res) || res.length === 0) {
+                if (!append && container) container.innerHTML = '<div style="text-align:center; padding: 24px; color: #888;">No artists found.</div>';
+                this.allArtistsLoaded = true;
+              } else {
+                if (!append && container) container.innerHTML = '';
+                res.forEach(entry => {
+                  const artist = {
+                    name: entry.name,
+                    id: entry.id || 0,
+                    count: parseInt(entry.count || 0),
+                    score: parseInt(entry.score || 0),
+                    plays: parseInt(entry.plays || 0),
+                    followers: parseInt(entry.followers || 0),
+                    user_id: entry.user_id,
+                    rankInfo: null
+                  };
+                  
+                  const total = parseInt(entry.perfect) + parseInt(entry.great) + parseInt(entry.good) + parseInt(entry.bad) + parseInt(entry.miss);
+                  artist.rankInfo = total > 0 ? this.getRankFromStats(entry.perfect, entry.great, entry.good, entry.bad, entry.miss) : { rank: 'F', color: '#555' };
+                  
+                  if (container) container.appendChild(this.createArtistElement(artist));
+                });
+                if (res.length < 25) this.allArtistsLoaded = true;
+              }
+            } catch (e) { console.error(e); }
+            this.isLoadingArtists = false;
           }
 
           sortArtists(method) {
-            if (method === 'name_asc') {
-              this.filteredArtists.sort((a, b) => a.name.localeCompare(b.name));
-            } else if (method === 'name_desc') {
-              this.filteredArtists.sort((a, b) => b.name.localeCompare(a.name));
-            } else if (method === 'count_desc') {
-              this.filteredArtists.sort((a, b) => b.count - a.count);
-            }
-            this.renderArtistsList();
+            this.artistRenderLimit = 25;
+            this.loadArtists();
           }
 
           renderArtistsList() {
@@ -37855,34 +38445,149 @@ SOFTWARE.</div>
               container.innerHTML = '<div style="text-align:center; padding: 24px; color: #888;">No artists found.</div>';
               return;
             }
-            this.filteredArtists.forEach(artist => {
+            const chunk = this.filteredArtists.slice(0, this.artistRenderLimit);
+            chunk.forEach(artist => {
               container.appendChild(this.createArtistElement(artist));
             });
           }
 
           createArtistElement(artist) {
             const el = document.createElement('div');
-            el.className = 'rg-list-item';
-            el.style.cssText = "background: linear-gradient(90deg, rgba(25, 25, 25, 0.95) 0%, rgba(10, 10, 10, 0.98) 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s; margin-bottom: 12px; min-height: 80px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);";
+            el.className = 'rg-list-item position-relative overflow-hidden';
+            el.setAttribute('data-artist-name', encodeURIComponent(artist.name));
+            el.style.cssText = "background: linear-gradient(90deg, rgba(30, 30, 30, 0.9) 0%, rgba(15, 15, 15, 0.95) 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 16px 14px; display: flex; align-items: center; gap: 14px; cursor: pointer; position: relative; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s; margin-bottom: 0.25em; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); min-height: 10em;";
             
-            el.onmouseover = () => { el.style.transform = "scale(1.02) translateY(-2px)"; el.style.borderColor = "var(--rg-primary)"; };
-            el.onmouseout = () => { el.style.transform = "none"; el.style.borderColor = "rgba(255, 255, 255, 0.08)"; };
+            el.onmouseover = () => { el.style.transform = "scale(1.02) translateY(-2px)"; el.style.borderColor = "var(--rg-primary)"; el.style.boxShadow = "0 10px 25px rgba(255,59,48,0.2)"; };
+            el.onmouseout = () => { el.style.transform = "none"; el.style.borderColor = "rgba(255, 255, 255, 0.08)"; el.style.boxShadow = "0 6px 16px rgba(0, 0, 0, 0.4)"; };
             
+            // Build Rank badge component (defaults to F rank color #555 if they haven't played yet)
+            const rank = artist.rankInfo ? artist.rankInfo : { rank: 'F', color: '#555' };
+            const rankBadgeHTML = `<span class="badge d-flex align-items-center justify-content-center" style="font-family: 'Arial Black', sans-serif; font-size: 0.75rem; font-weight: 900; background-color: ${rank.color}; color: #000; height: 24px; width: 30px; border-radius: 4px; box-shadow: 0 2px 8px ${rank.color}40;" title="AVERAGE RANK">${rank.rank}</span>`;
+
+            // Default to latest song cover art, fallback to browser-generated SVG letter avatar if no songs exist
+            const imgUrl = (artist.id && artist.id > 0) ? `?action=get_image&id=${artist.id}&size=small` : getSvgPlaceholder(artist.name);
+
             el.innerHTML = `
-              <div class="d-flex align-items-center gap-3">
-                <img src="?action=get_image&id=${artist.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-sm" style="width: 50px; height: 50px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
-                <div>
-                  <div class="text-white fw-bold" style="font-size: 1.1rem;">${escapeHTML(artist.name)}</div>
-                  <div class="text-secondary small mt-1 fw-bold" style="font-size: 0.8rem;"><i class="bi bi-music-note-beamed text-danger"></i> ${artist.count} Tracks</div>
+              <div class="d-flex align-items-center gap-3 w-100" style="min-width: 0;">
+                <div class="position-relative" style="width: 80px; height: 80px; flex-shrink: 0; border-radius: 50%; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.6); border: 2px solid rgba(255,255,255,0.1);">
+                  <img src="${imgUrl}" onerror="this.onerror=null; this.src='${getSvgPlaceholder(artist.name)}';" style="width: 100%; height: 100%; object-fit: cover;">
+                  <div class="position-absolute bottom-0 start-0 w-100 h-50" style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);"></div>
+                </div>
+                
+                <div class="d-flex flex-column justify-content-center text-start text-col-info" style="min-width: 0; flex-grow: 1; gap: 2px;">
+                  <!-- Row 1: Artist Name -->
+                  <div class="text-white fw-bolder text-truncate mb-1" style="font-size: 1.15rem; letter-spacing: -0.2px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${escapeHTML(artist.name)}</div>
+                  
+                  <!-- Row 2: Rank Badge -->
+                  <div class="mb-1" style="min-height: 24px; line-height: 1;">
+                    ${rankBadgeHTML}
+                  </div>
+                  
+                  <!-- Row 3: Score -->
+                  <div class="text-secondary small fw-bold score-val mb-1" style="font-size: 0.75rem; font-family: monospace;">Score: <b class="text-white">${(artist.score || 0).toLocaleString()}</b></div>
+                  
+                  <!-- Row 4: Plays -->
+                  <div class="text-secondary small fw-bold plays-val mb-1" style="font-size: 0.75rem; font-family: monospace;">Plays: <b class="text-white">${artist.plays || 0}</b></div>
+                  
+                  <!-- Row 5: Tracks -->
+                  <div class="text-secondary fw-bold text-truncate rg-tracks-count" style="font-size: 0.85rem; color: #a1a1aa !important;"><i class="bi bi-music-note-beamed text-danger me-1"></i> ${artist.count} Tracks ${artist.followers > 0 ? `• <i class="bi bi-people-fill text-info ms-1 me-1"></i> ${formatSongCount(artist.followers)}` : ''}</div>
+                </div>
+                
+                <div class="d-flex align-items-center justify-content-center ms-2 right-actions-col" style="flex-shrink: 0; align-self: stretch; min-height: 84px;">
+                  <button class="btn p-0 border-0 rounded-circle d-flex align-items-center justify-content-center" style="width: 42px; height: 42px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); transition: background-color 0.2s, transform 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,59,48,0.2)'; this.style.transform='scale(1.1)';" onmouseout="this.style.backgroundColor='rgba(255,255,255,0.05)'; this.style.transform='none';">
+                    <i class="bi bi-chevron-right text-white fs-5" style="margin-left: 2px;"></i>
+                  </button>
                 </div>
               </div>
-              <i class="bi bi-chevron-right text-secondary fs-5 pe-1"></i>
             `;
             
             el.addEventListener('click', () => {
               this.openArtistDetail(artist.name);
             });
             return el;
+          }
+
+          async loadArtistSongs(artistName, append = false) {
+            if (!append) {
+              this.artistSongsPage = 1;
+              const container = document.getElementById('rg-list-artist-songs');
+              if (container) {
+                container.innerHTML = `
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>`;
+              }
+              this.allArtistSongsLoaded = false;
+            }
+            if (this.allArtistSongsLoaded) return;
+            this.isLoadingArtistSongs = true;
+
+            const sort = document.getElementById('rg-sort-artist-songs').value;
+            const q = document.getElementById('rg-search-artist-songs').value.trim();
+
+            let url = `?action=get_songs&artist=${encodeURIComponent(artistName)}&page=${this.artistSongsPage}&sort=${sort}&rhythm_game=1`;
+            if (q) url += `&q=${encodeURIComponent(q)}`;
+
+            try {
+              const res = await fetchData(url, {}, true);
+
+              const favData = await fetchData('?action=get_rhythm_favorites', {}, true) || [];
+              const favSet = new Set(Array.isArray(favData) ? favData.map(id => parseInt(id)) : []);
+              const container = document.getElementById('rg-list-artist-songs');
+
+              if (!Array.isArray(res) || res.length === 0) {
+                if (!append && container) container.innerHTML = '<div style="text-align:center; padding: 24px; color: #888;">No tracks found.</div>';
+                this.allArtistSongsLoaded = true;
+              } else {
+                if (!append && container) container.innerHTML = '';
+                res.forEach(song => {
+                  song.rg_favorite = favSet.has(parseInt(song.id)) ? 1 : 0;
+                  if (container) container.appendChild(this.createSongElement(song));
+                });
+                if (res.length < 25) this.allArtistSongsLoaded = true;
+              }
+            } catch (e) { console.error(e); }
+            this.isLoadingArtistSongs = false;
+          }
+
+          async loadArtistFavorites(artistUserId, append = false) {
+            if (!append) {
+              this.artistFavsPage = 1;
+              const container = document.getElementById('rg-list-artist-favs');
+              if (container) {
+                container.innerHTML = `
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>`;
+              }
+              this.allArtistFavsLoaded = false;
+            }
+            if (this.allArtistFavsLoaded) return;
+            this.isLoadingArtistFavs = true;
+
+            const sort = document.getElementById('rg-sort-artist-favs').value;
+            const q = document.getElementById('rg-search-artist-favs').value.trim();
+
+            let url = `?action=get_rhythm_favorite_songs&target_user_id=${artistUserId}&page=${this.artistFavsPage}&sort=${sort}`;
+            if (q) url += `&q=${encodeURIComponent(q)}`;
+
+            try {
+              const res = await fetchData(url, {}, true);
+              const container = document.getElementById('rg-list-artist-favs');
+
+              if (!Array.isArray(res) || res.length === 0) {
+                if (!append && container) container.innerHTML = '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite tracks found.</div>';
+                this.allArtistFavsLoaded = true;
+              } else {
+                if (!append && container) container.innerHTML = '';
+                res.forEach(song => {
+                  song.rg_favorite = 1;
+                  if (container) container.appendChild(this.createSongElement(song));
+                });
+                if (res.length < 25) this.allArtistFavsLoaded = true;
+              }
+            } catch (e) { console.error(e); }
+            this.isLoadingArtistFavs = false;
           }
 
           async openArtistDetail(artistName) {
@@ -37892,25 +38597,20 @@ SOFTWARE.</div>
             localStorage.setItem('rg_active_artist', artistName);
             localStorage.setItem('rg_active_tab', 'artistDetail');
 
-            // 1. Client-side exact filtering for all tracks by/featuring this artist
-            this.artistDetailSongs = this.songs.filter(song => {
-              if (!song.artist) return false;
-              const parts = song.artist.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).map(p => p.trim().toLowerCase());
-              return parts.includes(artistName.toLowerCase());
-            });
-            this.artistDetailFilteredSongs = [...this.artistDetailSongs];
-
             // 2. Determine if the artist is a registered user to fetch overall stats
-            const sampleSong = this.artistDetailSongs[0] || { id: 0 };
+            let sampleSong = { id: 0 };
+            
+            const uStmt = await fetchData(`?action=get_view_data&type=artist&name=${encodeURIComponent(artistName)}`, {}, true);
             let artistUserId = null;
             let isUser = false;
             
-            // Look up artist user ID in our registered users database
-            if (window.rhythmLevelsMap) {
-              const uStmt = await fetchData(`?action=get_view_data&type=artist&name=${encodeURIComponent(artistName)}`, {}, true);
-              if (uStmt && uStmt.details && uStmt.details.is_user) {
+            if (uStmt && uStmt.details) {
+              if (uStmt.details.is_user) {
                 artistUserId = uStmt.details.user_id;
                 isUser = true;
+              }
+              if (uStmt.songs && uStmt.songs.length > 0) {
+                sampleSong = uStmt.songs[0];
               }
             }
 
@@ -37921,7 +38621,7 @@ SOFTWARE.</div>
 
             const activePlayerId = (typeof currentUser !== 'undefined' && currentUser) ? currentUser.id : null;
 
-            if (isUser && artistUserId && activePlayerId) {
+            if (isUser && artistUserId) {
               // Fetch the artist's personal overall play history of ALL songs they played
               artistScores = await fetchData(`?action=get_user_rhythm_scores&target_user_id=${artistUserId}&page=1`, {}, true) || [];
               
@@ -37982,8 +38682,10 @@ SOFTWARE.</div>
 
             // Render History list for this artist's personal plays
             const histContainer = document.getElementById('rg-list-artist-history');
-            if (!isUser || artistScores.length === 0) {
+            if (!isUser) {
               histContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-person-x-fill d-block fs-1 mb-2"></i>Only registered artist user accounts have an active play history.</div>`;
+            } else if (artistScores.length === 0) {
+              histContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-controller d-block fs-1 mb-2"></i>This user hasn't played any tracks yet.</div>`;
             } else {
               const diffColors = { easy: '#22d3ee', medium: '#34d399', hard: '#fb923c', expert: '#f43f5e', master: '#a78bfa', demon: '#7f1d1d' };
               const diffLabels = { easy: 'EZ', medium: 'ND', hard: 'HD', expert: 'EX', master: 'MS', demon: 'DM' };
@@ -38027,6 +38729,20 @@ SOFTWARE.</div>
               }).join('');
             }
 
+            this.activeArtistDetailId = artistUserId;
+
+            // Render Favorites list for this artist
+            if (isUser && artistUserId) {
+              const favsSearchInput = document.getElementById('rg-search-artist-favs');
+              if (favsSearchInput) favsSearchInput.value = '';
+              this.loadArtistFavorites(artistUserId);
+            } else {
+              const favsContainer = document.getElementById('rg-list-artist-favs');
+              if (favsContainer) {
+                favsContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-heart-break-fill d-block fs-1 mb-2"></i>Only registered users can have favorites.</div>`;
+              }
+            }
+
             document.getElementById('rg-search-artist-songs').value = '';
             
             // Hide ALL active tabs first to prevent vertical overlapping conflicts
@@ -38039,41 +38755,26 @@ SOFTWARE.</div>
               this.tabs.artistDetail.classList.remove('rg-hidden');
             }
             
-            // Sync bottom navigation highlight to "Artists"
+            // Sync bottom navigation highlight conditionally (Profile vs Artists)
+            const isMyOwnProfile = typeof currentUser !== 'undefined' && currentUser && artistName.toLowerCase() === currentUser.artist.toLowerCase();
             document.querySelectorAll('.rg-nav-item').forEach(n => {
-              n.classList.toggle('active', n.getAttribute('data-target') === 'artists');
+              if (isMyOwnProfile) {
+                n.classList.toggle('active', n.id === 'rg-nav-my-profile');
+              } else {
+                n.classList.toggle('active', n.getAttribute('data-target') === 'artists');
+              }
             });
             
-            // Default to Tracks sub-tab
-            const artTabTracks = document.getElementById('rg-art-tab-tracks');
-            if (artTabTracks) artTabTracks.click();
-            
-            this.sortArtistSongs(document.getElementById('rg-sort-artist-songs').value);
-          }
-
-          sortArtistSongs(method) {
-            const sortFn = (a, b) => {
-              if (method === 'title_asc') return (a.title || '').localeCompare(b.title || '');
-              if (method === 'album_asc') return (a.album || '').localeCompare(b.album || '');
-              if (method === 'id_desc') return parseInt(b.id) - parseInt(a.id);
-              if (method === 'trending') return parseInt(b.play_count || 0) - parseInt(a.play_count || 0);
-              if (method === 'random') return 0.5 - Math.random();
-              return 0;
-            };
-            this.artistDetailFilteredSongs.sort(sortFn);
-            this.renderArtistSongsList();
-          }
-
-          renderArtistSongsList() {
-            const container = document.getElementById('rg-list-artist-songs');
-            container.innerHTML = '';
-            if (this.artistDetailFilteredSongs.length === 0) {
-              container.innerHTML = '<div style="text-align:center; padding: 24px; color: #888;">No tracks found.</div>';
-              return;
+            // Default to correct sub-tab based on device size
+            if (window.innerWidth >= 992) {
+              const artTabHistory = document.getElementById('rg-art-tab-history');
+              if (artTabHistory) artTabHistory.click();
+            } else {
+              const artTabTracks = document.getElementById('rg-art-tab-tracks');
+              if (artTabTracks) artTabTracks.click();
             }
-            this.artistDetailFilteredSongs.forEach(song => {
-              container.appendChild(this.createSongElement(song));
-            });
+            
+            this.loadArtistSongs(artistName);
           }
 
           openArtistChoiceDialog(artistsList) {
@@ -38273,6 +38974,7 @@ SOFTWARE.</div>
                 }
                 this.panel.classList.add('open');
                 this.propBtn.classList.add('active');
+                setTimeout(() => this.resizeCanvas(), 50); // FIX: Recalculate canvas after panel expands
               }
             });
             
@@ -38417,11 +39119,12 @@ SOFTWARE.</div>
 
           resizeCanvas() {
             if (!this.workspace) return;
-            const maxWidth = this.workspace.clientWidth - 40;
-            const maxHeight = this.workspace.clientHeight - 40;
+            // FIX: Prevent negative or 0 dimension calculations causing CSS collapse
+            const maxWidth = Math.max(10, this.workspace.clientWidth - 40);
+            const maxHeight = Math.max(10, this.workspace.clientHeight - 40);
             const ratio = Math.min(maxWidth / this.canvasW, maxHeight / this.canvasH);
-            const finalW = this.canvasW * ratio;
-            const finalH = this.canvasH * ratio;
+            const finalW = Math.max(10, this.canvasW * ratio);
+            const finalH = Math.max(10, this.canvasH * ratio);
             
             this.canvas.width = this.canvasW;
             this.canvas.height = this.canvasH;
@@ -38687,8 +39390,16 @@ SOFTWARE.</div>
                   const layer = this.createLayer('image');
                   layer.img = img;
                   const ratio = img.height / img.width;
-                  layer.w = 300;
-                  layer.h = 300 * ratio;
+                  
+                  // Scale nicely within the current custom canvas bounds
+                  if (this.canvasW / this.canvasH > 1) { 
+                    layer.h = this.canvasH * 0.6;
+                    layer.w = layer.h / ratio;
+                  } else {
+                    layer.w = this.canvasW * 0.6;
+                    layer.h = layer.w * ratio;
+                  }
+                  
                   layer.x = (this.canvasW - layer.w) / 2;
                   layer.y = (this.canvasH - layer.h) / 2;
                   this.layers.push(layer);
@@ -38707,9 +39418,9 @@ SOFTWARE.</div>
           addText() {
             const layer = this.createLayer('text');
             layer.text = 'Double Tap to Edit';
-            layer.fontSize = 64;
+            layer.fontSize = Math.max(24, this.canvasH * 0.08); // Responsive font scale
             layer.color = '#FFFFFF';
-            layer.w = 400; // Fixed bounding box width for text wrapping
+            layer.w = this.canvasW * 0.6; 
             layer.h = layer.fontSize * 1.2;
             layer.x = (this.canvasW - layer.w) / 2;
             layer.y = (this.canvasH - layer.h) / 2;
@@ -38725,6 +39436,10 @@ SOFTWARE.</div>
             layer.shapeType = 'rect';
             layer.color = '#FF0000';
             layer.cornerRadius = 16;
+            layer.w = Math.min(this.canvasW, this.canvasH) * 0.3; // Responsive shape scale
+            layer.h = layer.w;
+            layer.x = (this.canvasW - layer.w) / 2;
+            layer.y = (this.canvasH - layer.h) / 2;
             this.layers.push(layer);
             this.activeLayer = layer;
             if (this.panel.classList.contains('open')) this.buildProperties();
@@ -38753,7 +39468,28 @@ SOFTWARE.</div>
                 </div>
               </div>
               <hr style="border-color: var(--pe-sys-color-outline); margin: 24px 0;">
-              <div class="pe-grid-2 mt-4">
+              <div class="pe-control-group" style="margin-bottom: 16px;">
+                <label>Canvas Presets</label>
+                <select id="pe-inp-ratio" style="margin-top: 8px;">
+                  <option value="custom">Custom / Free Form</option>
+                  <optgroup label="Lock Aspect Ratio">
+                    <option value="ratio_1">1:1 (Square)</option>
+                    <option value="ratio_1.7777">16:9 (Landscape)</option>
+                    <option value="ratio_0.5625">9:16 (Portrait)</option>
+                    <option value="ratio_1.3333">4:3 (Standard)</option>
+                    <option value="ratio_3">3:1 (Banner)</option>
+                  </optgroup>
+                  <optgroup label="Device & Social Sizes">
+                    <option value="size_1920_1080">1920 x 1080 (FHD 1080p)</option>
+                    <option value="size_1080_1920">1080 x 1920 (Story / Reel)</option>
+                    <option value="size_1280_720">1280 x 720 (HD 720p)</option>
+                    <option value="size_1080_1080">1080 x 1080 (Social Post)</option>
+                    <option value="size_1170_2532">1170 x 2532 (iPhone Pro)</option>
+                    <option value="size_3840_2160">3840 x 2160 (4K UHD)</option>
+                  </optgroup>
+                </select>
+              </div>
+              <div class="pe-grid-2">
                 <div class="pe-control-group">
                   <label>Canvas Width</label>
                   <input type="number" value="${this.canvasW}" id="pe-inp-cw">
@@ -38764,6 +39500,7 @@ SOFTWARE.</div>
                 </div>
               </div>
             `;
+            
             document.getElementById('pe-inp-bg').addEventListener('input', (e) => { 
               this.bgColor = e.target.value; 
               this.render(); 
@@ -38778,15 +39515,61 @@ SOFTWARE.</div>
               this.brushSize = parseFloat(e.target.value); 
               document.getElementById('pe-val-brush-size').innerText = Math.round(this.brushSize);
             });
+
+            const ratioSel = document.getElementById('pe-inp-ratio');
+            const cwInp = document.getElementById('pe-inp-cw');
+            const chInp = document.getElementById('pe-inp-ch');
+
+            const currentRatio = this.canvasW / this.canvasH;
+            Array.from(ratioSel.options).forEach(opt => {
+              if (opt.value.startsWith('ratio_') && Math.abs(parseFloat(opt.value.replace('ratio_', '')) - currentRatio) < 0.01) {
+                ratioSel.value = opt.value;
+              }
+            });
+
+            ratioSel.addEventListener('change', () => {
+              const val = ratioSel.value;
+              if (val.startsWith('size_')) {
+                const parts = val.replace('size_', '').split('_');
+                this.canvasW = parseInt(parts[0]);
+                this.canvasH = parseInt(parts[1]);
+                cwInp.value = this.canvasW;
+                chInp.value = this.canvasH;
+                this.resizeCanvas();
+                this.saveState();
+                ratioSel.value = 'custom'; // Revert to custom so users can freely edit the size afterward
+              } else if (val.startsWith('ratio_')) {
+                const ratio = parseFloat(val.replace('ratio_', ''));
+                const newH = Math.round(this.canvasW / ratio);
+                chInp.value = newH;
+                this.canvasH = newH;
+                this.resizeCanvas();
+                this.saveState();
+              }
+            });
             
-            const resize = () => {
-              this.canvasW = parseInt(document.getElementById('pe-inp-cw').value) || 800;
-              this.canvasH = parseInt(document.getElementById('pe-inp-ch').value) || 600;
+            const resize = (isWidthChange) => {
+              this.canvasW = parseInt(cwInp.value) || 800;
+              const val = ratioSel.value;
+              if (val.startsWith('ratio_')) {
+                const ratio = parseFloat(val.replace('ratio_', ''));
+                if (isWidthChange) {
+                  this.canvasH = Math.round(this.canvasW / ratio);
+                  chInp.value = this.canvasH;
+                } else {
+                  this.canvasH = parseInt(chInp.value) || 600;
+                  this.canvasW = Math.round(this.canvasH * ratio);
+                  cwInp.value = this.canvasW;
+                }
+              } else {
+                this.canvasH = parseInt(chInp.value) || 600;
+              }
               this.resizeCanvas();
               this.saveState();
             };
-            document.getElementById('pe-inp-cw').addEventListener('change', resize);
-            document.getElementById('pe-inp-ch').addEventListener('change', resize);
+            
+            cwInp.addEventListener('change', () => resize(true));
+            chInp.addEventListener('change', () => resize(false));
           }
 
           buildProperties() {
@@ -38983,6 +39766,7 @@ SOFTWARE.</div>
           closePanel() {
             this.panel.classList.remove('open');
             this.propBtn.classList.remove('active');
+            setTimeout(() => this.resizeCanvas(), 50); // FIX: Restore canvas size when workspace regains space
           }
 
           render() {
