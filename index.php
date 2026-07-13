@@ -18884,11 +18884,13 @@ curl_close($ch);
             select[id*="sort"]:focus, select#source-type:focus { outline: none; border-color: var(--ytm-accent) !important; box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.2) !important; }
             select[id*="sort"] option, select#source-type option { background-color: #212121; color: #ffffff; font-weight: 500; }
             label[for*="sort"], label[for="source-type"] { text-transform: uppercase; letter-spacing: 1px; font-size: 0.7rem !important; font-weight: 700; color: var(--ytm-secondary-text) !important; margin-right: 0.25rem; }
+
             .songs-header { display: grid; grid-template-columns: 48px 4fr 3fr 80px; gap: 1rem; padding: 0.75rem 1rem; color: var(--ytm-secondary-text); font-size: 0.85rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
             .song-item { display: grid; grid-template-columns: 48px 4fr 3fr 80px; gap: 1rem; align-items: center; padding: 0.75rem 1rem; border-radius: 8px; cursor: pointer; transition: background-color 0.15s; border-bottom: 1px solid rgba(255, 255, 255, 0.03); }
             .song-item:hover { background-color: var(--ytm-surface-hover); }
             .song-item.active { background-color: rgba(255, 255, 255, 0.08); }
             .song-item.active .song-title { color: var(--ytm-accent); }
+
             .song-thumb { width: 48px; height: 48px; border-radius: 4px; object-fit: cover; }
             .song-title { font-weight: 500; color: var(--ytm-primary-text); margin-bottom: 2px; }
             .song-artist { font-size: 0.9rem; color: var(--ytm-secondary-text); }
@@ -18897,10 +18899,12 @@ curl_close($ch);
             .player-bar { position: fixed; bottom: 0; left: 0; right: 0; height: 96px; background-color: var(--ytm-surface); border-top: 1px solid var(--ytm-border); display: grid; grid-template-columns: 1fr 2fr 1fr; align-items: center; padding: 0 2rem; z-index: 1050; transform: translateY(100%); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
             .player-bar.visible { transform: translateY(0); }
             .pb-left { display: flex; align-items: center; gap: 1rem; min-width: 0; }
+
             .pb-art-container { position: relative; width: 56px; height: 56px; border-radius: 4px; overflow: hidden; cursor: pointer; flex-shrink: 0; }
             .pb-art { width: 100%; height: 100%; object-fit: cover; }
             .pb-art-hover { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.2s; }
             .pb-art-container:hover .pb-art-hover { opacity: 1; }
+
             .pb-metadata { overflow: hidden; min-width: 0; }
             .pb-title { font-weight: 500; margin-bottom: 2px; }
             .pb-artist { font-size: 0.85rem; color: var(--ytm-secondary-text); }
@@ -18914,6 +18918,7 @@ curl_close($ch);
             .pb-play-circle { width: 42px; height: 42px; border-radius: 50%; background-color: var(--ytm-primary-text); color: var(--ytm-bg) !important; transition: transform 0.15s; }
             .pb-play-circle:hover { transform: scale(1.08); }
             .pb-play-circle .bi { font-size: 1.8rem; }
+
             .pb-timeline { width: 100%; display: flex; align-items: center; gap: 0.75rem; }
             .pb-time { font-size: 0.75rem; color: var(--ytm-secondary-text); width: 35px; text-align: center; }
             .timeline-container { flex: 1; height: 24px; position: relative; cursor: pointer; display: flex; align-items: center; }
@@ -18924,6 +18929,7 @@ curl_close($ch);
             .volume-bar { width: 100px; height: 24px; position: relative; cursor: pointer; display: flex; align-items: center; }
             .volume-bg { position: absolute; left: 0; right: 0; height: 4px; background-color: #555555; border-radius: 2px; pointer-events: none; }
             .volume-filled { height: 4px; background-color: var(--ytm-primary-text); width: 100%; position: absolute; left: 0; border-radius: 2px; pointer-events: none; z-index: 2; }
+
             #infinite-scroll-sentinel { height: 50px; display: flex; align-items: center; justify-content: center; margin-top: 1rem; }
             .content-wrapper { flex: 1; margin-left: var(--sidebar-width); padding: 2rem; max-width: 1200px; }
             .ytm-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: #070707; z-index: 2000; transform: translateY(100%); transition: transform 0.4s cubic-bezier(0.1, 0.76, 0.55, 0.94); display: flex; flex-direction: column; }
@@ -18934,11 +18940,13 @@ curl_close($ch);
             .ytm-modal-art-box { width: 100%; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; box-shadow: 0 12px 36px rgba(0,0,0,0.6); margin-bottom: 2rem; }
             .ytm-modal-art-box img { width: 100%; height: 100%; object-fit: cover; }
             .ytm-modal-details { width: 100%; display: flex; justify-content: center; align-items: center; text-align: center; min-width: 0; }
+
             .btn-modal-lg { font-size: 1.5rem; }
             .btn-modal-xl { font-size: 2.2rem; }
             .pb-modal-play-circle { width: 76px; height: 76px; min-width: 76px; border-radius: 50%; background-color: var(--ytm-primary-text); color: var(--ytm-bg) !important; transition: transform 0.15s; }
             .pb-modal-play-circle:hover { transform: scale(1.08); }
             .pb-modal-play-circle .bi { font-size: 2.8rem; }
+
             @media (min-width: 769px) { .player-bar.visible { z-index: 1250; } body:has(.player-bar.visible) .sidebar { padding-bottom: calc(96px + 1.25rem); } }
             @media (max-width: 768px) {
               .sidebar { transform: translateX(-100%); bottom: 0 !important; height: 100dvh !important; top: 0 !important; box-shadow: 5px 0 15px rgba(0,0,0,0.5); }
@@ -28553,8 +28561,50 @@ SOFTWARE.</div>
           });
         });
 
+        const getSearchHistory = () => {
+          try { return JSON.parse(localStorage.getItem('ytm_searchHistory')) || []; } catch(e) { return []; }
+        };
+        
+        const saveSearchHistory = (query) => {
+          if (!query || query.trim() === '') return;
+          let history = getSearchHistory();
+          history = history.filter(item => item.toLowerCase() !== query.toLowerCase()); // Remove duplicates
+          history.unshift(query); // Add to the top
+          if (history.length > 25) history.pop(); // Keep only the last 25
+          localStorage.setItem('ytm_searchHistory', JSON.stringify(history));
+        };
+        
+        const removeSearchHistory = (query) => {
+          let history = getSearchHistory();
+          history = history.filter(item => item.toLowerCase() !== query.toLowerCase());
+          localStorage.setItem('ytm_searchHistory', JSON.stringify(history));
+        };
+        
+        const renderSearchHistory = (dropdownEl) => {
+          const history = getSearchHistory();
+          if (history.length === 0) {
+            dropdownEl.classList.add('d-none');
+            return;
+          }
+          let html = `<div class="search-dropdown-header text-secondary d-flex justify-content-between mb-1"><span>Recent Searches</span></div>`;
+          history.forEach(q => {
+            html += `
+              <div class="search-dropdown-item history-dropdown-item d-flex justify-content-between align-items-center py-2" data-query="${escapeHTML(q)}">
+                <div class="d-flex align-items-center gap-3 flex-grow-1" style="min-width:0;">
+                  <i class="bi bi-clock-history text-secondary fs-5"></i>
+                  <span class="text-white text-truncate fw-medium" style="font-size: 0.95rem;">${escapeHTML(q)}</span>
+                </div>
+                <button class="btn p-0 border-0 rounded-circle text-secondary delete-history-btn d-flex align-items-center justify-content-center" data-query="${escapeHTML(q)}" style="width: 32px; height: 32px; transition: background-color 0.2s, color 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.1)'; this.style.color='#fff'" onmouseout="this.style.backgroundColor='transparent'; this.style.color='var(--ytm-secondary-text)'"><i class="bi bi-x-lg"></i></button>
+              </div>
+            `;
+          });
+          dropdownEl.innerHTML = html;
+          dropdownEl.classList.remove('d-none');
+        };
+
         const performSearch = (query) => {
           if (query.trim() !== '') {
+            saveSearchHistory(query.trim());
             document.getElementById('search-dropdown-desktop').classList.add('d-none');
             document.getElementById('search-dropdown-mobile').classList.add('d-none');
             searchInputDesktop.value = query;
@@ -28638,7 +28688,7 @@ SOFTWARE.</div>
           else searchInputDesktop.value = query;
 
           if (query.trim() === '') {
-            targetDropdown.classList.add('d-none');
+            renderSearchHistory(targetDropdown);
             if (currentView.type === 'search') loadView({ type: 'get_songs', param: '', sort: 'random', filter_user_id: '', artist_name: '' });
             return;
           }
@@ -28647,6 +28697,31 @@ SOFTWARE.</div>
             const data = await fetchData(`?action=search&q=${encodeURIComponent(query.trim())}`);
             
             renderSearchDropdown(targetDropdown, data);
+            
+            // Properly teardown full-screen apps to transition into the search view
+            if (['rhythm_game', 'photo_editor', 'get_inbox'].includes(currentView.type)) {
+              if (window.rhythmGameInstance) window.rhythmGameInstance.destroy();
+              document.body.classList.remove('rg-session-active');
+              
+              const pageHeaderEl = document.querySelector('.page-header');
+              const mainContentEl = document.getElementById('main-content');
+              if (pageHeaderEl) pageHeaderEl.classList.remove('d-none');
+              
+              contentArea.style.padding = '';
+              contentArea.style.margin = '';
+              contentArea.style.width = '';
+              contentArea.style.maxWidth = '';
+              contentArea.style.height = '';
+              
+              if (mainContentEl) {
+                mainContentEl.style.height = '';
+                mainContentEl.style.overflow = '';
+              }
+              if (playerBar && currentSong) {
+                playerBar.classList.remove('d-none');
+                document.body.classList.add('player-visible');
+              }
+            }
             
             currentView = { type: 'search', param: query.trim(), sort: 'artist_asc', filter_user_id: '', artist_name: '', f_date: '', f_dur: '', f_sort: 'relevance' };
             updateContentTitle(`Search: "${query.trim()}"`);
@@ -28657,6 +28732,17 @@ SOFTWARE.</div>
 
         searchInputDesktop.addEventListener('input', liveSearchHandler);
         searchInputMobile.addEventListener('input', liveSearchHandler);
+
+        const focusSearchHandler = (e) => {
+          const query = e.target.value.trim();
+          if (query === '') {
+            const isDesktop = e.target === searchInputDesktop;
+            const targetDropdown = isDesktop ? document.getElementById('search-dropdown-desktop') : document.getElementById('search-dropdown-mobile');
+            renderSearchHistory(targetDropdown);
+          }
+        };
+        searchInputDesktop.addEventListener('focus', focusSearchHandler);
+        searchInputMobile.addEventListener('focus', focusSearchHandler);
 
         const instantSearchHandler = (e) => { 
           if (e.key === 'Enter') {
@@ -28672,6 +28758,18 @@ SOFTWARE.</div>
         searchBtnMobile.addEventListener('click', () => { clearTimeout(searchTimeout); performSearch(searchInputMobile.value); });
 
         document.addEventListener('click', e => {
+          const deleteHistBtn = e.target.closest('.delete-history-btn');
+          if (deleteHistBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            removeSearchHistory(deleteHistBtn.dataset.query);
+            const dropdownDesktop = document.getElementById('search-dropdown-desktop');
+            const dropdownMobile = document.getElementById('search-dropdown-mobile');
+            if (!dropdownDesktop.classList.contains('d-none')) renderSearchHistory(dropdownDesktop);
+            if (!dropdownMobile.classList.contains('d-none')) renderSearchHistory(dropdownMobile);
+            return;
+          }
+
           if (!e.target.closest('.search-bar')) {
             document.getElementById('search-dropdown-desktop').classList.add('d-none');
             document.getElementById('search-dropdown-mobile').classList.add('d-none');
@@ -28682,7 +28780,12 @@ SOFTWARE.</div>
             document.getElementById('search-dropdown-desktop').classList.add('d-none');
             document.getElementById('search-dropdown-mobile').classList.add('d-none');
 
-            if (dropItem.classList.contains('song-dropdown-item') || dropItem.classList.contains('top-result-item')) {
+            if (dropItem.classList.contains('history-dropdown-item')) {
+              const query = dropItem.dataset.query;
+              searchInputDesktop.value = query;
+              searchInputMobile.value = query;
+              performSearch(query);
+            } else if (dropItem.classList.contains('song-dropdown-item') || dropItem.classList.contains('top-result-item')) {
               setQueueAndPlay(parseInt(dropItem.dataset.id));
             } else if (dropItem.classList.contains('artist-dropdown-item')) {
               loadView({ type: 'artist_songs', param: dropItem.dataset.artist, sort: 'album_asc', filter_user_id: dropItem.dataset.userid });
