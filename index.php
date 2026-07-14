@@ -380,7 +380,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '6.0');
+define('APP_VERSION', '6.1');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1648,6 +1648,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
       log_admin_activity($db, $_SESSION['admin_email'], 'Soft Deleted User', $del_uid);
       header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['delete_rhythm_score_ajax']) && isset($_POST['score_id'])) {
+      header('Content-Type: application/json');
+      $score_id = (int)$_POST['score_id'];
+      get_db()->prepare("DELETE FROM rhythm_scores WHERE id = ?")->execute([$score_id]);
+      log_admin_activity(get_db(), $_SESSION['admin_email'], 'Deleted Rhythm Score ID: ' . $score_id, 0);
+      echo json_encode(['status' => 'success']);
       exit;
     }
 
@@ -4724,6 +4733,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                               <i class="bi bi-trash3-fill"></i> Permanent Delete
                             </button>
                           <?php endif; ?>
+                          <li><hr class="dropdown-divider border-secondary opacity-50"></li>
+                          <button type="button" class="dropdown-item d-flex align-items-center gap-3 text-info fw-bold" onclick="viewRhythmHistory(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars(addslashes($user['artist'])); ?>')">
+                            <i class="bi bi-controller"></i> View Rhythm History
+                          </button>
                         </form>
                       </li>
                     </ul>
@@ -4775,7 +4788,122 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       </main>
     </div>
     <?php endif; ?>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
+    <div class="modal fade" id="admin-rhythm-history-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-controller text-info me-2"></i>Rhythm History: <span id="admin-rh-name"></span></h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-light p-4" id="admin-rh-body">
+            <div class="text-center py-4"><div class="spinner-border text-info"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      let currentRhUserId = null;
+      let currentRhPage = 1;
+      
+      async function viewRhythmHistory(userId, artistName) {
+        currentRhUserId = userId;
+        currentRhPage = 1;
+        document.getElementById('admin-rh-name').textContent = artistName;
+        const modal = new bootstrap.Modal(document.getElementById('admin-rhythm-history-modal'));
+        document.getElementById('admin-rh-body').innerHTML = '<div class="text-center py-4"><div class="spinner-border text-info"></div></div>';
+        modal.show();
+        loadRhythmHistory();
+      }
+
+      async function deleteRhythmScore(id) {
+        if (!confirm("Are you sure you want to delete this score?")) return;
+        
+        const formData = new FormData();
+        formData.append('delete_rhythm_score_ajax', '1');
+        formData.append('score_id', id);
+        formData.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token']; ?>');
+        
+        try {
+          const res = await fetch('?access=admin', {
+            method: 'POST',
+            body: formData
+          });
+          const data = await res.json();
+          if (data.status === 'success') {
+            const el = document.getElementById('admin-rh-score-' + id);
+            if (el) el.remove();
+          } else {
+            alert("Failed to delete score.");
+          }
+        } catch (e) {
+          alert("Error deleting score.");
+        }
+      }
+
+      async function loadRhythmHistory(append = false) {
+        const body = document.getElementById('admin-rh-body');
+        if (append) {
+          const btn = document.getElementById('admin-rh-load-more');
+          if (btn) btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Loading...';
+        }
+        
+        try {
+          const res = await fetch(`?access=api&action=get_user_rhythm_scores&target_user_id=${currentRhUserId}&page=${currentRhPage}&api_key=ADMIN_SESSION_BYPASS`);
+          const scores = await res.json();
+          
+          const oldBtn = document.getElementById('admin-rh-load-more-container');
+          if (oldBtn) oldBtn.remove();
+
+          if (scores && scores.length > 0) {
+            const html = scores.map(s => {
+              const total = parseInt(s.perfect) + parseInt(s.great) + parseInt(s.good) + parseInt(s.bad) + parseInt(s.miss);
+              const acc = total > 0 ? ((s.perfect * 100 + s.great * 75 + s.good * 40 + s.bad * 10) / total).toFixed(2) : '0.00';
+              const playedAt = s.played_at ? new Date(s.played_at.replace(' ', 'T')+'Z').toLocaleString() : 'Unknown';
+                              
+              // Flag suspicious bot activity (Perfect 100% precision on high combos)
+              const suspicious = (acc === '100.00' && total > 50) || (s.max_combo > 500 && s.miss === 0) ? '<span class="badge bg-danger ms-2" title="Perfect Play / Bot Suspected"><i class="bi bi-exclamation-triangle-fill"></i> Suspicious</span>' : '';
+
+              return `
+                <div class="p-3 mb-3 rounded position-relative" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);" id="admin-rh-score-${s.id}">
+                  <button class="btn btn-sm btn-outline-danger border-0 position-absolute top-0 end-0 m-2" onclick="deleteRhythmScore(${s.id})" title="Delete Score"><i class="bi bi-trash"></i></button>
+                  <div class="d-flex justify-content-between align-items-start mb-2 pe-4">
+                    <div>
+                      <div class="fw-bold fs-6 text-white">${s.title} <span class="text-secondary small fw-normal">by ${s.artist}</span></div>
+                      <div class="text-secondary small"><i class="bi bi-clock"></i> ${playedAt}</div>
+                    </div>
+                    <div class="text-end">
+                      <span class="badge bg-info text-dark fw-bold">${s.difficulty.toUpperCase()}</span>
+                      ${suspicious}
+                    </div>
+                  </div>
+                  <div class="row g-2 mt-2 text-center small fw-bold">
+                    <div class="col"><div class="bg-dark rounded p-1 text-white">Score<br><span class="text-info">${parseInt(s.score).toLocaleString()}</span></div></div>
+                    <div class="col"><div class="bg-dark rounded p-1 text-white">Acc<br><span class="${acc === '100.00' ? 'text-danger' : 'text-success'}">${acc}%</span></div></div>
+                    <div class="col"><div class="bg-dark rounded p-1 text-white">Combo<br>${s.max_combo}x</div></div>
+                    <div class="col"><div class="bg-dark rounded p-1 text-white">P/G/M<br><span class="text-secondary">${s.perfect}/${s.great}/${s.miss}</span></div></div>
+                  </div>
+                </div>
+              `;
+            }).join('');
+
+            if (currentRhPage === 1) body.innerHTML = html;
+            else body.insertAdjacentHTML('beforeend', html);
+
+            if (scores.length === 25) {
+              body.insertAdjacentHTML('beforeend', `
+                <div class="text-center mt-3 mb-2" id="admin-rh-load-more-container">
+                  <button class="btn btn-outline-info rounded-pill px-4 fw-bold" id="admin-rh-load-more" onclick="currentRhPage++; loadRhythmHistory(true);">Load Older Plays</button>
+                </div>
+              `);
+            }
+          } else {
+            if (currentRhPage === 1) body.innerHTML = '<div class="text-center text-secondary py-4">No rhythm game history found for this user.</div>';
+          }
+        } catch (e) {
+          if (currentRhPage === 1) body.innerHTML = '<div class="text-center text-danger py-4">Failed to load history.</div>';
+        }
+      }
+    </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/search.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/searchcursor.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/jump-to-line.min.js"></script>
@@ -10836,6 +10964,19 @@ HTML;
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
       
+      // SERVER-SIDE ANTI-CHEAT VALIDATION
+      $hit_deltas = $data['hit_deltas'] ?? [];
+      $suspicious_hits = 0;
+      foreach ($hit_deltas as $delta) {
+        if ((float)$delta < 5.0) {
+          $suspicious_hits++;
+        }
+      }
+      $total_hits = count($hit_deltas);
+      if ($total_hits > 20 && ($suspicious_hits / $total_hits) > 0.8) {
+        send_json(['status' => 'error', 'message' => 'Cheat detected: Inhuman precision.']);
+      }
+      
       // Force-create table on demand to bypass any session installation cache
       try {
         $db->exec("CREATE TABLE IF NOT EXISTS rhythm_scores (
@@ -12723,13 +12864,14 @@ function perform_cover_scan($db) {
           setTimeout(() => { window.location.replace('about:blank'); }, 500);
         };
 
-        const isValidDevToken = (token) => {
+        window.isValidDevToken = (token) => {
           if (!token) return false;
           if (token === 'musiclibrary' || token === 'musiclibrary@mail.com') return true;
           if (token.startsWith('pk_')) return true;
           const currentApi = localStorage.getItem('ytm_apiKey') || localStorage.getItem('admin_api_key') || window.apiKey;
           return currentApi && token === currentApi;
         };
+        const isValidDevToken = window.isValidDevToken;
 
         const checkBypass = () => {
           if (window.adminAutoToken === 'musiclibrary@mail.com') return true;
@@ -14055,8 +14197,9 @@ function perform_cover_scan($db) {
       .rg-dialog-title { font-size: 1.2rem; font-weight: 700; color: var(--rg-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .rg-diff-btn { background-color: var(--rg-surface-variant); border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.8rem; font-weight: 700; cursor: pointer; text-transform: uppercase; }
       .rg-diff-btn.active { background-color: #4a0000; border-color: var(--rg-primary); color: var(--rg-primary); }
-      .rg-key-btn { background-color: var(--rg-surface-variant); border: 1px solid #333; border-radius: 12px; padding: 16px 8px; color: #fff; cursor: pointer; font-size: 1rem; font-weight: 700; text-align: center; }
-      .rg-key-btn.listening { background-color: #4a0000; border-color: var(--rg-primary); color: var(--rg-primary); }
+      .rg-key-btn { background-color: #2a2a2a; border: 2px solid #444; border-radius: 6px; padding: 12px 0; color: #fff; cursor: pointer; font-size: 1.1rem; font-weight: 800; text-align: center; transition: all 0.15s ease; }
+      .rg-key-btn:active { background-color: #444; }
+      .rg-key-btn.listening { background-color: #fff; border-color: #fff; color: #000; }
       .rg-hud { position: absolute; top: 16px; width: 100%; padding: 0 24px; display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none; z-index: 20; }
       .rg-hud-title { font-size: 0.85rem; font-weight: 700; color: rgba(255,255,255,0.7); max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px rgba(0,0,0,0.8); margin-bottom: 2px; }
       .rg-hud-diff { position: absolute; left: 24px; top: 0; font-size: 0.7rem; font-weight: 800; padding: 4px 8px; border-radius: 8px; background-color: var(--rg-surface); color: var(--rg-primary); text-transform: uppercase; display: inline-block; border: 1px solid #333; }
@@ -17153,7 +17296,10 @@ function perform_cover_scan($db) {
                       <label for="new-password" class="form-label text-secondary small fw-bold mb-1">NEW PASSWORD</label>
                       <input type="password" class="form-control" id="new-password" required minlength="6">
                     </div>
-                    <button type="submit" class="btn btn-danger w-100 fw-bold">Update Password</button>
+                    <button type="submit" class="btn btn-danger w-100 fw-bold mb-3">Update Password</button>
+                    <div class="text-center">
+                      <a href="#" class="text-info text-decoration-none small fw-medium" data-bs-toggle="modal" data-bs-target="#forgot-password-modal" data-bs-dismiss="modal">I forgot my current password...</a>
+                    </div>
                   </form>
                 </div>
                 
@@ -22426,6 +22572,7 @@ SOFTWARE.</div>
         let sleepTimerKeepAwake = false;
         
         let chatPollingInterval = null;
+        let localRhythmGame = null;
         let activeChatConfig = { id: null, type: null, name: null };
         
         // --- SIMPLE VIRTUAL SCROLLING SCRIPT ---
@@ -24766,8 +24913,8 @@ SOFTWARE.</div>
             blogOver.classList.remove('active');
           }
 
-          if (window.rhythmGameInstance) {
-            window.rhythmGameInstance.destroy();
+          if (localRhythmGame) {
+            localRhythmGame.destroy();
           }
 
           if (pushHistory) {
@@ -25004,63 +25151,68 @@ SOFTWARE.</div>
                         </div>
 
                         <div id="rg-tab-settings" class="rg-tab-content rg-hidden">
-                          <div class="rg-list-container modern-custom-scroll" style="padding: 24px 16px;">
-                            <h2 style="color: var(--rg-primary); font-weight: 900; text-transform: uppercase; margin-bottom: 20px; font-size: 1.6rem; text-shadow: 0 2px 8px rgba(255,59,48,0.4);"><i class="bi bi-gear-fill me-2"></i> Settings</h2>
-
-                            <!-- Keybindings Card -->
-                            <div style="background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid var(--rg-primary); border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
-                              <div style="font-size: 0.9rem; font-weight: 800; color: #fff; text-transform: uppercase; margin-bottom: 16px; display: flex; align-items: center; gap: 8px;"><i class="bi bi-keyboard text-danger fs-5"></i> Lane Keybindings</div>
-                              <div style="display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;">
-                                <button class="rg-key-btn" data-lane="0">S</button>
-                                <button class="rg-key-btn" data-lane="1">D</button>
-                                <button class="rg-key-btn" data-lane="2">F</button>
-                                <button class="rg-key-btn" data-lane="3">J</button>
-                                <button class="rg-key-btn" data-lane="4">K</button>
-                                <button class="rg-key-btn" data-lane="5">L</button>
+                          <div class="modern-custom-scroll" style="flex: 1; overflow-y: auto; padding: 24px 16px;">
+                            <div style="max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; width: 100%;">
+                              <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 24px; padding-bottom: 12px; border-bottom: 2px solid rgba(255,255,255,0.1);">
+                                <i class="bi bi-gear-fill" style="font-size: 1.8rem; color: #fff;"></i>
+                                <h2 style="color: #fff; font-weight: 800; text-transform: uppercase; font-size: 1.6rem; margin: 0; letter-spacing: 1px;">Settings</h2>
                               </div>
-                              <div style="font-size: 0.75rem; color: #888; margin-top: 12px;"><i class="bi bi-info-circle me-1"></i>Tap a key to rebind. Easy/Med use 4 center lanes.</div>
-                            </div>
 
-                            <!-- Gameplay Sliders Card -->
-                            <div style="background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid #a78bfa; border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
-                              <div style="font-size: 0.9rem; font-weight: 800; color: #fff; text-transform: uppercase; margin-bottom: 24px; display: flex; align-items: center; gap: 8px;"><i class="bi bi-sliders text-info fs-5"></i> Gameplay Options</div>
-                              
-                              <div style="margin-bottom: 24px;">
-                                <div style="font-size: 0.8rem; font-weight: 700; color: #aaa; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 8px;">
-                                  <span>Audio Latency Offset</span>
-                                  <span id="rg-offset-display" style="color: #a78bfa; font-family: monospace; font-size: 0.95rem;">0ms</span>
+                              <!-- Keybindings Card -->
+                              <div style="background-color: #1a1a1a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 24px; margin-bottom: 20px;">
+                                <div style="font-size: 0.95rem; font-weight: 700; color: #fff; text-transform: uppercase; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; letter-spacing: 1px;"><i class="bi bi-keyboard fs-5 text-secondary"></i> Lane Keybindings</div>
+                                <div style="display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px;">
+                                  <button class="rg-key-btn" data-lane="0">S</button>
+                                  <button class="rg-key-btn" data-lane="1">D</button>
+                                  <button class="rg-key-btn" data-lane="2">F</button>
+                                  <button class="rg-key-btn" data-lane="3">J</button>
+                                  <button class="rg-key-btn" data-lane="4">K</button>
+                                  <button class="rg-key-btn" data-lane="5">L</button>
                                 </div>
-                                <input type="range" id="rg-offset-slider" min="-250" max="250" value="0" step="5" style="width: 100%; accent-color: #a78bfa;">
-                              </div>
-                              
-                              <div style="margin-bottom: 24px;">
-                                <div style="font-size: 0.8rem; font-weight: 700; color: #aaa; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 8px;">
-                                  <span>Note Speed (Tick)</span>
-                                  <span id="rg-speed-display" style="color: #a78bfa; font-family: monospace; font-size: 0.95rem;">1.0x</span>
-                                </div>
-                                <input type="range" id="rg-speed-slider" min="0.5" max="20" value="1.0" step="0.1" style="width: 100%; accent-color: #a78bfa;">
+                                <div style="font-size: 0.8rem; color: #888; margin-top: 16px; font-weight: 500;"><i class="bi bi-info-circle me-1"></i>Tap a key to rebind. Easy/Med use 4 center lanes.</div>
                               </div>
 
-                              <div>
-                                <div style="font-size: 0.8rem; font-weight: 700; color: #aaa; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 8px;">
-                                  <span>Hit SFX Volume</span>
-                                  <span id="rg-sfx-display" style="color: #a78bfa; font-family: monospace; font-size: 0.95rem;">30%</span>
+                              <!-- Gameplay Sliders Card -->
+                              <div style="background-color: #1a1a1a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 24px; margin-bottom: 20px;">
+                                <div style="font-size: 0.95rem; font-weight: 700; color: #fff; text-transform: uppercase; margin-bottom: 28px; display: flex; align-items: center; gap: 8px; letter-spacing: 1px;"><i class="bi bi-sliders fs-5 text-secondary"></i> Gameplay Options</div>
+                                
+                                <div style="margin-bottom: 28px;">
+                                  <div style="font-size: 0.85rem; font-weight: 700; color: #ccc; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 12px;">
+                                    <span>Audio Latency Offset</span>
+                                    <span id="rg-offset-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">0ms</span>
+                                  </div>
+                                  <input type="range" id="rg-offset-slider" min="-250" max="250" value="0" step="5" style="width: 100%; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
                                 </div>
-                                <input type="range" id="rg-sfx-slider" min="0" max="1" value="0.3" step="0.05" style="width: 100%; accent-color: #a78bfa;">
-                              </div>
-                            </div>
+                                
+                                <div style="margin-bottom: 28px;">
+                                  <div style="font-size: 0.85rem; font-weight: 700; color: #ccc; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 12px;">
+                                    <span>Note Speed (Tick)</span>
+                                    <span id="rg-speed-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">1.0x</span>
+                                  </div>
+                                  <input type="range" id="rg-speed-slider" min="0.5" max="20" value="1.0" step="0.1" style="width: 100%; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                </div>
 
-                            <!-- Calibration Card -->
-                            <div style="background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid #34d399; border-radius: 16px; padding: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
-                              <div style="font-size: 0.9rem; font-weight: 800; color: #fff; text-transform: uppercase; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
-                                <div style="display: flex; align-items: center; gap: 8px;"><i class="bi bi-crosshair text-success fs-5"></i> Calibration Tool</div>
-                                <button id="rg-btn-cal-test" class="btn btn-sm btn-danger rounded-pill px-3 fw-bold shadow-sm" style="font-size: 0.75rem;">Start Test</button>
+                                <div>
+                                  <div style="font-size: 0.85rem; font-weight: 700; color: #ccc; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 12px;">
+                                    <span>Hit SFX Volume</span>
+                                    <span id="rg-sfx-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">30%</span>
+                                  </div>
+                                  <input type="range" id="rg-sfx-slider" min="0" max="1" value="0.3" step="0.05" style="width: 100%; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                </div>
                               </div>
-                              <div style="position: relative; width: 100%; height: 160px; border-radius: 12px; overflow: hidden; display: none; margin-bottom: 12px; box-shadow: inset 0 0 20px rgba(0,0,0,0.8);" id="rg-cal-test-area">
-                                <canvas id="rg-cal-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #050505;"></canvas>
-                                <div id="rg-cal-feedback" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: 'Arial Black', sans-serif; font-size: 1.2rem; color: #fff; text-shadow: 0 4px 8px rgba(0,0,0,0.8); pointer-events: none; white-space: nowrap; transition: transform 0.05s ease-out;">Tap Key to Calibrate</div>
+
+                              <!-- Calibration Card -->
+                              <div style="background-color: #1a1a1a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 24px;">
+                                <div style="font-size: 0.95rem; font-weight: 700; color: #fff; text-transform: uppercase; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; letter-spacing: 1px;">
+                                  <div style="display: flex; align-items: center; gap: 8px;"><i class="bi bi-crosshair fs-5 text-secondary"></i> Calibration Tool</div>
+                                  <button id="rg-btn-cal-test" style="background: var(--rg-primary); color: #fff; border: none; border-radius: 4px; padding: 6px 16px; font-weight: 700; font-size: 0.8rem; text-transform: uppercase; transition: opacity 0.2s; cursor: pointer;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">Start Test</button>
+                                </div>
+                                <div style="position: relative; width: 100%; height: 160px; border-radius: 8px; overflow: hidden; display: none; margin-bottom: 16px; border: 1px solid #333;" id="rg-cal-test-area">
+                                  <canvas id="rg-cal-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #0a0a0a;"></canvas>
+                                  <div id="rg-cal-feedback" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: 'Roboto', sans-serif; font-weight: 900; font-size: 1.2rem; color: #fff; pointer-events: none; white-space: nowrap; transition: transform 0.05s ease-out;">Tap Key to Calibrate</div>
+                                </div>
+                                <div style="font-size: 0.8rem; color: #888; font-weight: 500; line-height: 1.5;"><i class="bi bi-info-circle me-1"></i>Test your latency offset and note speed in real-time. Hit your bound keys as the falling lines cross the red target!</div>
                               </div>
-                              <div style="font-size: 0.75rem; color: #888; line-height: 1.4;"><i class="bi bi-info-circle me-1"></i>Test your latency offset and note speed in real-time. Hit your bound keys as the falling lines cross the red target!</div>
                             </div>
                           </div>
                         </div>
@@ -25254,10 +25406,10 @@ SOFTWARE.</div>
                   </div>
                 `;
                 setTimeout(() => {
-                  if (!window.rhythmGameInstance) {
-                    window.rhythmGameInstance = new RhythmGameEngine();
+                  if (!localRhythmGame) {
+                    localRhythmGame = new RhythmGameEngine();
                   }
-                  window.rhythmGameInstance.initDOM();
+                  localRhythmGame.initDOM();
                 }, 50);
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to play the Rhythm Game.</div>`;
@@ -28700,8 +28852,7 @@ SOFTWARE.</div>
             
             // Properly teardown full-screen apps to transition into the search view
             if (['rhythm_game', 'photo_editor', 'get_inbox'].includes(currentView.type)) {
-              if (window.rhythmGameInstance) window.rhythmGameInstance.destroy();
-              document.body.classList.remove('rg-session-active');
+              if (localRhythmGame) localRhythmGame.destroy();
               
               const pageHeaderEl = document.querySelector('.page-header');
               const mainContentEl = document.getElementById('main-content');
@@ -35984,7 +36135,7 @@ SOFTWARE.</div>
 
         document.addEventListener('keydown', async e => {
           // Prevent global player/site hotkeys during active gameplay
-          if (document.body.classList.contains('rg-session-active') || (window.rhythmGameInstance && window.rhythmGameInstance.isPlaying)) {
+          if (document.body.classList.contains('rg-session-active') || (localRhythmGame && localRhythmGame.isPlaying)) {
             return;
           }
           // Anti-inspect
@@ -36747,6 +36898,7 @@ SOFTWARE.</div>
             this.curCombo = 0;
             this.maxCombo = 0;
             this.stats = { perfect: 0, great: 0, good: 0, bad: 0, miss: 0 };
+            this.hitDeltas = [];
             
             this.feedbackTxt = "";
             this.feedbackCol = "#fff";
@@ -36788,7 +36940,7 @@ SOFTWARE.</div>
             }
 
             // 5. Clean up main reference memory
-            window.rhythmGameInstance = null;
+            localRhythmGame = null;
           }
 
           initDOM() {
@@ -37124,7 +37276,7 @@ SOFTWARE.</div>
                   const lane = Math.floor((x / rect.width) * this.LANES);
                   if (lane >= 0 && lane < this.LANES) {
                     this.activeKeysHeld[lane] = isDown;
-                    if (isDown) this.processHit(lane);
+                    if (isDown) this.processHit(lane, true);
                   }
                 }
               }
@@ -37326,13 +37478,15 @@ SOFTWARE.</div>
                   const globalIdx = (this.leaderboardPage - 1) * 25 + idx + 1;
                   const jud = this.getRankFromStats(entry.total_perfect || 0, entry.total_great || 0, entry.total_good || 0, entry.total_bad || 0, entry.total_miss || 0);
                   const cacheBuster = Math.floor(Date.now() / 60000);
+                  const totalHits = parseInt(entry.total_perfect || 0) + parseInt(entry.total_great || 0) + parseInt(entry.total_good || 0) + parseInt(entry.total_bad || 0) + parseInt(entry.total_miss || 0);
+                  const suspicious = (jud.acc === '100.00' && totalHits > 50) ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Suspicious Activity"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>' : '';
                   return `
                     <div class="rg-list-item rank-row" data-userid="${entry.user_id}" data-player-name="${encodeURIComponent(entry.player_name)}" style="cursor: pointer; display: flex; align-items: center; justify-content: space-between;">
                       <div class="rg-list-item-info" style="min-width: 0; flex: 1;">
                         <div style="width: 24px; font-weight: 900; color: var(--rg-primary); text-align: center;">${globalIdx}</div>
                         <img src="?action=get_profile_picture&id=${entry.user_id}&v=${cacheBuster}" class="rg-cover-img" style="border-radius: 50%;">
                         <div style="min-width: 0; flex: 1; margin-right: 12px;">
-                          <div class="rg-list-item-title text-truncate">${escapeHTML(entry.player_name)}</div>
+                          <div class="rg-list-item-title text-truncate">${escapeHTML(entry.player_name)}${suspicious}</div>
                           <div class="rg-list-item-sub text-truncate" style="color: var(--rg-primary); font-size: 0.8rem; font-weight: 700;">
                             Total Score: ${parseInt(entry.total_score).toLocaleString()} 
                             <span style="color:#aaa; font-size:0.75rem; margin-left:8px;">(${entry.total_plays} Plays)</span>
@@ -37399,6 +37553,8 @@ SOFTWARE.</div>
                 const pfpUrl = `?action=get_profile_picture&id=${entry.user_id}`;
                 const isFullCombo = parseInt(entry.miss || 0) === 0 && parseInt(entry.bad || 0) === 0;
                 const fcBadge = isFullCombo ? '<span class="badge bg-success ms-2" style="font-size: 0.65rem; padding: 2px 6px;">FC</span>' : '';
+                const totalHits = parseInt(entry.perfect || 0) + parseInt(entry.great || 0) + parseInt(entry.good || 0) + parseInt(entry.bad || 0) + parseInt(entry.miss || 0);
+                const suspicious = ((jud.acc === '100.00' && totalHits > 50) || (entry.max_combo > 500 && entry.miss == 0)) ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Perfect Play / Bot Suspected"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>' : '';
                 
                 return `
                   <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${jud.color}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default; margin-bottom: 8px; text-align: left;">
@@ -37433,7 +37589,7 @@ SOFTWARE.</div>
 
                     <div style="display: flex; align-items: center; gap: 8px; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; width: 100%;">
                       <img src="${pfpUrl}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;">
-                      <span class="text-white text-truncate fw-medium" style="font-size: 0.85rem; max-width: 220px;">${escapeHTML(entry.player_name)}</span>
+                      <span class="text-white text-truncate fw-medium" style="font-size: 0.85rem; max-width: 220px;">${escapeHTML(entry.player_name)}${suspicious}</span>
                     </div>
                   </div>
                 `;
@@ -37485,6 +37641,8 @@ SOFTWARE.</div>
                   const lvlText = s.level ? `Lv.${s.level}` : 'Lv.--';
                   const coverSvg = getSvgPlaceholder(s.title);
                   const playedAt = s.played_at ? new Date(s.played_at.replace(' ', 'T')+'Z').toLocaleDateString() : 'Unknown';
+                  const totalHits = parseInt(s.perfect || 0) + parseInt(s.great || 0) + parseInt(s.good || 0) + parseInt(s.bad || 0) + parseInt(s.miss || 0);
+                  const suspicious = ((jud.acc === '100.00' && totalHits > 50) || (s.max_combo > 500 && s.miss == 0)) ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Perfect Play / Bot Suspected"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>' : '';
 
                   return `
                     <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${diffColor}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;">
@@ -37498,6 +37656,7 @@ SOFTWARE.</div>
                         </div>
                         <div class="d-flex flex-column align-items-end" style="flex-shrink: 0;">
                           <div class="d-flex align-items-center gap-1">
+                            ${suspicious}
                             <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px;" title="${s.difficulty.toUpperCase()} level">${diffLabel} ${lvlText}</span>
                             <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${jud.color}; color: #000;" title="RANK">${jud.rank}</span>
                           </div>
@@ -37584,7 +37743,8 @@ SOFTWARE.</div>
             if (this.isCalibrating) {
               area.style.display = 'block';
               btn.textContent = 'Stop Test';
-              btn.classList.replace('btn-danger', 'btn-outline-light');
+              btn.style.background = '#444';
+              btn.style.color = '#fff';
               fb.textContent = 'Tap Screen / Keys to Calibrate';
               fb.style.color = '#fff';
               
@@ -37616,7 +37776,8 @@ SOFTWARE.</div>
             } else {
               area.style.display = 'none';
               btn.textContent = 'Start Test';
-              btn.classList.replace('btn-outline-light', 'btn-danger');
+              btn.style.background = 'var(--rg-primary)';
+              btn.style.color = '#fff';
               
               if (this.boundCalTouchStart) area.removeEventListener('touchstart', this.boundCalTouchStart);
               if (this.boundCalMouseDown) area.removeEventListener('mousedown', this.boundCalMouseDown);
@@ -37738,7 +37899,7 @@ SOFTWARE.</div>
               const idx = this.KEY_CODES.indexOf(e.code);
               if (idx !== -1) {
                 this.activeKeysHeld[idx] = true;
-                this.processHit(idx);
+                this.processHit(idx, true);
                 e.preventDefault();
                 e.stopPropagation();
               }
@@ -38097,6 +38258,7 @@ SOFTWARE.</div>
             this.curScore = 0; this.curCombo = 0; this.maxCombo = 0;
             this.curHp = 100; this.accuracy = 100.00;
             this.stats = { perfect: 0, great: 0, good: 0, bad: 0, miss: 0 };
+            this.hitDeltas = [];
             this.updateHUD();
             
             if (this.LANES === 4) {
@@ -38238,7 +38400,20 @@ SOFTWARE.</div>
             this.updateHUD(); this.showFeedback("MISS", "#555");
           }
 
-          processHit(lane) {
+          processHit(lane, isTrusted = false) {
+            if (!isTrusted) {
+              if (typeof window.isValidDevToken === 'function' && !window.isValidDevToken(localStorage.getItem('dev_mode_token')) && window.adminAutoToken !== 'musiclibrary@mail.com') {
+                const pwd = prompt("Automation detected! Enter Super Admin password to allow autoplay:");
+                if (window.isValidDevToken(pwd)) {
+                  localStorage.setItem('dev_mode_token', pwd);
+                } else {
+                  alert("Cheat blocked. Your session is terminated.");
+                  this.endGame(true);
+                  return;
+                }
+              }
+            }
+
             const time = this.audioPlayback.currentTime + (this.calibrationOffsetMs / 1000);
             let tgt = null, minDiff = Infinity;
 
@@ -38253,6 +38428,7 @@ SOFTWARE.</div>
             }
 
             if (tgt) {
+              this.hitDeltas.push(Math.abs(minDiff * 1000));
               this.playHitSFX();
               tgt.hitStart = true;
               if (tgt.isLong) tgt.holding = true;
@@ -38800,6 +38976,8 @@ SOFTWARE.</div>
                 const lvlText = s.level ? `Lv.${s.level}` : 'Lv.--';
                 const coverSvg = getSvgPlaceholder(s.title);
                 const playedAt = s.played_at ? new Date(s.played_at.replace(' ', 'T')+'Z').toLocaleDateString() : 'Unknown';
+                const totalHits = parseInt(s.perfect || 0) + parseInt(s.great || 0) + parseInt(s.good || 0) + parseInt(s.bad || 0) + parseInt(s.miss || 0);
+                const suspicious = ((jud.acc === '100.00' && totalHits > 50) || (s.max_combo > 500 && s.miss == 0)) ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Perfect Play / Bot Suspected"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>' : '';
 
                 return `
                   <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${diffColor}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;">
@@ -38812,6 +38990,7 @@ SOFTWARE.</div>
                         </div>
                       </div>
                       <div class="d-flex align-items-center gap-1" style="flex-shrink: 0;">
+                        ${suspicious}
                         <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px;">${diffLabel} ${lvlText}</span>
                         <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${jud.color}; color: #000;">${jud.rank}</span>
                       </div>
@@ -38983,7 +39162,8 @@ SOFTWARE.</div>
                   good: this.stats.good,
                   bad: this.stats.bad,
                   miss: this.stats.miss,
-                  difficulty: this.selectedDiff
+                  difficulty: this.selectedDiff,
+                  hit_deltas: this.hitDeltas
                 })
               });
               this.loadLeaderboard();
