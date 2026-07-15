@@ -380,7 +380,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '6.1');
+define('APP_VERSION', '6.2');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1618,11 +1618,75 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    if (isset($_POST['toggle_rhythm_ban']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $user_id = (int)$_POST['user_id'];
+      
+      $stmt = $db->prepare("SELECT rhythm_strikes FROM users WHERE id = ?");
+      $stmt->execute([$user_id]);
+      $strikes = (int)$stmt->fetchColumn();
+
+      if ($strikes > 0) {
+        // Currently banned. Unban them but preserve their strike count as a negative history integer
+        $new_strikes = -$strikes;
+        $db->prepare("UPDATE users SET rhythm_strikes = ? WHERE id = ?")->execute([$new_strikes, $user_id]);
+        log_admin_activity($db, $_SESSION['admin_email'], 'Unbanned from Rhythm Game (History Preserved)', $user_id);
+      } else {
+        // Currently allowed to play. Ban them and increment their historical strike count
+        $abs_strikes = abs($strikes);
+        $new_strikes = $abs_strikes + 1;
+        if ($new_strikes >= 3) {
+          // 3/3 reached: Trigger Full Account Ban
+          $db->prepare("UPDATE users SET rhythm_strikes = 3, banned = 1 WHERE id = ?")->execute([$user_id]);
+          log_admin_activity($db, $_SESSION['admin_email'], 'Rhythm Game Ban 3/3: Full Account Ban Triggered', $user_id);
+        } else {
+          $db->prepare("UPDATE users SET rhythm_strikes = ? WHERE id = ?")->execute([$new_strikes, $user_id]);
+          log_admin_activity($db, $_SESSION['admin_email'], 'Banned from Rhythm Game (Strike ' . $new_strikes . '/3)', $user_id);
+        }
+      }
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['reset_rhythm_history']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $user_id = (int)$_POST['user_id'];
+      $db->prepare("UPDATE users SET rhythm_strikes = 0, banned = 0 WHERE id = ?")->execute([$user_id]);
+      log_admin_activity($db, $_SESSION['admin_email'], 'Reset Rhythm Ban History and Unbanned Account', $user_id);
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
     if (isset($_POST['resolve_report']) && isset($_POST['report_id'])) {
       $db = get_db();
       $report_id = (int)$_POST['report_id'];
       $db->prepare("UPDATE user_reports SET status = 'resolved' WHERE id = ?")->execute([$report_id]);
       log_admin_activity($db, $_SESSION['admin_email'], 'Resolved User Report ID: ' . $report_id, 0);
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['approve_appeal']) && isset($_POST['appeal_id']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $appeal_id = (int)$_POST['appeal_id'];
+      $user_id = (int)$_POST['user_id'];
+      
+      $db->prepare("UPDATE ban_appeals SET status = 'approved' WHERE id = ?")->execute([$appeal_id]);
+      $db->prepare("UPDATE users SET banned = 0, rhythm_strikes = 0 WHERE id = ?")->execute([$user_id]);
+      
+      log_admin_activity($db, $_SESSION['admin_email'], 'Approved Ban Appeal (Unbanned & Strikes Reset)', $user_id);
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['reject_appeal']) && isset($_POST['appeal_id']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $appeal_id = (int)$_POST['appeal_id'];
+      $user_id = (int)$_POST['user_id'];
+      
+      $db->prepare("UPDATE ban_appeals SET status = 'rejected' WHERE id = ?")->execute([$appeal_id]);
+      
+      log_admin_activity($db, $_SESSION['admin_email'], 'Rejected Ban Appeal', $user_id);
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
     }
@@ -2007,6 +2071,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <a href="?access=admin" class="nav-link <?php echo (empty($_GET['page']) || $_GET['page'] === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
             <a href="?access=admin&page=logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
             <a href="?access=admin&page=reports" class="nav-link <?php echo (($_GET['page'] ?? '') === 'reports') ? 'active' : ''; ?>"><i class="bi bi-shield-fill-exclamation"></i><span>Profile Reports</span></a>
+            <a href="?access=admin&page=appeals" class="nav-link <?php echo (($_GET['page'] ?? '') === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
             <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Drive Manager</span></a>
             <a href="?access=admin&page=api" class="nav-link <?php echo (($_GET['page'] ?? '') === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
             <a href="./#playground" target="_blank" class="nav-link"><i class="bi bi-window-stack"></i><span>API Playground</span></a>
@@ -2109,6 +2174,85 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <?php endfor; ?>
                 <li class="page-item <?php echo ($rep_page >= $total_rep_pages) ? 'disabled' : ''; ?>">
                   <a class="page-link" href="?access=admin&page=reports&p=<?php echo $rep_page + 1; ?>">Next</a>
+                </li>
+              </ul>
+            </nav>
+            <?php endif; ?>
+          </div>
+        <?php elseif (($_GET['page'] ?? '') === 'appeals'): ?>
+          <div class="page-header"><h1 class="content-title m-0">Pending Ban Appeals</h1></div>
+          <div class="content-area-wrapper">
+            <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
+              <table class="table table-dark table-striped m-0 align-middle">
+                <thead class="border-bottom border-secondary">
+                  <tr><th class="py-3 px-4">Time</th><th class="py-3 px-4">User Details</th><th class="py-3 px-4">Appeal Text</th><th class="py-3 px-4 text-end">Actions</th></tr>
+                </thead>
+                <tbody>
+                  <?php
+                    $app_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                    $app_limit = 25;
+                    $app_offset = ($app_page - 1) * $app_limit;
+                    $db = get_db();
+                    
+                    $total_apps = $db->query("SELECT COUNT(id) FROM ban_appeals WHERE status = 'pending'")->fetchColumn();
+                    $total_app_pages = ceil($total_apps / $app_limit);
+                    
+                    $stmt_apps = $db->prepare("
+                      SELECT a.*, u.artist, u.email, u.banned 
+                      FROM ban_appeals a
+                      JOIN users u ON a.user_id = u.id
+                      WHERE a.status = 'pending'
+                      ORDER BY a.created_at DESC LIMIT ? OFFSET ?
+                    ");
+                    $stmt_apps->bindValue(1, (int)$app_limit, PDO::PARAM_INT);
+                    $stmt_apps->bindValue(2, (int)$app_offset, PDO::PARAM_INT);
+                    $stmt_apps->execute();
+                    $appeals = $stmt_apps->fetchAll();
+                    
+                    if (empty($appeals)): ?>
+                      <tr><td colspan="4" class="text-center py-4 text-secondary">No pending ban appeals.</td></tr>
+                  <?php else: foreach ($appeals as $a): ?>
+                  <tr>
+                    <td class="py-3 px-4 text-secondary small"><?php echo $a['created_at']; ?></td>
+                    <td class="py-3 px-4">
+                      <span class="fw-bold text-info"><?php echo htmlspecialchars($a['artist']); ?></span>
+                      <?php if ($a['banned']): ?><span class="badge bg-danger ms-1">Banned</span><?php endif; ?><br>
+                      <small class="text-secondary">ID: <?php echo $a['user_id']; ?> | <?php echo htmlspecialchars($a['email']); ?></small>
+                    </td>
+                    <td class="py-3 px-4 text-warning" style="white-space: pre-wrap;"><?php echo htmlspecialchars($a['appeal_text']); ?></td>
+                    <td class="py-3 px-4 text-end">
+                      <form method="POST" action="" class="m-0 d-flex gap-2 justify-content-end">
+                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                        <input type="hidden" name="appeal_id" value="<?php echo $a['id']; ?>">
+                        <input type="hidden" name="user_id" value="<?php echo $a['user_id']; ?>">
+                        
+                        <button type="submit" name="approve_appeal" class="btn btn-sm btn-success" onclick="return confirm('Are you sure you want to lift the ban for this user?');">Unban & Approve</button>
+                        <button type="submit" name="reject_appeal" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to reject this appeal?');">Reject</button>
+                      </form>
+                    </td>
+                  </tr>
+                  <?php endforeach; endif; ?>
+                </tbody>
+              </table>
+            </div>
+            <?php if ($total_app_pages > 1): ?>
+            <nav aria-label="Appeals pagination">
+              <ul class="pagination justify-content-center">
+                <li class="page-item <?php echo ($app_page <= 1) ? 'disabled' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=appeals&p=<?php echo $app_page - 1; ?>">Previous</a>
+                </li>
+                <?php
+                  $start_p = max(1, $app_page - 1);
+                  $end_p = min($total_app_pages, $start_p + 2);
+                  if ($end_p - $start_p < 2) { $start_p = max(1, $end_p - 2); }
+                ?>
+                <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
+                <li class="page-item <?php echo ($app_page == $i) ? 'active' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=appeals&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                </li>
+                <?php endfor; ?>
+                <li class="page-item <?php echo ($app_page >= $total_app_pages) ? 'disabled' : ''; ?>">
+                  <a class="page-link" href="?access=admin&page=appeals&p=<?php echo $app_page + 1; ?>">Next</a>
                 </li>
               </ul>
             </nav>
@@ -4650,7 +4794,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 ];
                 $admin_order_by = $admin_sort_map[$sort_admin] ?? 'ORDER BY id DESC';
                 
-                $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned, is_admin, reset_requested FROM users $where $admin_order_by LIMIT ? OFFSET ?";
+                $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned, is_admin, reset_requested, rhythm_strikes FROM users $where $admin_order_by LIMIT ? OFFSET ?";
                 $stmt = $db->prepare($sql);
                 $param_index = 1;
                 if ($search !== '') {
@@ -4682,8 +4826,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <?php elseif ($user['verified'] === 'pending'): ?>
                     <span class="badge bg-info text-dark fw-bold"><i class="bi bi-hourglass-split"></i> PENDING</span>
                   <?php endif; ?>
-                  <?php if ($user['banned']): ?>
+                  <?php if ($user['banned'] && abs($user['rhythm_strikes']) < 3): ?>
                     <span class="badge bg-danger"><i class="bi bi-slash-circle-fill"></i> BANNED</span>
+                  <?php endif; ?>
+                  <?php if ($user['rhythm_strikes'] > 0 && !$user['banned']): ?>
+                    <span class="badge bg-warning text-dark"><i class="bi bi-controller"></i> GAME BANNED (<?php echo $user['rhythm_strikes']; ?>/3)</span>
+                  <?php elseif (abs($user['rhythm_strikes']) > 0 && !$user['banned']): ?>
+                    <span class="badge bg-secondary text-white"><i class="bi bi-controller"></i> STRIKES (<?php echo abs($user['rhythm_strikes']); ?>/3)</span>
+                  <?php elseif (abs($user['rhythm_strikes']) >= 3 && $user['banned']): ?>
+                    <span class="badge bg-danger"><i class="bi bi-slash-circle-fill"></i> 3/3 RHYTHM BAN</span>
                   <?php endif; ?>
                 </div>
                 <div class="user-item-last-up-desktop text-secondary small fw-medium"><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></div>
@@ -4723,6 +4874,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                               <i class="bi bi-slash-circle" style="color: orange;"></i> 
                               <?php echo $user['banned'] ? 'Unban User' : 'Ban User'; ?>
                             </button>
+                            
+                            <?php if (abs($user['rhythm_strikes']) >= 3): ?>
+                              <button type="submit" name="reset_rhythm_history" class="dropdown-item d-flex align-items-center gap-3 text-danger fw-bold" onclick="return confirm('Reset all rhythm strikes history to 0/3 and fully unban this account?');">
+                                <i class="bi bi-arrow-counterclockwise"></i> Reset Rhythm History & Unban
+                              </button>
+                            <?php else: ?>
+                              <button type="submit" name="toggle_rhythm_ban" class="dropdown-item d-flex align-items-center gap-3 text-white">
+                                <i class="bi bi-controller text-warning"></i> 
+                                <?php echo $user['rhythm_strikes'] > 0 ? 'Unban from Rhythm Game' : 'Ban from Rhythm Game'; ?> (<?php echo abs($user['rhythm_strikes']); ?>/3)
+                              </button>
+                            <?php endif; ?>
                             
                             <li><hr class="dropdown-divider border-secondary opacity-50"></li>
                             <button type="submit" name="soft_delete_user" class="dropdown-item d-flex align-items-center gap-3 text-warning fw-bold" onclick="return confirm('Soft delete this user? Their account will be anonymized and locked, but their uploaded music and posts will remain.');">
@@ -5161,6 +5323,7 @@ function init_db($db) {
     if (!in_array('profile_picture_type', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_picture_type TEXT;");
     if (!in_array('backup_key', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN backup_key TEXT;");
     if (!in_array('banned', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0;");
+    if (!in_array('rhythm_strikes', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN rhythm_strikes INTEGER DEFAULT 0;");
     if (!in_array('settings', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN settings TEXT;");
     if (!in_array('bio', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN bio TEXT;");
     if (!in_array('profile_background', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background BLOB;");
@@ -5431,6 +5594,14 @@ function init_db($db) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (reported_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS ban_appeals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      appeal_text TEXT,
+      status TEXT DEFAULT 'pending',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
   ");
 
@@ -6335,9 +6506,10 @@ HTML;
     case 'get_session':
       if ($user_id) {
         try { $db->exec("ALTER TABLE users ADD COLUMN last_active DATETIME;"); } catch(Exception $e) {}
+        try { $db->exec("ALTER TABLE users ADD COLUMN rhythm_strikes INTEGER DEFAULT 0;"); } catch(Exception $e) {}
         $db->prepare("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE id = ?")->execute([$user_id]);
 
-        $stmt = $db->prepare("SELECT id, email, artist, bio, verified, last_upload_date, daily_upload_count, banned, settings, is_admin FROM users WHERE id = ?");
+        $stmt = $db->prepare("SELECT id, email, artist, bio, verified, last_upload_date, daily_upload_count, banned, settings, is_admin, rhythm_strikes FROM users WHERE id = ?");
         $stmt->execute([$user_id]);
         $user = $stmt->fetch();
         if ($user && empty($user['banned'])) {
@@ -6356,6 +6528,54 @@ HTML;
       } else {
         send_json(['status' => 'loggedout']);
       }
+      break;
+
+    case 'submit_appeal':
+      $data = json_decode(file_get_contents('php://input'), true);
+      $appeal_text = trim(htmlspecialchars($data['appeal_text'] ?? '', ENT_QUOTES, 'UTF-8'));
+      
+      if (empty($appeal_text)) {
+        http_response_code(400);
+        send_json(['status' => 'error', 'message' => 'Appeal reasoning is required.']);
+      }
+
+      $target_user_id = null;
+
+      // Handle Logged-out Full Ban Appeal (Requires Email)
+      if (isset($data['email']) && !empty($data['email'])) {
+        $email = filter_var($data['email'], FILTER_VALIDATE_EMAIL);
+        if (!$email) {
+          http_response_code(400);
+          send_json(['status' => 'error', 'message' => 'Invalid email format.']);
+        }
+        $stmt = $db->prepare("SELECT id, banned FROM users WHERE email = ?");
+        $stmt->execute([$email]);
+        $user = $stmt->fetch();
+        
+        if (!$user || $user['banned'] == 0) {
+          http_response_code(400);
+          send_json(['status' => 'error', 'message' => 'This account is not currently permanently banned or does not exist.']);
+        }
+        $target_user_id = $user['id'];
+      } 
+      // Handle Logged-in Game Ban Appeal
+      else if ($user_id) {
+        $stmt = $db->prepare("SELECT id, rhythm_strikes FROM users WHERE id = ?");
+        $stmt->execute([$user_id]);
+        $user = $stmt->fetch();
+        
+        if (!$user || $user['rhythm_strikes'] == 0) {
+          http_response_code(400);
+          send_json(['status' => 'error', 'message' => 'Your account is not suspended from the Rhythm Game.']);
+        }
+        $target_user_id = $user_id;
+      } else {
+        http_response_code(400);
+        send_json(['status' => 'error', 'message' => 'Authentication or Email required.']);
+      }
+      
+      $db->prepare("INSERT INTO ban_appeals (user_id, appeal_text) VALUES (?, ?)")->execute([$target_user_id, $appeal_text]);
+      send_json(['status' => 'success', 'message' => 'Your appeal has been submitted for administrative review.']);
       break;
 
     case 'forgot_password':
@@ -7376,8 +7596,18 @@ HTML;
       $is_all = isset($_GET['all']) && $_GET['all'] == '1';
       $current_limit = $is_all ? '' : $limit_clause;
 
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE os.user_id = ? " . $order_by . " " . $current_limit);
-      $stmt->execute([$user_id, $user_id]);
+      $where_sql = "WHERE os.user_id = ?";
+      $params = [$user_id, $user_id];
+      if (!empty($_GET['q'])) {
+        $where_sql .= " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
+        $q_param = '%' . $_GET['q'] . '%';
+        $params[] = $q_param;
+        $params[] = $q_param;
+        $params[] = $q_param;
+      }
+
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . " " . $current_limit);
+      $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
 
@@ -10964,17 +11194,80 @@ HTML;
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
       
-      // SERVER-SIDE ANTI-CHEAT VALIDATION
+      // SERVER-SIDE ANTI-CHEAT VALIDATION (V6.2: Multi-Layered, Pattern Analysis, Auto-Ban)
       $hit_deltas = $data['hit_deltas'] ?? [];
-      $suspicious_hits = 0;
-      foreach ($hit_deltas as $delta) {
-        if ((float)$delta < 5.0) {
-          $suspicious_hits++;
+      $total_hits = count($hit_deltas);
+      $max_combo = intval($data['max_combo'] ?? 0);
+      $claimed_score = intval($data['score'] ?? 0);
+      $is_cheater = false;
+      $ban_reason = '';
+
+      if ($total_hits > 20) {
+        // Layer 1: Inhuman Precision bounds (Too many hits occurring with sub-5ms delta)
+        $suspicious_hits = 0;
+        $sum = 0;
+        foreach ($hit_deltas as $delta) {
+          $d = (float)$delta;
+          if ($d < 5.0) $suspicious_hits++;
+          $sum += $d;
+        }
+        
+        if (($suspicious_hits / $total_hits) > 0.8) {
+          $is_cheater = true;
+          $ban_reason = 'Inhuman Precision (80%+ hits under 5ms)';
+        }
+
+        // Layer 2: Pattern Analysis (Macro / Zero-Variance Detection via Standard Deviation)
+        if (!$is_cheater) {
+          $mean = $sum / $total_hits;
+          $variance_sum = 0;
+          foreach ($hit_deltas as $delta) {
+            $variance_sum += pow((float)$delta - $mean, 2);
+          }
+          $std_dev = sqrt($variance_sum / $total_hits);
+          
+          // Human timing organically fluctuates. Standard deviation < 1.5ms across 20+ hits strongly indicates a machine macro.
+          if ($std_dev < 1.5) {
+            $is_cheater = true;
+            $ban_reason = 'Macro Pattern Detected (StdDev < 1.5ms)';
+          }
         }
       }
-      $total_hits = count($hit_deltas);
-      if ($total_hits > 20 && ($suspicious_hits / $total_hits) > 0.8) {
-        send_json(['status' => 'error', 'message' => 'Cheat detected: Inhuman precision.']);
+
+      // Layer 3: Bounds Validation (Score / Combo Spoofing)
+      $theoretical_max = $total_hits * 1000;
+      if ($claimed_score > $theoretical_max || $max_combo > $total_hits) {
+        $is_cheater = true;
+        $ban_reason = 'Data Spoofing (Score or Combo out of mathematical bounds)';
+      }
+
+      if ($is_cheater) {
+        // Fetch current strikes (using absolute value to accurately track historical progression)
+        $stmt_strikes = $db->prepare("SELECT rhythm_strikes FROM users WHERE id = ?");
+        $stmt_strikes->execute([$user_id]);
+        $current_strikes = (int)$stmt_strikes->fetchColumn();
+        $new_strikes = abs($current_strikes) + 1;
+        
+        try {
+          $db->exec("CREATE TABLE IF NOT EXISTS admin_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, admin_email TEXT, action TEXT, target_user_id INTEGER, target_email TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);");
+        } catch(Exception $e) {}
+
+        if ($new_strikes >= 3) {
+          // 3rd strike: Full Account Permanent Ban
+          $db->prepare("UPDATE users SET rhythm_strikes = ?, banned = 1 WHERE id = ?")->execute([$new_strikes, $user_id]);
+          $db->prepare("INSERT INTO admin_logs (admin_email, action, target_user_id, target_email) VALUES (?, ?, ?, ?)")
+             ->execute(['SYSTEM (Auto-Ban)', '3rd Strike Cheat: ' . $ban_reason, $user_id, 'SYSTEM']);
+          session_destroy();
+          http_response_code(403);
+          send_json(['status' => 'error', 'message' => '3rd Strike Cheat detected: ' . $ban_reason . '. Your account has been permanently banned.']);
+        } else {
+          // 1st/2nd strike: Rhythm Game Ban Only
+          $db->prepare("UPDATE users SET rhythm_strikes = ? WHERE id = ?")->execute([$new_strikes, $user_id]);
+          $db->prepare("INSERT INTO admin_logs (admin_email, action, target_user_id, target_email) VALUES (?, ?, ?, ?)")
+             ->execute(['SYSTEM (Game-Ban)', 'Strike ' . $new_strikes . ' Cheat: ' . $ban_reason, $user_id, 'SYSTEM']);
+          http_response_code(403);
+          send_json(['status' => 'error', 'message' => 'Cheat detected (Strike ' . $new_strikes . '/3): ' . $ban_reason . '. You are banned from the Rhythm Game.']);
+        }
       }
       
       // Force-create table on demand to bypass any session installation cache
@@ -11167,6 +11460,10 @@ HTML;
       if ($search !== '') {
         $where .= " AND u.artist LIKE ? COLLATE NOCASE";
         $params[] = "%$search%";
+      }
+      if (!empty($_GET['following_of'])) {
+        $where .= " AND u.id IN (SELECT following_id FROM follows WHERE follower_id = ?)";
+        $params[] = (int)$_GET['following_of'];
       }
 
       // Fetch all registered players and song creators, computing stats natively via SQL
@@ -14108,16 +14405,16 @@ function perform_cover_scan($db) {
           padding-right: 4px;
         }
 
-        /* Force left sub-panes (History/Favorites) to fill height below tabs */
-        #rg-art-pane-history, #rg-art-pane-favs {
+        /* Force left sub-panes (History/Favorites/Following) to fill height below tabs */
+        #rg-art-pane-history, #rg-art-pane-favs, #rg-art-pane-following {
           flex-grow: 1;
           min-height: 0;
           display: flex;
           flex-direction: column;
         }
 
-        /* Make the inner History and Favorites lists scroll independently on the left column */
-        #rg-list-artist-history, #rg-list-artist-favs {
+        /* Make the inner History, Favorites and Following lists scroll independently on the left column */
+        #rg-list-artist-history, #rg-list-artist-favs, #rg-list-artist-following {
           overflow-y: auto !important;
           flex-grow: 1;
           min-height: 0;
@@ -14126,7 +14423,7 @@ function perform_cover_scan($db) {
         }
 
         /* Overwrite hidden states for Desktop */
-        #rg-art-pane-history.d-none, #rg-art-pane-favs.d-none {
+        #rg-art-pane-history.d-none, #rg-art-pane-favs.d-none, #rg-art-pane-following.d-none {
           display: none !important;
         }
       }
@@ -14712,7 +15009,7 @@ function perform_cover_scan($db) {
               <li><a class="dropdown-item" href="javascript:void(0);" onclick="loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' }); setTimeout(() => { const st = document.querySelector('[data-target=\'#tab-status\']'); if(st) st.click(); }, 300);"><i class="bi bi-camera-fill"></i> My Statuses</a></li>
               <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-mobile"><i class="bi bi-bar-chart-line-fill"></i> Statistics</a></li>
               <li><a class="dropdown-item" href="#" id="sleep-timer-btn-mobile"><i class="bi bi-moon-stars-fill"></i> Sleep Timer</a></li>
-              <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill"></i> Settings</a></li>
+              <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-sliders"></i> Settings</a></li>
               <li><hr class="dropdown-divider"></li>
               <li><a class="dropdown-item text-danger" href="#" id="profile-dropdown-logout-mobile"><i class="bi bi-box-arrow-left"></i> Logout</a></li>
             </ul>
@@ -14758,7 +15055,7 @@ function perform_cover_scan($db) {
                 <li><a class="dropdown-item" href="javascript:void(0);" onclick="loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' }); setTimeout(() => { const st = document.querySelector('[data-target=\'#tab-status\']'); if(st) st.click(); }, 300);"><i class="bi bi-camera-fill"></i> My Statuses</a></li>
                 <li><a class="dropdown-item" href="#" id="profile-dropdown-stats-desktop"><i class="bi bi-bar-chart-line-fill"></i> Statistics</a></li>
                 <li><a class="dropdown-item" href="#" id="sleep-timer-btn-desktop"><i class="bi bi-moon-stars-fill"></i> Sleep Timer</a></li>
-                <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-gear-fill"></i> Settings</a></li>
+                <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#settings-modal"><i class="bi bi-sliders"></i> Settings</a></li>
                 <li><hr class="dropdown-divider"></li>
                 <li><a class="dropdown-item text-danger" href="#" id="profile-dropdown-logout-desktop"><i class="bi bi-box-arrow-left"></i> Logout</a></li>
               </ul>
@@ -14853,7 +15150,7 @@ function perform_cover_scan($db) {
                       <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-soundwave"></i></div>
                       <div>
                         <strong class="text-white">5-Band Equalizer & Crossfade</strong><br>
-                        <span class="text-secondary">Inside the <i class="bi bi-gear-fill"></i> Settings menu, toggle the Equalizer to sculpt the frequencies (Bass, Mids, Treble). You can also adjust the Crossfade slider to seamlessly blend the end of one song into the beginning of the next!</span>
+                        <span class="text-secondary">Inside the <i class="bi bi-sliders"></i> Settings menu, toggle the Equalizer to sculpt the frequencies (Bass, Mids, Treble). You can also adjust the Crossfade slider to seamlessly blend the end of one song into the beginning of the next!</span>
                       </div>
                     </div>
                   </li>
@@ -16592,6 +16889,7 @@ function perform_cover_scan($db) {
               <button type="submit" class="btn btn-danger w-100 mb-3">Login</button>
               <div class="text-center">
                 <a href="#" class="text-info text-decoration-none small d-block mb-2" data-bs-toggle="modal" data-bs-target="#forgot-password-modal" data-bs-dismiss="modal">I forgot my password</a>
+                <a href="#" class="text-warning text-decoration-none small d-block mb-2" data-bs-toggle="modal" data-bs-target="#appeal-ban-modal" data-bs-dismiss="modal">Appeal an account ban</a>
                 <a href="#" class="text-secondary text-decoration-none small d-block" data-bs-toggle="modal" data-bs-target="#register-modal" data-bs-dismiss="modal">I don't have an account</a>
               </div>
             </form>
@@ -16625,6 +16923,58 @@ function perform_cover_scan($db) {
               <div class="text-center">
                 <a href="#" class="text-secondary text-decoration-none small" data-bs-toggle="modal" data-bs-target="#login-modal" data-bs-dismiss="modal">I already have an account</a>
               </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="appeal-ban-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title text-white"><i class="bi bi-shield-exclamation text-warning me-2"></i> Appeal Account Ban</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4">
+            <form id="appeal-ban-form">
+              <p class="text-secondary small mb-4">If you believe your account was falsely flagged by the anti-cheat system in the Rhythm Game, please submit an appeal below.</p>
+              <div class="mb-3">
+                <label for="appeal-email" class="form-label text-secondary fw-bold small">EMAIL ADDRESS</label>
+                <input type="email" class="form-control bg-dark text-white border-secondary" id="appeal-email" required>
+              </div>
+              <div class="mb-4">
+                <label for="appeal-text" class="form-label text-secondary fw-bold small">REASON FOR APPEAL</label>
+                <textarea class="form-control bg-dark text-white border-secondary" id="appeal-text" rows="4" required placeholder="Explain why your ban was a false positive..."></textarea>
+              </div>
+              <button type="submit" class="btn btn-warning text-dark fw-bold w-100 mb-3">Submit Appeal</button>
+              <div class="text-center">
+                <a href="#" class="text-secondary text-decoration-none small" data-bs-toggle="modal" data-bs-target="#login-modal" data-bs-dismiss="modal">Back to Login</a>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="settings-appeal-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title text-white"><i class="bi bi-shield-exclamation text-warning me-2"></i> Appeal Game Suspension</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4">
+            <form id="settings-appeal-form">
+              <div class="alert alert-danger py-2 px-3 small border-danger fw-bold mb-4">
+                <i class="bi bi-exclamation-triangle-fill me-1"></i> WARNING: 3 cheat strikes will permanently ban your entire account and revoke site access.
+              </div>
+              <p class="text-secondary small mb-3">Submit your reasoning below to have your rhythm game access restored by an admin.</p>
+              <div class="mb-4">
+                <label for="settings-appeal-text" class="form-label text-secondary fw-bold small">REASON FOR APPEAL</label>
+                <textarea class="form-control bg-dark text-white border-secondary" id="settings-appeal-text" rows="4" required placeholder="Explain why the anti-cheat falsely flagged you..."></textarea>
+              </div>
+              <button type="submit" class="btn btn-warning text-dark fw-bold w-100">Submit Appeal</button>
             </form>
           </div>
         </div>
@@ -17303,6 +17653,12 @@ function perform_cover_scan($db) {
                   </form>
                 </div>
                 
+                <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-shield-exclamation text-warning"></i> Game Ban Status</h6>
+                  <p class="text-secondary small mb-3">If you are locked out of the Rhythm Game due to false anti-cheat flags, you can appeal the restriction here.</p>
+                  <button type="button" class="btn btn-warning text-dark w-100 fw-bold" data-bs-toggle="modal" data-bs-target="#settings-appeal-modal" data-bs-dismiss="modal"><i class="bi bi-envelope-paper me-2"></i> Submit Game Ban Appeal</button>
+                </div>
+
                 <div class="phpmusic-settings-section border-danger" style="background-color: rgba(255,0,0,0.03);">
                   <h6 class="phpmusic-settings-section-title text-danger border-danger"><i class="bi bi-exclamation-triangle-fill"></i> Danger Zone</h6>
                   <p class="text-secondary small mb-4">Once you delete your account, there is no going back. Please be certain.</p>
@@ -23266,12 +23622,21 @@ SOFTWARE.</div>
             const keys = await cache.keys();
             for (let req of keys) {
               const u = new URL(req.url);
-              if (u.searchParams.get('id') == id) await cache.delete(req);
+              // Clean up both audio (?id=) and charts (?song_id=)
+              if (u.searchParams.get('id') == id || u.searchParams.get('song_id') == id) await cache.delete(req);
             }
             
             const v = globalSongCache[id] ? (globalSongCache[id].last_modified || 0) : 0;
             await cache.add(`?action=get_image&id=${id}&v=${v}`);
             await cache.add(`?action=get_song_data&id=${id}`);
+            
+            // Explicitly force the device to cache Rhythm Game charts so they load safely offline!
+            await cache.add(`?action=get_all_rhythm_levels`).catch(()=>{});
+            await cache.add(`?action=get_rhythm_levels&song_id=${id}`).catch(()=>{});
+            const rgDiffs = ['easy', 'medium', 'hard', 'expert', 'master', 'demon'];
+            for (let d of rgDiffs) {
+              await cache.add(`?action=get_rhythm_chart&song_id=${id}&difficulty=${d}`).catch(()=>{});
+            }
 
             const response = await fetch(`?action=get_stream&id=${id}`);
             const contentLength = response.headers.get('content-length');
@@ -23374,7 +23739,7 @@ SOFTWARE.</div>
                 const keys = await cache.keys();
                 for (let req of keys) {
                   const u = new URL(req.url);
-                  if (u.searchParams.get('id') == songId) await cache.delete(req);
+                  if (u.searchParams.get('id') == songId || u.searchParams.get('song_id') == songId) await cache.delete(req);
                 }
               } catch (e) {}
               offlineSongsSet.delete(parseInt(songId));
@@ -25033,10 +25398,33 @@ SOFTWARE.</div>
           if (currentView.f_end_date) pageParams.append('f_end_date', currentView.f_end_date);
           if (currentView.filter) pageParams.append('filter', currentView.filter);
           
+          if (!navigator.onLine && currentView.type !== 'get_offline_songs' && currentView.type !== 'rhythm_game') {
+            updateContentTitle('Offline', false);
+            contentArea.innerHTML = `
+              <div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100" style="height: 60vh;">
+                <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 5rem;"></i>
+                <h3 class="fw-bold text-white">You are currently offline</h3>
+                <p class="text-secondary mt-2 mb-4" style="max-width: 400px;">Try to play offline songs in your offline library.</p>
+                <div class="d-flex gap-3 justify-content-center flex-wrap">
+                  <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="window.loadView({ type: 'get_offline_songs', param: '', sort: 'manual_order', filter_user_id: '' })"><i class="bi bi-cloud-check-fill text-success me-2"></i> Offline Library</button>
+                  <button class="btn btn-danger fw-bold px-4 py-2 rounded-pill" onclick="window.loadView({ type: 'rhythm_game', param: '', sort: '', filter_user_id: '' })"><i class="bi bi-controller me-2"></i> Rhythm Game</button>
+                </div>
+              </div>
+            `;
+            allContentloaded = true;
+            hideLoader();
+            return;
+          }
+
           switch (currentView.type) {
             case 'rhythm_game':
               updateContentTitle('Rhythm Game', !!currentUser);
               if (currentUser) {
+                if (currentUser.rhythm_strikes > 0) {
+                  contentArea.innerHTML = `<div class="text-center p-5 text-danger"><i class="bi bi-exclamation-triangle-fill d-block fs-1 mb-3"></i><h4>Game Access Suspended</h4><p class="text-secondary mt-2">You have been banned from the Rhythm Game for suspicious activity (Strike ${currentUser.rhythm_strikes}/3).<br>Submit an appeal in Settings to restore access.</p></div>`;
+                  allContentloaded = true;
+                  break;
+                }
                 contentArea.style.padding = '0';
                 contentArea.style.height = '100%';
                 contentArea.innerHTML = `
@@ -25086,10 +25474,11 @@ SOFTWARE.</div>
                               <div id="rg-artist-detail-header" class="p-3 rounded-4" style="background: linear-gradient(135deg, rgba(255,59,48,0.15) 0%, rgba(0,0,0,0.4) 100%); border: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 16px;"></div>
 
                               <!-- Sub Navigation Tabs -->
-                              <ul class="nav nav-tabs border-secondary border-0 d-flex gap-2" id="rg-artist-detail-tabs" style="margin-bottom: 8px;">
-                                <li class="nav-item"><button class="nav-link active" id="rg-art-tab-tracks" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important;">Tracks</button></li>
-                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-history" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important;">History</button></li>
-                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-favs" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important;">Favorites</button></li>
+                              <ul class="nav nav-tabs border-secondary border-0 d-flex gap-2" id="rg-artist-detail-tabs" style="margin-bottom: 8px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;">
+                                <li class="nav-item"><button class="nav-link active" id="rg-art-tab-tracks" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Tracks</button></li>
+                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-history" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">History</button></li>
+                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-favs" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Favorites</button></li>
+                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-following" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Following</button></li>
                               </ul>
 
                               <!-- History Pane -->
@@ -25111,6 +25500,23 @@ SOFTWARE.</div>
                                   </select>
                                 </div>
                                 <div id="rg-list-artist-favs" class="d-flex flex-column gap-2"></div>
+                              </div>
+                              
+                              <!-- Following Pane -->
+                              <div id="rg-art-pane-following" class="d-none flex-column gap-2 w-100">
+                                <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
+                                  <input type="text" id="rg-search-artist-following" class="rg-search-input" placeholder="Search following..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                                  <select id="rg-sort-artist-following" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                                    <option value="name_asc">Name (A-Z)</option>
+                                    <option value="name_desc">Name (Z-A)</option>
+                                    <option value="count_desc">Most Tracks</option>
+                                    <option value="followers_desc">Most Followers</option>
+                                    <option value="score_desc">Most Scores</option>
+                                    <option value="rank_desc">Most Ranks</option>
+                                    <option value="random">Random</option>
+                                  </select>
+                                </div>
+                                <div id="rg-list-artist-following" class="d-flex flex-column gap-2"></div>
                               </div>
                             </div>
 
@@ -25153,9 +25559,14 @@ SOFTWARE.</div>
                         <div id="rg-tab-settings" class="rg-tab-content rg-hidden">
                           <div class="modern-custom-scroll" style="flex: 1; overflow-y: auto; padding: 24px 16px;">
                             <div style="max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; width: 100%;">
-                              <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 24px; padding-bottom: 12px; border-bottom: 2px solid rgba(255,255,255,0.1);">
-                                <i class="bi bi-gear-fill" style="font-size: 1.8rem; color: #fff;"></i>
-                                <h2 style="color: #fff; font-weight: 800; text-transform: uppercase; font-size: 1.6rem; margin: 0; letter-spacing: 1px;">Settings</h2>
+                              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; padding-bottom: 12px; border-bottom: 2px solid rgba(255,255,255,0.1);">
+                                <div style="display: flex; align-items: center; gap: 12px;">
+                                  <i class="bi bi-sliders" style="font-size: 1.8rem; color: #fff;"></i>
+                                  <h2 style="color: #fff; font-weight: 800; text-transform: uppercase; font-size: 1.6rem; margin: 0; letter-spacing: 1px;">Settings</h2>
+                                </div>
+                                <button class="btn btn-outline-light rounded-pill fw-bold d-flex align-items-center gap-2 share-view-btn" data-share-type="game" data-share-name="PHP Music Rhythm Game" data-image-url="?action=get_app_icon&size=512" style="font-size: 0.85rem;">
+                                  <i class="bi bi-share-fill"></i> Share
+                                </button>
                               </div>
 
                               <!-- Keybindings Card -->
@@ -25216,6 +25627,21 @@ SOFTWARE.</div>
                             </div>
                           </div>
                         </div>
+
+                        <div id="rg-tab-offline" class="rg-tab-content rg-hidden">
+                          <div class="rg-search-bar" style="display: flex; gap: 8px;">
+                            <input type="text" id="rg-search-offline" class="rg-search-input" placeholder="Search offline tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                            <select id="rg-sort-offline" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                              <option value="manual_order">My Order</option>
+                              <option value="random">Random</option>
+                              <option value="trending">Trending</option>
+                              <option value="added_newest">Newest</option>
+                              <option value="title_asc">Title (A-Z)</option>
+                              <option value="artist_asc">Artist (A-Z)</option>
+                            </select>
+                          </div>
+                          <div class="rg-list-container" id="rg-list-offline"></div>
+                        </div>
                       </div>
                       <div class="rg-bottom-nav">
                         <div class="rg-nav-item active" data-target="songs"><i class="bi bi-music-note-list fs-4"></i><div class="rg-nav-label">Songs</div></div>
@@ -25223,10 +25649,8 @@ SOFTWARE.</div>
                         <div class="rg-nav-item" data-target="favorites"><i class="bi bi-heart-fill fs-4"></i><div class="rg-nav-label">Favorites</div></div>
                         <div class="rg-nav-item" data-target="leaderboard"><i class="bi bi-trophy-fill fs-4"></i><div class="rg-nav-label">Ranks</div></div>
                         <div class="rg-nav-item" id="rg-nav-my-profile"><i class="bi bi-person-fill fs-4"></i><div class="rg-nav-label">Profile</div></div>
-                        <div class="rg-nav-item" data-target="settings"><i class="bi bi-gear-fill fs-4"></i><div class="rg-nav-label">Settings</div></div>
-                        <div class="share-view-btn" data-share-type="game" data-share-name="PHP Music Rhythm Game" data-image-url="?action=get_app_icon&size=512" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: #fff; opacity: 0.5; cursor: pointer; padding: 8px 16px; border-radius: 16px; transition: all 0.2s;" onmouseover="this.style.opacity='1'; this.style.color='var(--rg-primary)'" onmouseout="this.style.opacity='0.5'; this.style.color='#fff'">
-                          <i class="bi bi-share-fill fs-4"></i><div class="rg-nav-label" style="font-size: 0.75rem; font-weight: 700;">Share</div>
-                        </div>
+                        <div class="rg-nav-item" data-target="offline"><i class="bi bi-cloud-check-fill fs-4"></i><div class="rg-nav-label">Offline</div></div>
+                        <div class="rg-nav-item" data-target="settings"><i class="bi bi-sliders fs-4"></i><div class="rg-nav-label">Settings</div></div>
                       </div>
                     </div>
 
@@ -25241,14 +25665,28 @@ SOFTWARE.</div>
                               <div style="font-size: 0.8rem; font-weight: 700; color: #777; margin-bottom: 12px; text-align: left; text-transform: uppercase;">Select Difficulty</div>
                               <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
                                 <button class="rg-diff-btn active" data-diff="easy">Easy</button>
-                              <button class="rg-diff-btn" data-diff="medium">Med</button>
+                                <button class="rg-diff-btn" data-diff="medium">Med</button>
                                 <button class="rg-diff-btn" data-diff="hard">Hard</button>
                                 <button class="rg-diff-btn" data-diff="expert">Exprt</button>
                                 <button class="rg-diff-btn" data-diff="master">Mstr</button>
                                 <button class="rg-diff-btn" style="color: #ff3b30;" data-diff="demon">Demon</button>
                               </div>
                             </div>
+
+                            <div style="width: 100%; max-width: 360px; margin: 24px auto 0 auto; display: flex; align-items: center; justify-content: space-between; background: var(--rg-surface-variant); padding: 12px 16px; border-radius: 12px; border: 1px solid #333;">
+                              <div class="text-start" style="min-width: 0;">
+                                <div style="font-size: 0.9rem; font-weight: 700; color: #fff;">Autoplay (Bot Mode)</div>
+                                <div style="font-size: 0.75rem; color: #aaa;">Watch the bot play perfectly. Scores will not be saved.</div>
+                              </div>
+                              <div class="form-check form-switch m-0 fs-4">
+                                <input class="form-check-input" type="checkbox" id="rg-autoplay-toggle" style="cursor: pointer; accent-color: var(--rg-primary);">
+                              </div>
+                            </div>
                             
+                            <div style="width: 100%; max-width: 360px; margin: 12px auto 0 auto;">
+                              <button id="rg-btn-view-chart" class="btn btn-outline-light w-100 rounded-pill fw-bold" style="font-size: 0.9rem; border-color: rgba(255,255,255,0.2);"><i class="bi bi-map me-1"></i> View Chart Map</button>
+                            </div>
+                          
                             <div style="display: flex; justify-content: center; gap: 16px; margin-top: 32px; width: 100%; max-width: 360px;">
                               <button class="btn btn-link text-secondary text-decoration-none fw-bold" id="rg-btn-dialog-cancel" style="font-size: 1.1rem;">Cancel</button>
                               <button class="btn btn-danger rounded-pill px-5 fw-bold flex-grow-1" id="rg-btn-dialog-play" style="font-size: 1.1rem; padding-top: 12px; padding-bottom: 12px; box-shadow: 0 4px 16px rgba(255,59,48,0.4);">Play</button>
@@ -25312,6 +25750,22 @@ SOFTWARE.</div>
                             <div id="rg-in-game-hp" style="width: 100%; height: 100%; background-color: #27c93f; transition: width 0.1s, background-color: 0.1s;"></div>
                           </div>
                           <div id="rg-in-game-accuracy" style="font-family: monospace; font-size: 0.8rem; font-weight: bold; color: #aaa; text-shadow: 0 1px 2px rgba(0,0,0,0.8); line-height: 1;">100.00%</div>
+                          <div id="rg-in-game-autoplay" style="font-size: 0.65rem; font-weight: 800; color: #00bcd4; text-transform: uppercase; margin-top: 2px; text-shadow: 0 0 6px rgba(0,188,212,0.4); display: none;">Autoplay</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="rg-dialog-chart-modal" class="rg-dialog-backdrop rg-hidden" style="z-index: 60;">
+                      <div class="rg-dialog-surface text-center" style="max-width: 90%; width: 500px; max-height: 80vh; padding: 0; overflow: hidden; gap: 0;">
+                        <div style="padding: 16px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: var(--rg-surface-variant); flex-shrink: 0;">
+                          <h5 class="text-white m-0 fw-bold" style="font-size: 1.1rem;"><i class="bi bi-map text-danger me-2"></i> Chart Map</h5>
+                          <button class="btn-close btn-close-white" id="rg-btn-close-chart"></button>
+                        </div>
+                        <div id="rg-chart-modal-content" style="overflow-y: auto; overflow-x: auto; background: #000; padding: 16px; flex-grow: 1;">
+                          <!-- SVG injected here -->
+                        </div>
+                        <div style="padding: 16px; border-top: 1px solid #333; background: var(--rg-surface-variant); flex-shrink: 0;">
+                          <button id="rg-btn-dl-chart" class="btn btn-info w-100 fw-bold text-dark rounded-pill"><i class="bi bi-download me-1"></i> Download SVG</button>
                         </div>
                       </div>
                     </div>
@@ -26381,7 +26835,28 @@ SOFTWARE.</div>
                     </div>
                   </div>`;
                 
-                const allData = await fetchData(`?action=get_offline_songs&sort=${currentView.sort}&all=1`, {}, true);
+                let allData = await fetchData(`?action=get_offline_songs&sort=${currentView.sort}&all=1`, {}, true);
+                
+                // OFFLINE FALLBACK: If API fails, dynamically extract metadata from the local hardware cache
+                if ((!allData || allData.length === 0) && !navigator.onLine) {
+                  try {
+                    const cache = await caches.open('php-music-offline');
+                    const keys = await cache.keys();
+                    allData = [];
+                    for (let req of keys) {
+                      if (req.url.includes('action=get_song_data')) {
+                        const res = await cache.match(req);
+                        if (res) {
+                          const songData = await res.json();
+                          if (songData && songData.id) allData.push(songData);
+                        }
+                      }
+                    }
+                  } catch (e) {
+                    console.error("Offline cache extraction failed", e);
+                  }
+                }
+
                 if (allData && allData.length > 0) {
                   offlineViewSongsData = allData;
                   data = offlineViewSongsData.slice(0, PAGE_SIZE);
@@ -30675,6 +31150,13 @@ SOFTWARE.</div>
                     await cache.add(`?action=get_image&id=${id}&v=${v}`);
                     await cache.add(`?action=get_song_data&id=${id}`);
 
+                    await cache.add(`?action=get_all_rhythm_levels`).catch(()=>{});
+                    await cache.add(`?action=get_rhythm_levels&song_id=${id}`).catch(()=>{});
+                    const rgDiffs = ['easy', 'medium', 'hard', 'expert', 'master', 'demon'];
+                    for (let d of rgDiffs) {
+                      await cache.add(`?action=get_rhythm_chart&song_id=${id}&difficulty=${d}`).catch(()=>{});
+                    }
+
                     const response = await fetch(`?action=get_stream&id=${id}`);
                     const contentLength = response.headers.get('content-length');
                     
@@ -30725,7 +31207,7 @@ SOFTWARE.</div>
                     const keys = await cache.keys();
                     for (let req of keys) {
                       const u = new URL(req.url);
-                      if (u.searchParams.get('id') == id) await cache.delete(req);
+                      if (u.searchParams.get('id') == id || u.searchParams.get('song_id') == id) await cache.delete(req);
                     }
                   } catch(e) {}
                   showToast('Removed from offline list.', 'success');
@@ -31923,6 +32405,8 @@ SOFTWARE.</div>
         const registerForm = document.getElementById('register-form');
         const restoreForm = document.getElementById('restore-form');
         const forgotForm = document.getElementById('forgot-password-form');
+        const appealForm = document.getElementById('appeal-ban-form');
+        const settingsAppealForm = document.getElementById('settings-appeal-form');
         const resetPwForm = document.getElementById('reset-password-form');
         const changeNameForm = document.getElementById('change-name-form');
         const changePwForm = document.getElementById('change-password-form');
@@ -32042,6 +32526,49 @@ SOFTWARE.</div>
             loadView(currentView);
           }
         });
+        
+        if (appealForm) {
+          appealForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const email = document.getElementById('appeal-email').value;
+            const appeal_text = document.getElementById('appeal-text').value;
+            const btn = appealForm.querySelector('button[type="submit"]');
+            btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Submitting...';
+            
+            const data = await fetchData('?action=submit_appeal', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ email, appeal_text })
+            });
+            
+            if (data && data.status === 'success') {
+              bootstrap.Modal.getInstance(document.getElementById('appeal-ban-modal')).hide();
+              appealForm.reset();
+              showToast(data.message, 'success');
+            }
+            btn.disabled = false; btn.innerHTML = 'Submit Appeal';
+          });
+        }
+
+        if (settingsAppealForm) {
+          settingsAppealForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const appeal_text = document.getElementById('settings-appeal-text').value;
+            const btn = settingsAppealForm.querySelector('button[type="submit"]');
+            btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Submitting...';
+            
+            const data = await fetchData('?action=submit_appeal', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ appeal_text })
+            });
+            
+            if (data && data.status === 'success') {
+              bootstrap.Modal.getInstance(document.getElementById('settings-appeal-modal')).hide();
+              settingsAppealForm.reset();
+              showToast(data.message, 'success');
+            }
+            btn.disabled = false; btn.innerHTML = 'Submit Appeal';
+          });
+        }
         
         if (forgotForm) {
           forgotForm.addEventListener('submit', async e => {
@@ -33944,12 +34471,16 @@ SOFTWARE.</div>
           document.body.classList.toggle('logged-out', !isLoggedIn);
           if (isLoggedIn) {
             document.body.classList.toggle('user-verified', currentUser.verified === 'yes');
-            const picUrl = currentUser.profile_picture_url + '&t=' + new Date().getTime();
+            const picUrl = navigator.onLine 
+              ? currentUser.profile_picture_url + '&t=' + new Date().getTime() 
+              : `?action=get_profile_picture&id=${currentUser.id}`;
             profilePictureHeaderDesktop.src = picUrl;
             profilePictureHeaderMobile.src = picUrl;
             profilePicturePreview.src = picUrl;
             
-            const bgUrl = `?action=get_profile_background&id=${currentUser.id}&v=${Date.now()}`;
+            const bgUrl = navigator.onLine
+              ? `?action=get_profile_background&id=${currentUser.id}&v=${Date.now()}`
+              : `?action=get_profile_background&id=${currentUser.id}`;
             document.querySelectorAll('.phpmusic-profile-bg-placeholder').forEach(el => el.style.backgroundImage = `url('${bgUrl}')`);
             
             const bgPreviewEl = document.getElementById('profile-bg-preview');
@@ -34001,9 +34532,18 @@ SOFTWARE.</div>
         }
 
         async function checkSession() {
-          const data = await fetchData('?action=get_session');
+          const data = await fetchData('?action=get_session', {}, true);
           if (data && data.status === 'loggedin') {
             currentUser = data.user;
+            try { 
+              localStorage.setItem('ytm_currentUser', JSON.stringify(currentUser)); 
+              if ('caches' in window) {
+                caches.open('php-music-offline').then(cache => {
+                  cache.add(`?action=get_profile_picture&id=${currentUser.id}`).catch(()=>{});
+                  cache.add(`?action=get_profile_background&id=${currentUser.id}`).catch(()=>{});
+                });
+              }
+            } catch(e) {}
             if (currentUser.settings) {
               try {
                 // Highly robust JSON extraction for settings
@@ -34062,8 +34602,16 @@ SOFTWARE.</div>
             if (uploadRemainingText) {
               uploadRemainingText.textContent = `Today's remaining uploads: ${currentUser.uploads_remaining}`;
             }
-          } else {
+          } else if (data && data.status === 'loggedout') {
             currentUser = null;
+            try { localStorage.removeItem('ytm_currentUser'); } catch(e) {}
+          } else {
+            // OFFLINE FALLBACK: Restore persistent session identity to bypass Auth locks when network fails
+            try {
+              const cachedUser = localStorage.getItem('ytm_currentUser');
+              if (cachedUser) currentUser = JSON.parse(cachedUser);
+              else currentUser = null;
+            } catch(e) { currentUser = null; }
           }
           updateUIForAuthState();
         }
@@ -35961,6 +36509,12 @@ SOFTWARE.</div>
           if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('?pwa=sw').catch(err => console.error('SW registration failed:', err));
           }
+
+          window.addEventListener('offline', () => {
+            if (currentView.type !== 'get_offline_songs' && currentView.type !== 'rhythm_game') {
+              loadView(currentView);
+            }
+          });
           
           playerElements.prevBtn.forEach(b => b.innerHTML = ICONS.prev);
           playerElements.nextBtn.forEach(b => b.innerHTML = ICONS.next);
@@ -36403,11 +36957,26 @@ SOFTWARE.</div>
                 });
                 if (offRes) {
                   if (offRes.status === 'added') {
-                    showToast('Caching offline (check menu for progress)...', 'info');
                     offlineSongsSet.add(parseInt(currentSong.id));
+                    recacheOfflineSong(parseInt(currentSong.id));
                   } else {
-                    showToast('Removed from offline list.', 'success');
                     offlineSongsSet.delete(parseInt(currentSong.id));
+                    try {
+                      const cache = await caches.open('php-music-offline');
+                      const keys = await cache.keys();
+                      for (let req of keys) {
+                        const u = new URL(req.url);
+                        if (u.searchParams.get('id') == currentSong.id || u.searchParams.get('song_id') == currentSong.id) await cache.delete(req);
+                      }
+                    } catch(err) {}
+                    showToast('Removed from offline list.', 'success');
+                    if (currentView.type === 'get_offline_songs') {
+                       const row = document.querySelector(`.song-item[data-song-id="${currentSong.id}"]`);
+                       if (row) {
+                         row.style.opacity = '0';
+                         setTimeout(() => row.remove(), 300);
+                       }
+                    }
                   }
                 }
               }
@@ -36826,19 +37395,29 @@ SOFTWARE.</div>
         class RhythmGameEngine {
           constructor() {
             this.LANES = 4;
-            this.JUDGMENT = { PERFECT: 0.045, GREAT: 0.080, GOOD: 0.125, BAD: 0.170 };
-            
+            this.JUDGMENT = { PERFECT: 0.045, GREAT: 0.08, GOOD: 0.125, BAD: 0.17 };
+
             // Load saved settings and keybindings from local storage cache
-            this.KEY_CODES = JSON.parse(localStorage.getItem('rg_key_codes')) || ['KeyS', 'KeyD', 'KeyF', 'KeyJ', 'KeyK', 'KeyL'];
-            this.KEY_LABELS = JSON.parse(localStorage.getItem('rg_key_labels')) || ['S', 'D', 'F', 'J', 'K', 'L'];
-            this.calibrationOffsetMs = localStorage.getItem('rg_cal_offset') !== null ? parseInt(localStorage.getItem('rg_cal_offset')) : 0;
-            this.userTickSpeed = localStorage.getItem('rg_tick_speed') !== null ? parseFloat(localStorage.getItem('rg_tick_speed')) : 1.0;
-            this.sfxVolume = localStorage.getItem('rg_sfx_volume') !== null ? parseFloat(localStorage.getItem('rg_sfx_volume')) : 0.3;
-            
+            this.KEY_CODES = JSON.parse(localStorage.getItem("rg_key_codes")) || [
+              "KeyS",
+              "KeyD",
+              "KeyF",
+              "KeyJ",
+              "KeyK",
+              "KeyL",
+            ];
+            this.KEY_LABELS = JSON.parse(localStorage.getItem("rg_key_labels")) || ["S", "D", "F", "J", "K", "L"];
+            this.calibrationOffsetMs =
+              localStorage.getItem("rg_cal_offset") !== null ? parseInt(localStorage.getItem("rg_cal_offset")) : 0;
+            this.userTickSpeed =
+              localStorage.getItem("rg_tick_speed") !== null ? parseFloat(localStorage.getItem("rg_tick_speed")) : 1.0;
+            this.sfxVolume =
+              localStorage.getItem("rg_sfx_volume") !== null ? parseFloat(localStorage.getItem("rg_sfx_volume")) : 0.3;
+
             this.activeCodes = [];
             this.activeLabels = [];
             this.listeningLane = null;
-            
+
             this.songs = [];
             this.filteredSongs = [];
             this.favFilteredSongs = [];
@@ -36846,36 +37425,36 @@ SOFTWARE.</div>
             this.filteredArtists = [];
             this.artistDetailSongs = [];
             this.artistDetailFilteredSongs = [];
-            
+
             this.songsPage = 1;
             this.favsPage = 1;
             this.artistsPage = 1;
             this.artistSongsPage = 1;
             this.artistFavsPage = 1;
             this.leaderboardPage = 1;
-            
+
             this.allSongsLoaded = false;
             this.allFavsLoaded = false;
             this.allArtistsLoaded = false;
             this.allArtistSongsLoaded = false;
             this.allArtistFavsLoaded = false;
             this.allLeaderboardLoaded = false;
-            
+
             this.isLoadingSongs = false;
             this.isLoadingFavs = false;
             this.isLoadingArtists = false;
             this.isLoadingArtistSongs = false;
             this.isLoadingArtistFavs = false;
             this.isLoadingLeaderboard = false;
-            
-            this.activeArtistDetailName = '';
+
+            this.activeArtistDetailName = "";
             this.activeArtistDetailId = null;
-            
+
             this.selectedSong = null;
-            this.selectedDiff = 'easy';
-            this.currentSortMethod = 'random';
-            this.currentFavSortMethod = 'manual_order';
-            
+            this.selectedDiff = "easy";
+            this.currentSortMethod = "random";
+            this.currentFavSortMethod = "manual_order";
+
             this.audioCtx = null;
             this.sfxCtx = null;
             this.audioBuffer = null;
@@ -36887,24 +37466,25 @@ SOFTWARE.</div>
             this.laneApproachSpeed = 1.3;
             this.rgSongCache = {};
             this.curHp = 100;
-            this.accuracy = 100.00;
+            this.accuracy = 100.0;
             this.isCalibrating = false;
             this.calNotes = [];
             this.calCanvas = null;
             this.calCtx = null;
             this.calAnimId = null;
-            
+
             this.curScore = 0;
             this.curCombo = 0;
             this.maxCombo = 0;
             this.stats = { perfect: 0, great: 0, good: 0, bad: 0, miss: 0 };
             this.hitDeltas = [];
-            
+            this.isAutoplay = false;
+
             this.feedbackTxt = "";
             this.feedbackCol = "#fff";
             this.feedbackTimer = 0;
             this.feedbackScale = 1;
-            
+
             this.handleKeyDown = this.onKeyDown.bind(this);
             this.handleKeyUp = this.onKeyUp.bind(this);
             this.handleResize = this.resizeCanvas.bind(this);
@@ -36912,11 +37492,16 @@ SOFTWARE.</div>
 
           destroy() {
             // 1. Remove active global window listeners
-            window.removeEventListener('keydown', this.handleKeyDown);
-            window.removeEventListener('keyup', this.handleKeyUp);
-            window.removeEventListener('resize', this.handleResize);
+            window.removeEventListener("keydown", this.handleKeyDown);
+            window.removeEventListener("keyup", this.handleKeyUp);
+            window.removeEventListener("resize", this.handleResize);
 
             if (this.startGameTimeout) clearTimeout(this.startGameTimeout);
+
+            if (this.autoplayWakeLocked) {
+              if (typeof noSleep !== "undefined") noSleep.disable();
+              this.autoplayWakeLocked = false;
+            }
 
             // 2. Shut down active audio playback safely
             if (this.audioPlayback) {
@@ -36933,10 +37518,10 @@ SOFTWARE.</div>
             }
 
             // 4. Release local calibration touch bindings
-            const area = document.getElementById('rg-cal-test-area');
+            const area = document.getElementById("rg-cal-test-area");
             if (area) {
-              if (this.boundCalTouchStart) area.removeEventListener('touchstart', this.boundCalTouchStart);
-              if (this.boundCalMouseDown) area.removeEventListener('mousedown', this.boundCalMouseDown);
+              if (this.boundCalTouchStart) area.removeEventListener("touchstart", this.boundCalTouchStart);
+              if (this.boundCalMouseDown) area.removeEventListener("mousedown", this.boundCalMouseDown);
             }
 
             // 5. Clean up main reference memory
@@ -36945,153 +37530,270 @@ SOFTWARE.</div>
 
           initDOM() {
             this.screens = {
-              hub: document.getElementById('rg-screen-hub'),
-              loading: document.getElementById('rg-screen-loading'),
-              game: document.getElementById('rg-screen-game'),
-              result: document.getElementById('rg-screen-result')
+              hub: document.getElementById("rg-screen-hub"),
+              loading: document.getElementById("rg-screen-loading"),
+              game: document.getElementById("rg-screen-game"),
+              result: document.getElementById("rg-screen-result"),
             };
             this.tabs = {
-              songs: document.getElementById('rg-tab-songs'),
-              artists: document.getElementById('rg-tab-artists'),
-              artistDetail: document.getElementById('rg-tab-artist-detail'),
-              favorites: document.getElementById('rg-tab-favorites'),
-              leaderboard: document.getElementById('rg-tab-leaderboard'),
-              settings: document.getElementById('rg-tab-settings')
+              songs: document.getElementById("rg-tab-songs"),
+              offline: document.getElementById("rg-tab-offline"),
+              artists: document.getElementById("rg-tab-artists"),
+              artistDetail: document.getElementById("rg-tab-artist-detail"),
+              favorites: document.getElementById("rg-tab-favorites"),
+              leaderboard: document.getElementById("rg-tab-leaderboard"),
+              settings: document.getElementById("rg-tab-settings"),
             };
-            this.listSongsEl = document.getElementById('rg-list-songs');
-            this.listFavsEl = document.getElementById('rg-list-favs');
-            
+            this.listSongsEl = document.getElementById("rg-list-songs");
+            this.listFavsEl = document.getElementById("rg-list-favs");
+            this.listOfflineEl = document.getElementById("rg-list-offline");
+            this.allOfflineLoaded = false;
+            this.isLoadingOffline = false;
+            this.offlinePage = 1;
+            this.allArtistFollowingLoaded = false;
+            this.isLoadingArtistFollowing = false;
+            this.artistFollowingPage = 1;
+
             setTimeout(() => {
-              this.switchScreen('hub');
-              this.loadSongs();
+              this.switchScreen("hub");
+              if (!navigator.onLine) {
+                const offlineTabBtn = document.querySelector('.rg-nav-item[data-target="offline"]');
+                if (offlineTabBtn) offlineTabBtn.click();
+              } else {
+                this.loadSongs();
+              }
             }, 50);
 
-            const navItems = document.querySelectorAll('.rg-nav-item');
-            navItems.forEach(item => {
-              item.addEventListener('click', () => {
-                navItems.forEach(n => n.classList.remove('active'));
-                item.classList.add('active');
-                const target = item.getAttribute('data-target');
-                
+            const navItems = document.querySelectorAll(".rg-nav-item");
+            navItems.forEach((item) => {
+              item.addEventListener("click", () => {
+                navItems.forEach((n) => n.classList.remove("active"));
+                item.classList.add("active");
+                const target = item.getAttribute("data-target");
+
                 if (target) {
                   // Cache active tab choice to survive page reloads
-                  localStorage.setItem('rg_active_tab', target);
-                  
-                  Object.values(this.tabs).forEach(t => {
-                    if (t) t.classList.add('rg-hidden');
+                  localStorage.setItem("rg_active_tab", target);
+
+                  Object.values(this.tabs).forEach((t) => {
+                    if (t) t.classList.add("rg-hidden");
                   });
                   if (this.tabs[target]) {
-                    this.tabs[target].classList.remove('rg-hidden');
+                    this.tabs[target].classList.remove("rg-hidden");
                   }
-                  if (target === 'artists') {
-                    localStorage.removeItem('rg_active_artist');
+                  if (target === "artists") {
+                    localStorage.removeItem("rg_active_artist");
                     this.loadArtists();
-                  } else if (target === 'favorites') {
-                    localStorage.removeItem('rg_active_artist');
+                  } else if (target === "favorites") {
+                    localStorage.removeItem("rg_active_artist");
                     this.loadFavorites();
+                  } else if (target === "offline") {
+                    localStorage.removeItem("rg_active_artist");
+                    this.loadOfflineSongs();
                   } else {
-                    localStorage.removeItem('rg_active_artist');
+                    localStorage.removeItem("rg_active_artist");
                   }
                 }
               });
             });
 
-            const myProfileBtn = document.getElementById('rg-nav-my-profile');
+            const myProfileBtn = document.getElementById("rg-nav-my-profile");
             if (myProfileBtn) {
-              myProfileBtn.addEventListener('click', () => {
-                if (typeof currentUser !== 'undefined' && currentUser && currentUser.artist) {
+              myProfileBtn.addEventListener("click", () => {
+                if (typeof currentUser !== "undefined" && currentUser && currentUser.artist) {
                   this.openArtistDetail(currentUser.artist);
                 } else {
-                  showToast('Please log in to view your profile.', 'error');
+                  showToast("Please log in to view your profile.", "error");
                 }
               });
             }
 
             // Artists Search & Sort (Null-safe)
             let searchArtistDebounce = null;
-            const rgSearchArtists = document.getElementById('rg-search-artists');
+            const rgSearchArtists = document.getElementById("rg-search-artists");
             if (rgSearchArtists) {
-              rgSearchArtists.addEventListener('input', (e) => {
+              rgSearchArtists.addEventListener("input", (e) => {
                 clearTimeout(searchArtistDebounce);
                 searchArtistDebounce = setTimeout(() => {
                   this.loadArtists();
                 }, 300);
               });
             }
-            const rgSortArtists = document.getElementById('rg-sort-artists');
+            const rgSortArtists = document.getElementById("rg-sort-artists");
             if (rgSortArtists) {
-              rgSortArtists.addEventListener('change', (e) => {
+              rgSortArtists.addEventListener("change", (e) => {
                 this.loadArtists();
               });
             }
 
+            // Offline Search & Sort
+            let searchOfflineDebounce = null;
+            const rgSearchOffline = document.getElementById("rg-search-offline");
+            if (rgSearchOffline) {
+              rgSearchOffline.addEventListener("input", (e) => {
+                clearTimeout(searchOfflineDebounce);
+                searchOfflineDebounce = setTimeout(() => {
+                  this.loadOfflineSongs();
+                }, 300);
+              });
+            }
+            const rgSortOffline = document.getElementById("rg-sort-offline");
+            if (rgSortOffline) {
+              rgSortOffline.addEventListener("change", (e) => {
+                this.loadOfflineSongs();
+              });
+            }
+            if (this.listOfflineEl) {
+              this.listOfflineEl.addEventListener("scroll", () => {
+                if (
+                  this.listOfflineEl.scrollTop + this.listOfflineEl.clientHeight >=
+                  this.listOfflineEl.scrollHeight - 50
+                ) {
+                  if (!this.isLoadingOffline && !this.allOfflineLoaded) {
+                    this.offlinePage++;
+                    this.loadOfflineSongs(true);
+                  }
+                }
+              });
+            }
+
+            // Chart Viewer logic
+            const btnViewChart = document.getElementById("rg-btn-view-chart");
+            const chartModal = document.getElementById("rg-dialog-chart-modal");
+            const chartContent = document.getElementById("rg-chart-modal-content");
+            const btnCloseChart = document.getElementById("rg-btn-close-chart");
+            const btnDlChart = document.getElementById("rg-btn-dl-chart");
+
+            if (btnViewChart && chartModal && chartContent) {
+              btnViewChart.addEventListener("click", async () => {
+                if (!this.selectedSong) return;
+
+                chartModal.classList.remove("rg-hidden");
+                chartContent.innerHTML =
+                  '<div class="spinner-border text-danger mt-4" style="width: 2rem; height: 2rem; border-width: 0.25em;"></div><div class="text-secondary mt-2 small fw-bold text-uppercase">Compiling map...</div>';
+
+                try {
+                  const dbChart = await fetchData(
+                    `?action=get_rhythm_chart&song_id=${this.selectedSong.id}&difficulty=${this.selectedDiff}`,
+                    {},
+                    true
+                  );
+                  if (dbChart && dbChart.found && dbChart.notes) {
+                    // Temporarily store state required for the local SVG generator method
+                    const tempNotes = this.chartNotes;
+                    const tempLanes = this.LANES;
+                    const tempAudio = this.audioBuffer;
+
+                    this.chartNotes = dbChart.notes;
+                    this.LANES = this.selectedDiff === "easy" || this.selectedDiff === "medium" ? 4 : 6;
+                    this.audioBuffer = { duration: this.selectedSong.duration || 180 };
+
+                    const svgHtml = this.generateChartSVG();
+                    chartContent.innerHTML = svgHtml;
+
+                    // Restore actual live game state so we don't break playback
+                    this.chartNotes = tempNotes;
+                    this.LANES = tempLanes;
+                    this.audioBuffer = tempAudio;
+                  } else {
+                    chartContent.innerHTML = '<div class="text-danger mt-4 fw-bold">Failed to generate chart.</div>';
+                  }
+                } catch (err) {
+                  chartContent.innerHTML =
+                    '<div class="text-danger mt-4 fw-bold"><i class="bi bi-cloud-slash-fill me-1"></i> Offline or Network Error.</div>';
+                }
+              });
+
+              if (btnCloseChart) {
+                btnCloseChart.addEventListener("click", () => chartModal.classList.add("rg-hidden"));
+              }
+
+              if (btnDlChart) {
+                btnDlChart.addEventListener("click", () => {
+                  const svgData = chartContent.innerHTML;
+                  if (!svgData.includes("<svg")) return showToast("No chart available to download.", "error");
+                  const blob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `chart_${this.selectedSong.id}_${this.selectedDiff}.svg`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                });
+              }
+            }
+
             // Artist Songs Search & Sort (Null-safe)
             let searchArtistSongsDebounce = null;
-            const rgSearchArtistSongs = document.getElementById('rg-search-artist-songs');
+            const rgSearchArtistSongs = document.getElementById("rg-search-artist-songs");
             if (rgSearchArtistSongs) {
-              rgSearchArtistSongs.addEventListener('input', (e) => {
+              rgSearchArtistSongs.addEventListener("input", (e) => {
                 clearTimeout(searchArtistSongsDebounce);
                 searchArtistSongsDebounce = setTimeout(() => {
                   this.loadArtistSongs(this.activeArtistDetailName);
                 }, 300);
               });
             }
-            const rgSortArtistSongs = document.getElementById('rg-sort-artist-songs');
+            const rgSortArtistSongs = document.getElementById("rg-sort-artist-songs");
             if (rgSortArtistSongs) {
-              rgSortArtistSongs.addEventListener('change', (e) => {
+              rgSortArtistSongs.addEventListener("change", (e) => {
                 this.loadArtistSongs(this.activeArtistDetailName);
               });
             }
 
             // Cancel Multi-Artist Dialog Click (Null-safe)
-            const rgBtnArtistChoiceCancel = document.getElementById('rg-btn-artist-choice-cancel');
+            const rgBtnArtistChoiceCancel = document.getElementById("rg-btn-artist-choice-cancel");
             if (rgBtnArtistChoiceCancel) {
-              rgBtnArtistChoiceCancel.addEventListener('click', () => {
-                const dialogChoice = document.getElementById('rg-dialog-artist-choice');
-                if (dialogChoice) dialogChoice.classList.add('rg-hidden');
+              rgBtnArtistChoiceCancel.addEventListener("click", () => {
+                const dialogChoice = document.getElementById("rg-dialog-artist-choice");
+                if (dialogChoice) dialogChoice.classList.add("rg-hidden");
               });
             }
 
-            const keyBtns = document.querySelectorAll('.rg-key-btn');
+            const keyBtns = document.querySelectorAll(".rg-key-btn");
             keyBtns.forEach((btn, idx) => {
               if (this.KEY_LABELS[idx]) btn.textContent = this.KEY_LABELS[idx];
-              btn.addEventListener('click', () => {
-                keyBtns.forEach(b => b.classList.remove('listening'));
-                this.listeningLane = parseInt(btn.getAttribute('data-lane'));
-                btn.classList.add('listening');
+              btn.addEventListener("click", () => {
+                keyBtns.forEach((b) => b.classList.remove("listening"));
+                this.listeningLane = parseInt(btn.getAttribute("data-lane"));
+                btn.classList.add("listening");
               });
             });
 
-            const offsetSlider = document.getElementById('rg-offset-slider');
+            const offsetSlider = document.getElementById("rg-offset-slider");
             if (offsetSlider) {
               offsetSlider.value = this.calibrationOffsetMs;
-              document.getElementById('rg-offset-display').textContent = `${this.calibrationOffsetMs >= 0 ? '+' : ''}${this.calibrationOffsetMs}ms`;
-              offsetSlider.addEventListener('input', (e) => {
+              document.getElementById("rg-offset-display").textContent =
+                `${this.calibrationOffsetMs >= 0 ? "+" : ""}${this.calibrationOffsetMs}ms`;
+              offsetSlider.addEventListener("input", (e) => {
                 this.calibrationOffsetMs = parseInt(e.target.value);
-                document.getElementById('rg-offset-display').textContent = `${this.calibrationOffsetMs >= 0 ? '+' : ''}${this.calibrationOffsetMs}ms`;
-                localStorage.setItem('rg_cal_offset', this.calibrationOffsetMs);
-              });
-            }
-            
-            const speedSlider = document.getElementById('rg-speed-slider');
-            if (speedSlider) {
-              speedSlider.value = this.userTickSpeed;
-              document.getElementById('rg-speed-display').textContent = `${this.userTickSpeed}x`;
-              speedSlider.addEventListener('input', (e) => {
-                this.userTickSpeed = parseFloat(e.target.value);
-                document.getElementById('rg-speed-display').textContent = `${this.userTickSpeed}x`;
-                localStorage.setItem('rg_tick_speed', this.userTickSpeed);
+                document.getElementById("rg-offset-display").textContent =
+                  `${this.calibrationOffsetMs >= 0 ? "+" : ""}${this.calibrationOffsetMs}ms`;
+                localStorage.setItem("rg_cal_offset", this.calibrationOffsetMs);
               });
             }
 
-            const sfxSlider = document.getElementById('rg-sfx-slider');
+            const speedSlider = document.getElementById("rg-speed-slider");
+            if (speedSlider) {
+              speedSlider.value = this.userTickSpeed;
+              document.getElementById("rg-speed-display").textContent = `${this.userTickSpeed}x`;
+              speedSlider.addEventListener("input", (e) => {
+                this.userTickSpeed = parseFloat(e.target.value);
+                document.getElementById("rg-speed-display").textContent = `${this.userTickSpeed}x`;
+                localStorage.setItem("rg_tick_speed", this.userTickSpeed);
+              });
+            }
+
+            const sfxSlider = document.getElementById("rg-sfx-slider");
             if (sfxSlider) {
               sfxSlider.value = this.sfxVolume;
-              document.getElementById('rg-sfx-display').textContent = Math.round(this.sfxVolume * 100) + '%';
-              sfxSlider.addEventListener('input', (e) => {
+              document.getElementById("rg-sfx-display").textContent = Math.round(this.sfxVolume * 100) + "%";
+              sfxSlider.addEventListener("input", (e) => {
                 this.sfxVolume = parseFloat(e.target.value);
-                document.getElementById('rg-sfx-display').textContent = Math.round(this.sfxVolume * 100) + '%';
-                localStorage.setItem('rg_sfx_volume', this.sfxVolume);
+                document.getElementById("rg-sfx-display").textContent = Math.round(this.sfxVolume * 100) + "%";
+                localStorage.setItem("rg_sfx_volume", this.sfxVolume);
                 if (this.sfxVolume > 0 && !this.sfxCtx) {
                   this.sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
                 }
@@ -37099,16 +37801,16 @@ SOFTWARE.</div>
               });
             }
 
-            const calBtn = document.getElementById('rg-btn-cal-test');
+            const calBtn = document.getElementById("rg-btn-cal-test");
             if (calBtn) {
-              calBtn.addEventListener('click', (e) => {
+              calBtn.addEventListener("click", (e) => {
                 e.stopPropagation();
                 this.toggleCalibrationTest();
               });
             }
 
             let searchDebounceTimeout = null;
-            document.getElementById('rg-search-songs').addEventListener('input', (e) => {
+            document.getElementById("rg-search-songs").addEventListener("input", (e) => {
               clearTimeout(searchDebounceTimeout);
               searchDebounceTimeout = setTimeout(() => {
                 this.loadSongs();
@@ -37116,14 +37818,14 @@ SOFTWARE.</div>
             });
 
             let favSearchDebounceTimeout = null;
-            document.getElementById('rg-search-favs').addEventListener('input', (e) => {
+            document.getElementById("rg-search-favs").addEventListener("input", (e) => {
               clearTimeout(favSearchDebounceTimeout);
               favSearchDebounceTimeout = setTimeout(() => {
                 this.loadFavorites();
               }, 300);
             });
 
-            this.listSongsEl.addEventListener('scroll', () => {
+            this.listSongsEl.addEventListener("scroll", () => {
               if (this.listSongsEl.scrollTop + this.listSongsEl.clientHeight >= this.listSongsEl.scrollHeight - 50) {
                 if (!this.isLoadingSongs && !this.allSongsLoaded) {
                   this.songsPage++;
@@ -37132,7 +37834,7 @@ SOFTWARE.</div>
               }
             });
 
-            this.listFavsEl.addEventListener('scroll', () => {
+            this.listFavsEl.addEventListener("scroll", () => {
               if (this.listFavsEl.scrollTop + this.listFavsEl.clientHeight >= this.listFavsEl.scrollHeight - 50) {
                 if (!this.isLoadingFavs && !this.allFavsLoaded) {
                   this.favsPage++;
@@ -37141,9 +37843,9 @@ SOFTWARE.</div>
               }
             });
 
-            const listArtistsEl = document.getElementById('rg-list-artists');
+            const listArtistsEl = document.getElementById("rg-list-artists");
             if (listArtistsEl) {
-              listArtistsEl.addEventListener('scroll', () => {
+              listArtistsEl.addEventListener("scroll", () => {
                 if (listArtistsEl.scrollTop + listArtistsEl.clientHeight >= listArtistsEl.scrollHeight - 50) {
                   if (!this.isLoadingArtists && !this.allArtistsLoaded) {
                     this.artistsPage++;
@@ -37153,10 +37855,13 @@ SOFTWARE.</div>
               });
             }
 
-            const listArtistSongsEl = document.getElementById('rg-list-artist-songs');
+            const listArtistSongsEl = document.getElementById("rg-list-artist-songs");
             if (listArtistSongsEl) {
-              listArtistSongsEl.addEventListener('scroll', () => {
-                if (listArtistSongsEl.scrollTop + listArtistSongsEl.clientHeight >= listArtistSongsEl.scrollHeight - 50) {
+              listArtistSongsEl.addEventListener("scroll", () => {
+                if (
+                  listArtistSongsEl.scrollTop + listArtistSongsEl.clientHeight >=
+                  listArtistSongsEl.scrollHeight - 50
+                ) {
                   if (!this.isLoadingArtistSongs && !this.allArtistSongsLoaded) {
                     this.artistSongsPage++;
                     this.loadArtistSongs(this.activeArtistDetailName, true);
@@ -37167,25 +37872,43 @@ SOFTWARE.</div>
 
             // Artist Favorites Search & Sort (Null-safe)
             let searchArtistFavsDebounce = null;
-            const rgSearchArtistFavs = document.getElementById('rg-search-artist-favs');
+            const rgSearchArtistFavs = document.getElementById("rg-search-artist-favs");
             if (rgSearchArtistFavs) {
-              rgSearchArtistFavs.addEventListener('input', (e) => {
+              rgSearchArtistFavs.addEventListener("input", (e) => {
                 clearTimeout(searchArtistFavsDebounce);
                 searchArtistFavsDebounce = setTimeout(() => {
                   this.loadArtistFavorites(this.activeArtistDetailId);
                 }, 300);
               });
             }
-            const rgSortArtistFavs = document.getElementById('rg-sort-artist-favs');
+            const rgSortArtistFavs = document.getElementById("rg-sort-artist-favs");
             if (rgSortArtistFavs) {
-              rgSortArtistFavs.addEventListener('change', (e) => {
+              rgSortArtistFavs.addEventListener("change", (e) => {
                 this.loadArtistFavorites(this.activeArtistDetailId);
               });
             }
 
-            const listArtistFavsEl = document.getElementById('rg-list-artist-favs');
+            // Artist Following Search & Sort (Null-safe)
+            let searchArtistFollowingDebounce = null;
+            const rgSearchArtistFollowing = document.getElementById("rg-search-artist-following");
+            if (rgSearchArtistFollowing) {
+              rgSearchArtistFollowing.addEventListener("input", (e) => {
+                clearTimeout(searchArtistFollowingDebounce);
+                searchArtistFollowingDebounce = setTimeout(() => {
+                  this.loadArtistFollowing(this.activeArtistDetailId);
+                }, 300);
+              });
+            }
+            const rgSortArtistFollowing = document.getElementById("rg-sort-artist-following");
+            if (rgSortArtistFollowing) {
+              rgSortArtistFollowing.addEventListener("change", (e) => {
+                this.loadArtistFollowing(this.activeArtistDetailId);
+              });
+            }
+
+            const listArtistFavsEl = document.getElementById("rg-list-artist-favs");
             if (listArtistFavsEl) {
-              listArtistFavsEl.addEventListener('scroll', () => {
+              listArtistFavsEl.addEventListener("scroll", () => {
                 if (listArtistFavsEl.scrollTop + listArtistFavsEl.clientHeight >= listArtistFavsEl.scrollHeight - 50) {
                   if (!this.isLoadingArtistFavs && !this.allArtistFavsLoaded) {
                     this.artistFavsPage++;
@@ -37195,10 +37918,28 @@ SOFTWARE.</div>
               });
             }
 
-            const listLeaderboardEl = document.getElementById('rg-list-leaderboard');
+            const listArtistFollowingEl = document.getElementById("rg-list-artist-following");
+            if (listArtistFollowingEl) {
+              listArtistFollowingEl.addEventListener("scroll", () => {
+                if (
+                  listArtistFollowingEl.scrollTop + listArtistFollowingEl.clientHeight >=
+                  listArtistFollowingEl.scrollHeight - 50
+                ) {
+                  if (!this.isLoadingArtistFollowing && !this.allArtistFollowingLoaded) {
+                    this.artistFollowingPage++;
+                    this.loadArtistFollowing(this.activeArtistDetailId, true);
+                  }
+                }
+              });
+            }
+
+            const listLeaderboardEl = document.getElementById("rg-list-leaderboard");
             if (listLeaderboardEl) {
-              listLeaderboardEl.addEventListener('scroll', () => {
-                if (listLeaderboardEl.scrollTop + listLeaderboardEl.clientHeight >= listLeaderboardEl.scrollHeight - 50) {
+              listLeaderboardEl.addEventListener("scroll", () => {
+                if (
+                  listLeaderboardEl.scrollTop + listLeaderboardEl.clientHeight >=
+                  listLeaderboardEl.scrollHeight - 50
+                ) {
                   if (!this.isLoadingLeaderboard && !this.allLeaderboardLoaded) {
                     this.leaderboardPage++;
                     this.loadLeaderboard(true);
@@ -37207,71 +37948,95 @@ SOFTWARE.</div>
               });
             }
 
-            const diffBtns = document.querySelectorAll('.rg-diff-btn');
-            diffBtns.forEach(btn => {
-              btn.addEventListener('click', () => {
-                diffBtns.forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                this.selectedDiff = btn.getAttribute('data-diff');
+            const diffBtns = document.querySelectorAll(".rg-diff-btn");
+            diffBtns.forEach((btn) => {
+              btn.addEventListener("click", () => {
+                diffBtns.forEach((b) => b.classList.remove("active"));
+                btn.classList.add("active");
+                this.selectedDiff = btn.getAttribute("data-diff");
               });
             });
 
-            document.getElementById('rg-sort-songs').addEventListener('change', (e) => {
+            document.getElementById("rg-sort-songs").addEventListener("change", (e) => {
               this.loadSongs();
             });
 
-            document.getElementById('rg-sort-favs').addEventListener('change', (e) => {
+            document.getElementById("rg-sort-favs").addEventListener("change", (e) => {
               this.loadFavorites();
             });
 
-            document.getElementById('rg-btn-dialog-cancel').addEventListener('click', () => document.getElementById('rg-dialog-play').classList.add('rg-hidden'));
-            document.getElementById('rg-btn-dialog-play').addEventListener('click', () => {
-              document.getElementById('rg-dialog-play').classList.add('rg-hidden');
+            document
+              .getElementById("rg-btn-dialog-cancel")
+              .addEventListener("click", () => document.getElementById("rg-dialog-play").classList.add("rg-hidden"));
+            document.getElementById("rg-btn-dialog-play").addEventListener("click", () => {
+              document.getElementById("rg-dialog-play").classList.add("rg-hidden");
+              const apToggle = document.getElementById("rg-autoplay-toggle");
+              this.isAutoplay = apToggle ? apToggle.checked : false;
+
+              if (this.isAutoplay && typeof noSleep !== "undefined") {
+                try {
+                  noSleep.enable();
+                  this.autoplayWakeLocked = true;
+                } catch (err) {
+                  console.warn("Autoplay Wake Lock failed:", err);
+                }
+              }
+
               this.prepGame(this.selectedSong, this.selectedDiff);
             });
 
-            const pauseDialog = document.getElementById('rg-dialog-pause');
-            document.getElementById('rg-btn-quit-game').addEventListener('click', () => {
+            const pauseDialog = document.getElementById("rg-dialog-pause");
+            document.getElementById("rg-btn-quit-game").addEventListener("click", () => {
               this.isPlaying = false;
               if (this.audioPlayback) this.audioPlayback.pause();
-              pauseDialog.classList.remove('rg-hidden');
+              pauseDialog.classList.remove("rg-hidden");
             });
-            document.getElementById('rg-btn-resume').addEventListener('click', () => {
-              pauseDialog.classList.add('rg-hidden');
+            document.getElementById("rg-btn-resume").addEventListener("click", () => {
+              pauseDialog.classList.add("rg-hidden");
               this.isPlaying = true;
               if (this.audioPlayback) this.audioPlayback.play();
               requestAnimationFrame(this.gameLoop.bind(this));
             });
-            document.getElementById('rg-btn-retry-pause').addEventListener('click', () => {
-              pauseDialog.classList.add('rg-hidden');
-              this.switchScreen('loading');
+            document.getElementById("rg-btn-retry-pause").addEventListener("click", () => {
+              pauseDialog.classList.add("rg-hidden");
+              this.switchScreen("loading");
               this.prepGame(this.selectedSong, this.selectedDiff);
             });
-            document.getElementById('rg-btn-quit').addEventListener('click', () => {
-              pauseDialog.classList.add('rg-hidden');
-              this.switchScreen('hub');
+            document.getElementById("rg-btn-quit").addEventListener("click", () => {
+              pauseDialog.classList.add("rg-hidden");
+              this.switchScreen("hub");
             });
 
-            document.getElementById('rg-btn-result-back').addEventListener('click', () => this.switchScreen('hub'));
-            document.getElementById('rg-btn-result-retry').addEventListener('click', () => {
-              this.switchScreen('loading');
+            document.getElementById("rg-btn-result-back").addEventListener("click", () => this.switchScreen("hub"));
+            document.getElementById("rg-btn-result-retry").addEventListener("click", () => {
+              this.switchScreen("loading");
               this.prepGame(this.selectedSong, this.selectedDiff);
             });
-            document.getElementById('rg-btn-result-share').addEventListener('click', () => {
+            document.getElementById("rg-btn-result-share").addEventListener("click", () => {
               const textPayload = `I just scored ${parseInt(this.curScore).toLocaleString()} (${this.maxCombo}x Combo) on ${this.selectedSong.title} [${this.selectedDiff.toUpperCase()}] in PHP Music Rhythm Game!`;
               const coverUrl = `?action=get_image&id=${this.selectedSong.id}&v=${this.selectedSong.last_modified || 0}`;
-              if (typeof showShareModal === 'function') {
-                showShareModal('game', this.selectedSong.id, this.selectedSong.title, '', '', coverUrl, '', textPayload);
+              if (typeof showShareModal === "function") {
+                showShareModal(
+                  "game",
+                  this.selectedSong.id,
+                  this.selectedSong.title,
+                  "",
+                  "",
+                  coverUrl,
+                  "",
+                  textPayload
+                );
               }
             });
 
-            const touchLayer = document.getElementById('rg-touch-layer');
+            const touchLayer = document.getElementById("rg-touch-layer");
             const handleTouch = (e, isDown) => {
-              if (!this.isPlaying) return;
+              if (!this.isPlaying || this.isAutoplay) return; // Rejects manual screen touch overlays during Autoplay
               const rect = this.canvas.getBoundingClientRect();
               for (let i = 0; i < e.changedTouches.length; i++) {
                 const t = e.changedTouches[i];
-                const x = t.clientX - rect.left, y = t.clientY - rect.top;
+                const x = t.clientX - rect.left,
+                  y = t.clientY - rect.top;
                 if (y > rect.height * 0.4) {
                   const lane = Math.floor((x / rect.width) * this.LANES);
                   if (lane >= 0 && lane < this.LANES) {
@@ -37282,30 +38047,33 @@ SOFTWARE.</div>
               }
               e.preventDefault();
             };
-            touchLayer.addEventListener('touchstart', e => handleTouch(e, true), {passive: false});
-            touchLayer.addEventListener('touchend', e => handleTouch(e, false), {passive: false});
+            touchLayer.addEventListener("touchstart", (e) => handleTouch(e, true), { passive: false });
+            touchLayer.addEventListener("touchend", (e) => handleTouch(e, false), { passive: false });
 
             const setupArtistTabs = () => {
-              const tabs = ['tracks', 'history', 'favs'];
-              tabs.forEach(tab => {
+              const tabs = ["tracks", "history", "favs", "following"];
+              tabs.forEach((tab) => {
                 const btn = document.getElementById(`rg-art-tab-${tab}`);
                 if (btn) {
-                  btn.addEventListener('click', () => {
-                    tabs.forEach(t => {
-                      document.getElementById(`rg-art-tab-${t}`).classList.remove('active');
-                      document.getElementById(`rg-art-pane-${t}`).classList.replace('d-flex', 'd-none');
+                  btn.addEventListener("click", () => {
+                    tabs.forEach((t) => {
+                      const b = document.getElementById(`rg-art-tab-${t}`);
+                      const p = document.getElementById(`rg-art-pane-${t}`);
+                      if (b) b.classList.remove("active");
+                      if (p) p.classList.replace("d-flex", "d-none");
                     });
-                    btn.classList.add('active');
-                    document.getElementById(`rg-art-pane-${tab}`).classList.replace('d-none', 'd-flex');
+                    btn.classList.add("active");
+                    const pane = document.getElementById(`rg-art-pane-${tab}`);
+                    if (pane) pane.classList.replace("d-none", "d-flex");
                   });
                 }
               });
             };
             setupArtistTabs();
 
-            window.addEventListener('keydown', this.handleKeyDown);
-            window.addEventListener('keyup', this.handleKeyUp);
-            window.addEventListener('resize', this.handleResize);
+            window.addEventListener("keydown", this.handleKeyDown);
+            window.addEventListener("keyup", this.handleKeyUp);
+            window.addEventListener("resize", this.handleResize);
           }
 
           async loadSongs(append = false) {
@@ -37321,85 +38089,109 @@ SOFTWARE.</div>
             }
             if (this.allSongsLoaded) return;
             this.isLoadingSongs = true;
-            
-            const sort = document.getElementById('rg-sort-songs').value;
-            const q = document.getElementById('rg-search-songs').value.trim();
-            
+
+            if (!navigator.onLine) {
+              if (!append && this.listSongsEl) {
+                this.listSongsEl.innerHTML = `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100"><i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i><h5 class="fw-bold text-white">You are offline</h5><p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p><button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button></div>`;
+              }
+              this.allSongsLoaded = true;
+              this.isLoadingSongs = false;
+              return;
+            }
+
+            const sort = document.getElementById("rg-sort-songs").value;
+            const q = document.getElementById("rg-search-songs").value.trim();
+
             let url = `?action=get_songs&page=${this.songsPage}&sort=${sort}&rhythm_game=1`;
             if (q) url += `&q=${encodeURIComponent(q)}`;
-            
+
             try {
               if (!window.rhythmLevelsMap) {
-                 const levelsRes = await fetchData('?action=get_all_rhythm_levels', {}, true);
-                 window.rhythmLevelsMap = levelsRes || { levels: {} };
+                const levelsRes = await fetchData("?action=get_all_rhythm_levels", {}, true);
+                window.rhythmLevelsMap = levelsRes || { levels: {} };
               }
               // Sequential pacing (50ms) prevents shared-hosting concurrent socket blocks
-              await new Promise(r => setTimeout(r, 50));
-              const favData = await fetchData('?action=get_rhythm_favorites', {}, true) || [];
-              const favSet = new Set(Array.isArray(favData) ? favData.map(id => parseInt(id)) : []);
-              
-              await new Promise(r => setTimeout(r, 50));
+              await new Promise((r) => setTimeout(r, 50));
+              const favData = (await fetchData("?action=get_rhythm_favorites", {}, true)) || [];
+              const favSet = new Set(Array.isArray(favData) ? favData.map((id) => parseInt(id)) : []);
+
+              await new Promise((r) => setTimeout(r, 50));
               const res = await fetchData(url, {}, true);
-              
+
               if (!Array.isArray(res) || res.length === 0) {
-                if (!append && this.listSongsEl) this.listSongsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: #aaa;">No songs found.</div>';
+                if (!append && this.listSongsEl)
+                  this.listSongsEl.innerHTML =
+                    '<div style="text-align:center; padding: 24px; color: #aaa;">No songs found.</div>';
                 this.allSongsLoaded = true;
               } else {
                 if (!append && this.listSongsEl) {
-                  this.listSongsEl.innerHTML = '';
-                  if (window.rhythmLevelsMap && window.rhythmLevelsMap.levels && Object.keys(window.rhythmLevelsMap.levels).length === 0 && !q) {
-                    const isAdmin = currentUser && (currentUser.is_admin == 1 || currentUser.email === 'musiclibrary@mail.com');
-                    this.listSongsEl.insertAdjacentHTML('beforeend', `
+                  this.listSongsEl.innerHTML = "";
+                  if (
+                    window.rhythmLevelsMap &&
+                    window.rhythmLevelsMap.levels &&
+                    Object.keys(window.rhythmLevelsMap.levels).length === 0 &&
+                    !q
+                  ) {
+                    const isAdmin =
+                      currentUser && (currentUser.is_admin == 1 || currentUser.email === "musiclibrary@mail.com");
+                    this.listSongsEl.insertAdjacentHTML(
+                      "beforeend",
+                      `
                       <div style="background: rgba(255, 59, 48, 0.1); border: 1px solid var(--rg-primary); border-radius: 16px; padding: 20px; margin-bottom: 16px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
                         <i class="bi bi-exclamation-triangle-fill text-danger d-block mb-2" style="font-size: 2.5rem;"></i>
                         <h6 class="text-white fw-bold text-uppercase mb-2" style="letter-spacing: 1px;">No Charts Generated</h6>
                         <p class="text-secondary small mb-3">The database currently has no pre-compiled note charts. Songs will generate on-the-fly when clicked, which may cause a slight initial delay.</p>
                         ${isAdmin ? `<button class="btn btn-danger rounded-pill fw-bold px-4 py-2 shadow-sm" onclick="document.getElementById('nav-chart-scan').click();"><i class="bi bi-open-chart-scan me-1"></i> Run Server Scanner Now</button>` : `<div class="badge bg-dark border border-secondary text-secondary p-2"><i class="bi bi-lock-fill me-1"></i> Contact Admin to Run Scanner</div>`}
                       </div>
-                    `);
+                    `
+                    );
                   }
                 }
-                res.forEach(song => {
+                res.forEach((song) => {
                   song.rg_favorite = favSet.has(parseInt(song.id)) ? 1 : 0;
                   if (this.listSongsEl) this.listSongsEl.appendChild(this.createSongElement(song));
                 });
                 if (res.length < 25) this.allSongsLoaded = true;
               }
-              
+
               if (!append) {
                 this.loadFavorites();
                 this.loadLeaderboard();
-                const savedTab = localStorage.getItem('rg_active_tab') || 'songs';
-                const savedArtist = localStorage.getItem('rg_active_artist');
-                if (savedTab === 'artistDetail' && savedArtist) {
+                const savedTab = localStorage.getItem("rg_active_tab") || "songs";
+                const savedArtist = localStorage.getItem("rg_active_artist");
+                if (savedTab === "artistDetail" && savedArtist) {
                   this.openArtistDetail(savedArtist);
                 } else {
                   const activeNavItem = document.querySelector(`.rg-nav-item[data-target="${savedTab}"]`);
                   if (activeNavItem) {
-                    document.querySelectorAll('.rg-nav-item').forEach(n => n.classList.remove('active'));
-                    activeNavItem.classList.add('active');
-                    Object.values(this.tabs).forEach(t => { if (t) t.classList.add('rg-hidden'); });
-                    if (this.tabs[savedTab]) this.tabs[savedTab].classList.remove('rg-hidden');
-                    
-                    if (savedTab === 'artists') {
+                    document.querySelectorAll(".rg-nav-item").forEach((n) => n.classList.remove("active"));
+                    activeNavItem.classList.add("active");
+                    Object.values(this.tabs).forEach((t) => {
+                      if (t) t.classList.add("rg-hidden");
+                    });
+                    if (this.tabs[savedTab]) this.tabs[savedTab].classList.remove("rg-hidden");
+
+                    if (savedTab === "artists") {
                       this.loadArtists();
-                    } else if (savedTab === 'favorites') {
+                    } else if (savedTab === "favorites") {
                       this.loadFavorites();
+                    } else if (savedTab === "offline") {
+                      this.loadOfflineSongs();
                     }
                   }
                 }
-                if (typeof currentView !== 'undefined' && currentView.artist_name) {
+                if (typeof currentView !== "undefined" && currentView.artist_name) {
                   this.openArtistDetail(currentView.artist_name);
                   delete currentView.artist_name;
                   if (currentView.artist_id) delete currentView.artist_id;
-                } else if (typeof currentView !== 'undefined' && currentView.param) {
+                } else if (typeof currentView !== "undefined" && currentView.param) {
                   const targetId = parseInt(currentView.param);
                   try {
                     const fetchedData = await fetchData(`?action=get_song_data&id=${targetId}`, {}, true);
                     if (fetchedData && fetchedData.id) {
                       fetchedData.rg_favorite = favSet.has(targetId) ? 1 : 0;
                       this.openPlayDialog(fetchedData);
-                      currentView.param = '';
+                      currentView.param = "";
                     }
                   } catch (e) {}
                 }
@@ -37407,7 +38199,14 @@ SOFTWARE.</div>
             } catch (e) {
               console.error("Game Engine Failed to Load Tracks:", e);
               if (!append && this.listSongsEl) {
-                this.listSongsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: var(--rg-error, #ffb4ab);">Error establishing database connection.</div>';
+                this.listSongsEl.innerHTML = !navigator.onLine ? 
+                  `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100">
+                    <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i>
+                    <h5 class="fw-bold text-white">You are offline</h5>
+                    <p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p>
+                    <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button>
+                  </div>` :
+                  '<div style="text-align:center; padding: 24px; color: #ffb4ab;">Error establishing database connection.</div>';
               }
             }
             this.isLoadingSongs = false;
@@ -37427,8 +38226,17 @@ SOFTWARE.</div>
             if (this.allFavsLoaded) return;
             this.isLoadingFavs = true;
 
-            const sort = document.getElementById('rg-sort-favs').value;
-            const q = document.getElementById('rg-search-favs').value.trim();
+            if (!navigator.onLine) {
+              if (!append && this.listFavsEl) {
+                this.listFavsEl.innerHTML = `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100"><i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i><h5 class="fw-bold text-white">You are offline</h5><p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p><button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button></div>`;
+              }
+              this.allFavsLoaded = true;
+              this.isLoadingFavs = false;
+              return;
+            }
+
+            const sort = document.getElementById("rg-sort-favs").value;
+            const q = document.getElementById("rg-search-favs").value.trim();
 
             let url = `?action=get_rhythm_favorite_songs&page=${this.favsPage}&sort=${sort}`;
             if (q) url += `&q=${encodeURIComponent(q)}`;
@@ -37436,24 +38244,37 @@ SOFTWARE.</div>
             try {
               const res = await fetchData(url, {}, true);
               if (!Array.isArray(res) || res.length === 0) {
-                if (!append && this.listFavsEl) this.listFavsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite songs yet. Add some!</div>';
+                if (!append && this.listFavsEl)
+                  this.listFavsEl.innerHTML =
+                    '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite songs yet. Add some!</div>';
                 this.allFavsLoaded = true;
               } else {
-                if (!append && this.listFavsEl) this.listFavsEl.innerHTML = '';
-                res.forEach(song => {
+                if (!append && this.listFavsEl) this.listFavsEl.innerHTML = "";
+                res.forEach((song) => {
                   song.rg_favorite = 1;
                   if (this.listFavsEl) this.listFavsEl.appendChild(this.createSongElement(song));
                 });
                 if (res.length < 25) this.allFavsLoaded = true;
               }
-            } catch (e) { console.error(e); }
+            } catch (e) {
+              console.error(e);
+              if (!append && this.listFavsEl && !navigator.onLine) {
+                this.listFavsEl.innerHTML = 
+                  `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100">
+                    <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i>
+                    <h5 class="fw-bold text-white">You are offline</h5>
+                    <p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p>
+                    <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button>
+                  </div>`;
+              }
+            }
             this.isLoadingFavs = false;
           }
 
           async loadLeaderboard(append = false) {
             if (!append) {
               this.leaderboardPage = 1;
-              const container = document.getElementById('rg-list-leaderboard');
+              const container = document.getElementById("rg-list-leaderboard");
               if (container) {
                 container.innerHTML = `
                   <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
@@ -37465,22 +38286,49 @@ SOFTWARE.</div>
             if (this.allLeaderboardLoaded) return;
             this.isLoadingLeaderboard = true;
 
+            if (!navigator.onLine) {
+              const container = document.getElementById("rg-list-leaderboard");
+              if (!append && container) {
+                container.innerHTML = `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100"><i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i><h5 class="fw-bold text-white">You are offline</h5><p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p><button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button></div>`;
+              }
+              this.allLeaderboardLoaded = true;
+              this.isLoadingLeaderboard = false;
+              return;
+            }
+
             try {
               const data = await fetchData(`?action=get_rhythm_leaderboard&page=${this.leaderboardPage}`, {}, true);
-              const container = document.getElementById('rg-list-leaderboard');
-              
+              const container = document.getElementById("rg-list-leaderboard");
+
               if (!Array.isArray(data) || data.length === 0) {
-                if (!append && container) container.innerHTML = '<div style="text-align:center; padding:24px; color:#aaa;">No scores recorded yet. Be the first to play!</div>';
+                if (!append && container)
+                  container.innerHTML =
+                    '<div style="text-align:center; padding:24px; color:#aaa;">No scores recorded yet. Be the first to play!</div>';
                 this.allLeaderboardLoaded = true;
               } else {
-                if (!append && container) container.innerHTML = '';
-                const html = data.map((entry, idx) => {
-                  const globalIdx = (this.leaderboardPage - 1) * 25 + idx + 1;
-                  const jud = this.getRankFromStats(entry.total_perfect || 0, entry.total_great || 0, entry.total_good || 0, entry.total_bad || 0, entry.total_miss || 0);
-                  const cacheBuster = Math.floor(Date.now() / 60000);
-                  const totalHits = parseInt(entry.total_perfect || 0) + parseInt(entry.total_great || 0) + parseInt(entry.total_good || 0) + parseInt(entry.total_bad || 0) + parseInt(entry.total_miss || 0);
-                  const suspicious = (jud.acc === '100.00' && totalHits > 50) ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Suspicious Activity"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>' : '';
-                  return `
+                if (!append && container) container.innerHTML = "";
+                const html = data
+                  .map((entry, idx) => {
+                    const globalIdx = (this.leaderboardPage - 1) * 25 + idx + 1;
+                    const jud = this.getRankFromStats(
+                      entry.total_perfect || 0,
+                      entry.total_great || 0,
+                      entry.total_good || 0,
+                      entry.total_bad || 0,
+                      entry.total_miss || 0
+                    );
+                    const cacheBuster = Math.floor(Date.now() / 60000);
+                    const totalHits =
+                      parseInt(entry.total_perfect || 0) +
+                      parseInt(entry.total_great || 0) +
+                      parseInt(entry.total_good || 0) +
+                      parseInt(entry.total_bad || 0) +
+                      parseInt(entry.total_miss || 0);
+                    const suspicious =
+                      jud.acc === "100.00" && totalHits > 50
+                        ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Suspicious Activity"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>'
+                        : "";
+                    return `
                     <div class="rg-list-item rank-row" data-userid="${entry.user_id}" data-player-name="${encodeURIComponent(entry.player_name)}" style="cursor: pointer; display: flex; align-items: center; justify-content: space-between;">
                       <div class="rg-list-item-info" style="min-width: 0; flex: 1;">
                         <div style="width: 24px; font-weight: 900; color: var(--rg-primary); text-align: center;">${globalIdx}</div>
@@ -37498,14 +38346,15 @@ SOFTWARE.</div>
                       </div>
                     </div>
                   `;
-                }).join('');
-                
+                  })
+                  .join("");
+
                 if (container) {
-                  container.insertAdjacentHTML('beforeend', html);
-                  const rows = container.querySelectorAll('.rank-row:not(.bound)');
-                  rows.forEach(row => {
-                    row.classList.add('bound');
-                    row.addEventListener('click', () => {
+                  container.insertAdjacentHTML("beforeend", html);
+                  const rows = container.querySelectorAll(".rank-row:not(.bound)");
+                  rows.forEach((row) => {
+                    row.classList.add("bound");
+                    row.addEventListener("click", () => {
                       this.openPlayerStats(row.dataset.userid, decodeURIComponent(row.dataset.playerName), 1);
                     });
                   });
@@ -37514,49 +38363,310 @@ SOFTWARE.</div>
               }
             } catch (err) {
               console.error("Failed to load Leaderboard:", err);
+              const container = document.getElementById("rg-list-leaderboard");
+              if (!append && container && !navigator.onLine) {
+                container.innerHTML = 
+                  `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100">
+                    <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i>
+                    <h5 class="fw-bold text-white">You are offline</h5>
+                    <p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p>
+                    <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button>
+                  </div>`;
+              }
             }
             this.isLoadingLeaderboard = false;
           }
 
+          async loadOfflineSongs(append = false) {
+            if (!append) {
+              this.offlinePage = 1;
+              if (this.listOfflineEl) {
+                this.listOfflineEl.innerHTML = `
+                <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                  <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                </div>`;
+              }
+              this.allOfflineLoaded = false;
+            }
+            if (this.allOfflineLoaded) return;
+            this.isLoadingOffline = true;
+
+            const sort = document.getElementById("rg-sort-offline").value;
+            const q = document.getElementById("rg-search-offline").value.trim().toLowerCase();
+
+            try {
+              if (!window.rhythmLevelsMap) {
+                const levelsRes = await fetchData("?action=get_all_rhythm_levels", {}, true);
+                window.rhythmLevelsMap = levelsRes || { levels: {} };
+              }
+              const favData = (await fetchData("?action=get_rhythm_favorites", {}, true)) || [];
+              const favSet = new Set(Array.isArray(favData) ? favData.map((id) => parseInt(id)) : []);
+
+              let res = null;
+
+              // Try to grab from the main app's global offline memory first
+              if (window.offlineViewSongsData && window.offlineViewSongsData.length > 0) {
+                res = [...window.offlineViewSongsData];
+              } else {
+                // Fallback: Fetch exactly what the Service Worker caches to guarantee a hit
+                res = await fetchData(`?action=get_offline_songs&sort=manual_order&all=1`, {}, true);
+                
+                // DEEP OFFLINE HARDWARE FALLBACK: Extract directly from binary cache if API is unreachable
+                if ((!res || res.length === 0) && !navigator.onLine) {
+                  try {
+                    const cache = await caches.open('php-music-offline');
+                    const keys = await cache.keys();
+                    res = [];
+                    for (let req of keys) {
+                      if (req.url.includes('action=get_song_data')) {
+                        const cachedRes = await cache.match(req);
+                        if (cachedRes) {
+                          const songData = await cachedRes.json();
+                          if (songData && songData.id) res.push(songData);
+                        }
+                      }
+                    }
+                  } catch (e) {
+                    console.error("Rhythm Game offline cache extraction failed", e);
+                  }
+                }
+              }
+
+              if (!Array.isArray(res) || res.length === 0) {
+                if (!append && this.listOfflineEl)
+                  this.listOfflineEl.innerHTML =
+                    '<div style="text-align:center; padding: 24px; color: #aaa;">No offline tracks found.</div>';
+                this.allOfflineLoaded = true;
+              } else {
+                // Apply Sorting Client-Side to support pure offline sorting without backend queries
+                if (sort === "title_asc") res.sort((a, b) => a.title.localeCompare(b.title));
+                else if (sort === "artist_asc") res.sort((a, b) => a.artist.localeCompare(b.artist));
+                else if (sort === "added_newest") res.sort((a, b) => b.id - a.id);
+                else if (sort === "trending") res.sort((a, b) => (b.play_count || 0) - (a.play_count || 0));
+                else if (sort === "random") res.sort(() => Math.random() - 0.5);
+
+                // Apply Search Filter Client-Side
+                if (q) {
+                  res = res.filter(
+                    (s) =>
+                      (s.title && s.title.toLowerCase().includes(q)) || (s.artist && s.artist.toLowerCase().includes(q))
+                  );
+                }
+
+                // Apply Pagination Client-Side to maintain performance
+                const startIndex = (this.offlinePage - 1) * 25;
+                const chunk = res.slice(startIndex, startIndex + 25);
+
+                if (!append && this.listOfflineEl) this.listOfflineEl.innerHTML = "";
+
+                if (!append && chunk.length === 0 && this.listOfflineEl) {
+                  this.listOfflineEl.innerHTML =
+                    '<div style="text-align:center; padding: 24px; color: #aaa;">No offline tracks matching search found.</div>';
+                }
+
+                chunk.forEach((song) => {
+                  song.rg_favorite = favSet.has(parseInt(song.id)) ? 1 : 0;
+                  if (this.listOfflineEl) this.listOfflineEl.appendChild(this.createSongElement(song));
+                });
+
+                if (startIndex + 25 >= res.length) {
+                  this.allOfflineLoaded = true;
+                }
+              }
+            } catch (e) {
+              console.error(e);
+              if (!append && this.listOfflineEl)
+                this.listOfflineEl.innerHTML =
+                  '<div style="text-align:center; padding: 24px; color: #aaa;">Failed to load offline tracks.</div>';
+            }
+            this.isLoadingOffline = false;
+          }
+
+          async loadArtistFollowing(artistUserId, append = false) {
+            if (!append) {
+              this.artistFollowingPage = 1;
+              const container = document.getElementById("rg-list-artist-following");
+              if (container) {
+                container.innerHTML = `
+                <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                  <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                </div>`;
+              }
+              this.allArtistFollowingLoaded = false;
+            }
+            if (this.allArtistFollowingLoaded) return;
+            this.isLoadingArtistFollowing = true;
+
+            const sort = document.getElementById("rg-sort-artist-following").value;
+            const q = document.getElementById("rg-search-artist-following").value.trim();
+
+            let url = `?action=get_rhythm_artists&following_of=${artistUserId}&page=${this.artistFollowingPage}&sort=${sort}`;
+            if (q) url += `&q=${encodeURIComponent(q)}`;
+
+            try {
+              const res = await fetchData(url, {}, true);
+              const container = document.getElementById("rg-list-artist-following");
+
+              if (!Array.isArray(res) || res.length === 0) {
+                if (!append && container)
+                  container.innerHTML =
+                    '<div style="text-align:center; padding: 24px; color: #aaa;">Not following anyone.</div>';
+                this.allArtistFollowingLoaded = true;
+              } else {
+                if (!append && container) container.innerHTML = "";
+                res.forEach((entry) => {
+                  const artist = {
+                    name: entry.name,
+                    id: entry.id || 0,
+                    count: parseInt(entry.count || 0),
+                    score: parseInt(entry.score || 0),
+                    plays: parseInt(entry.plays || 0),
+                    followers: parseInt(entry.followers || 0),
+                    user_id: entry.user_id,
+                    rankInfo: null,
+                  };
+                  const total =
+                    parseInt(entry.perfect) +
+                    parseInt(entry.great) +
+                    parseInt(entry.good) +
+                    parseInt(entry.bad) +
+                    parseInt(entry.miss);
+                  artist.rankInfo =
+                    total > 0
+                      ? this.getRankFromStats(entry.perfect, entry.great, entry.good, entry.bad, entry.miss)
+                      : { rank: "F", color: "#555" };
+                  if (container) container.appendChild(this.createArtistElement(artist));
+                });
+                if (res.length < 25) this.allArtistFollowingLoaded = true;
+              }
+            } catch (e) {
+              console.error(e);
+            }
+            this.isLoadingArtistFollowing = false;
+          }
+
+          generateChartSVG() {
+            if (!this.chartNotes || this.chartNotes.length === 0) return "";
+            const lanes = this.LANES;
+            const duration = this.audioBuffer ? this.audioBuffer.duration : 180;
+            const width = lanes * 40 + 20;
+            const pxPerSec = 150;
+            const height = Math.ceil(duration * pxPerSec) + 40;
+
+            let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="background:#0a0a0a; display: block; margin: 0 auto;">`;
+
+            // Draw lane dividers
+            for (let i = 0; i <= lanes; i++) {
+              svg += `<line x1="${10 + i * 40}" y1="0" x2="${10 + i * 40}" y2="${height}" stroke="#333" stroke-width="2"/>`;
+            }
+
+            // Draw horizontal measure lines (every 1 second)
+            for (let t = 0; t <= Math.ceil(duration); t++) {
+              const y = height - t * pxPerSec - 20;
+              svg += `<line x1="10" y1="${y}" x2="${10 + lanes * 40}" y2="${y}" stroke="#222" stroke-width="1"/>`;
+            }
+
+            // Draw notes
+            this.chartNotes.forEach((n) => {
+              const x = 10 + n.lane * 40;
+              const yBottom = height - n.time * pxPerSec - 20; // Bottom edge of note (since time goes up)
+              if (n.isLong) {
+                const yTop = height - n.endTime * pxPerSec - 20;
+                const h = Math.max(5, yBottom - yTop);
+                svg += `<rect x="${x + 4}" y="${yTop}" width="32" height="${h}" fill="rgba(255, 59, 48, 0.4)" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
+              } else {
+                svg += `<rect x="${x + 4}" y="${yBottom - 8}" width="32" height="16" fill="#fff" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
+              }
+            });
+
+            // Draw hit bar at y=height-20
+            svg += `<line x1="5" y1="${height - 20}" x2="${15 + lanes * 40}" y2="${height - 20}" stroke="#ff3b30" stroke-width="4"/>`;
+
+            svg += `</svg>`;
+            return svg;
+          }
+
           async openPlayDialog(song) {
             this.selectedSong = song;
-            document.getElementById('rg-dialog-song-name').textContent = song.title;
-            const coverEl = document.getElementById('rg-dialog-cover');
+            document.getElementById("rg-dialog-song-name").textContent = song.title;
+            
+            const warningId = "rg-offline-play-warning";
+            let warningEl = document.getElementById(warningId);
+            if (!navigator.onLine) {
+              if (!warningEl) {
+                const buttonContainer = document.getElementById("rg-btn-dialog-play").parentNode;
+                buttonContainer.insertAdjacentHTML("beforebegin", `
+                  <div id="${warningId}" class="alert border-warning text-warning small mb-3 text-start rounded-3" style="background: rgba(255,193,7,0.1); width: 100%; max-width: 360px; margin: 16px auto 0 auto; line-height: 1.4;">
+                    <i class="bi bi-exclamation-triangle-fill me-2"></i><strong>Offline Mode:</strong> Played song information/scores will <strong>NOT</strong> be stored in the database, even after you go back online. Only online plays are saved.
+                  </div>
+                `);
+              }
+            } else {
+              if (warningEl) warningEl.remove();
+            }
+
+            const coverEl = document.getElementById("rg-dialog-cover");
             if (coverEl) coverEl.src = `?action=get_image&id=${song.id}&v=${song.last_modified || 0}`;
-            
+
+            // Clear previous modal chart content
+            const chartContent = document.getElementById("rg-chart-modal-content");
+            if (chartContent) chartContent.innerHTML = "";
+
             const lvlData = await fetchData(`?action=get_rhythm_levels&song_id=${song.id}`, {}, true);
-            const diffMap = { easy: 'Easy', medium: 'Med', hard: 'Hard', expert: 'Exprt', master: 'Mstr', demon: 'Demon' };
-            
-            document.querySelectorAll('.rg-diff-btn').forEach(btn => {
+            const diffMap = {
+              easy: "Easy",
+              medium: "Med",
+              hard: "Hard",
+              expert: "Exprt",
+              master: "Mstr",
+              demon: "Demon",
+            };
+
+            document.querySelectorAll(".rg-diff-btn").forEach((btn) => {
               const diffKey = btn.dataset.diff;
-              const defaultText = diffMap[diffKey] || 'Diff';
+              const defaultText = diffMap[diffKey] || "Diff";
               if (lvlData && lvlData.levels && lvlData.levels[diffKey] !== undefined) {
                 btn.innerHTML = `${defaultText} <span style="font-size:0.7rem; opacity:0.65; display:block; font-weight:bold; margin-top:2px;">Lv.${lvlData.levels[diffKey]}</span>`;
               } else {
                 btn.innerHTML = `${defaultText} <span style="font-size:0.7rem; opacity:0.4; display:block; margin-top:2px;">Lv.--</span>`;
               }
             });
-            
-            const container = document.getElementById('rg-song-leaderboard');
-            container.innerHTML = '<div class="text-center text-secondary small py-2"><div class="spinner-border spinner-border-sm text-danger" style="border-width: 0.15em;"></div> Loading scores...</div>';
-            document.getElementById('rg-dialog-play').classList.remove('rg-hidden');
+
+            const container = document.getElementById("rg-song-leaderboard");
+            container.innerHTML =
+              '<div class="text-center text-secondary small py-2"><div class="spinner-border spinner-border-sm text-danger" style="border-width: 0.15em;"></div> Loading scores...</div>';
+            const apToggle = document.getElementById("rg-autoplay-toggle");
+            if (apToggle) apToggle.checked = false;
+            document.getElementById("rg-dialog-play").classList.remove("rg-hidden");
 
             try {
               const data = await fetchData(`?action=get_song_rhythm_leaderboard&song_id=${song.id}`, {}, true);
               if (!Array.isArray(data) || data.length === 0) {
-                container.innerHTML = '<div class="text-center text-secondary small py-4">No scores recorded yet. Be the first!</div>';
+                container.innerHTML =
+                  '<div class="text-center text-secondary small py-4">No scores recorded yet. Be the first!</div>';
                 return;
               }
 
-              container.innerHTML = data.map((entry, idx) => {
-                const jud = this.getRankFromStats(entry.perfect, entry.great, entry.good, entry.bad, entry.miss);
-                const pfpUrl = `?action=get_profile_picture&id=${entry.user_id}`;
-                const isFullCombo = parseInt(entry.miss || 0) === 0 && parseInt(entry.bad || 0) === 0;
-                const fcBadge = isFullCombo ? '<span class="badge bg-success ms-2" style="font-size: 0.65rem; padding: 2px 6px;">FC</span>' : '';
-                const totalHits = parseInt(entry.perfect || 0) + parseInt(entry.great || 0) + parseInt(entry.good || 0) + parseInt(entry.bad || 0) + parseInt(entry.miss || 0);
-                const suspicious = ((jud.acc === '100.00' && totalHits > 50) || (entry.max_combo > 500 && entry.miss == 0)) ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Perfect Play / Bot Suspected"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>' : '';
-                
-                return `
+              container.innerHTML = data
+                .map((entry, idx) => {
+                  const jud = this.getRankFromStats(entry.perfect, entry.great, entry.good, entry.bad, entry.miss);
+                  const pfpUrl = `?action=get_profile_picture&id=${entry.user_id}`;
+                  const isFullCombo = parseInt(entry.miss || 0) === 0 && parseInt(entry.bad || 0) === 0;
+                  const fcBadge = isFullCombo
+                    ? '<span class="badge bg-success ms-2" style="font-size: 0.65rem; padding: 2px 6px;">FC</span>'
+                    : "";
+                  const totalHits =
+                    parseInt(entry.perfect || 0) +
+                    parseInt(entry.great || 0) +
+                    parseInt(entry.good || 0) +
+                    parseInt(entry.bad || 0) +
+                    parseInt(entry.miss || 0);
+                  const suspicious =
+                    (jud.acc === "100.00" && totalHits > 50) || (entry.max_combo > 500 && entry.miss == 0)
+                      ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Perfect Play / Bot Suspected"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>'
+                      : "";
+
+                  return `
                   <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${jud.color}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default; margin-bottom: 8px; text-align: left;">
                     <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
                       <div style="font-size: 1.1rem; font-weight: 900; color: var(--rg-primary); width: 24px; text-align: center; font-family: monospace;">${idx + 1}</div>
@@ -37593,7 +38703,8 @@ SOFTWARE.</div>
                     </div>
                   </div>
                 `;
-              }).join('');
+                })
+                .join("");
             } catch (err) {
               console.error("Failed to load song specific leaderboard:", err);
               container.innerHTML = '<div class="text-center text-danger small py-2">Failed to load scores.</div>';
@@ -37601,10 +38712,10 @@ SOFTWARE.</div>
           }
 
           openPlayerStats(userId, name, page = 1) {
-            const body = document.getElementById('rg-player-stats-body');
-            const modalEl = document.getElementById('rg-player-stats-modal');
+            const body = document.getElementById("rg-player-stats-body");
+            const modalEl = document.getElementById("rg-player-stats-modal");
             const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
-            
+
             if (page === 1) {
               body.innerHTML = `
                 <div class="text-center mb-4">
@@ -37621,30 +38732,56 @@ SOFTWARE.</div>
               this.statsUserId = userId;
               this.statsPlayerName = name;
             } else {
-              const loadMoreBtn = document.getElementById('rg-btn-load-more-stats');
-              if (loadMoreBtn) loadMoreBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Loading...';
+              const loadMoreBtn = document.getElementById("rg-btn-load-more-stats");
+              if (loadMoreBtn)
+                loadMoreBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Loading...';
             }
 
-            fetchData(`?action=get_user_rhythm_scores&target_user_id=${userId}&page=${page}`).then(scores => {
-              const listContainer = document.getElementById('rg-player-scores-list');
-              const oldBtn = document.getElementById('load-more-stats-container');
+            fetchData(`?action=get_user_rhythm_scores&target_user_id=${userId}&page=${page}`).then((scores) => {
+              const listContainer = document.getElementById("rg-player-scores-list");
+              const oldBtn = document.getElementById("load-more-stats-container");
               if (oldBtn) oldBtn.remove();
 
               if (scores && scores.length > 0) {
-                const diffColors = { easy: '#22d3ee', medium: '#34d399', hard: '#fb923c', expert: '#f43f5e', master: '#a78bfa', demon: '#7f1d1d' };
-                const diffLabels = { easy: 'EZ', medium: 'ND', hard: 'HD', expert: 'EX', master: 'MS', demon: 'DM' };
-                
-                const cardsHtml = scores.map(s => {
-                  const jud = this.getRankFromStats(s.perfect, s.great, s.good, s.bad, s.miss);
-                  const diffColor = diffColors[s.difficulty] || '#aaa';
-                  const diffLabel = diffLabels[s.difficulty] || 'UN';
-                  const lvlText = s.level ? `Lv.${s.level}` : 'Lv.--';
-                  const coverSvg = getSvgPlaceholder(s.title);
-                  const playedAt = s.played_at ? new Date(s.played_at.replace(' ', 'T')+'Z').toLocaleDateString() : 'Unknown';
-                  const totalHits = parseInt(s.perfect || 0) + parseInt(s.great || 0) + parseInt(s.good || 0) + parseInt(s.bad || 0) + parseInt(s.miss || 0);
-                  const suspicious = ((jud.acc === '100.00' && totalHits > 50) || (s.max_combo > 500 && s.miss == 0)) ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Perfect Play / Bot Suspected"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>' : '';
+                const diffColors = {
+                  easy: "#22d3ee",
+                  medium: "#34d399",
+                  hard: "#fb923c",
+                  expert: "#f43f5e",
+                  master: "#a78bfa",
+                  demon: "#7f1d1d",
+                };
+                const diffLabels = {
+                  easy: "EZ",
+                  medium: "ND",
+                  hard: "HD",
+                  expert: "EX",
+                  master: "MS",
+                  demon: "DM",
+                };
 
-                  return `
+                const cardsHtml = scores
+                  .map((s) => {
+                    const jud = this.getRankFromStats(s.perfect, s.great, s.good, s.bad, s.miss);
+                    const diffColor = diffColors[s.difficulty] || "#aaa";
+                    const diffLabel = diffLabels[s.difficulty] || "UN";
+                    const lvlText = s.level ? `Lv.${s.level}` : "Lv.--";
+                    const coverSvg = getSvgPlaceholder(s.title);
+                    const playedAt = s.played_at
+                      ? new Date(s.played_at.replace(" ", "T") + "Z").toLocaleDateString()
+                      : "Unknown";
+                    const totalHits =
+                      parseInt(s.perfect || 0) +
+                      parseInt(s.great || 0) +
+                      parseInt(s.good || 0) +
+                      parseInt(s.bad || 0) +
+                      parseInt(s.miss || 0);
+                    const suspicious =
+                      (jud.acc === "100.00" && totalHits > 50) || (s.max_combo > 500 && s.miss == 0)
+                        ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Perfect Play / Bot Suspected"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>'
+                        : "";
+
+                    return `
                     <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${diffColor}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;">
                       <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
                         <div class="d-flex align-items-center gap-3" style="min-width: 0; flex: 1;">
@@ -37657,7 +38794,7 @@ SOFTWARE.</div>
                         <div class="d-flex flex-column align-items-end" style="flex-shrink: 0;">
                           <div class="d-flex align-items-center gap-1">
                             ${suspicious}
-                            <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px;" title="${s.difficulty.toUpperCase()} level">${diffLabel} ${lvlText}</span>
+                            <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty === "demon" ? "#fff" : "#000"}; padding: 2px 6px; border-radius: 4px;" title="${s.difficulty.toUpperCase()} level">${diffLabel} ${lvlText}</span>
                             <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${jud.color}; color: #000;" title="RANK">${jud.rank}</span>
                           </div>
                           <div class="text-secondary small mt-1" style="font-size: 0.75rem;">${playedAt}</div>
@@ -37680,30 +38817,38 @@ SOFTWARE.</div>
                       </div>
                     </div>
                   `;
-                }).join('');
+                  })
+                  .join("");
 
                 if (page === 1) {
                   listContainer.innerHTML = cardsHtml;
                 } else {
-                  listContainer.insertAdjacentHTML('beforeend', cardsHtml);
+                  listContainer.insertAdjacentHTML("beforeend", cardsHtml);
                 }
 
                 if (scores.length === 25) {
-                  listContainer.insertAdjacentHTML('afterend', `
+                  listContainer.insertAdjacentHTML(
+                    "afterend",
+                    `
                     <div class="text-center p-3" id="load-more-stats-container">
                       <button class="btn btn-outline-light rounded-pill px-4 btn-sm fw-bold" id="rg-btn-load-more-stats">Load More History</button>
                     </div>
-                  `);
-                  document.getElementById('rg-btn-load-more-stats').onclick = () => {
+                  `
+                  );
+                  document.getElementById("rg-btn-load-more-stats").onclick = () => {
                     this.currentStatsPage++;
                     this.openPlayerStats(this.statsUserId, this.statsPlayerName, this.currentStatsPage);
                   };
                 } else if (page > 1) {
-                  listContainer.insertAdjacentHTML('afterend', '<div class="text-center p-3 text-secondary small" id="load-more-stats-container">No more plays recorded.</div>');
+                  listContainer.insertAdjacentHTML(
+                    "afterend",
+                    '<div class="text-center p-3 text-secondary small" id="load-more-stats-container">No more plays recorded.</div>'
+                  );
                 }
               } else {
                 if (page === 1) {
-                  listContainer.innerHTML = '<div class="text-center text-secondary py-5">No play history recorded yet for this user.</div>';
+                  listContainer.innerHTML =
+                    '<div class="text-center text-secondary py-5">No play history recorded yet for this user.</div>';
                 }
               }
             });
@@ -37715,14 +38860,14 @@ SOFTWARE.</div>
           renderFavoritesList() {}
 
           switchScreen(name) {
-            Object.values(this.screens).forEach(s => s.classList.add('rg-hidden'));
-            if (this.screens[name]) this.screens[name].classList.remove('rg-hidden');
-            
-            if (name === 'game' || name === 'loading') {
-              document.body.classList.add('rg-session-active');
+            Object.values(this.screens).forEach((s) => s.classList.add("rg-hidden"));
+            if (this.screens[name]) this.screens[name].classList.remove("rg-hidden");
+
+            if (name === "game" || name === "loading") {
+              document.body.classList.add("rg-session-active");
             } else {
-              document.body.classList.remove('rg-session-active');
-              if (name === 'hub') {
+              document.body.classList.remove("rg-session-active");
+              if (name === "hub") {
                 if (this.audioPlayback) {
                   this.audioPlayback.pause();
                   this.audioPlayback.src = "";
@@ -37734,27 +38879,27 @@ SOFTWARE.</div>
           }
 
           toggleCalibrationTest() {
-            const area = document.getElementById('rg-cal-test-area');
-            const btn = document.getElementById('rg-btn-cal-test');
-            const fb = document.getElementById('rg-cal-feedback');
-            
+            const area = document.getElementById("rg-cal-test-area");
+            const btn = document.getElementById("rg-btn-cal-test");
+            const fb = document.getElementById("rg-cal-feedback");
+
             this.isCalibrating = !this.isCalibrating;
-            
+
             if (this.isCalibrating) {
-              area.style.display = 'block';
-              btn.textContent = 'Stop Test';
-              btn.style.background = '#444';
-              btn.style.color = '#fff';
-              fb.textContent = 'Tap Screen / Keys to Calibrate';
-              fb.style.color = '#fff';
-              
-              this.calCanvas = document.getElementById('rg-cal-canvas');
-              this.calCtx = this.calCanvas.getContext('2d');
+              area.style.display = "block";
+              btn.textContent = "Stop Test";
+              btn.style.background = "#444";
+              btn.style.color = "#fff";
+              fb.textContent = "Tap Screen / Keys to Calibrate";
+              fb.style.color = "#fff";
+
+              this.calCanvas = document.getElementById("rg-cal-canvas");
+              this.calCtx = this.calCanvas.getContext("2d");
               this.resizeCalCanvas();
-              
+
               this.calNotes = [];
               this.calStartTime = Date.now();
-              
+
               if (!this.sfxCtx) {
                 this.sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
               }
@@ -37769,19 +38914,19 @@ SOFTWARE.</div>
                 e.stopPropagation();
                 this.processCalHit();
               };
-              area.addEventListener('touchstart', this.boundCalTouchStart, { passive: false });
-              area.addEventListener('mousedown', this.boundCalMouseDown);
-              
+              area.addEventListener("touchstart", this.boundCalTouchStart, { passive: false });
+              area.addEventListener("mousedown", this.boundCalMouseDown);
+
               this.runCalibrationLoop();
             } else {
-              area.style.display = 'none';
-              btn.textContent = 'Start Test';
-              btn.style.background = 'var(--rg-primary)';
-              btn.style.color = '#fff';
-              
-              if (this.boundCalTouchStart) area.removeEventListener('touchstart', this.boundCalTouchStart);
-              if (this.boundCalMouseDown) area.removeEventListener('mousedown', this.boundCalMouseDown);
-              
+              area.style.display = "none";
+              btn.textContent = "Start Test";
+              btn.style.background = "var(--rg-primary)";
+              btn.style.color = "#fff";
+
+              if (this.boundCalTouchStart) area.removeEventListener("touchstart", this.boundCalTouchStart);
+              if (this.boundCalMouseDown) area.removeEventListener("mousedown", this.boundCalMouseDown);
+
               cancelAnimationFrame(this.calAnimId);
               this.calNotes = [];
             }
@@ -37796,39 +38941,39 @@ SOFTWARE.</div>
 
           runCalibrationLoop() {
             if (!this.isCalibrating) return;
-            
+
             const now = (Date.now() - this.calStartTime) / 1000;
             const w = this.calCanvas.width;
             const h = this.calCanvas.height;
-            
-            this.calCtx.fillStyle = '#000';
+
+            this.calCtx.fillStyle = "#000";
             this.calCtx.fillRect(0, 0, w, h);
-            
+
             const targetY = h * 0.75;
             const speed = 150 * this.userTickSpeed;
-            
+
             if (this.calNotes.length === 0 || now - this.calNotes[this.calNotes.length - 1].time > 1.0) {
               this.calNotes.push({ time: now + 1.2, hit: false, missed: false });
             }
-            
-            this.calCtx.strokeStyle = 'var(--rg-primary)';
+
+            this.calCtx.strokeStyle = "var(--rg-primary)";
             this.calCtx.lineWidth = 2;
             this.calCtx.beginPath();
             this.calCtx.moveTo(0, targetY);
             this.calCtx.lineTo(w, targetY);
             this.calCtx.stroke();
-            
-            this.calNotes.forEach(n => {
+
+            this.calNotes.forEach((n) => {
               if (n.hit || n.missed) return;
               const delta = n.time - now;
-              const y = targetY - (delta * speed);
-              
+              const y = targetY - delta * speed;
+
               if (y > h) {
                 n.missed = true;
                 return;
               }
               if (y >= 0 && y < h) {
-                this.calCtx.strokeStyle = '#fff';
+                this.calCtx.strokeStyle = "#fff";
                 this.calCtx.lineWidth = 3;
                 this.calCtx.beginPath();
                 this.calCtx.moveTo(w * 0.2, y);
@@ -37836,7 +38981,7 @@ SOFTWARE.</div>
                 this.calCtx.stroke();
               }
             });
-            
+
             this.calAnimId = requestAnimationFrame(this.runCalibrationLoop.bind(this));
           }
 
@@ -37846,8 +38991,8 @@ SOFTWARE.</div>
             const now = (Date.now() - this.calStartTime) / 1000;
             let minDiff = Infinity;
             let target = null;
-            
-            this.calNotes.forEach(n => {
+
+            this.calNotes.forEach((n) => {
               if (!n.hit && !n.missed) {
                 const diff = now - n.time;
                 if (Math.abs(diff) < Math.abs(minDiff)) {
@@ -37856,23 +39001,25 @@ SOFTWARE.</div>
                 }
               }
             });
-            
+
             if (target && Math.abs(minDiff) < 0.3) {
               target.hit = true;
-              const fb = document.getElementById('rg-cal-feedback');
+              const fb = document.getElementById("rg-cal-feedback");
               const diffMs = Math.round(minDiff * 1000);
-              
+
               if (fb) {
                 if (Math.abs(diffMs) <= 45) {
-                  fb.textContent = `PERFECT (${diffMs >= 0 ? '+' : ''}${diffMs}ms)`;
-                  fb.style.color = '#27c93f';
+                  fb.textContent = `PERFECT (${diffMs >= 0 ? "+" : ""}${diffMs}ms)`;
+                  fb.style.color = "#27c93f";
                 } else {
                   const isLate = diffMs > 0;
-                  fb.textContent = `${isLate ? 'LATE' : 'EARLY'} (${diffMs >= 0 ? '+' : ''}${diffMs}ms)`;
-                  fb.style.color = isLate ? '#ff5f56' : '#ffbd2e';
+                  fb.textContent = `${isLate ? "LATE" : "EARLY"} (${diffMs >= 0 ? "+" : ""}${diffMs}ms)`;
+                  fb.style.color = isLate ? "#ff5f56" : "#ffbd2e";
                 }
-                fb.style.transform = 'translate(-50%, -50%) scale(1.1)';
-                setTimeout(() => { fb.style.transform = 'translate(-50%, -50%) scale(1)'; }, 50);
+                fb.style.transform = "translate(-50%, -50%) scale(1.1)";
+                setTimeout(() => {
+                  fb.style.transform = "translate(-50%, -50%) scale(1)";
+                }, 50);
               }
             }
           }
@@ -37881,21 +39028,22 @@ SOFTWARE.</div>
             if (this.listeningLane !== null) {
               this.KEY_CODES[this.listeningLane] = e.code;
               let label = e.key.toUpperCase();
-              if (e.code.startsWith('Key')) label = e.code.replace('Key', '');
-              else if (e.code === 'Space') label = 'SPC';
+              if (e.code.startsWith("Key")) label = e.code.replace("Key", "");
+              else if (e.code === "Space") label = "SPC";
               this.KEY_LABELS[this.listeningLane] = label;
-              
-              localStorage.setItem('rg_key_codes', JSON.stringify(this.KEY_CODES));
-              localStorage.setItem('rg_key_labels', JSON.stringify(this.KEY_LABELS));
-              
+
+              localStorage.setItem("rg_key_codes", JSON.stringify(this.KEY_CODES));
+              localStorage.setItem("rg_key_labels", JSON.stringify(this.KEY_LABELS));
+
               const btn = document.querySelector(`.rg-key-btn[data-lane="${this.listeningLane}"]`);
               if (btn) {
                 btn.textContent = label;
-                btn.classList.remove('listening');
+                btn.classList.remove("listening");
               }
               this.listeningLane = null;
               e.preventDefault();
             } else if (this.isPlaying && !e.repeat) {
+              if (this.isAutoplay) return; // Disables physical keyboard inputs during Bot Mode sessions
               const idx = this.KEY_CODES.indexOf(e.code);
               if (idx !== -1) {
                 this.activeKeysHeld[idx] = true;
@@ -37908,33 +39056,42 @@ SOFTWARE.</div>
 
           onKeyUp(e) {
             if (this.isPlaying) {
+              if (this.isAutoplay) return; // Disables physical key releases during Bot Mode sessions
               const idx = this.KEY_CODES.indexOf(e.code);
               if (idx !== -1) this.activeKeysHeld[idx] = false;
             }
           }
 
           createSongElement(song) {
-            const el = document.createElement('div');
-            el.className = 'rg-list-item position-relative overflow-hidden';
-            
-            const levels = (window.rhythmLevelsMap && window.rhythmLevelsMap.levels && window.rhythmLevelsMap.levels[song.id]) ? window.rhythmLevelsMap.levels[song.id] : null;
-            let badgesHTML = '';
-            
+            const el = document.createElement("div");
+            el.className = "rg-list-item position-relative overflow-hidden";
+
+            const levels =
+              window.rhythmLevelsMap && window.rhythmLevelsMap.levels && window.rhythmLevelsMap.levels[song.id]
+                ? window.rhythmLevelsMap.levels[song.id]
+                : null;
+            let badgesHTML = "";
+
             if (levels) {
               const diffs = [
-                { short: 'EZ', key: 'easy', bg: '#6EE7B7', text: '#064E3B' },
-                { short: 'NM', key: 'medium', bg: '#60A5FA', text: '#1E3A8A' },
-                { short: 'HD', key: 'hard', bg: '#FBBF24', text: '#78350F' },
-                { short: 'EX', key: 'expert', bg: '#F43F5E', text: '#FFFFFF' },
-                { short: 'MS', key: 'master', bg: '#A78BFA', text: '#FFFFFF' },
-                { short: 'DM', key: 'demon', bg: '#4C1D95', text: '#FFFFFF' }
+                { short: "EZ", key: "easy", bg: "#6EE7B7", text: "#064E3B" },
+                { short: "NM", key: "medium", bg: "#60A5FA", text: "#1E3A8A" },
+                { short: "HD", key: "hard", bg: "#FBBF24", text: "#78350F" },
+                { short: "EX", key: "expert", bg: "#F43F5E", text: "#FFFFFF" },
+                { short: "MS", key: "master", bg: "#A78BFA", text: "#FFFFFF" },
+                { short: "DM", key: "demon", bg: "#4C1D95", text: "#FFFFFF" },
               ];
-              badgesHTML = `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 8px; max-width: 175px;">` + diffs.map(d => {
-                const lvl = levels[d.key];
-                if (!lvl) return ''; 
-                return `<span class="badge d-flex align-items-center justify-content-center px-2 py-1 shadow-sm" style="font-family: 'Arial Black', sans-serif; font-size: 0.7rem; font-weight: 900; background-color: ${d.bg}; color: ${d.text}; border-radius: 6px; letter-spacing: 0.5px; width: 90%; text-align: center;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
-              }).join('') + `</div>`;
-              
+              badgesHTML =
+                `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 8px; max-width: 175px;">` +
+                diffs
+                  .map((d) => {
+                    const lvl = levels[d.key];
+                    if (!lvl) return "";
+                    return `<span class="badge d-flex align-items-center justify-content-center px-2 py-1 shadow-sm" style="font-family: 'Arial Black', sans-serif; font-size: 0.7rem; font-weight: 900; background-color: ${d.bg}; color: ${d.text}; border-radius: 6px; letter-spacing: 0.5px; width: 90%; text-align: center;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
+                  })
+                  .join("") +
+                `</div>`;
+
               if (badgesHTML === `<div class="d-flex flex-wrap gap-1 mt-2"></div>`) {
                 badgesHTML = `<div class="text-secondary small mt-2 fw-bold" style="font-size: 0.75rem;"><i class="bi bi-cpu-fill me-1"></i>Tap to compile notes</div>`;
               }
@@ -37942,10 +39099,19 @@ SOFTWARE.</div>
               badgesHTML = `<div class="text-secondary small mt-2 fw-bold" style="font-size: 0.75rem;"><i class="bi bi-cpu-fill me-1"></i>Tap to compile notes</div>`;
             }
 
-            el.style.cssText = "background: linear-gradient(90deg, rgba(30, 30, 30, 0.9) 0%, rgba(15, 15, 15, 0.95) 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 16px 14px; display: flex; align-items: center; gap: 14px; cursor: pointer; position: relative; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s, border-color 0.2s; margin-bottom: 0.25em; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); min-height: 10em;";
-            
-            el.onmouseover = () => { el.style.transform = "scale(1.02) translateY(-2px)"; el.style.borderColor = "var(--rg-primary)"; el.style.boxShadow = "0 10px 25px rgba(255,59,48,0.2)"; };
-            el.onmouseout = () => { el.style.transform = "none"; el.style.borderColor = "rgba(255,255,255,0.08)"; el.style.boxShadow = "0 6px 16px rgba(0,0,0,0.4)"; };
+            el.style.cssText =
+              "background: linear-gradient(90deg, rgba(30, 30, 30, 0.9) 0%, rgba(15, 15, 15, 0.95) 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 16px 14px; display: flex; align-items: center; gap: 14px; cursor: pointer; position: relative; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s, border-color 0.2s; margin-bottom: 0.25em; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); min-height: 10em;";
+
+            el.onmouseover = () => {
+              el.style.transform = "scale(1.02) translateY(-2px)";
+              el.style.borderColor = "var(--rg-primary)";
+              el.style.boxShadow = "0 10px 25px rgba(255,59,48,0.2)";
+            };
+            el.onmouseout = () => {
+              el.style.transform = "none";
+              el.style.borderColor = "rgba(255,255,255,0.08)";
+              el.style.boxShadow = "0 6px 16px rgba(0,0,0,0.4)";
+            };
 
             el.innerHTML = `
               <div class="d-flex align-items-center gap-3 w-100" style="min-width: 0;">
@@ -37959,13 +39125,13 @@ SOFTWARE.</div>
                 
                 <div class="d-flex flex-column justify-content-center" style="min-width: 0; flex-grow: 1; gap: 2px;">
                   <div class="text-white fw-bolder text-truncate" style="font-size: 1.15rem; letter-spacing: -0.2px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${escapeHTML(song.title)}</div>
-                  <div class="text-secondary fw-bold text-truncate artist-link" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id || ''}" style="font-size: 0.85rem; color: #a1a1aa !important; margin-top: -2px;">${escapeHTML(song.artist)}</div>
+                  <div class="text-secondary fw-bold text-truncate artist-link" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id || ""}" style="font-size: 0.85rem; color: #a1a1aa !important; margin-top: -2px;">${escapeHTML(song.artist)}</div>
                   ${badgesHTML}
                 </div>
                 
                 <div class="d-flex flex-column align-items-end justify-content-between ms-2" style="flex-shrink: 0; align-self: stretch; min-height: 84px; gap: 8px;">
                   <div class="d-flex gap-2">
-                    <button class="btn p-1 border-0 rg-fav-btn ${song.rg_favorite == 1 ? 'text-danger' : 'text-secondary'}" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i></button>
+                    <button class="btn p-1 border-0 rg-fav-btn ${song.rg_favorite == 1 ? "text-danger" : "text-secondary"}" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi ${song.rg_favorite == 1 ? "bi-heart-fill" : "bi-heart"} fs-5"></i></button>
                     <button class="btn p-1 border-0 rg-share-song-btn text-light" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-share-fill fs-5"></i></button>
                   </div>
                   <button class="btn p-0 border-0 rounded-circle rg-play-btn d-flex align-items-center justify-content-center mt-auto" style="width: 42px; height: 42px; background: linear-gradient(135deg, var(--rg-primary), #ff0055); box-shadow: 0 4px 12px rgba(255,59,48,0.5); transition: transform 0.2s;">
@@ -37974,51 +39140,56 @@ SOFTWARE.</div>
                 </div>
               </div>
             `;
-            
-            const favBtn = el.querySelector('.rg-fav-btn');
-            const shareBtn = el.querySelector('.rg-share-song-btn');
-            const playBtn = el.querySelector('.rg-play-btn');
-            
-            shareBtn.addEventListener('click', (e) => {
+
+            const favBtn = el.querySelector(".rg-fav-btn");
+            const shareBtn = el.querySelector(".rg-share-song-btn");
+            const playBtn = el.querySelector(".rg-play-btn");
+
+            shareBtn.addEventListener("click", (e) => {
               e.stopPropagation();
-              if (typeof showShareModal === 'function') {
-                showShareModal('game', song.id, song.title);
+              if (typeof showShareModal === "function") {
+                showShareModal("game", song.id, song.title);
               }
             });
-            
-            favBtn.addEventListener('click', async (e) => {
+
+            favBtn.addEventListener("click", async (e) => {
               e.stopPropagation();
-              const res = await fetchData('?action=toggle_rhythm_favorite', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ song_id: song.id })
+              const res = await fetchData("?action=toggle_rhythm_favorite", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ song_id: song.id }),
               });
               if (res) {
                 song.rg_favorite = res.is_favorite;
-                favBtn.classList.toggle('text-danger', song.rg_favorite == 1);
-                favBtn.classList.toggle('text-secondary', song.rg_favorite != 1);
-                favBtn.innerHTML = `<i class="bi ${song.rg_favorite == 1 ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i>`;
-                
+                favBtn.classList.toggle("text-danger", song.rg_favorite == 1);
+                favBtn.classList.toggle("text-secondary", song.rg_favorite != 1);
+                favBtn.innerHTML = `<i class="bi ${song.rg_favorite == 1 ? "bi-heart-fill" : "bi-heart"} fs-5"></i>`;
+
                 // If unfavorited and currently viewing the Favorites tab, fade out and remove card immediately
                 if (song.rg_favorite != 1) {
-                  const activeTab = localStorage.getItem('rg_active_tab') || 'songs';
-                  if (activeTab === 'favorites') {
-                    el.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
-                    el.style.opacity = '0';
-                    el.style.transform = 'scale(0.95)';
+                  const activeTab = localStorage.getItem("rg_active_tab") || "songs";
+                  if (activeTab === "favorites") {
+                    el.style.transition = "opacity 0.2s ease, transform 0.2s ease";
+                    el.style.opacity = "0";
+                    el.style.transform = "scale(0.95)";
                     setTimeout(() => el.remove(), 200);
                   }
                 }
               }
             });
-            
+
             // Bind Artist navigation when clicking the artist label
-            const artistLink = el.querySelector('.artist-link');
+            const artistLink = el.querySelector(".artist-link");
             if (artistLink) {
-              artistLink.addEventListener('click', (e) => {
+              artistLink.addEventListener("click", (e) => {
                 e.stopPropagation();
-                const rawArtist = song.artist || 'Unknown';
-                const parts = rawArtist.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).map(p => p.trim()).filter(p => p !== '');
+                const rawArtist = song.artist || "Unknown";
+                const parts = rawArtist
+                  .split(
+                    /\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i
+                  )
+                  .map((p) => p.trim())
+                  .filter((p) => p !== "");
                 if (parts.length > 1) {
                   this.openArtistChoiceDialog(parts);
                 } else if (parts.length === 1) {
@@ -38029,81 +39200,106 @@ SOFTWARE.</div>
 
             // Allow playing by clicking anywhere on the card OR directly on the play button
             const initiatePlay = () => this.openPlayDialog(song);
-            playBtn.addEventListener('click', (e) => { e.stopPropagation(); initiatePlay(); });
-            el.addEventListener('click', (e) => {
-              if (e.target.closest('.artist-link')) return;
+            playBtn.addEventListener("click", (e) => {
+              e.stopPropagation();
               initiatePlay();
             });
-            
+            el.addEventListener("click", (e) => {
+              if (e.target.closest(".artist-link")) return;
+              initiatePlay();
+            });
+
             return el;
           }
 
           renderSongsList() {
-            this.listSongsEl.innerHTML = '';
-            
-            if (window.rhythmLevelsMap && window.rhythmLevelsMap.levels && Object.keys(window.rhythmLevelsMap.levels).length === 0) {
-              const isAdmin = currentUser && (currentUser.is_admin == 1 || currentUser.email === 'musiclibrary@mail.com');
-              this.listSongsEl.insertAdjacentHTML('beforeend', `
+            this.listSongsEl.innerHTML = "";
+
+            if (
+              window.rhythmLevelsMap &&
+              window.rhythmLevelsMap.levels &&
+              Object.keys(window.rhythmLevelsMap.levels).length === 0
+            ) {
+              const isAdmin =
+                currentUser && (currentUser.is_admin == 1 || currentUser.email === "musiclibrary@mail.com");
+              this.listSongsEl.insertAdjacentHTML(
+                "beforeend",
+                `
                 <div style="background: rgba(255, 59, 48, 0.1); border: 1px solid var(--rg-primary); border-radius: 16px; padding: 20px; margin-bottom: 16px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
                   <i class="bi bi-exclamation-triangle-fill text-danger d-block mb-2" style="font-size: 2.5rem;"></i>
                   <h6 class="text-white fw-bold text-uppercase mb-2" style="letter-spacing: 1px;">No Charts Generated</h6>
                   <p class="text-secondary small mb-3">The database currently has no pre-compiled note charts. Songs will generate on-the-fly when clicked, which may cause a slight initial delay.</p>
                   ${isAdmin ? `<button class="btn btn-danger rounded-pill fw-bold px-4 py-2 shadow-sm" onclick="document.getElementById('nav-chart-scan').click();"><i class="bi bi-open-chart-scan me-1"></i> Run Server Scanner Now</button>` : `<div class="badge bg-dark border border-secondary text-secondary p-2"><i class="bi bi-lock-fill me-1"></i> Contact Admin to Run Scanner</div>`}
                 </div>
-              `);
+              `
+              );
             }
 
             const chunk = this.filteredSongs.slice(0, this.renderLimit);
             if (chunk.length === 0) {
-              this.listSongsEl.insertAdjacentHTML('beforeend', '<div style="text-align:center; padding: 24px; color: #aaa;">No songs found.</div>');
+              this.listSongsEl.insertAdjacentHTML(
+                "beforeend",
+                '<div style="text-align:center; padding: 24px; color: #aaa;">No songs found.</div>'
+              );
               return;
             }
-            chunk.forEach(song => this.listSongsEl.appendChild(this.createSongElement(song)));
+            chunk.forEach((song) => this.listSongsEl.appendChild(this.createSongElement(song)));
           }
 
           renderFavoritesList() {
-            this.listFavsEl.innerHTML = '';
+            this.listFavsEl.innerHTML = "";
             const chunk = this.favFilteredSongs.slice(0, this.favRenderLimit);
             if (chunk.length === 0) {
-              this.listFavsEl.innerHTML = '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite songs yet. Add some!</div>';
+              this.listFavsEl.innerHTML =
+                '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite songs yet. Add some!</div>';
               return;
             }
-            chunk.forEach(song => this.listFavsEl.appendChild(this.createSongElement(song)));
+            chunk.forEach((song) => this.listFavsEl.appendChild(this.createSongElement(song)));
           }
 
           calculateLevel(notes, duration) {
             if (!duration || duration <= 0) return 1;
             const nps = notes.length / duration;
-            const level = Math.round(nps * 0.42); 
+            const level = Math.round(nps * 0.42);
             return Math.max(1, Math.min(30, level));
           }
 
           getRankFromStats(perfect, great, good, bad, miss) {
-            const total = parseInt(perfect || 0) + parseInt(great || 0) + parseInt(good || 0) + parseInt(bad || 0) + parseInt(miss || 0);
-            if (total === 0) return { rank: 'F', color: '#7f1d1d', acc: '0.00' };
-            const accVal = (parseInt(perfect || 0) * 100 + parseInt(great || 0) * 75 + parseInt(good || 0) * 40 + parseInt(bad || 0) * 10) / total;
-            
-            if (accVal >= 98.00) return { rank: 'SS', color: '#ff0055', acc: accVal.toFixed(2) };
-            if (accVal >= 95.00) return { rank: 'S', color: '#ffbd2e', acc: accVal.toFixed(2) };
-            if (accVal >= 90.00) return { rank: 'A', color: '#a78bfa', acc: accVal.toFixed(2) };
-            if (accVal >= 80.00) return { rank: 'B', color: '#60a5fa', acc: accVal.toFixed(2) };
-            if (accVal >= 70.00) return { rank: 'C', color: '#34d399', acc: accVal.toFixed(2) };
-            if (accVal >= 60.00) return { rank: 'D', color: '#fb923c', acc: accVal.toFixed(2) };
-            if (accVal >= 50.00) return { rank: 'E', color: '#9ca3af', acc: accVal.toFixed(2) };
-            return { rank: 'F', color: '#7f1d1d', acc: accVal.toFixed(2) };
+            const total =
+              parseInt(perfect || 0) +
+              parseInt(great || 0) +
+              parseInt(good || 0) +
+              parseInt(bad || 0) +
+              parseInt(miss || 0);
+            if (total === 0) return { rank: "F", color: "#7f1d1d", acc: "0.00" };
+            const accVal =
+              (parseInt(perfect || 0) * 100 +
+                parseInt(great || 0) * 75 +
+                parseInt(good || 0) * 40 +
+                parseInt(bad || 0) * 10) /
+              total;
+
+            if (accVal >= 98.0) return { rank: "SS", color: "#ff0055", acc: accVal.toFixed(2) };
+            if (accVal >= 95.0) return { rank: "S", color: "#ffbd2e", acc: accVal.toFixed(2) };
+            if (accVal >= 90.0) return { rank: "A", color: "#a78bfa", acc: accVal.toFixed(2) };
+            if (accVal >= 80.0) return { rank: "B", color: "#60a5fa", acc: accVal.toFixed(2) };
+            if (accVal >= 70.0) return { rank: "C", color: "#34d399", acc: accVal.toFixed(2) };
+            if (accVal >= 60.0) return { rank: "D", color: "#fb923c", acc: accVal.toFixed(2) };
+            if (accVal >= 50.0) return { rank: "E", color: "#9ca3af", acc: accVal.toFixed(2) };
+            return { rank: "F", color: "#7f1d1d", acc: accVal.toFixed(2) };
           }
 
           async prepGame(song, diff) {
             if (this.startGameTimeout) clearTimeout(this.startGameTimeout);
-            this.switchScreen('loading');
-            document.getElementById('rg-loading-cover').src = `?action=get_image&id=${song.id}&v=${song.last_modified}`;
-            document.getElementById('rg-loading-title').textContent = song.title;
-            const progressText = document.getElementById('rg-loading-text');
+            this.switchScreen("loading");
+            document.getElementById("rg-loading-cover").src = `?action=get_image&id=${song.id}&v=${song.last_modified}`;
+            document.getElementById("rg-loading-title").textContent = song.title;
+            const progressText = document.getElementById("rg-loading-text");
             progressText.textContent = `Preparing audio...`;
-            
+
             try {
               let playableUrl = `?action=get_stream&id=${song.id}`;
-              
+
               if (this.rgSongCache[song.id]) {
                 playableUrl = this.rgSongCache[song.id].blobUrl;
               } else {
@@ -38115,21 +39311,25 @@ SOFTWARE.</div>
               }
 
               progressText.textContent = `Loading note chart...`;
-              const dbChart = await fetchData(`?action=get_rhythm_chart&song_id=${song.id}&difficulty=${diff}`, {}, true);
-              
+              const dbChart = await fetchData(
+                `?action=get_rhythm_chart&song_id=${song.id}&difficulty=${diff}`,
+                {},
+                true
+              );
+
               if (dbChart && dbChart.found) {
                 this.chartNotes = dbChart.notes;
-                this.audioBuffer = { duration: song.duration || 180, sampleRate: 44100 }; 
-                this.LANES = (diff === 'easy' || diff === 'medium') ? 4 : 6;
-                
+                this.audioBuffer = { duration: song.duration || 180, sampleRate: 44100 };
+                this.LANES = diff === "easy" || diff === "medium" ? 4 : 6;
+
                 // Calculate and apply Note Speed effect
                 let baseSpeed = 1.3;
-                if (diff === 'easy') baseSpeed = 1.0;
-                else if (diff === 'medium') baseSpeed = 1.3;
-                else if (diff === 'hard') baseSpeed = 1.6;
-                else if (diff === 'expert') baseSpeed = 2.0;
-                else if (diff === 'master') baseSpeed = 2.4;
-                else if (diff === 'demon') baseSpeed = 2.8;
+                if (diff === "easy") baseSpeed = 1.0;
+                else if (diff === "medium") baseSpeed = 1.3;
+                else if (diff === "hard") baseSpeed = 1.6;
+                else if (diff === "expert") baseSpeed = 2.0;
+                else if (diff === "master") baseSpeed = 2.4;
+                else if (diff === "demon") baseSpeed = 2.8;
                 this.laneApproachSpeed = baseSpeed * this.userTickSpeed;
 
                 if (!window.rhythmLevelsMap) window.rhythmLevelsMap = { levels: {} };
@@ -38138,36 +39338,63 @@ SOFTWARE.</div>
               } else {
                 throw new Error("Note chart generation failed on the server.");
               }
-              
+
               if (this.audioPlayback) {
                 this.audioPlayback.pause();
                 this.audioPlayback.src = "";
               }
-              
+
               this.audioPlayback = new Audio(playableUrl);
-              this.audioPlayback.crossOrigin = 'anonymous';
-              
+              this.audioPlayback.crossOrigin = "anonymous";
+
               this.startGame(song.title, diff);
             } catch (err) {
               console.error("Game prep failed:", err);
               showToast(err.message || "Failed to process audio engine. The track format may be unsupported.", "error");
-              this.switchScreen('hub');
+              this.switchScreen("hub");
             }
           }
 
           generateChart(diff) {
-            this.LANES = (diff === 'easy' || diff === 'medium') ? 4 : 6;
+            this.LANES = diff === "easy" || diff === "medium" ? 4 : 6;
             const channel = this.audioBuffer.getChannelData(0);
             const sampleRate = this.audioBuffer.sampleRate;
-            
-            let peakThresholdScale = 0.2, spacingMinSec = 0.12, chanceLong = 0.15;
-            
-            if (diff === 'easy') { peakThresholdScale = 0.3; spacingMinSec = 0.20; chanceLong = 0.05; this.laneApproachSpeed = 1.0; }
-            else if (diff === 'medium') { peakThresholdScale = 0.2; spacingMinSec = 0.12; chanceLong = 0.15; this.laneApproachSpeed = 1.3; }
-            else if (diff === 'hard') { peakThresholdScale = 0.15; spacingMinSec = 0.07; chanceLong = 0.25; this.laneApproachSpeed = 1.6; }
-            else if (diff === 'expert') { peakThresholdScale = 0.1; spacingMinSec = 0.05; chanceLong = 0.35; this.laneApproachSpeed = 2.0; }
-            else if (diff === 'master') { peakThresholdScale = 0.05; spacingMinSec = 0.03; chanceLong = 0.45; this.laneApproachSpeed = 2.4; }
-            else if (diff === 'demon') { peakThresholdScale = 0.03; spacingMinSec = 0.02; chanceLong = 0.50; this.laneApproachSpeed = 2.8; }
+
+            let peakThresholdScale = 0.2,
+              spacingMinSec = 0.12,
+              chanceLong = 0.15;
+
+            if (diff === "easy") {
+              peakThresholdScale = 0.3;
+              spacingMinSec = 0.2;
+              chanceLong = 0.05;
+              this.laneApproachSpeed = 1.0;
+            } else if (diff === "medium") {
+              peakThresholdScale = 0.2;
+              spacingMinSec = 0.12;
+              chanceLong = 0.15;
+              this.laneApproachSpeed = 1.3;
+            } else if (diff === "hard") {
+              peakThresholdScale = 0.15;
+              spacingMinSec = 0.07;
+              chanceLong = 0.25;
+              this.laneApproachSpeed = 1.6;
+            } else if (diff === "expert") {
+              peakThresholdScale = 0.1;
+              spacingMinSec = 0.05;
+              chanceLong = 0.35;
+              this.laneApproachSpeed = 2.0;
+            } else if (diff === "master") {
+              peakThresholdScale = 0.05;
+              spacingMinSec = 0.03;
+              chanceLong = 0.45;
+              this.laneApproachSpeed = 2.4;
+            } else if (diff === "demon") {
+              peakThresholdScale = 0.03;
+              spacingMinSec = 0.02;
+              chanceLong = 0.5;
+              this.laneApproachSpeed = 2.8;
+            }
 
             this.laneApproachSpeed = this.laneApproachSpeed * this.userTickSpeed;
 
@@ -38191,16 +39418,25 @@ SOFTWARE.</div>
 
             for (let i = 1; i < energies.length - 1; i++) {
               const curr = energies[i].rms;
-              if (curr > threshold && curr > energies[i-1].rms && curr > energies[i+1].rms) {
+              if (curr > threshold && curr > energies[i - 1].rms && curr > energies[i + 1].rms) {
                 const t = energies[i].time;
                 if (t - lastTime >= spacingMinSec) {
                   let lane = Math.floor(Math.random() * this.LANES);
                   if (lane === lastLane) lane = (lane + 1) % this.LANES;
-                  
+
                   const isLong = Math.random() < chanceLong;
-                  const dur = isLong ? 0.3 + (Math.random() * 0.6) : 0;
-                  
-                  notes.push({ time: t + 2.0, lane, isLong, endTime: t + 2.0 + dur, hitStart: false, hitEnd: false, missed: false, holding: false });
+                  const dur = isLong ? 0.3 + Math.random() * 0.6 : 0;
+
+                  notes.push({
+                    time: t + 2.0,
+                    lane,
+                    isLong,
+                    endTime: t + 2.0 + dur,
+                    hitStart: false,
+                    hitEnd: false,
+                    missed: false,
+                    holding: false,
+                  });
                   lastTime = t + dur;
                   lastLane = lane;
                 }
@@ -38210,28 +39446,28 @@ SOFTWARE.</div>
           }
 
           generateSyntheticChart(duration, diff) {
-            this.LANES = (diff === 'easy' || diff === 'medium') ? 4 : 6;
+            this.LANES = diff === "easy" || diff === "medium" ? 4 : 6;
             this.audioBuffer = { duration: duration || 180, sampleRate: 44100 };
             let spacing = 0.5;
-            if (diff === 'easy') spacing = 0.6;
-            else if (diff === 'medium') spacing = 0.45;
-            else if (diff === 'hard') spacing = 0.35;
-            else if (diff === 'expert') spacing = 0.25;
-            else if (diff === 'master') spacing = 0.18;
-            else if (diff === 'demon') spacing = 0.12;
-            
+            if (diff === "easy") spacing = 0.6;
+            else if (diff === "medium") spacing = 0.45;
+            else if (diff === "hard") spacing = 0.35;
+            else if (diff === "expert") spacing = 0.25;
+            else if (diff === "master") spacing = 0.18;
+            else if (diff === "demon") spacing = 0.12;
+
             const notes = [];
             let lastLane = -1;
             const totalTime = duration || 180;
-            
+
             for (let t = 1.0; t < totalTime - 2.0; t += spacing) {
               if (Math.sin(t * 1.5) > -0.4) {
                 let lane = Math.floor(Math.abs(Math.sin(t * 8)) * this.LANES) % this.LANES;
                 if (lane === lastLane) lane = (lane + 1) % this.LANES;
-                
+
                 const isLong = Math.sin(t * 4) > 0.85;
                 const dur = isLong ? 0.4 : 0;
-                
+
                 notes.push({
                   time: t + 2.0,
                   lane,
@@ -38240,7 +39476,7 @@ SOFTWARE.</div>
                   hitStart: false,
                   hitEnd: false,
                   missed: false,
-                  holding: false
+                  holding: false,
                 });
                 lastLane = lane;
                 t += dur;
@@ -38250,17 +39486,25 @@ SOFTWARE.</div>
           }
 
           startGame(title, diff) {
-            this.switchScreen('game');
-            document.getElementById('rg-in-game-title').textContent = title;
-            const pauseDiffEl = document.getElementById('rg-pause-diff-display');
+            this.switchScreen("game");
+            document.getElementById("rg-in-game-title").textContent = title;
+            const pauseDiffEl = document.getElementById("rg-pause-diff-display");
             if (pauseDiffEl) pauseDiffEl.textContent = diff;
-            
-            this.curScore = 0; this.curCombo = 0; this.maxCombo = 0;
-            this.curHp = 100; this.accuracy = 100.00;
+
+            this.curScore = 0;
+            this.curCombo = 0;
+            this.maxCombo = 0;
+            this.curHp = 100;
+            this.accuracy = 100.0;
             this.stats = { perfect: 0, great: 0, good: 0, bad: 0, miss: 0 };
             this.hitDeltas = [];
             this.updateHUD();
-            
+
+            const apHud = document.getElementById("rg-in-game-autoplay");
+            if (apHud) {
+              apHud.style.display = this.isAutoplay ? "block" : "none";
+            }
+
             if (this.LANES === 4) {
               this.activeCodes = [this.KEY_CODES[1], this.KEY_CODES[2], this.KEY_CODES[3], this.KEY_CODES[4]];
               this.activeLabels = [this.KEY_LABELS[1], this.KEY_LABELS[2], this.KEY_LABELS[3], this.KEY_LABELS[4]];
@@ -38269,20 +39513,26 @@ SOFTWARE.</div>
               this.activeLabels = [...this.KEY_LABELS];
             }
 
-            this.canvas = document.getElementById('rg-game-canvas');
-            this.ctx = this.canvas.getContext('2d');
+            this.canvas = document.getElementById("rg-game-canvas");
+            this.ctx = this.canvas.getContext("2d");
             this.resizeCanvas();
-            
-            this.chartNotes.forEach(n => { n.hitStart=false; n.hitEnd=false; n.missed=false; n.holding=false; });
-            this.particles = []; this.feedbackTimer = 0;
-            const ratingEl = document.getElementById('rg-in-game-rating');
-            if (ratingEl) ratingEl.textContent = '';
-            
+
+            this.chartNotes.forEach((n) => {
+              n.hitStart = false;
+              n.hitEnd = false;
+              n.missed = false;
+              n.holding = false;
+            });
+            this.particles = [];
+            this.feedbackTimer = 0;
+            const ratingEl = document.getElementById("rg-in-game-rating");
+            if (ratingEl) ratingEl.textContent = "";
+
             if (this.audioPlayback) this.audioPlayback.currentTime = 0;
-            
+
             if (this.startGameTimeout) clearTimeout(this.startGameTimeout);
             this.startGameTimeout = setTimeout(() => {
-              if (this.audioPlayback) this.audioPlayback.play().catch(e => console.warn(e));
+              if (this.audioPlayback) this.audioPlayback.play().catch((e) => console.warn(e));
               this.isPlaying = true;
               requestAnimationFrame(this.gameLoop.bind(this));
             }, 1000);
@@ -38293,8 +39543,8 @@ SOFTWARE.</div>
             const rect = this.canvas.parentNode.getBoundingClientRect();
             this.canvas.width = rect.width * window.devicePixelRatio;
             this.canvas.height = rect.height * window.devicePixelRatio;
-            this.canvas.style.width = rect.width + 'px';
-            this.canvas.style.height = rect.height + 'px';
+            this.canvas.style.width = rect.width + "px";
+            this.canvas.style.height = rect.height + "px";
             this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
           }
 
@@ -38304,108 +39554,138 @@ SOFTWARE.</div>
               if (!this.sfxCtx) {
                 this.sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
               }
-              if (this.sfxCtx.state === 'suspended') this.sfxCtx.resume();
-              
+              if (this.sfxCtx.state === "suspended") this.sfxCtx.resume();
+
               const osc = this.sfxCtx.createOscillator();
               const gain = this.sfxCtx.createGain();
-              osc.connect(gain); gain.connect(this.sfxCtx.destination);
+              osc.connect(gain);
+              gain.connect(this.sfxCtx.destination);
               osc.frequency.setValueAtTime(800, this.sfxCtx.currentTime);
               osc.frequency.exponentialRampToValueAtTime(100, this.sfxCtx.currentTime + 0.05);
               gain.gain.setValueAtTime(this.sfxVolume, this.sfxCtx.currentTime);
               gain.gain.exponentialRampToValueAtTime(0.01, this.sfxCtx.currentTime + 0.05);
-              osc.start(); osc.stop(this.sfxCtx.currentTime + 0.05);
-            } catch(e) {
+              osc.start();
+              osc.stop(this.sfxCtx.currentTime + 0.05);
+            } catch (e) {
               console.warn("SFX AudioContext failed to initialize:", e);
             }
           }
 
           updateHUD() {
-            document.getElementById('rg-in-game-score').textContent = String(this.curScore).padStart(9, '0');
-            
+            document.getElementById("rg-in-game-score").textContent = String(this.curScore).padStart(9, "0");
+
             const maxScore = (this.chartNotes.length || 1) * 1000;
             const scorePct = Math.min(100, Math.max(0, (this.curScore / maxScore) * 100));
-            const scoreBar = document.getElementById('rg-in-game-score-bar');
+            const scoreBar = document.getElementById("rg-in-game-score-bar");
             if (scoreBar) {
-              scoreBar.style.width = scorePct + '%';
+              scoreBar.style.width = scorePct + "%";
             }
 
-            const cNum = document.getElementById('rg-in-game-combo');
-            const cLbl = document.getElementById('rg-in-game-combo-lbl');
+            const cNum = document.getElementById("rg-in-game-combo");
+            const cLbl = document.getElementById("rg-in-game-combo-lbl");
             if (this.curCombo >= 3) {
               cNum.textContent = this.curCombo;
               cNum.style.transform = "scale(1.2)";
-              setTimeout(() => cNum.style.transform = "scale(1)", 50);
-              cNum.style.opacity = "1"; cLbl.style.opacity = "1";
+              setTimeout(() => (cNum.style.transform = "scale(1)"), 50);
+              cNum.style.opacity = "1";
+              cLbl.style.opacity = "1";
             } else {
-              cNum.style.opacity = "0"; cLbl.style.opacity = "0";
+              cNum.style.opacity = "0";
+              cLbl.style.opacity = "0";
             }
 
             const total = this.stats.perfect + this.stats.great + this.stats.good + this.stats.bad + this.stats.miss;
             if (total > 0) {
-              const weight = (this.stats.perfect * 100 + this.stats.great * 75 + this.stats.good * 40 + this.stats.bad * 10) / total;
+              const weight =
+                (this.stats.perfect * 100 + this.stats.great * 75 + this.stats.good * 40 + this.stats.bad * 10) / total;
               this.accuracy = weight.toFixed(2);
             } else {
-              this.accuracy = "0.00"; 
+              this.accuracy = "0.00";
             }
-            const accEl = document.getElementById('rg-in-game-accuracy');
-            if (accEl) accEl.textContent = this.accuracy + '%';
+            const accEl = document.getElementById("rg-in-game-accuracy");
+            if (accEl) accEl.textContent = this.accuracy + "%";
 
-            let rank = 'F';
-            let rankColor = '#7f1d1d';
+            let rank = "F";
+            let rankColor = "#7f1d1d";
             const accVal = parseFloat(this.accuracy);
-            
-            if (accVal >= 98.00) { rank = 'SS'; rankColor = '#ff0055'; }
-            else if (accVal >= 95.00) { rank = 'S'; rankColor = '#ffbd2e'; }
-            else if (accVal >= 90.00) { rank = 'A'; rankColor = '#a78bfa'; }
-            else if (accVal >= 80.00) { rank = 'B'; rankColor = '#60a5fa'; }
-            else if (accVal >= 70.00) { rank = 'C'; rankColor = '#34d399'; }
-            else if (accVal >= 60.00) { rank = 'D'; rankColor = '#fb923c'; }
-            else if (accVal >= 50.00) { rank = 'E'; rankColor = '#9ca3af'; }
 
-            const rankEl = document.getElementById('rg-in-game-rank');
+            if (accVal >= 98.0) {
+              rank = "SS";
+              rankColor = "#ff0055";
+            } else if (accVal >= 95.0) {
+              rank = "S";
+              rankColor = "#ffbd2e";
+            } else if (accVal >= 90.0) {
+              rank = "A";
+              rankColor = "#a78bfa";
+            } else if (accVal >= 80.0) {
+              rank = "B";
+              rankColor = "#60a5fa";
+            } else if (accVal >= 70.0) {
+              rank = "C";
+              rankColor = "#34d399";
+            } else if (accVal >= 60.0) {
+              rank = "D";
+              rankColor = "#fb923c";
+            } else if (accVal >= 50.0) {
+              rank = "E";
+              rankColor = "#9ca3af";
+            }
+
+            const rankEl = document.getElementById("rg-in-game-rank");
             if (rankEl) {
               rankEl.textContent = rank;
               rankEl.style.color = rankColor;
             }
 
-            const hpEl = document.getElementById('rg-in-game-hp');
+            const hpEl = document.getElementById("rg-in-game-hp");
             if (hpEl) {
-              hpEl.style.width = this.curHp + '%';
-              if (this.curHp > 50) hpEl.style.backgroundColor = '#27c93f'; 
-              else if (this.curHp > 20) hpEl.style.backgroundColor = '#ffbd2e'; 
-              else hpEl.style.backgroundColor = '#ff5f56'; 
+              hpEl.style.width = this.curHp + "%";
+              if (this.curHp > 50) hpEl.style.backgroundColor = "#27c93f";
+              else if (this.curHp > 20) hpEl.style.backgroundColor = "#ffbd2e";
+              else hpEl.style.backgroundColor = "#ff5f56";
             }
 
             if (this.curHp <= 0 && this.isPlaying) {
-              this.endGame(true); 
+              this.endGame(true);
             }
           }
 
           showFeedback(txt, col) {
-            this.feedbackTxt = txt; this.feedbackCol = col;
-            this.feedbackTimer = 0.6; this.feedbackScale = 1.3;
-            
-            const ratingEl = document.getElementById('rg-in-game-rating');
+            this.feedbackTxt = txt;
+            this.feedbackCol = col;
+            this.feedbackTimer = 0.6;
+            this.feedbackScale = 1.3;
+
+            const ratingEl = document.getElementById("rg-in-game-rating");
             if (ratingEl) {
               ratingEl.textContent = txt;
               ratingEl.style.color = col;
               ratingEl.style.transform = "scale(1.2)";
-              setTimeout(() => { if (ratingEl) ratingEl.style.transform = "scale(1)"; }, 50);
+              setTimeout(() => {
+                if (ratingEl) ratingEl.style.transform = "scale(1)";
+              }, 50);
             }
           }
 
           registerMiss() {
-            this.curCombo = 0; this.stats.miss++;
+            this.curCombo = 0;
+            this.stats.miss++;
             this.curHp = Math.max(0, this.curHp - 10);
-            this.updateHUD(); this.showFeedback("MISS", "#555");
+            this.updateHUD();
+            this.showFeedback("MISS", "#555");
           }
 
           processHit(lane, isTrusted = false) {
             if (!isTrusted) {
-              if (typeof window.isValidDevToken === 'function' && !window.isValidDevToken(localStorage.getItem('dev_mode_token')) && window.adminAutoToken !== 'musiclibrary@mail.com') {
+              if (
+                typeof window.isValidDevToken === "function" &&
+                !window.isValidDevToken(localStorage.getItem("dev_mode_token")) &&
+                window.adminAutoToken !== "musiclibrary@mail.com"
+              ) {
                 const pwd = prompt("Automation detected! Enter Super Admin password to allow autoplay:");
                 if (window.isValidDevToken(pwd)) {
-                  localStorage.setItem('dev_mode_token', pwd);
+                  localStorage.setItem("dev_mode_token", pwd);
                 } else {
                   alert("Cheat blocked. Your session is terminated.");
                   this.endGame(true);
@@ -38414,15 +39694,17 @@ SOFTWARE.</div>
               }
             }
 
-            const time = this.audioPlayback.currentTime + (this.calibrationOffsetMs / 1000);
-            let tgt = null, minDiff = Infinity;
+            const time = this.audioPlayback.currentTime + this.calibrationOffsetMs / 1000;
+            let tgt = null,
+              minDiff = Infinity;
 
             for (let i = 0; i < this.chartNotes.length; i++) {
               const n = this.chartNotes[i];
               if (n.lane === lane && !n.missed && !n.hitStart) {
                 const diff = Math.abs(time - n.time);
                 if (diff < minDiff && diff <= this.JUDGMENT.BAD) {
-                  minDiff = diff; tgt = n;
+                  minDiff = diff;
+                  tgt = n;
                 }
               }
             }
@@ -38432,43 +39714,93 @@ SOFTWARE.</div>
               this.playHitSFX();
               tgt.hitStart = true;
               if (tgt.isLong) tgt.holding = true;
-              
-              let pts = 50, rating = "BAD", col = "#8e1c1c";
-              if (minDiff <= this.JUDGMENT.PERFECT) { rating = "PERFECT"; col = "#fff"; pts = 1000; this.stats.perfect++; this.curHp = Math.min(100, this.curHp + 2); }
-              else if (minDiff <= this.JUDGMENT.GREAT) { rating = "GREAT"; col = "#ff3b30"; pts = 750; this.stats.great++; this.curHp = Math.min(100, this.curHp + 1); }
-              else if (minDiff <= this.JUDGMENT.GOOD) { rating = "GOOD"; col = "#ffa000"; pts = 400; this.stats.good++; this.curHp = Math.min(100, this.curHp + 0.5); }
-              else { this.stats.bad++; this.curHp = Math.max(0, this.curHp - 5); }
 
-              if (rating !== "BAD") { this.curCombo++; if (this.curCombo > this.maxCombo) this.maxCombo = this.curCombo; }
-              else this.curCombo = 0;
+              let pts = 50,
+                rating = "BAD",
+                col = "#8e1c1c";
+              if (minDiff <= this.JUDGMENT.PERFECT) {
+                rating = "PERFECT";
+                col = "#fff";
+                pts = 1000;
+                this.stats.perfect++;
+                this.curHp = Math.min(100, this.curHp + 2);
+              } else if (minDiff <= this.JUDGMENT.GREAT) {
+                rating = "GREAT";
+                col = "#ff3b30";
+                pts = 750;
+                this.stats.great++;
+                this.curHp = Math.min(100, this.curHp + 1);
+              } else if (minDiff <= this.JUDGMENT.GOOD) {
+                rating = "GOOD";
+                col = "#ffa000";
+                pts = 400;
+                this.stats.good++;
+                this.curHp = Math.min(100, this.curHp + 0.5);
+              } else {
+                this.stats.bad++;
+                this.curHp = Math.max(0, this.curHp - 5);
+              }
+
+              if (rating !== "BAD") {
+                this.curCombo++;
+                if (this.curCombo > this.maxCombo) this.maxCombo = this.curCombo;
+              } else this.curCombo = 0;
 
               this.curScore += pts;
-              this.updateHUD(); this.showFeedback(rating, col);
+              this.updateHUD();
+              this.showFeedback(rating, col);
               this.spawnParticles(lane, !tgt.isLong);
             }
           }
 
           gameLoop() {
             if (!this.isPlaying) return;
-            const time = this.audioPlayback.currentTime + (this.calibrationOffsetMs / 1000);
+            const time = this.audioPlayback.currentTime + this.calibrationOffsetMs / 1000;
 
-            this.chartNotes.forEach(n => {
+            // NATIVE AUTOPLAY BOT ENGINE
+            if (this.isAutoplay) {
+              this.chartNotes.forEach((n) => {
+                if (!n.missed) {
+                  if (!n.hitStart && time >= n.time) {
+                    n.time = time;
+                    this.processHit(n.lane, true); // Flags isTrusted=true to bypass internal anti-automation checks
+                  }
+                  if (n.isLong && n.hitStart && n.holding && !n.hitEnd) {
+                    this.activeKeysHeld[n.lane] = true;
+                    if (time >= n.endTime) {
+                      n.endTime = time;
+                      this.activeKeysHeld[n.lane] = false;
+                    }
+                  }
+                }
+              });
+            }
+
+            this.chartNotes.forEach((n) => {
               if (!n.missed) {
                 if (!n.isLong) {
-                  if (!n.hitStart && (time - n.time) > this.JUDGMENT.BAD) {
-                    n.missed = true; this.registerMiss();
+                  if (!n.hitStart && time - n.time > this.JUDGMENT.BAD) {
+                    n.missed = true;
+                    this.registerMiss();
                   }
                 } else {
-                  if (!n.hitStart && (time - n.time) > this.JUDGMENT.BAD) {
-                    n.missed = true; this.registerMiss();
+                  if (!n.hitStart && time - n.time > this.JUDGMENT.BAD) {
+                    n.missed = true;
+                    this.registerMiss();
                   } else if (n.hitStart && n.holding && !n.hitEnd) {
                     if (!this.activeKeysHeld[n.lane] && time < n.endTime - this.JUDGMENT.GREAT) {
-                      n.holding = false; n.missed = true; this.registerMiss();
+                      n.holding = false;
+                      n.missed = true;
+                      this.registerMiss();
                     } else if (time >= n.endTime - this.JUDGMENT.GREAT) {
-                      n.holding = false; n.hitEnd = true;
-                      this.curScore += 1000; this.stats.perfect++; this.curCombo++;
+                      n.holding = false;
+                      n.hitEnd = true;
+                      this.curScore += 1000;
+                      this.stats.perfect++;
+                      this.curCombo++;
                       if (this.curCombo > this.maxCombo) this.maxCombo = this.curCombo;
-                      this.updateHUD(); this.showFeedback("PERFECT", "#fff");
+                      this.updateHUD();
+                      this.showFeedback("PERFECT", "#fff");
                       this.spawnParticles(n.lane, true);
                     }
                   }
@@ -38476,83 +39808,108 @@ SOFTWARE.</div>
               }
             });
 
-            this.particles = this.particles.filter(p => {
-              p.x += p.vx; p.y += p.vy; p.life -= 0.04;
+            this.particles = this.particles.filter((p) => {
+              p.x += p.vx;
+              p.y += p.vy;
+              p.life -= 0.04;
               return p.life > 0;
             });
 
             if (this.feedbackTimer > 0) {
               this.feedbackTimer -= 0.016;
               if (this.feedbackTimer <= 0) {
-                const ratingEl = document.getElementById('rg-in-game-rating');
-                if (ratingEl) ratingEl.textContent = '';
+                const ratingEl = document.getElementById("rg-in-game-rating");
+                if (ratingEl) ratingEl.textContent = "";
               }
             }
 
             const w = this.canvas.width / window.devicePixelRatio;
             const h = this.canvas.height / window.devicePixelRatio;
-            this.ctx.fillStyle = "#000"; this.ctx.fillRect(0,0,w,h);
+            this.ctx.fillStyle = "#000";
+            this.ctx.fillRect(0, 0, w, h);
 
-            const vanY = h * 0.15, hwH = h * 0.72, judY = vanY + hwH;
+            const vanY = h * 0.15,
+              hwH = h * 0.72,
+              judY = vanY + hwH;
             const isPortrait = h > w;
-            
-            const topW = this.LANES === 6 ? (isPortrait ? w * 0.40 : w * 0.20) : (isPortrait ? w * 0.35 : w * 0.12);
-            const botW = this.LANES === 6 ? (isPortrait ? w * 1.15 : w * 1.00) : (isPortrait ? w * 0.98 : w * 0.88);
+
+            const topW = this.LANES === 6 ? (isPortrait ? w * 0.4 : w * 0.2) : isPortrait ? w * 0.35 : w * 0.12;
+            const botW = this.LANES === 6 ? (isPortrait ? w * 1.15 : w * 1.0) : isPortrait ? w * 0.98 : w * 0.88;
 
             const getPt = (lane, prog) => {
               const ease = Math.pow(prog, 1.35);
               const cY = vanY + ease * hwH;
               const cW = topW + ease * (botW - topW);
               const sW = cW / this.LANES;
-              return { x: (w/2) - (cW/2) + lane*sW, y: cY, w: sW };
+              return { x: w / 2 - cW / 2 + lane * sW, y: cY, w: sW };
             };
 
             this.ctx.beginPath();
-            this.ctx.moveTo((w/2)-(topW/2), vanY); this.ctx.lineTo((w/2)+(topW/2), vanY);
-            this.ctx.lineTo((w/2)+(botW/2), judY); this.ctx.lineTo((w/2)-(botW/2), judY);
-            this.ctx.fillStyle = "#0c0a0a"; this.ctx.fill();
+            this.ctx.moveTo(w / 2 - topW / 2, vanY);
+            this.ctx.lineTo(w / 2 + topW / 2, vanY);
+            this.ctx.lineTo(w / 2 + botW / 2, judY);
+            this.ctx.lineTo(w / 2 - botW / 2, judY);
+            this.ctx.fillStyle = "#0c0a0a";
+            this.ctx.fill();
 
-            this.ctx.strokeStyle = "#ff3b30"; this.ctx.lineWidth = 3;
-            this.ctx.beginPath(); this.ctx.moveTo((w/2)-(topW/2), vanY); this.ctx.lineTo((w/2)-(botW/2), judY); this.ctx.stroke();
-            this.ctx.beginPath(); this.ctx.moveTo((w/2)+(topW/2), vanY); this.ctx.lineTo((w/2)+(botW/2), judY); this.ctx.stroke();
-            
+            this.ctx.strokeStyle = "#ff3b30";
+            this.ctx.lineWidth = 3;
+            this.ctx.beginPath();
+            this.ctx.moveTo(w / 2 - topW / 2, vanY);
+            this.ctx.lineTo(w / 2 - botW / 2, judY);
+            this.ctx.stroke();
+            this.ctx.beginPath();
+            this.ctx.moveTo(w / 2 + topW / 2, vanY);
+            this.ctx.lineTo(w / 2 + botW / 2, judY);
+            this.ctx.stroke();
+
             for (let i = 1; i < this.LANES; i++) {
-              this.ctx.strokeStyle = "#221111"; this.ctx.lineWidth = 1.5;
+              this.ctx.strokeStyle = "#221111";
+              this.ctx.lineWidth = 1.5;
               this.ctx.beginPath();
-              this.ctx.moveTo((w/2)-(topW/2)+i*(topW/this.LANES), vanY);
-              this.ctx.lineTo((w/2)-(botW/2)+i*(botW/this.LANES), judY);
+              this.ctx.moveTo(w / 2 - topW / 2 + i * (topW / this.LANES), vanY);
+              this.ctx.lineTo(w / 2 - botW / 2 + i * (botW / this.LANES), judY);
               this.ctx.stroke();
             }
 
             for (let i = 0; i < this.LANES; i++) {
               if (this.activeKeysHeld[i]) {
-                const pTop = getPt(i, 0), pBot = getPt(i, 1);
+                const pTop = getPt(i, 0),
+                  pBot = getPt(i, 1);
                 this.ctx.fillStyle = "rgba(255, 59, 48, 0.15)";
                 this.ctx.beginPath();
-                this.ctx.moveTo(pTop.x, pTop.y); this.ctx.lineTo(pTop.x+pTop.w, pTop.y);
-                this.ctx.lineTo(pBot.x+pBot.w, pBot.y); this.ctx.lineTo(pBot.x, pBot.y);
+                this.ctx.moveTo(pTop.x, pTop.y);
+                this.ctx.lineTo(pTop.x + pTop.w, pTop.y);
+                this.ctx.lineTo(pBot.x + pBot.w, pBot.y);
+                this.ctx.lineTo(pBot.x, pBot.y);
                 this.ctx.fill();
               }
             }
 
-            this.ctx.strokeStyle = "#ff3b30"; this.ctx.lineWidth = 4;
+            this.ctx.strokeStyle = "#ff3b30";
+            this.ctx.lineWidth = 4;
             this.ctx.beginPath();
-            this.ctx.moveTo((w/2)-(botW/2), judY); this.ctx.lineTo((w/2)+(botW/2), judY);
+            this.ctx.moveTo(w / 2 - botW / 2, judY);
+            this.ctx.lineTo(w / 2 + botW / 2, judY);
             this.ctx.stroke();
 
             for (let i = 0; i < this.LANES; i++) {
               const pt = getPt(i, 1);
-              const cX = pt.x + pt.w/2;
-              this.ctx.beginPath(); this.ctx.arc(cX, judY, 16, 0, Math.PI*2);
+              const cX = pt.x + pt.w / 2;
+              this.ctx.beginPath();
+              this.ctx.arc(cX, judY, 16, 0, Math.PI * 2);
               this.ctx.fillStyle = "#121212";
               this.ctx.strokeStyle = this.activeKeysHeld[i] ? "#fff" : "#ff3b30";
               this.ctx.lineWidth = this.activeKeysHeld[i] ? 4 : 2;
-              this.ctx.fill(); this.ctx.stroke();
+              this.ctx.fill();
+              this.ctx.stroke();
 
               this.ctx.fillStyle = this.activeKeysHeld[i] ? "#000" : "#fff";
               if (this.activeKeysHeld[i]) {
-                this.ctx.beginPath(); this.ctx.arc(cX, judY, 14, 0, Math.PI*2);
-                this.ctx.fillStyle = "#fff"; this.ctx.fill();
+                this.ctx.beginPath();
+                this.ctx.arc(cX, judY, 14, 0, Math.PI * 2);
+                this.ctx.fillStyle = "#fff";
+                this.ctx.fill();
                 this.ctx.fillStyle = "#000";
               }
               this.ctx.font = "bold 14px sans-serif";
@@ -38562,25 +39919,30 @@ SOFTWARE.</div>
             }
 
             const win = 1.2 / this.laneApproachSpeed;
-            
+
             for (let i = 0; i < this.chartNotes.length; i++) {
               const n = this.chartNotes[i];
               if (n.missed || !n.isLong || n.hitEnd) continue;
-              
-              const sDel = n.time - time, eDel = n.endTime - time;
+
+              const sDel = n.time - time,
+                eDel = n.endTime - time;
               if (sDel > win && eDel > win) continue;
               if (eDel < -this.JUDGMENT.BAD) continue;
 
-              const pS = Math.max(0, Math.min(1.2, 1 - (sDel/win)));
-              const pE = Math.max(0, Math.min(1.2, 1 - (eDel/win)));
+              const pS = Math.max(0, Math.min(1.2, 1 - sDel / win));
+              const pE = Math.max(0, Math.min(1.2, 1 - eDel / win));
 
-              const cS = getPt(n.lane, pS), cE = getPt(n.lane, pE);
-              const wS = cS.w * 0.8, wE = cE.w * 0.8;
-              
+              const cS = getPt(n.lane, pS),
+                cE = getPt(n.lane, pE);
+              const wS = cS.w * 0.8,
+                wE = cE.w * 0.8;
+
               this.ctx.fillStyle = n.holding ? "#e60000" : "#801010";
               this.ctx.beginPath();
-              this.ctx.moveTo(cS.x+(cS.w-wS)/2, cS.y); this.ctx.lineTo(cS.x+(cS.w+wS)/2, cS.y);
-              this.ctx.lineTo(cE.x+(cE.w+wE)/2, cE.y); this.ctx.lineTo(cE.x+(cE.w-wE)/2, cE.y);
+              this.ctx.moveTo(cS.x + (cS.w - wS) / 2, cS.y);
+              this.ctx.lineTo(cS.x + (cS.w + wS) / 2, cS.y);
+              this.ctx.lineTo(cE.x + (cE.w + wE) / 2, cE.y);
+              this.ctx.lineTo(cE.x + (cE.w - wE) / 2, cE.y);
               this.ctx.fill();
             }
 
@@ -38591,51 +39953,66 @@ SOFTWARE.</div>
               if (!n.isLong && !n.hitStart) {
                 const del = n.time - time;
                 if (del <= win && del >= -this.JUDGMENT.BAD) {
-                  const p = 1 - (del/win);
+                  const p = 1 - del / win;
                   if (p >= 0 && p <= 1.2) {
                     const pt = getPt(n.lane, p);
-                    const nW = pt.w * 0.85, nH = 10 + p*15;
-                    this.ctx.fillStyle = "#fff"; this.ctx.strokeStyle = "#ff3b30"; this.ctx.lineWidth = 2 + p*2;
+                    const nW = pt.w * 0.85,
+                      nH = 10 + p * 15;
+                    this.ctx.fillStyle = "#fff";
+                    this.ctx.strokeStyle = "#ff3b30";
+                    this.ctx.lineWidth = 2 + p * 2;
                     this.ctx.beginPath();
-                    this.ctx.roundRect(pt.x+(pt.w-nW)/2, pt.y-nH/2, nW, nH, 6);
-                    this.ctx.fill(); this.ctx.stroke();
+                    this.ctx.roundRect(pt.x + (pt.w - nW) / 2, pt.y - nH / 2, nW, nH, 6);
+                    this.ctx.fill();
+                    this.ctx.stroke();
                   }
                 }
               } else if (n.isLong) {
                 if (!n.hitStart) {
                   const del = n.time - time;
                   if (del <= win && del >= -this.JUDGMENT.BAD) {
-                    const p = 1 - (del/win);
+                    const p = 1 - del / win;
                     const pt = getPt(n.lane, p);
-                    const nW = pt.w * 0.85, nH = 10 + p*15;
-                    this.ctx.fillStyle = "#ff3b30"; this.ctx.strokeStyle = "#fff"; this.ctx.lineWidth = 2;
+                    const nW = pt.w * 0.85,
+                      nH = 10 + p * 15;
+                    this.ctx.fillStyle = "#ff3b30";
+                    this.ctx.strokeStyle = "#fff";
+                    this.ctx.lineWidth = 2;
                     this.ctx.beginPath();
-                    this.ctx.roundRect(pt.x+(pt.w-nW)/2, pt.y-nH/2, nW, nH, 6);
-                    this.ctx.fill(); this.ctx.stroke();
+                    this.ctx.roundRect(pt.x + (pt.w - nW) / 2, pt.y - nH / 2, nW, nH, 6);
+                    this.ctx.fill();
+                    this.ctx.stroke();
                   }
                 }
                 if (!n.hitEnd) {
                   const del = n.endTime - time;
                   if (del <= win && del >= -this.JUDGMENT.BAD) {
-                    const p = 1 - (del/win);
+                    const p = 1 - del / win;
                     const pt = getPt(n.lane, p);
-                    const nW = pt.w * 0.85, nH = 10 + p*15;
-                    this.ctx.fillStyle = "#ff3b30"; this.ctx.strokeStyle = "#000"; this.ctx.lineWidth = 3;
+                    const nW = pt.w * 0.85,
+                      nH = 10 + p * 15;
+                    this.ctx.fillStyle = "#ff3b30";
+                    this.ctx.strokeStyle = "#000";
+                    this.ctx.lineWidth = 3;
                     this.ctx.beginPath();
-                    this.ctx.roundRect(pt.x+(pt.w-nW)/2, pt.y-nH/2, nW, nH, 6);
-                    this.ctx.fill(); this.ctx.stroke();
+                    this.ctx.roundRect(pt.x + (pt.w - nW) / 2, pt.y - nH / 2, nW, nH, 6);
+                    this.ctx.fill();
+                    this.ctx.stroke();
                   }
                 }
               }
             }
 
-            this.particles.forEach(p => {
-              this.ctx.beginPath(); this.ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
-              this.ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${p.life})`; this.ctx.fill();
+            this.particles.forEach((p) => {
+              this.ctx.beginPath();
+              this.ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+              this.ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${p.life})`;
+              this.ctx.fill();
             });
 
             if (this.audioPlayback.ended || time > this.audioBuffer.duration + 2.0) {
-              this.endGame(false); return;
+              this.endGame(false);
+              return;
             }
             requestAnimationFrame(this.gameLoop.bind(this));
           }
@@ -38644,17 +40021,23 @@ SOFTWARE.</div>
             const w = this.canvas.width / window.devicePixelRatio;
             const h = this.canvas.height / window.devicePixelRatio;
             const isPortrait = h > w;
-            
-            const botW = this.LANES === 6 ? (isPortrait ? w * 1.15 : w * 1.00) : (isPortrait ? w * 0.98 : w * 0.88);
+
+            const botW = this.LANES === 6 ? (isPortrait ? w * 1.15 : w * 1.0) : isPortrait ? w * 0.98 : w * 0.88;
             const sW = botW / this.LANES;
-            const cX = (w/2) - (botW/2) + lane*sW + sW/2;
-            const cY = h*0.15 + h*0.72;
-            const col = white ? [255,255,255] : [255,59,48];
+            const cX = w / 2 - botW / 2 + lane * sW + sW / 2;
+            const cY = h * 0.15 + h * 0.72;
+            const col = white ? [255, 255, 255] : [255, 59, 48];
             for (let i = 0; i < 15; i++) {
               this.particles.push({
-                x: cX, y: cY,
-                vx: (Math.random()-0.5)*8, vy: (Math.random()-0.8)*10 - 2,
-                size: Math.random()*3+2, r: col[0], g: col[1], b: col[2], life: 1
+                x: cX,
+                y: cY,
+                vx: (Math.random() - 0.5) * 8,
+                vy: (Math.random() - 0.8) * 10 - 2,
+                size: Math.random() * 3 + 2,
+                r: col[0],
+                g: col[1],
+                b: col[2],
+                life: 1,
               });
             }
           }
@@ -38662,7 +40045,7 @@ SOFTWARE.</div>
           async loadArtists(append = false) {
             if (!append) {
               this.artistsPage = 1;
-              const container = document.getElementById('rg-list-artists');
+              const container = document.getElementById("rg-list-artists");
               if (container) {
                 container.innerHTML = `
                   <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
@@ -38674,22 +40057,34 @@ SOFTWARE.</div>
             if (this.allArtistsLoaded) return;
             this.isLoadingArtists = true;
 
-            const sort = document.getElementById('rg-sort-artists').value;
-            const q = document.getElementById('rg-search-artists').value.trim();
+            if (!navigator.onLine) {
+              const container = document.getElementById("rg-list-artists");
+              if (!append && container) {
+                container.innerHTML = `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100"><i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i><h5 class="fw-bold text-white">You are offline</h5><p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p><button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button></div>`;
+              }
+              this.allArtistsLoaded = true;
+              this.isLoadingArtists = false;
+              return;
+            }
+
+            const sort = document.getElementById("rg-sort-artists").value;
+            const q = document.getElementById("rg-search-artists").value.trim();
 
             let url = `?action=get_rhythm_artists&page=${this.artistsPage}&sort=${sort}`;
             if (q) url += `&q=${encodeURIComponent(q)}`;
 
             try {
               const res = await fetchData(url, {}, true);
-              const container = document.getElementById('rg-list-artists');
-              
+              const container = document.getElementById("rg-list-artists");
+
               if (!Array.isArray(res) || res.length === 0) {
-                if (!append && container) container.innerHTML = '<div style="text-align:center; padding: 24px; color: #888;">No artists found.</div>';
+                if (!append && container)
+                  container.innerHTML =
+                    '<div style="text-align:center; padding: 24px; color: #888;">No artists found.</div>';
                 this.allArtistsLoaded = true;
               } else {
-                if (!append && container) container.innerHTML = '';
-                res.forEach(entry => {
+                if (!append && container) container.innerHTML = "";
+                res.forEach((entry) => {
                   const artist = {
                     name: entry.name,
                     id: entry.id || 0,
@@ -38698,17 +40093,37 @@ SOFTWARE.</div>
                     plays: parseInt(entry.plays || 0),
                     followers: parseInt(entry.followers || 0),
                     user_id: entry.user_id,
-                    rankInfo: null
+                    rankInfo: null,
                   };
-                  
-                  const total = parseInt(entry.perfect) + parseInt(entry.great) + parseInt(entry.good) + parseInt(entry.bad) + parseInt(entry.miss);
-                  artist.rankInfo = total > 0 ? this.getRankFromStats(entry.perfect, entry.great, entry.good, entry.bad, entry.miss) : { rank: 'F', color: '#555' };
-                  
+
+                  const total =
+                    parseInt(entry.perfect) +
+                    parseInt(entry.great) +
+                    parseInt(entry.good) +
+                    parseInt(entry.bad) +
+                    parseInt(entry.miss);
+                  artist.rankInfo =
+                    total > 0
+                      ? this.getRankFromStats(entry.perfect, entry.great, entry.good, entry.bad, entry.miss)
+                      : { rank: "F", color: "#555" };
+
                   if (container) container.appendChild(this.createArtistElement(artist));
                 });
                 if (res.length < 25) this.allArtistsLoaded = true;
               }
-            } catch (e) { console.error(e); }
+            } catch (e) {
+              console.error(e);
+              const container = document.getElementById("rg-list-artists");
+              if (!append && container && !navigator.onLine) {
+                container.innerHTML = 
+                  `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100">
+                    <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i>
+                    <h5 class="fw-bold text-white">You are offline</h5>
+                    <p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p>
+                    <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button>
+                  </div>`;
+              }
+            }
             this.isLoadingArtists = false;
           }
 
@@ -38718,33 +40133,46 @@ SOFTWARE.</div>
           }
 
           renderArtistsList() {
-            const container = document.getElementById('rg-list-artists');
-            container.innerHTML = '';
+            const container = document.getElementById("rg-list-artists");
+            container.innerHTML = "";
             if (this.filteredArtists.length === 0) {
-              container.innerHTML = '<div style="text-align:center; padding: 24px; color: #888;">No artists found.</div>';
+              container.innerHTML =
+                '<div style="text-align:center; padding: 24px; color: #888;">No artists found.</div>';
               return;
             }
             const chunk = this.filteredArtists.slice(0, this.artistRenderLimit);
-            chunk.forEach(artist => {
+            chunk.forEach((artist) => {
               container.appendChild(this.createArtistElement(artist));
             });
           }
 
           createArtistElement(artist) {
-            const el = document.createElement('div');
-            el.className = 'rg-list-item position-relative overflow-hidden';
-            el.setAttribute('data-artist-name', encodeURIComponent(artist.name));
-            el.style.cssText = "background: linear-gradient(90deg, rgba(30, 30, 30, 0.9) 0%, rgba(15, 15, 15, 0.95) 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 16px 14px; display: flex; align-items: center; gap: 14px; cursor: pointer; position: relative; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s; margin-bottom: 0.25em; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); min-height: 10em;";
-            
-            el.onmouseover = () => { el.style.transform = "scale(1.02) translateY(-2px)"; el.style.borderColor = "var(--rg-primary)"; el.style.boxShadow = "0 10px 25px rgba(255,59,48,0.2)"; };
-            el.onmouseout = () => { el.style.transform = "none"; el.style.borderColor = "rgba(255, 255, 255, 0.08)"; el.style.boxShadow = "0 6px 16px rgba(0, 0, 0, 0.4)"; };
-            
+            const el = document.createElement("div");
+            el.className = "rg-list-item position-relative overflow-hidden";
+            el.setAttribute("data-artist-name", encodeURIComponent(artist.name));
+            el.style.cssText =
+              "background: linear-gradient(90deg, rgba(30, 30, 30, 0.9) 0%, rgba(15, 15, 15, 0.95) 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 16px 14px; display: flex; align-items: center; gap: 14px; cursor: pointer; position: relative; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s; margin-bottom: 0.25em; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); min-height: 10em;";
+
+            el.onmouseover = () => {
+              el.style.transform = "scale(1.02) translateY(-2px)";
+              el.style.borderColor = "var(--rg-primary)";
+              el.style.boxShadow = "0 10px 25px rgba(255,59,48,0.2)";
+            };
+            el.onmouseout = () => {
+              el.style.transform = "none";
+              el.style.borderColor = "rgba(255, 255, 255, 0.08)";
+              el.style.boxShadow = "0 6px 16px rgba(0, 0, 0, 0.4)";
+            };
+
             // Build Rank badge component (defaults to F rank color #555 if they haven't played yet)
-            const rank = artist.rankInfo ? artist.rankInfo : { rank: 'F', color: '#555' };
+            const rank = artist.rankInfo ? artist.rankInfo : { rank: "F", color: "#555" };
             const rankBadgeHTML = `<span class="badge d-flex align-items-center justify-content-center" style="font-family: 'Arial Black', sans-serif; font-size: 0.75rem; font-weight: 900; background-color: ${rank.color}; color: #000; height: 24px; width: 30px; border-radius: 4px; box-shadow: 0 2px 8px ${rank.color}40;" title="AVERAGE RANK">${rank.rank}</span>`;
 
             // Default to latest song cover art, fallback to browser-generated SVG letter avatar if no songs exist
-            const imgUrl = (artist.id && artist.id > 0) ? `?action=get_image&id=${artist.id}&size=small` : getSvgPlaceholder(artist.name);
+            const imgUrl =
+              artist.id && artist.id > 0
+                ? `?action=get_image&id=${artist.id}&size=small`
+                : getSvgPlaceholder(artist.name);
 
             el.innerHTML = `
               <div class="d-flex align-items-center gap-3 w-100" style="min-width: 0;">
@@ -38769,7 +40197,7 @@ SOFTWARE.</div>
                   <div class="text-secondary small fw-bold plays-val mb-1" style="font-size: 0.75rem; font-family: monospace;">Plays: <b class="text-white">${artist.plays || 0}</b></div>
                   
                   <!-- Row 5: Tracks -->
-                  <div class="text-secondary fw-bold text-truncate rg-tracks-count" style="font-size: 0.85rem; color: #a1a1aa !important;"><i class="bi bi-music-note-beamed text-danger me-1"></i> ${artist.count} Tracks ${artist.followers > 0 ? `• <i class="bi bi-people-fill text-info ms-1 me-1"></i> ${formatSongCount(artist.followers)}` : ''}</div>
+                  <div class="text-secondary fw-bold text-truncate rg-tracks-count" style="font-size: 0.85rem; color: #a1a1aa !important;"><i class="bi bi-music-note-beamed text-danger me-1"></i> ${artist.count} Tracks ${artist.followers > 0 ? `• <i class="bi bi-people-fill text-info ms-1 me-1"></i> ${formatSongCount(artist.followers)}` : ""}</div>
                 </div>
                 
                 <div class="d-flex align-items-center justify-content-center ms-2 right-actions-col" style="flex-shrink: 0; align-self: stretch; min-height: 84px;">
@@ -38779,8 +40207,8 @@ SOFTWARE.</div>
                 </div>
               </div>
             `;
-            
-            el.addEventListener('click', () => {
+
+            el.addEventListener("click", () => {
               this.openArtistDetail(artist.name);
             });
             return el;
@@ -38789,7 +40217,7 @@ SOFTWARE.</div>
           async loadArtistSongs(artistName, append = false) {
             if (!append) {
               this.artistSongsPage = 1;
-              const container = document.getElementById('rg-list-artist-songs');
+              const container = document.getElementById("rg-list-artist-songs");
               if (container) {
                 container.innerHTML = `
                   <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
@@ -38801,8 +40229,8 @@ SOFTWARE.</div>
             if (this.allArtistSongsLoaded) return;
             this.isLoadingArtistSongs = true;
 
-            const sort = document.getElementById('rg-sort-artist-songs').value;
-            const q = document.getElementById('rg-search-artist-songs').value.trim();
+            const sort = document.getElementById("rg-sort-artist-songs").value;
+            const q = document.getElementById("rg-search-artist-songs").value.trim();
 
             let url = `?action=get_songs&artist=${encodeURIComponent(artistName)}&page=${this.artistSongsPage}&sort=${sort}&rhythm_game=1`;
             if (q) url += `&q=${encodeURIComponent(q)}`;
@@ -38810,29 +40238,33 @@ SOFTWARE.</div>
             try {
               const res = await fetchData(url, {}, true);
 
-              const favData = await fetchData('?action=get_rhythm_favorites', {}, true) || [];
-              const favSet = new Set(Array.isArray(favData) ? favData.map(id => parseInt(id)) : []);
-              const container = document.getElementById('rg-list-artist-songs');
+              const favData = (await fetchData("?action=get_rhythm_favorites", {}, true)) || [];
+              const favSet = new Set(Array.isArray(favData) ? favData.map((id) => parseInt(id)) : []);
+              const container = document.getElementById("rg-list-artist-songs");
 
               if (!Array.isArray(res) || res.length === 0) {
-                if (!append && container) container.innerHTML = '<div style="text-align:center; padding: 24px; color: #888;">No tracks found.</div>';
+                if (!append && container)
+                  container.innerHTML =
+                    '<div style="text-align:center; padding: 24px; color: #888;">No tracks found.</div>';
                 this.allArtistSongsLoaded = true;
               } else {
-                if (!append && container) container.innerHTML = '';
-                res.forEach(song => {
+                if (!append && container) container.innerHTML = "";
+                res.forEach((song) => {
                   song.rg_favorite = favSet.has(parseInt(song.id)) ? 1 : 0;
                   if (container) container.appendChild(this.createSongElement(song));
                 });
                 if (res.length < 25) this.allArtistSongsLoaded = true;
               }
-            } catch (e) { console.error(e); }
+            } catch (e) {
+              console.error(e);
+            }
             this.isLoadingArtistSongs = false;
           }
 
           async loadArtistFavorites(artistUserId, append = false) {
             if (!append) {
               this.artistFavsPage = 1;
-              const container = document.getElementById('rg-list-artist-favs');
+              const container = document.getElementById("rg-list-artist-favs");
               if (container) {
                 container.innerHTML = `
                   <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
@@ -38844,45 +40276,53 @@ SOFTWARE.</div>
             if (this.allArtistFavsLoaded) return;
             this.isLoadingArtistFavs = true;
 
-            const sort = document.getElementById('rg-sort-artist-favs').value;
-            const q = document.getElementById('rg-search-artist-favs').value.trim();
+            const sort = document.getElementById("rg-sort-artist-favs").value;
+            const q = document.getElementById("rg-search-artist-favs").value.trim();
 
             let url = `?action=get_rhythm_favorite_songs&target_user_id=${artistUserId}&page=${this.artistFavsPage}&sort=${sort}`;
             if (q) url += `&q=${encodeURIComponent(q)}`;
 
             try {
               const res = await fetchData(url, {}, true);
-              const container = document.getElementById('rg-list-artist-favs');
+              const container = document.getElementById("rg-list-artist-favs");
 
               if (!Array.isArray(res) || res.length === 0) {
-                if (!append && container) container.innerHTML = '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite tracks found.</div>';
+                if (!append && container)
+                  container.innerHTML =
+                    '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite tracks found.</div>';
                 this.allArtistFavsLoaded = true;
               } else {
-                if (!append && container) container.innerHTML = '';
-                res.forEach(song => {
+                if (!append && container) container.innerHTML = "";
+                res.forEach((song) => {
                   song.rg_favorite = 1;
                   if (container) container.appendChild(this.createSongElement(song));
                 });
                 if (res.length < 25) this.allArtistFavsLoaded = true;
               }
-            } catch (e) { console.error(e); }
+            } catch (e) {
+              console.error(e);
+            }
             this.isLoadingArtistFavs = false;
           }
 
           async openArtistDetail(artistName) {
             this.activeArtistDetailName = artistName;
-            
+
             // Cache current state to survive page reloads
-            localStorage.setItem('rg_active_artist', artistName);
-            localStorage.setItem('rg_active_tab', 'artistDetail');
+            localStorage.setItem("rg_active_artist", artistName);
+            localStorage.setItem("rg_active_tab", "artistDetail");
 
             // 2. Determine if the artist is a registered user to fetch overall stats
             let sampleSong = { id: 0 };
-            
-            const uStmt = await fetchData(`?action=get_view_data&type=artist&name=${encodeURIComponent(artistName)}`, {}, true);
+
+            const uStmt = await fetchData(
+              `?action=get_view_data&type=artist&name=${encodeURIComponent(artistName)}`,
+              {},
+              true
+            );
             let artistUserId = null;
             let isUser = false;
-            
+
             if (uStmt && uStmt.details) {
               if (uStmt.details.is_user) {
                 artistUserId = uStmt.details.user_id;
@@ -38895,17 +40335,23 @@ SOFTWARE.</div>
 
             let totalScore = 0;
             let artistScores = [];
-            let displayRank = 'F';
-            let rankColor = '#555';
+            let displayRank = "F";
+            let rankColor = "#555";
 
-            const activePlayerId = (typeof currentUser !== 'undefined' && currentUser) ? currentUser.id : null;
+            const activePlayerId = typeof currentUser !== "undefined" && currentUser ? currentUser.id : null;
 
             if (isUser && artistUserId) {
               // Fetch the artist's personal overall play history of ALL songs they played
-              artistScores = await fetchData(`?action=get_user_rhythm_scores&target_user_id=${artistUserId}&page=1`, {}, true) || [];
-              
-              let totalPerfect = 0, totalGreat = 0, totalGood = 0, totalBad = 0, totalMiss = 0;
-              artistScores.forEach(s => {
+              artistScores =
+                (await fetchData(`?action=get_user_rhythm_scores&target_user_id=${artistUserId}&page=1`, {}, true)) ||
+                [];
+
+              let totalPerfect = 0,
+                totalGreat = 0,
+                totalGood = 0,
+                totalBad = 0,
+                totalMiss = 0;
+              artistScores.forEach((s) => {
                 totalScore += parseInt(s.score || 0);
                 totalPerfect += parseInt(s.perfect || 0);
                 totalGreat += parseInt(s.great || 0);
@@ -38913,14 +40359,14 @@ SOFTWARE.</div>
                 totalBad += parseInt(s.bad || 0);
                 totalMiss += parseInt(s.miss || 0);
               });
-              
+
               const rankInfo = this.getRankFromStats(totalPerfect, totalGreat, totalGood, totalBad, totalMiss);
-              displayRank = artistScores.length > 0 ? rankInfo.rank : 'F';
-              rankColor = artistScores.length > 0 ? rankInfo.color : '#555';
+              displayRank = artistScores.length > 0 ? rankInfo.rank : "F";
+              rankColor = artistScores.length > 0 ? rankInfo.color : "#555";
             }
 
             // Render Header with statistical metrics & dynamic Share Button
-            const headerContainer = document.getElementById('rg-artist-detail-header');
+            const headerContainer = document.getElementById("rg-artist-detail-header");
             if (isUser && artistUserId) {
               headerContainer.innerHTML = `
                 <img src="?action=get_image&id=${sampleSong.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-lg border border-secondary" style="width: 72px; height: 72px; object-fit: cover; flex-shrink: 0;">
@@ -38936,10 +40382,10 @@ SOFTWARE.</div>
                   <span class="badge d-flex align-items-center justify-content-center" style="font-family: 'Arial Black', sans-serif; font-size: 1.1rem; font-weight: 900; background-color: ${rankColor}; color: #000; height: 42px; min-width: 48px; border-radius: 8px; box-shadow: 0 4px 12px ${rankColor}40;" title="AVERAGE RANK">${displayRank}</span>
                 </div>
               `;
-              
-              document.getElementById('rg-btn-share-artist').onclick = (e) => {
+
+              document.getElementById("rg-btn-share-artist").onclick = (e) => {
                 e.stopPropagation();
-                showShareModal('game', '', artistName, artistUserId, artistName);
+                showShareModal("game", "", artistName, artistUserId, artistName);
               };
             } else {
               headerContainer.innerHTML = `
@@ -38952,34 +40398,59 @@ SOFTWARE.</div>
                   </div>
                 </div>
               `;
-              
-              document.getElementById('rg-btn-share-artist').onclick = (e) => {
+
+              document.getElementById("rg-btn-share-artist").onclick = (e) => {
                 e.stopPropagation();
-                showShareModal('game', '', artistName, '', artistName); // No User ID for guest artists
+                showShareModal("game", "", artistName, "", artistName); // No User ID for guest artists
               };
             }
 
             // Render History list for this artist's personal plays
-            const histContainer = document.getElementById('rg-list-artist-history');
+            const histContainer = document.getElementById("rg-list-artist-history");
             if (!isUser) {
               histContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-person-x-fill d-block fs-1 mb-2"></i>Only registered artist user accounts have an active play history.</div>`;
             } else if (artistScores.length === 0) {
               histContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-controller d-block fs-1 mb-2"></i>This user hasn't played any tracks yet.</div>`;
             } else {
-              const diffColors = { easy: '#22d3ee', medium: '#34d399', hard: '#fb923c', expert: '#f43f5e', master: '#a78bfa', demon: '#7f1d1d' };
-              const diffLabels = { easy: 'EZ', medium: 'ND', hard: 'HD', expert: 'EX', master: 'MS', demon: 'DM' };
-              
-              histContainer.innerHTML = artistScores.map(s => {
-                const jud = this.getRankFromStats(s.perfect, s.great, s.good, s.bad, s.miss);
-                const diffColor = diffColors[s.difficulty] || '#aaa';
-                const diffLabel = diffLabels[s.difficulty] || 'UN';
-                const lvlText = s.level ? `Lv.${s.level}` : 'Lv.--';
-                const coverSvg = getSvgPlaceholder(s.title);
-                const playedAt = s.played_at ? new Date(s.played_at.replace(' ', 'T')+'Z').toLocaleDateString() : 'Unknown';
-                const totalHits = parseInt(s.perfect || 0) + parseInt(s.great || 0) + parseInt(s.good || 0) + parseInt(s.bad || 0) + parseInt(s.miss || 0);
-                const suspicious = ((jud.acc === '100.00' && totalHits > 50) || (s.max_combo > 500 && s.miss == 0)) ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Perfect Play / Bot Suspected"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>' : '';
+              const diffColors = {
+                easy: "#22d3ee",
+                medium: "#34d399",
+                hard: "#fb923c",
+                expert: "#f43f5e",
+                master: "#a78bfa",
+                demon: "#7f1d1d",
+              };
+              const diffLabels = {
+                easy: "EZ",
+                medium: "ND",
+                hard: "HD",
+                expert: "EX",
+                master: "MS",
+                demon: "DM",
+              };
 
-                return `
+              histContainer.innerHTML = artistScores
+                .map((s) => {
+                  const jud = this.getRankFromStats(s.perfect, s.great, s.good, s.bad, s.miss);
+                  const diffColor = diffColors[s.difficulty] || "#aaa";
+                  const diffLabel = diffLabels[s.difficulty] || "UN";
+                  const lvlText = s.level ? `Lv.${s.level}` : "Lv.--";
+                  const coverSvg = getSvgPlaceholder(s.title);
+                  const playedAt = s.played_at
+                    ? new Date(s.played_at.replace(" ", "T") + "Z").toLocaleDateString()
+                    : "Unknown";
+                  const totalHits =
+                    parseInt(s.perfect || 0) +
+                    parseInt(s.great || 0) +
+                    parseInt(s.good || 0) +
+                    parseInt(s.bad || 0) +
+                    parseInt(s.miss || 0);
+                  const suspicious =
+                    (jud.acc === "100.00" && totalHits > 50) || (s.max_combo > 500 && s.miss == 0)
+                      ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Perfect Play / Bot Suspected"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>'
+                      : "";
+
+                  return `
                   <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${diffColor}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;">
                     <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
                       <div class="d-flex align-items-center gap-3" style="min-width: 0; flex: 1;">
@@ -38991,7 +40462,7 @@ SOFTWARE.</div>
                       </div>
                       <div class="d-flex align-items-center gap-1" style="flex-shrink: 0;">
                         ${suspicious}
-                        <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty==='demon'?'#fff':'#000'}; padding: 2px 6px; border-radius: 4px;">${diffLabel} ${lvlText}</span>
+                        <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty === "demon" ? "#fff" : "#000"}; padding: 2px 6px; border-radius: 4px;">${diffLabel} ${lvlText}</span>
                         <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${jud.color}; color: #000;">${jud.rank}</span>
                       </div>
                     </div>
@@ -39008,80 +40479,93 @@ SOFTWARE.</div>
                     </div>
                   </div>
                 `;
-              }).join('');
+                })
+                .join("");
             }
 
             this.activeArtistDetailId = artistUserId;
 
             // Render Favorites list for this artist
             if (isUser && artistUserId) {
-              const favsSearchInput = document.getElementById('rg-search-artist-favs');
-              if (favsSearchInput) favsSearchInput.value = '';
+              const favsSearchInput = document.getElementById("rg-search-artist-favs");
+              if (favsSearchInput) favsSearchInput.value = "";
               this.loadArtistFavorites(artistUserId);
+              this.loadArtistFollowing(artistUserId);
             } else {
-              const favsContainer = document.getElementById('rg-list-artist-favs');
+              const favsContainer = document.getElementById("rg-list-artist-favs");
               if (favsContainer) {
                 favsContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-heart-break-fill d-block fs-1 mb-2"></i>Only registered users can have favorites.</div>`;
               }
+              const folContainer = document.getElementById("rg-list-artist-following");
+              if (folContainer) {
+                folContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-person-x-fill d-block fs-1 mb-2"></i>Only registered users can follow others.</div>`;
+              }
             }
 
-            document.getElementById('rg-search-artist-songs').value = '';
-            
+            document.getElementById("rg-search-artist-songs").value = "";
+
             // Hide ALL active tabs first to prevent vertical overlapping conflicts
-            Object.values(this.tabs).forEach(t => {
-              if (t) t.classList.add('rg-hidden');
+            Object.values(this.tabs).forEach((t) => {
+              if (t) t.classList.add("rg-hidden");
             });
-            
+
             // Show only the artist detail view
             if (this.tabs.artistDetail) {
-              this.tabs.artistDetail.classList.remove('rg-hidden');
+              this.tabs.artistDetail.classList.remove("rg-hidden");
             }
-            
+
             // Sync bottom navigation highlight conditionally (Profile vs Artists)
-            const isMyOwnProfile = typeof currentUser !== 'undefined' && currentUser && artistName.toLowerCase() === currentUser.artist.toLowerCase();
-            document.querySelectorAll('.rg-nav-item').forEach(n => {
+            const isMyOwnProfile =
+              typeof currentUser !== "undefined" &&
+              currentUser &&
+              artistName.toLowerCase() === currentUser.artist.toLowerCase();
+            document.querySelectorAll(".rg-nav-item").forEach((n) => {
               if (isMyOwnProfile) {
-                n.classList.toggle('active', n.id === 'rg-nav-my-profile');
+                n.classList.toggle("active", n.id === "rg-nav-my-profile");
               } else {
-                n.classList.toggle('active', n.getAttribute('data-target') === 'artists');
+                n.classList.toggle("active", n.getAttribute("data-target") === "artists");
               }
             });
-            
+
             // Default to correct sub-tab based on device size
             if (window.innerWidth >= 992) {
-              const artTabHistory = document.getElementById('rg-art-tab-history');
+              const artTabHistory = document.getElementById("rg-art-tab-history");
               if (artTabHistory) artTabHistory.click();
             } else {
-              const artTabTracks = document.getElementById('rg-art-tab-tracks');
+              const artTabTracks = document.getElementById("rg-art-tab-tracks");
               if (artTabTracks) artTabTracks.click();
             }
-            
+
             this.loadArtistSongs(artistName);
           }
 
           openArtistChoiceDialog(artistsList) {
-            const body = document.getElementById('artists-modal-body');
+            const body = document.getElementById("artists-modal-body");
             if (!body) return;
-            
-            const modalEl = document.getElementById('artists-modal');
+
+            const modalEl = document.getElementById("artists-modal");
             const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
-            
-            const modalTitle = modalEl.querySelector('.modal-title');
-            if (modalTitle) modalTitle.textContent = 'Artists';
-            
+
+            const modalTitle = modalEl.querySelector(".modal-title");
+            if (modalTitle) modalTitle.textContent = "Artists";
+
             body.innerHTML = `
               <div class="list-group list-group-flush rounded">
-                ${artistsList.map(a => `
+                ${artistsList
+                  .map(
+                    (a) => `
                   <button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary rhythm-artist-modal-item py-3 text-start px-4" style="border-left: none; border-right: none;" data-artist="${encodeURIComponent(a)}">
                     ${a}
                   </button>
-                `).join('')}
+                `
+                  )
+                  .join("")}
               </div>
             `;
-            
+
             // Re-bind clicks directly to open the selected artist profile
-            body.querySelectorAll('.rhythm-artist-modal-item').forEach(btn => {
-              btn.addEventListener('click', () => {
+            body.querySelectorAll(".rhythm-artist-modal-item").forEach((btn) => {
+              btn.addEventListener("click", () => {
                 modal.hide();
                 this.openArtistDetail(decodeURIComponent(btn.dataset.artist));
               });
@@ -39093,66 +40577,108 @@ SOFTWARE.</div>
           async endGame(failed = false) {
             this.isPlaying = false;
             if (this.audioPlayback) this.audioPlayback.pause();
-            this.switchScreen('result');
-            
-            const titleEl = document.querySelector('#rg-screen-result h2');
+
+            if (this.autoplayWakeLocked) {
+              if (typeof noSleep !== "undefined") noSleep.disable();
+              this.autoplayWakeLocked = false;
+            }
+
+            this.switchScreen("result");
+
+            const resultWarningId = "rg-offline-result-warning";
+            let resultWarningEl = document.getElementById(resultWarningId);
+            if (resultWarningEl) resultWarningEl.remove();
+
+            if (!navigator.onLine && !failed && !this.isAutoplay) {
+              const resultButtonContainer = document.getElementById("rg-btn-result-share").parentNode;
+              resultButtonContainer.insertAdjacentHTML("beforebegin", `
+                <div id="${resultWarningId}" class="alert border-danger text-danger small mb-3 text-center rounded-3 w-100" style="background: rgba(255,59,48,0.1); line-height: 1.4; font-weight: bold; border-style: dashed;">
+                  <i class="bi bi-shield-slash-fill me-2"></i>Score Not Saved: Played while offline. This score will NOT be synced to the database.
+                </div>
+              `);
+            }
+
+            const titleEl = document.querySelector("#rg-screen-result h2");
             if (titleEl) {
-              titleEl.textContent = failed ? 'STAGE FAILED' : 'STAGE CLEARED';
-              titleEl.style.color = failed ? '#ff5f56' : 'var(--rg-primary)';
+              titleEl.textContent = failed ? "STAGE FAILED" : "STAGE CLEARED";
+              titleEl.style.color = failed ? "#ff5f56" : "var(--rg-primary)";
             }
-            const shareBtn = document.getElementById('rg-btn-result-share');
+            const shareBtn = document.getElementById("rg-btn-result-share");
             if (shareBtn) {
-              shareBtn.style.display = failed ? 'none' : 'block';
+              shareBtn.style.display = failed ? "none" : "block";
             }
 
-            let rank = 'F';
-            let rankColor = '#7f1d1d';
+            let rank = "F";
+            let rankColor = "#7f1d1d";
             const accVal = parseFloat(this.accuracy);
-            
-            if (accVal >= 98.00) { rank = 'SS'; rankColor = '#ff0055'; }
-            else if (accVal >= 95.00) { rank = 'S'; rankColor = '#ffbd2e'; }
-            else if (accVal >= 90.00) { rank = 'A'; rankColor = '#a78bfa'; }
-            else if (accVal >= 80.00) { rank = 'B'; rankColor = '#60a5fa'; }
-            else if (accVal >= 70.00) { rank = 'C'; rankColor = '#34d399'; }
-            else if (accVal >= 60.00) { rank = 'D'; rankColor = '#fb923c'; }
-            else if (accVal >= 50.00) { rank = 'E'; rankColor = '#9ca3af'; }
-            
-            if (failed) {
-              rank = 'F';
-              rankColor = '#ff5f56';
+
+            if (accVal >= 98.0) {
+              rank = "SS";
+              rankColor = "#ff0055";
+            } else if (accVal >= 95.0) {
+              rank = "S";
+              rankColor = "#ffbd2e";
+            } else if (accVal >= 90.0) {
+              rank = "A";
+              rankColor = "#a78bfa";
+            } else if (accVal >= 80.0) {
+              rank = "B";
+              rankColor = "#60a5fa";
+            } else if (accVal >= 70.0) {
+              rank = "C";
+              rankColor = "#34d399";
+            } else if (accVal >= 60.0) {
+              rank = "D";
+              rankColor = "#fb923c";
+            } else if (accVal >= 50.0) {
+              rank = "E";
+              rankColor = "#9ca3af";
             }
 
-            const rankEl = document.getElementById('rg-res-rank');
+            if (failed) {
+              rank = "F";
+              rankColor = "#ff5f56";
+            }
+
+            const rankEl = document.getElementById("rg-res-rank");
             if (rankEl) {
               rankEl.textContent = rank;
               rankEl.style.color = rankColor;
             }
 
-            const accEl = document.getElementById('rg-res-acc');
+            const accEl = document.getElementById("rg-res-acc");
             if (accEl) {
-              accEl.textContent = this.accuracy + '%';
+              accEl.textContent = this.accuracy + "%";
             }
 
             const maxScore = (this.chartNotes.length || 1) * 1000;
             const pct = Math.min(100, Math.max(0, (this.curScore / maxScore) * 100));
-            const scoreBar = document.getElementById('rg-res-score-bar');
+            const scoreBar = document.getElementById("rg-res-score-bar");
             if (scoreBar) {
-              scoreBar.style.width = '0%';
-              setTimeout(() => { scoreBar.style.width = pct + '%'; }, 100);
+              scoreBar.style.width = "0%";
+              setTimeout(() => {
+                scoreBar.style.width = pct + "%";
+              }, 100);
             }
 
-            document.getElementById('rg-res-score').textContent = String(this.curScore).padStart(9, '0');
-            document.getElementById('rg-res-max-combo').textContent = this.maxCombo;
-            document.getElementById('rg-res-perfect').textContent = this.stats.perfect;
-            document.getElementById('rg-res-great').textContent = this.stats.great;
-            document.getElementById('rg-res-good').textContent = this.stats.good;
-            document.getElementById('rg-res-bad').textContent = this.stats.bad;
-            document.getElementById('rg-res-miss').textContent = this.stats.miss;
+            document.getElementById("rg-res-score").textContent = String(this.curScore).padStart(9, "0");
+            document.getElementById("rg-res-max-combo").textContent = this.maxCombo;
+            document.getElementById("rg-res-perfect").textContent = this.stats.perfect;
+            document.getElementById("rg-res-great").textContent = this.stats.great;
+            document.getElementById("rg-res-good").textContent = this.stats.good;
+            document.getElementById("rg-res-bad").textContent = this.stats.bad;
+            document.getElementById("rg-res-miss").textContent = this.stats.miss;
 
-            if (!failed && this.curScore > 0 && this.selectedSong) {
-              await fetchData('?action=save_rhythm_score', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+            const resTitle = document.querySelector("#rg-screen-result h2");
+            if (this.isAutoplay && resTitle) {
+              resTitle.textContent = "AUTOPLAY (UNRANKED)";
+              resTitle.style.color = "#00bcd4";
+            }
+
+            if (!failed && this.curScore > 0 && this.selectedSong && !this.isAutoplay) {
+              await fetchData("?action=save_rhythm_score", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                   song_id: this.selectedSong.id,
                   score: this.curScore,
@@ -39163,8 +40689,8 @@ SOFTWARE.</div>
                   bad: this.stats.bad,
                   miss: this.stats.miss,
                   difficulty: this.selectedDiff,
-                  hit_deltas: this.hitDeltas
-                })
+                  hit_deltas: this.hitDeltas,
+                }),
               });
               this.loadLeaderboard();
             }
