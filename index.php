@@ -380,7 +380,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '6.2');
+define('APP_VERSION', '6.3');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1844,9 +1844,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <style>
       :root { --ytm-bg: #030303; --ytm-surface: #121212; --ytm-surface-2: #282828; --ytm-primary-text: #ffffff; --ytm-secondary-text: #aaaaaa; --ytm-accent: #ff0000; }
       body { background-color: var(--ytm-bg); color: var(--ytm-primary-text); font-family: 'Roboto', sans-serif; }
-      .app-container { display: flex; min-height: 100vh; flex-direction: column; }
-      .sidebar { width: 250px; background-color: var(--ytm-surface); border-right: 1px solid var(--ytm-surface-2); display: flex; flex-direction: column; flex-shrink: 0; z-index: 1045; transition: transform 0.3s ease; }
-      .main-content { flex-grow: 1; display: flex; flex-direction: column; overflow-y: auto; background-color: var(--ytm-bg); }
+      .app-container { display: flex; height: 100dvh; flex-direction: column; overflow: hidden; }
+      .sidebar { width: 250px; background-color: var(--ytm-surface); border-right: 1px solid var(--ytm-surface-2); display: flex; flex-direction: column; flex-shrink: 0; z-index: 1045; transition: transform 0.3s ease; overflow-y: auto; }
+      .main-content { flex-grow: 1; display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; background-color: var(--ytm-bg); }
       .content-area-wrapper { padding: 1.5rem 2rem; }
       .sidebar .logo { font-size: 1.25rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
       .sidebar .logo span { color: var(--ytm-accent); }
@@ -1872,11 +1872,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       .pagination .page-item.active .page-link { background-color: var(--ytm-accent); border-color: var(--ytm-accent); }
       .pagination .page-item.disabled .page-link { background-color: var(--ytm-surface); border-color: #404040; color: var(--ytm-secondary-text); }
       @media (min-width: 992px) {
-        .app-container { flex-direction: row; }
+        .app-container { flex-direction: row; height: 100vh; overflow: hidden; }
+        .sidebar { overflow-y: auto; }
       }
       @media (max-width: 991.98px) {
-        .app-container { flex-direction: column; height: auto; }
-        .sidebar { padding: 0; }
+        .app-container { flex-direction: column; height: auto; overflow: visible; }
+        .sidebar { padding: 0; overflow-y: visible; }
         .main-content { overflow-y: visible; }
         .content-area-wrapper { padding: 1rem; }
         .page-header { padding: 1rem; flex-direction: column !important; align-items: stretch !important; gap: 1rem; }
@@ -2502,7 +2503,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             .drive-app-container * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-            .drive-app-container { font-family: var(--font-body); background-color: var(--theme-surface); color: var(--theme-on-surface); height: calc(100dvh - 40px); overflow: hidden; display: flex; flex-direction: column; width: 100%; position: relative; }
+            .drive-app-container { font-family: var(--font-body); background-color: var(--theme-surface); color: var(--theme-on-surface); height: 100%; overflow: hidden; display: flex; flex-direction: column; width: 100%; position: relative; }
 
             .drive-app-container .material-symbols-rounded { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; user-select: none; color: var(--theme-on-surface); }
             .drive-app-container .icon-filled { font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
@@ -2622,8 +2623,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .drive-app-container .editor-overlay-drive { position: fixed; inset: 0; background-color: var(--theme-surface); z-index: 3000; display: none; flex-direction: column; }
             .drive-app-container .editor-header-drive { height: 60px; display: flex; align-items: center; padding: 0 16px; gap: 16px; border-bottom: 1px solid var(--theme-outline-variant); background-color: var(--theme-surface-container-low); flex-shrink: 0; }
             .drive-app-container .editor-title-drive { flex: 1; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-            .drive-app-container .CodeMirror { flex: 1; height: 100% !important; font-family: monospace; font-size: 14px; }
+            .drive-app-container .CodeMirror { position: absolute !important; top: 0; left: 0; right: 0; bottom: 0; height: 100% !important; font-family: monospace; font-size: 14px; }
             .drive-app-container .CodeMirror-scroll { padding-bottom: 120px !important; }
+            .drive-app-container .CodeMirror-wrap .CodeMirror-scroll { overflow-x: hidden !important; }
             
             .drive-app-container .versions-list { max-height: 250px; overflow-y: auto; background: var(--theme-surface-container-high); border-radius: 8px; padding: 4px; }
             .drive-app-container .version-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid var(--theme-outline-variant); }
@@ -2873,7 +2875,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </div>
               </div>
               <div style="flex:1; overflow:hidden; display:flex; flex-direction:column;">
-                <div id="desktopEditorContainer" style="flex: 1; display: flex; flex-direction: column;">
+                <div id="desktopEditorContainer" style="flex: 1; display: none; position: relative; min-height: 0;">
                   <textarea id="editorTextarea"></textarea>
                 </div>
                 <div id="mobileEditorContainer" style="flex: 1; display: none; flex-direction: column;">
@@ -3276,7 +3278,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 // Update dynamic title with path and files indicator
                 const totalItems = this.filteredFolders.length + this.filteredFiles.length;
-                document.title = (this.currentPath ? `/${this.currentPath}` : 'Drive') + ` (${totalItems} items) - Admin Panel`;
+                const folderName = this.currentPath ? this.currentPath.split('/').pop() : 'Drive';
+                document.title = `${folderName} (${totalItems} items) - Admin Panel`;
 
                 document.getElementById('foldersTitle').classList.toggle('hidden', this.filteredFolders.length === 0 || this.currentFilter !== 'all');
                 document.getElementById('filesTitle').classList.toggle('hidden', this.filteredFiles.length === 0);
@@ -4175,6 +4178,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 
                 const streamUrl = `${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`;
 
+                document.title = `${item.name} - Admin Panel`;
                 if (item.isImage) {
                   const imageOverlay = document.getElementById('imageOverlay');
                   const imageContent = document.getElementById('imageModalContent');
@@ -4221,6 +4225,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const mobileContainer = document.getElementById('mobileEditorContainer');
                   
                   document.getElementById('editorTitle').textContent = item.name;
+                  document.title = `${item.name} - Editor - Admin Panel`;
                   overlay.style.display = 'flex';
                   
                   desktopContainer.style.display = 'none';
@@ -4235,12 +4240,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       const textEl = document.getElementById('mobileTextarea');
                       textEl.value = res.content;
                     } else {
-                      desktopContainer.style.display = 'flex';
+                      desktopContainer.style.display = 'block';
                       let mode = 'text/plain';
-                      if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
-                      if (item.ext === 'html') mode = 'text/html';
-                      if (item.ext === 'css') mode = 'text/css';
-                      if (item.ext === 'php') mode = 'application/x-httpd-php';
+                      // Disable complex token parsing on files >= 2MB to keep 60fps interaction responsiveness
+                      if (res.content && res.content.length < 2 * 1024 * 1024) {
+                        if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
+                        if (item.ext === 'html') mode = 'text/html';
+                        if (item.ext === 'css') mode = 'text/css';
+                        if (item.ext === 'php') mode = 'application/x-httpd-php';
+                      }
+
+                      if (this.editor) {
+                        this.editor.toTextArea();
+                        this.editor = null;
+                      }
 
                       this.editor = CodeMirror.fromTextArea(document.getElementById('editorTextarea'), {
                         lineNumbers: true,
@@ -4251,11 +4264,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         lineWrapping: this.editorWrap,
                         viewportMargin: 10
                       });
-                      this.editor.setValue(res.content);
+                      
+                      // Batch document insertion in a single redraw operation
+                      this.editor.operation(() => {
+                        this.editor.setValue(res.content);
+                      });
                       setTimeout(() => this.editor.refresh(), 50);
                     }
                   }
                 }
+              }
+              
+              restoreDocumentTitle() {
+                const folderName = this.currentPath ? this.currentPath.split('/').pop() : 'Drive';
+                const totalItems = this.filteredFolders.length + this.filteredFiles.length;
+                document.title = `${folderName} (${totalItems} items) - Admin Panel`;
               }
               
               closeImage() {
@@ -4265,6 +4288,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   document.getElementById('imageModalContent').innerHTML = '';
                 }
                 this.currentEditFile = null;
+                this.restoreDocumentTitle();
                 
                 // Revert URL Bar
                 const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '');
@@ -4278,6 +4302,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   document.getElementById('mediaModalContent').innerHTML = '';
                 }
                 this.currentEditFile = null;
+                this.restoreDocumentTitle();
                 
                 // Revert URL Bar
                 const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '');
@@ -4336,14 +4361,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
 
                 if (this.editor) {
+                this.editor.operation(() => {
                   this.editor.getAllMarks().forEach(m => m.clear());
                   const cursor = this.editor.getSearchCursor(term);
+                  let limit = 500; // Limit active visual DOM highlights to 500 to protect rendering performance
                   while (cursor.findNext()) {
-                    this.frMatches.push({from: cursor.from(), to: cursor.to()});
-                    this.editor.markText(cursor.from(), cursor.to(), {className: 'search-highlight'});
+                    const match = {from: cursor.from(), to: cursor.to()};
+                    this.frMatches.push(match);
+                    if (limit > 0) {
+                      this.editor.markText(match.from, match.to, {className: 'search-highlight'});
+                      limit--;
+                    }
                   }
-                } else {
-                  const text = document.getElementById('mobileTextarea').value;
+                });
+              } else {
+                const text = document.getElementById('mobileTextarea').value;
                   let idx = text.indexOf(term);
                   while (idx !== -1) {
                     this.frMatches.push({start: idx, end: idx + term.length});
@@ -4447,7 +4479,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.closeFindReplace();
                 document.getElementById('editorOverlay').style.display = 'none';
                 this.currentEditFile = null;
-                this.editor = null;
+                if (this.editor) {
+                  this.editor.toTextArea();
+                  this.editor = null;
+                }
+                this.restoreDocumentTitle();
                 
                 const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '');
                 window.history.pushState({ path: this.currentPath }, '', newUrl);
@@ -5066,6 +5102,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         }
       }
     </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/search.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/searchcursor.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/jump-to-line.min.js"></script>
@@ -5361,6 +5398,7 @@ function init_db($db) {
       bitrate INTEGER,
       lyrics TEXT,
       is_private INTEGER DEFAULT 0,
+      is_collaborative INTEGER DEFAULT 1,
       replaygain REAL DEFAULT 0,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
@@ -5419,6 +5457,28 @@ function init_db($db) {
   if ($music_table_exists && !in_array('is_private', $music_columns)) {
     $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;");
   }
+  if ($music_table_exists && !in_array('is_collaborative', $music_columns)) {
+    $db->exec("ALTER TABLE music ADD COLUMN is_collaborative INTEGER DEFAULT 1;");
+  }
+
+  $db->exec("
+    CREATE TABLE IF NOT EXISTS song_collaborators (
+      song_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      PRIMARY KEY (song_id, user_id),
+      FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  ");
+
+  $db->exec("
+    CREATE TABLE IF NOT EXISTS song_invites (
+      token TEXT PRIMARY KEY,
+      song_id INTEGER NOT NULL,
+      expires_at DATETIME,
+      FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+    );
+  ");
 
   $db->exec("
     CREATE TABLE IF NOT EXISTS playlist_invites (
@@ -5668,10 +5728,6 @@ function romanize_string($string) {
 }
 
 function generatePhpChart($song_id, $duration, $difficulty, $density_multiplier = 1.0) {
-  // Deterministic, song-specific intensity factor to prevent static, fixed difficulty ratings
-  $intensity_seed = crc32($song_id . '_intensity');
-  $intensity_factor = 0.65 + (($intensity_seed % 800) / 1000); // Produces unique multipliers from 0.65x to 1.45x
-
   $seed = crc32($song_id . '_' . $difficulty);
   $rng = function() use (&$seed) {
     $seed = ($seed * 1103515245 + 12345) & 0x7fffffff;
@@ -5680,44 +5736,54 @@ function generatePhpChart($song_id, $duration, $difficulty, $density_multiplier 
 
   $lanesCount = ($difficulty === 'easy' || $difficulty === 'medium') ? 4 : 6;
   
-  // Spacing set to 3x density (reduced by 2x compared to ultra-dense 6x values) for optimized, readable gameplay
-  $base_spacing = 0.166;
-  if ($difficulty === 'easy') $base_spacing = 0.216;
-  elseif ($difficulty === 'medium') $base_spacing = 0.160;
-  elseif ($difficulty === 'hard') $base_spacing = 0.120;
-  elseif ($difficulty === 'expert') $base_spacing = 0.086;
-  elseif ($difficulty === 'master') $base_spacing = 0.060;
-  elseif ($difficulty === 'demon') $base_spacing = 0.043;
+  $base_spacing = 0.500;
+  if ($difficulty === 'easy') $base_spacing = 0.800;
+  elseif ($difficulty === 'medium') $base_spacing = 0.500;
+  elseif ($difficulty === 'hard') $base_spacing = 0.350;
+  elseif ($difficulty === 'expert') $base_spacing = 0.250;
+  elseif ($difficulty === 'master') $base_spacing = 0.180;
+  elseif ($difficulty === 'demon') $base_spacing = 0.130;
 
-  // Multiply base spacing by intensity factor and divide by custom density multiplier (higher density = tighter spacing)
-  $spacing = ($base_spacing * $intensity_factor) / max(0.1, min(10.0, $density_multiplier));
+  $spacing = $base_spacing / max(0.1, min(10.0, $density_multiplier));
 
   $notes = [];
-  $lastLane = -1;
   $totalTime = $duration ?: 180;
+  
+  $chordChance = ($difficulty === 'easy' || $difficulty === 'medium') ? 0.0 : (($difficulty === 'hard') ? 0.1 : 0.25);
+  $swipeChance = ($difficulty === 'easy') ? 0.0 : (($difficulty === 'medium') ? 0.05 : 0.15);
+  $longChance = 0.15;
 
   for ($t = 1.0; $t < $totalTime - 2.0; $t += $spacing) {
-    // Removed the rhythmic sine spacing gaps to generate smooth, continuous, continuous-stream note charts
-    $lane = floor($rng() * $lanesCount) % $lanesCount;
-    if ($lane === $lastLane) {
-      $lane = ($lane + 1) % $lanesCount;
+    $isChord = $rng() < $chordChance;
+    $noteCount = $isChord ? 2 : 1;
+    $usedLanes = [];
+    
+    for ($i = 0; $i < $noteCount; $i++) {
+      $lane = floor($rng() * $lanesCount) % $lanesCount;
+      while (in_array($lane, $usedLanes)) {
+        $lane = ($lane + 1) % $lanesCount;
+      }
+      $usedLanes[] = $lane;
+      
+      $isLong = $rng() < $longChance;
+      $isSwipe = !$isLong && ($rng() < $swipeChance);
+      $hitEndSwipe = $isLong && ($rng() < $swipeChance);
+      
+      $dur = $isLong ? (0.4 + ($rng() * 0.4)) : 0; 
+      
+      $notes[] = [
+        'time' => round($t + 2.0, 3),
+        'lane' => (int)$lane,
+        'isLong' => $isLong,
+        'isSwipe' => $isSwipe,
+        'endTime' => round($t + 2.0 + $dur, 3),
+        'hitEndSwipe' => $hitEndSwipe,
+        'hitStart' => false,
+        'hitEnd' => false,
+        'missed' => false,
+        'holding' => false
+      ];
     }
-    
-    $isLong = $rng() > 0.88;
-    $dur = $isLong ? 0.4 : 0;
-    
-    $notes[] = [
-      'time' => round($t + 2.0, 3),
-      'lane' => (int)$lane,
-      'isLong' => $isLong,
-      'endTime' => round($t + 2.0 + $dur, 3),
-      'hitStart' => false,
-      'hitEnd' => false,
-      'missed' => false,
-      'holding' => false
-    ];
-    $lastLane = $lane;
-    $t += $dur;
   }
   return $notes;
 }
@@ -6420,7 +6486,7 @@ HTML;
       $stmt->execute([$seed_id]);
       $seed = $stmt->fetch();
       
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       
       if ($seed) {
         $radio_stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.genre = ? OR match_artist(m.artist, ?) = 1) AND m.id != ? ORDER BY RANDOM() LIMIT 15");
@@ -6439,7 +6505,7 @@ HTML;
       if (empty($ids)) { send_json([]); }
       
       $placeholders = implode(',', array_fill(0, count($ids), '?'));
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       
       $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id IN ($placeholders)");
       $params = array_merge([$user_id], $ids);
@@ -7089,9 +7155,32 @@ HTML;
         $info = $getID3->analyze($file['tmp_name']);
         getid3_lib::CopyTagsToComments($info);
 
-        $artist = trim($info['comments']['artist'][0] ?? 'Unknown Artist');
+        $uploader_name = $_SESSION['user_artist'] ?? 'Unknown Artist';
+        $posted_collabs = trim($_POST['artist'] ?? '');
+        $is_collaborative = intval($_POST['is_collaborative'] ?? 0);
+        
+        $artist = trim($info['comments']['artist'][0] ?? $uploader_name);
+        if (empty($artist) || $artist === 'Unknown Artist') $artist = $uploader_name;
+        
         $main_artist = trim(preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $artist)[0]);
-        if (empty($main_artist)) $main_artist = 'Unknown Artist';
+        if (empty($main_artist)) $main_artist = $uploader_name;
+        
+        $collab_user_ids = [];
+        if ($is_collaborative === 1 && !empty($posted_collabs)) {
+          $collab_inputs = array_map('trim', explode(',', $posted_collabs));
+          foreach ($collab_inputs as $c_input) {
+            if (empty($c_input)) continue;
+            $stmt_c = $db->prepare("SELECT id, artist FROM users WHERE id = ? OR email = ? COLLATE NOCASE");
+            $stmt_c->execute([$c_input, $c_input]);
+            $c_user = $stmt_c->fetch();
+            if ($c_user && $c_user['id'] != $user_id) {
+              $collab_user_ids[] = $c_user['id'];
+              if (stripos($artist, $c_user['artist']) === false) {
+                 $artist .= ', ' . $c_user['artist'];
+              }
+            }
+          }
+        }
         
         $artist_path = sanitize_for_path($main_artist);
         // SHARDING: Split uploads into 256 physical subfolders to prevent Linux inode collapse
@@ -7129,13 +7218,37 @@ HTML;
           $filePath = str_replace('\\', '/', $filePath); // Normalize slashes
           $actual_mtime = filemtime($filePath); // Get exact OS file modification time
           $is_private = intval($_POST['is_private'] ?? 0);
+          $is_collaborative = intval($_POST['is_collaborative'] ?? 0);
           
-          $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified, is_private, replaygain) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-          $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $actual_mtime, $is_private, $replaygain]);
+          $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified, is_private, is_collaborative, replaygain) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+          $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $actual_mtime, $is_private, $is_collaborative, $replaygain]);
           
           if ($is_private == 0) {
             $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, ?, ?)")->execute([$user_id, 'uploaded a new song', $title]);
           }
+
+          $new_song_id = $db->lastInsertId();
+          
+          if (!empty($collab_user_ids)) {
+            $stmt_add_c = $db->prepare("INSERT OR IGNORE INTO song_collaborators (song_id, user_id) VALUES (?, ?)");
+            foreach ($collab_user_ids as $c_id) {
+              $stmt_add_c->execute([$new_song_id, $c_id]);
+            }
+          }
+
+          try {
+            $db->exec("CREATE TABLE IF NOT EXISTS rhythm_charts (
+              song_id INTEGER NOT NULL, difficulty TEXT NOT NULL, notes_json TEXT, level INTEGER DEFAULT 1,
+              PRIMARY KEY (song_id, difficulty), FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+            );");
+            $rgDiffs = ['easy', 'medium', 'hard', 'expert', 'master', 'demon'];
+            $stmt_chart = $db->prepare("INSERT OR REPLACE INTO rhythm_charts (song_id, difficulty, notes_json, level) VALUES (?, ?, ?, ?)");
+            foreach ($rgDiffs as $diff) {
+              $c_notes = generatePhpChart($new_song_id, $duration, $diff, 1.0);
+              $c_level = calculatePhpLevel($c_notes, $duration, 1.0);
+              $stmt_chart->execute([$new_song_id, $diff, json_encode($c_notes), $c_level]);
+            }
+          } catch(Exception $e) {}
 
           $new_count = ($user_data['last_upload_date'] === $today) ? $daily_upload_count + 1 : 1;
           $update_stmt = $db->prepare("UPDATE users SET daily_upload_count = ?, last_upload_date = ? WHERE id = ?");
@@ -7230,8 +7343,14 @@ HTML;
         $song['file'] = $file_path; // Override with resolved path
 
         $is_private = intval($_POST['is_private'] ?? 0);
-        $update_fields = ["title = ?", "artist = ?", "album = ?", "genre = ?", "lyrics = ?", "is_private = ?"];
-        $update_params = [$new_title, $new_artist, $new_album, $new_genre, $new_lyrics, $is_private];
+        $is_collaborative = intval($_POST['is_collaborative'] ?? 0);
+        $update_fields = ["title = ?", "artist = ?", "album = ?", "genre = ?", "lyrics = ?", "is_private = ?", "is_collaborative = ?"];
+        $update_params = [$new_title, $new_artist, $new_album, $new_genre, $new_lyrics, $is_private, $is_collaborative];
+
+        if ($is_collaborative === 0) {
+          $db->prepare("DELETE FROM song_collaborators WHERE song_id = ?")->execute([$song_id]);
+          $db->prepare("DELETE FROM song_invites WHERE song_id = ?")->execute([$song_id]);
+        }
 
         $jpeg_data = null;
         $webp_data = null;
@@ -7343,7 +7462,7 @@ HTML;
       }
 
       $shelves = [];
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
 
       $discovery_songs_stmt = $db->prepare("
@@ -7545,12 +7664,13 @@ HTML;
         $params[] = $_GET['filter_user_id'];
       }
           
-      $where_clauses[] = "(m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+      $where_clauses[] = "(m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
+      $params[] = $user_id;
       $params[] = $user_id;
       
       $where_sql = 'WHERE ' . implode(' AND ', $where_clauses);
       
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . $limit_clause);
       $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
@@ -7568,8 +7688,8 @@ HTML;
         'year_asc' => 'ORDER BY m.year ASC, m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC'
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['title_asc'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.user_id = ? " . $order_by . $limit_clause);
-      $stmt->execute([$user_id, $user_id]);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR m.id IN (SELECT song_id FROM song_collaborators WHERE user_id = ?)) " . $order_by . $limit_clause);
+      $stmt->execute([$user_id, $user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
 
@@ -7606,7 +7726,7 @@ HTML;
         $params[] = $q_param;
       }
 
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . " " . $current_limit);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . " " . $current_limit);
       $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
@@ -7732,7 +7852,7 @@ HTML;
         'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC',
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, 1 as is_favorite FROM music m JOIN favorites f ON m.id = f.song_id WHERE f.user_id = ? " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, 1 as is_favorite FROM music m JOIN favorites f ON m.id = f.song_id WHERE f.user_id = ? " . $order_by . $limit_clause);
       $stmt->execute([$user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -7754,15 +7874,15 @@ HTML;
       $current_limit = $is_all ? '' : $limit_clause;
       
       $stmt = $db->prepare("
-        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.bitrate, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT artist FROM users WHERE id = ps.added_by) as added_by_name
+        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.bitrate, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT artist FROM users WHERE id = ps.added_by) as added_by_name
         FROM music m
         JOIN playlist_songs ps ON m.id = ps.song_id
         JOIN playlists p ON ps.playlist_id = p.id
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-        WHERE p.public_id = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)
+        WHERE p.public_id = ? AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)
         {$order_by} {$current_limit}
       ");
-      $stmt->execute([$user_id, $public_id, $user_id]);
+      $stmt->execute([$user_id, $public_id, $user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
 
@@ -7813,7 +7933,7 @@ HTML;
         'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC', 'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC', 'album_asc' => 'ORDER BY m.album COLLATE NOCASE ASC'
       ];
       $order_by = $sort_map[$sort_key] ?? $sort_map['manual_order'];
-      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN listen_later ll ON m.id = ll.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE ll.user_id = ? " . $order_by . $limit_clause);
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN listen_later ll ON m.id = ll.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE ll.user_id = ? " . $order_by . $limit_clause);
       $stmt->execute([$user_id, $user_id]);
       send_json($stmt->fetchAll());
       break;
@@ -8283,7 +8403,7 @@ HTML;
     case 'delete_blog_comment':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
-      $db->prepare("DELETE FROM blog_comments WHERE id = ? AND (user_id = ? OR {$is_super_admin} = 1)")->execute([intval($data['comment_id']), $user_id]);
+      $db->prepare("DELETE FROM blog_comments WHERE id = ? AND (user_id = ? OR {$is_admin} = 1)")->execute([intval($data['comment_id']), $user_id]);
       send_json(['status' => 'success']);
       break;
 
@@ -8405,7 +8525,7 @@ HTML;
     case 'delete_song_comment':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
-      $db->prepare("DELETE FROM song_comments WHERE id = ? AND (user_id = ? OR {$is_super_admin} = 1)")->execute([intval($data['comment_id']), $user_id]);
+      $db->prepare("DELETE FROM song_comments WHERE id = ? AND (user_id = ? OR {$is_admin} = 1)")->execute([intval($data['comment_id']), $user_id]);
       send_json(['status' => 'success']);
       break;
 
@@ -8593,7 +8713,7 @@ HTML;
     case 'delete_blog':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
-      $db->prepare("DELETE FROM blogs WHERE id = ? AND (user_id = ? OR {$is_super_admin} = 1)")->execute([intval($data['id']), $user_id]);
+      $db->prepare("DELETE FROM blogs WHERE id = ? AND (user_id = ? OR {$is_admin} = 1)")->execute([intval($data['id']), $user_id]);
       send_json(['status' => 'success']);
       break;
 
@@ -9580,21 +9700,26 @@ HTML;
           break;
         case 'artist_songs':
           if ($filter_user_id !== '') {
-            $conditions = "WHERE (match_artist(m.artist, ?) = 1 OR m.user_id = ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+            $conditions = "WHERE (match_artist(m.artist, ?) = 1 OR m.user_id = ? OR m.id IN (SELECT song_id FROM song_collaborators WHERE user_id = ?)) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR m.id IN (SELECT song_id FROM song_collaborators WHERE user_id = ?) OR {$is_super_admin} = 1)";
             $params[] = $param;
             $params[] = $filter_user_id;
+            $params[] = $filter_user_id;
+            $params[] = $user_id;
+            $params[] = $user_id;
             $params[] = $user_id;
             $filter_user_id = ''; // Processed here, prevent global append
           } else {
-            $conditions = "WHERE match_artist(m.artist, ?) = 1 AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+            $conditions = "WHERE match_artist(m.artist, ?) = 1 AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR m.id IN (SELECT song_id FROM song_collaborators WHERE user_id = ?) OR {$is_super_admin} = 1)";
             $params[] = $param;
             $params[] = $user_id;
+            $params[] = $user_id;
+            $params[] = $user_id;
           }
-          $default_sort = 'album_asc';
           break;
         case 'album_songs':
-          $conditions = "WHERE m.album = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+          $conditions = "WHERE m.album = ? AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
           $params[] = $param;
+          $params[] = $user_id;
           $params[] = $user_id;
           if ($artist_name !== '') {
             $conditions .= " AND match_artist(m.artist, ?) = 1";
@@ -9603,35 +9728,39 @@ HTML;
           $default_sort = 'title_asc';
           break;
         case 'year_songs':
-          $conditions = "WHERE m.year = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+          $conditions = "WHERE m.year = ? AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
           $params[] = $param;
+          $params[] = $user_id;
           $params[] = $user_id;
           $default_sort = 'artist_asc';
           break;
         case 'genre_songs':
-          $conditions = "WHERE m.genre = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+          $conditions = "WHERE m.genre = ? AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
           $params[] = $param;
+          $params[] = $user_id;
           $params[] = $user_id;
           $default_sort = 'artist_asc';
           break;
         case 'playlist_songs':
           $sql = "SELECT m.id FROM music m JOIN playlist_songs ps ON m.id = ps.song_id JOIN playlists p ON ps.playlist_id = p.id ";
-          $conditions = "WHERE p.public_id = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+          $conditions = "WHERE p.public_id = ? AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
           $params[] = $param;
+          $params[] = $user_id;
           $params[] = $user_id;
           $default_sort = 'manual_order';
           break;
         case 'mix_songs':
           $sql = "SELECT m.id FROM mix_songs ms JOIN mixes mx ON ms.mix_id = mx.id JOIN music m ON ms.song_id = m.id ";
-          $conditions = "WHERE mx.public_id = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+          $conditions = "WHERE mx.public_id = ? AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
           $params[] = $param;
+          $params[] = $user_id;
           $params[] = $user_id;
           $default_sort = 'manual_order';
           break;
         case 'search':
-          $conditions = "WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+          $conditions = "WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
           $query_param = '%' . $param . '%';
-          $params = [$query_param, $query_param, $query_param, $user_id];
+          $params = [$query_param, $query_param, $query_param, $user_id, $user_id];
           break;
         case 'get_recommendations':
           send_json([]);
@@ -9686,8 +9815,8 @@ HTML;
     case 'get_artists':
       $sort_key = $_GET['sort'] ?? 'name_asc';
       // ADVANCED IMAGE SCANNER: Tracks if the current song actually has an image
-      $stmt = $db->prepare("SELECT artist, id, CASE WHEN image IS NOT NULL THEN 1 ELSE 0 END as has_img FROM music WHERE artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) ORDER BY id DESC");
-      $stmt->execute([$user_id]);
+      $stmt = $db->prepare("SELECT artist, id, CASE WHEN image IS NOT NULL THEN 1 ELSE 0 END as has_img FROM music WHERE artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) ORDER BY id DESC");
+      $stmt->execute([$user_id, $user_id]);
       $rows = $stmt->fetchAll();
       $artists = [];
       foreach ($rows as $row) {
@@ -9719,7 +9848,7 @@ HTML;
     case 'get_albums':
       $sort_key = $_GET['sort'] ?? 'album_asc';
       
-      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, m.id, m.year, m.last_modified, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m WHERE m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY m.id DESC");
+      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, m.id, m.year, m.last_modified, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m WHERE m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) ORDER BY m.id DESC");
       $stmt->execute([$user_id]);
       $rows = $stmt->fetchAll();
       
@@ -9767,13 +9896,13 @@ HTML;
       break;
     
     case 'get_genres':
-      $stmt = $db->prepare("SELECT genre as name, MAX(id) as id FROM music WHERE genre != '' AND genre IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY genre ORDER BY genre COLLATE NOCASE" . $limit_clause);
+      $stmt = $db->prepare("SELECT genre as name, MAX(id) as id FROM music WHERE genre != '' AND genre IS NOT NULL AND (is_private = 0 OR user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) GROUP BY genre ORDER BY genre COLLATE NOCASE" . $limit_clause);
       $stmt->execute([$user_id]);
       send_json($stmt->fetchAll());
       break;
     
     case 'get_years':
-      $stmt = $db->prepare("SELECT CAST(year AS TEXT) as name, MAX(id) as id FROM music WHERE year IS NOT NULL AND year > 0 AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY year ORDER BY year DESC" . $limit_clause);
+      $stmt = $db->prepare("SELECT CAST(year AS TEXT) as name, MAX(id) as id FROM music WHERE year IS NOT NULL AND year > 0 AND (is_private = 0 OR user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) GROUP BY year ORDER BY year DESC" . $limit_clause);
       $stmt->execute([$user_id ?? 0]);
       send_json($stmt->fetchAll());
       break;
@@ -9795,7 +9924,7 @@ HTML;
     case 'delete_community_post':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
-      $db->prepare("DELETE FROM community_posts WHERE id = ? AND (user_id = ? OR {$is_super_admin} = 1)")->execute([intval($data['id']), $user_id]);
+      $db->prepare("DELETE FROM community_posts WHERE id = ? AND (user_id = ? OR {$is_admin} = 1)")->execute([intval($data['id']), $user_id]);
       send_json(['status' => 'success']);
       break;
     
@@ -9822,7 +9951,7 @@ HTML;
 
         if (!$user_details) { http_response_code(404); exit; }
 
-        $stmt_stats = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, SUM((SELECT COALESCE(SUM(play_count), 0) FROM play_counts WHERE song_id = music.id)) as play_count FROM music WHERE user_id = ?");
+        $stmt_stats = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, SUM((SELECT COALESCE(SUM(play_count), 0) FROM play_counts WHERE song_id = music.id)) as play_count FROM music WHERE user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1");
         $stmt_stats->execute([$user_id]);
         $details = $stmt_stats->fetch();
         
@@ -9863,7 +9992,7 @@ HTML;
 
         $search_cond = '';
         $q = $_GET['q'] ?? '';
-        $params = [$user_id, $user_id];
+        $params = [$user_id, $user_id, $user_id, $user_id];
         if ($q !== '') {
           $search_cond = " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
           $params[] = "%$q%";
@@ -9872,9 +10001,9 @@ HTML;
         }
 
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-          WHERE m.user_id = ? {$search_cond} {$order_by} {$limit_clause}
+          WHERE (m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR m.id IN (SELECT song_id FROM song_collaborators WHERE user_id = ?)) {$search_cond} {$order_by} {$limit_clause}
         ");
         $stmt_songs->execute($params);
         $songs = $stmt_songs->fetchAll();
@@ -9914,7 +10043,7 @@ HTML;
         }
         
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m JOIN playlist_songs ps ON m.id = ps.song_id JOIN playlists p ON ps.playlist_id = p.id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE p.public_id = ? {$search_cond} {$order_by} {$limit_clause}
         ");
@@ -9945,7 +10074,7 @@ HTML;
           }
 
           $stmt_songs = $db->prepare("
-            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
+            SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
             FROM music m 
             JOIN mix_songs ms ON m.id = ms.song_id 
             LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
@@ -9970,19 +10099,25 @@ HTML;
         
         if ($field === 'artist') {
           if ($filter_user_id !== '') {
-            $field_cond = "(match_artist(m.artist, ?) = 1 OR m.user_id = ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+            $field_cond = "(match_artist(m.artist, ?) = 1 OR m.user_id = ? OR m.id IN (SELECT song_id FROM song_collaborators WHERE user_id = ?)) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR m.id IN (SELECT song_id FROM song_collaborators WHERE user_id = ?) OR {$is_super_admin} = 1)";
             $user_params[] = $name;
             $user_params[] = $filter_user_id;
+            $user_params[] = $filter_user_id;
+            $user_params[] = $user_id;
+            $user_params[] = $user_id;
             $user_params[] = $user_id;
             $filter_user_id = ''; // Processed here, prevent global append
           } else {
-            $field_cond = "match_artist(m.artist, ?) = 1 AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+            $field_cond = "match_artist(m.artist, ?) = 1 AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR m.id IN (SELECT song_id FROM song_collaborators WHERE user_id = ?) OR {$is_super_admin} = 1)";
             $user_params[] = $name;
+            $user_params[] = $user_id;
+            $user_params[] = $user_id;
             $user_params[] = $user_id;
           }
         } else {
-          $field_cond = "m.{$field} = ? AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+          $field_cond = "m.{$field} = ? AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
           $user_params[] = $name;
+          $user_params[] = $user_id;
           $user_params[] = $user_id;
           if ($field === 'album' && $artist_name !== '') {
             $field_cond .= " AND match_artist(m.artist, ?) = 1";
@@ -10080,7 +10215,7 @@ HTML;
         }
 
         $stmt_songs = $db->prepare("
-          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
+          SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
           FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE {$field_cond} {$user_cond} {$search_cond} {$order_by} {$limit_clause}
         ");
@@ -10107,7 +10242,7 @@ HTML;
       if (!$user_id) { http_response_code(403); exit; }
       $stats = [];
       $stats_queries = [
-        'uploads' => "SELECT COUNT(*) FROM music WHERE user_id = {$user_id}",
+        'uploads' => "SELECT COUNT(*) FROM music WHERE user_id = {$user_id} OR match_artist(artist, (SELECT artist FROM users WHERE id = {$user_id})) = 1",
         'favorites' => "SELECT COUNT(*) FROM favorites WHERE user_id = {$user_id}",
         'playlists' => "SELECT COUNT(*) FROM playlists WHERE user_id = {$user_id}",
         'play_count' => "SELECT SUM(play_count) FROM play_counts WHERE user_id = {$user_id}"
@@ -10156,18 +10291,18 @@ HTML;
       elseif ($f_dur === 'long') { $dur_cond_m = " AND m.duration > 1200"; }
 
       $shelves = [];
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as play_count";
 
       // 1. TOP RESULT (Only if no specific sort is overriding)
       if ($f_sort === 'relevance' || $f_sort === '') {
         $stmt_top = $db->prepare("
           SELECT {$song_fields} FROM music m 
           LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? 
-          WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)
+          WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)
           $date_cond_m $dur_cond_m
           ORDER BY CASE WHEN m.title LIKE ? THEN 1 WHEN m.artist LIKE ? THEN 2 WHEN m.album LIKE ? THEN 3 ELSE 4 END ASC, m.id DESC LIMIT 1
         ");
-        $stmt_top->execute([$user_id, $query, $query, $query, $user_id, $q, $q, $q]);
+        $stmt_top->execute([$user_id, $query, $query, $query, $user_id, $user_id, $q, $q, $q]);
         $top_result = $stmt_top->fetch();
         if ($top_result) $shelves[] = ['title' => 'Top Result', 'type' => 'top_result', 'items' => [$top_result]];
       }
@@ -10197,9 +10332,9 @@ HTML;
       // 3. ALBUMS (Dynamically aggregated and filtered)
       $stmt = $db->prepare("
         SELECT m.album, m.artist, m.user_id, m.id, m.duration, m.last_modified, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc
-        FROM music m WHERE m.album LIKE ? AND m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) $date_cond_m
+        FROM music m WHERE m.album LIKE ? AND m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) $date_cond_m
       ");
-      $stmt->execute([$query, $user_id]);
+      $stmt->execute([$query, $user_id, $user_id]);
       $search_albums = [];
       foreach ($stmt->fetchAll() as $row) {
         $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
@@ -10252,7 +10387,7 @@ HTML;
 
       // 5. SONGS
       $order_m = "ORDER BY m.title ASC";
-      $song_params = [$user_id, $query, $query, $query, $user_id];
+      $song_params = [$user_id, $query, $query, $query, $user_id, $user_id];
       if ($f_sort === 'relevance' || $f_sort === '') {
         $order_m = "ORDER BY CASE WHEN m.title LIKE ? THEN 1 WHEN m.artist LIKE ? THEN 2 WHEN m.album LIKE ? THEN 3 ELSE 4 END ASC, m.id DESC";
         $song_params[] = $q; $song_params[] = $q; $song_params[] = $q;
@@ -10265,7 +10400,7 @@ HTML;
       }
       
       $song_fields_search = $song_fields . ", (SELECT COUNT(*) FROM favorites WHERE song_id = m.id) as like_count";
-      $stmt = $db->prepare("SELECT {$song_fields_search} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) $date_cond_m $dur_cond_m $order_m LIMIT 50");
+      $stmt = $db->prepare("SELECT {$song_fields_search} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) $date_cond_m $dur_cond_m $order_m LIMIT 50");
       $stmt->execute($song_params);
       $songs = $stmt->fetchAll();
       if (count($songs) > 0) $shelves[] = ['title' => 'Songs', 'type' => 'songs_list', 'items' => $songs];
@@ -10276,7 +10411,7 @@ HTML;
     case 'get_song_data':
       $id = intval($_GET['id'] ?? 0);
       $stmt = $db->prepare("
-        SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, m.is_private, m.last_modified, m.replaygain,
+        SELECT m.id, m.file, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.lyrics, m.user_id, m.is_private, m.is_collaborative, m.last_modified, m.replaygain,
         CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
         uss.volume_multiplier, uss.eq_bands
         FROM music m 
@@ -10287,7 +10422,16 @@ HTML;
       $stmt->execute([$user_id, $user_id, $id]);
       $song = $stmt->fetch();
       if ($song) {
-        if ($song['is_private'] == 1 && $song['user_id'] != $user_id && $is_super_admin == 0) {
+        $is_collab = false;
+        if ($user_id) {
+          $stmt_art = $db->prepare("SELECT artist FROM users WHERE id = ?");
+          $stmt_art->execute([$user_id]);
+          $u_art = $stmt_art->fetchColumn();
+          if ($u_art && $db->query("SELECT match_artist(".$db->quote($song['artist']).", ".$db->quote($u_art).")")->fetchColumn() == 1) {
+            $is_collab = true;
+          }
+        }
+        if ($song['is_private'] == 1 && $song['user_id'] != $user_id && !$is_collab && $is_super_admin == 0) {
           http_response_code(403); send_json(['status' => 'error', 'message' => 'This song is private.']);
         }
         $song['stream_url'] = '?action=get_stream&id=' . $song['id'];
@@ -10346,7 +10490,7 @@ HTML;
 
     case 'get_stream':
       $id = intval($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT file, user_id, is_private FROM music WHERE id = ?");
+      $stmt = $db->prepare("SELECT file, user_id, is_private, artist FROM music WHERE id = ?");
       $stmt->execute([$id]);
       $song_stream = $stmt->fetch();
       
@@ -10359,7 +10503,16 @@ HTML;
         }
 
         if (file_exists($file_path)) {
-          if ($song_stream['is_private'] == 1 && $song_stream['user_id'] != $user_id && $is_super_admin == 0) {
+          $is_collab = false;
+          if ($user_id) {
+             $stmt_art = $db->prepare("SELECT artist FROM users WHERE id = ?");
+             $stmt_art->execute([$user_id]);
+             $u_art = $stmt_art->fetchColumn();
+             if ($u_art && $db->query("SELECT match_artist(".$db->quote($song_stream['artist']).", ".$db->quote($u_art).")")->fetchColumn() == 1) {
+                 $is_collab = true;
+             }
+          }
+          if ($song_stream['is_private'] == 1 && $song_stream['user_id'] != $user_id && !$is_collab && $is_super_admin == 0) {
             http_response_code(403); exit;
           }
           session_write_close();
@@ -10661,6 +10814,110 @@ HTML;
       send_json(['status' => 'success', 'message' => 'You have left the collaboration.']);
       break;
       
+    case 'manage_song_collaborators':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $song_id = intval($data['song_id'] ?? 0);
+      $action_type = $data['collab_action']; 
+      
+      if ($action_type === 'search') {
+        $q = '%' . ($data['query'] ?? '') . '%';
+        $stmt = $db->prepare("SELECT id, artist FROM users WHERE artist LIKE ? OR email LIKE ? LIMIT 10");
+        $stmt->execute([$q, $q]);
+        send_json(['status' => 'success', 'users' => $stmt->fetchAll()]);
+      }
+      
+      $stmt = $db->prepare("SELECT id, user_id, is_collaborative FROM music WHERE id = ?");
+      $stmt->execute([$song_id]);
+      $song = $stmt->fetch();
+      
+      if (!$song) {
+        http_response_code(404); send_json(['status' => 'error', 'message' => 'Song not found.']);
+      }
+      
+      if ($action_type === 'generate_link') {
+        if ($song['user_id'] != $user_id && $is_super_admin == 0) {
+          http_response_code(403); send_json(['status' => 'error', 'message' => 'Only the owner can generate links.']);
+        }
+        $db->exec("DELETE FROM song_invites WHERE expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP");
+        
+        $expire_val = $data['expire'] ?? null;
+        $expires_at = null;
+        if ($expire_val && is_numeric($expire_val)) {
+          $expires_at = date('Y-m-d H:i:s', time() + ((int)$expire_val * 60));
+        }
+        $token = bin2hex(random_bytes(16));
+        $db->prepare("INSERT INTO song_invites (token, song_id, expires_at) VALUES (?, ?, ?)")->execute([$token, $song['id'], $expires_at]);
+        send_json(['status' => 'success', 'token' => $token]);
+      }
+
+      if ($action_type === 'join') {
+        $token = $data['token'] ?? '';
+        $stmt_inv = $db->prepare("SELECT song_id FROM song_invites WHERE token = ? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)");
+        $stmt_inv->execute([$token]);
+        $inv_song_id = $stmt_inv->fetchColumn();
+        
+        if (!$inv_song_id || $inv_song_id != $song['id']) {
+          send_json(['status' => 'error', 'message' => 'Invalid or expired invite link.']);
+        }
+        if (!$song['is_collaborative']) {
+          send_json(['status' => 'error', 'message' => 'This song is not open for collaboration.']);
+        }
+        if ($song['user_id'] == $user_id) {
+          send_json(['status' => 'error', 'message' => 'You are already the owner.']);
+        }
+        $db->prepare("INSERT OR IGNORE INTO song_collaborators (song_id, user_id) VALUES (?, ?)")->execute([$song['id'], $user_id]);
+        send_json(['status' => 'success', 'message' => 'Joined song successfully!']);
+      }
+      
+      if ($song['user_id'] != $user_id && $is_super_admin == 0) {
+        http_response_code(403); send_json(['status' => 'error', 'message' => 'Only the owner can manage collaborators.']);
+      }
+      
+      if ($action_type === 'list') {
+        $stmt_list = $db->prepare("SELECT u.id, u.artist, u.email FROM song_collaborators sc JOIN users u ON sc.user_id = u.id WHERE sc.song_id = ?");
+        $stmt_list->execute([$song['id']]);
+        send_json(['status' => 'success', 'collaborators' => $stmt_list->fetchAll()]);
+      } elseif ($action_type === 'add') {
+        $target_id = $data['target_id'] ?? null;
+        if ($target_id) {
+          $collab_user = $target_id;
+        } else {
+          $target = $data['target'];
+          $stmt_find = $db->prepare("SELECT id FROM users WHERE email = ? OR artist = ? COLLATE NOCASE");
+          $stmt_find->execute([$target, $target]);
+          $collab_user = $stmt_find->fetchColumn();
+        }
+        if (!$collab_user) { send_json(['status' => 'error', 'message' => 'User not found.']); }
+        if ($collab_user == $user_id) { send_json(['status' => 'error', 'message' => 'You already own this song.']); }
+          
+        $db->prepare("INSERT OR IGNORE INTO song_collaborators (song_id, user_id) VALUES (?, ?)")->execute([$song['id'], $collab_user]);
+        send_json(['status' => 'success', 'message' => 'Collaborator added successfully.']);
+      } elseif ($action_type === 'remove') {
+        $remove_id = $data['collab_user_id'];
+        $db->prepare("DELETE FROM song_collaborators WHERE song_id = ? AND user_id = ?")->execute([$song['id'], $remove_id]);
+        send_json(['status' => 'success', 'message' => 'Collaborator removed.']);
+      }
+      break;
+
+    case 'get_song_invite_info':
+      $token = $_GET['token'] ?? '';
+      $stmt = $db->prepare("
+        SELECT m.id, m.title, u.artist as creator, m.is_private, m.user_id 
+        FROM song_invites si 
+        JOIN music m ON si.song_id = m.id 
+        JOIN users u ON m.user_id = u.id 
+        WHERE si.token = ? AND (si.expires_at IS NULL OR si.expires_at > CURRENT_TIMESTAMP)
+      ");
+      $stmt->execute([$token]);
+      $info = $stmt->fetch();
+      if ($info) {
+        send_json(['status' => 'success', 'details' => $info]);
+      } else {
+        http_response_code(404); send_json(['status' => 'error', 'message' => 'Invalid or expired invite link.']);
+      }
+      break;
+
     case 'manage_collaborators':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
@@ -10942,7 +11199,7 @@ HTML;
       // Forcefully ensure the description column exists to prevent 500 errors if the session wasn't reset
       try { $db->exec("ALTER TABLE playlists ADD COLUMN description TEXT;"); } catch(Exception $e) {}
       
-      $stmt = $db->prepare("UPDATE playlists SET name = ?, description = ?, is_private = ?, is_collaborative = CASE WHEN ? = 1 THEN 0 ELSE is_collaborative END WHERE public_id = ? AND (user_id = ? OR {$is_super_admin} = 1)");
+      $stmt = $db->prepare("UPDATE playlists SET name = ?, description = ?, is_private = ?, is_collaborative = CASE WHEN ? = 1 THEN 0 ELSE is_collaborative END WHERE public_id = ? AND (user_id = ? OR {$is_admin} = 1)");
       $stmt->execute([$new_name, $description, $is_private, $is_private, $public_id, $user_id]);
       
       // Destroy collaborators safely if transitioning to Private
@@ -10957,7 +11214,7 @@ HTML;
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
       $public_id = $data['public_id'];
-      $stmt = $db->prepare("DELETE FROM playlists WHERE public_id = ? AND (user_id = ? OR {$is_super_admin} = 1)");
+      $stmt = $db->prepare("DELETE FROM playlists WHERE public_id = ? AND (user_id = ? OR {$is_admin} = 1)");
       $stmt->execute([$public_id, $user_id]);
       if ($stmt->rowCount() > 0) {
         send_json(['status' => 'success', 'message' => 'Playlist deleted.']);
@@ -11135,7 +11392,7 @@ HTML;
       break;
       
     case 'get_trending':
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       $stmt = $db->prepare("
         SELECT {$song_fields}
         FROM music m
@@ -11168,7 +11425,7 @@ HTML;
       $order_by = $sort_map[$sort_key] ?? $sort_map['history_desc'];
       
       $stmt = $db->prepare("
-        SELECT MAX(h.played_at) AS played_at, m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified,
+        SELECT MAX(h.played_at) AS played_at, m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified,
         CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
         (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
         FROM history h
@@ -11455,7 +11712,7 @@ HTML;
       }
 
       $where = "WHERE u.email NOT LIKE 'deleted_%' AND u.banned = 0";
-      $params = [$_SESSION['user_id'] ?? 0];
+      $params = [$_SESSION['user_id'] ?? 0, $_SESSION['user_id'] ?? 0];
 
       if ($search !== '') {
         $where .= " AND u.artist LIKE ? COLLATE NOCASE";
@@ -11472,7 +11729,7 @@ HTML;
           u.id as user_id,
           u.artist as name,
           (SELECT id FROM music WHERE match_artist(artist, u.artist) = 1 ORDER BY id DESC LIMIT 1) as id,
-          (SELECT COUNT(*) FROM music WHERE match_artist(artist, u.artist) = 1 AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1)) as count,
+          (SELECT COUNT(*) FROM music WHERE match_artist(artist, u.artist) = 1 AND (is_private = 0 OR user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)) as count,
           COALESCE(SUM(rs.score), 0) as score,
           COALESCE(COUNT(rs.id), 0) as plays,
           COALESCE(SUM(rs.perfect), 0) as perfect,
@@ -11969,7 +12226,7 @@ HTML;
       }
 
       $stmt = $db->prepare("
-        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified,
+        SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified,
         1 AS rg_favorite,
         (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
         FROM music m
@@ -12026,7 +12283,7 @@ HTML;
       }
 
       $shelves = [];
-      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       $album_fields = "m.album, m.artist, m.user_id, MAX(m.id) as id";
 
       $recent_songs_stmt = $db->prepare("
@@ -12554,10 +12811,10 @@ HTML;
         SELECT p.name, m.file, m.title, m.artist, m.album FROM playlists p 
         JOIN playlist_songs ps ON p.id = ps.playlist_id 
         JOIN music m ON ps.song_id = m.id 
-        WHERE p.public_id = ? AND (p.user_id = ? OR {$is_super_admin} = 1) AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)
+        WHERE p.public_id = ? AND (p.user_id = ? OR {$is_super_admin} = 1) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)
         ORDER BY ps.sort_order ASC
       ");
-      $stmt->execute([$public_id, $user_id, $user_id]);
+      $stmt->execute([$public_id, $user_id, $user_id, $user_id]);
       $rows = $stmt->fetchAll();
 
       if (empty($rows)) { http_response_code(404); exit; }
@@ -17828,6 +18085,22 @@ function perform_cover_scan($db) {
               <input class="form-check-input" type="checkbox" id="song-is-private">
               <label class="form-check-label text-white" for="song-is-private"><i class="bi bi-lock-fill text-warning"></i> Private Song</label>
             </div>
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" id="song-is-collaborative" checked>
+              <label class="form-check-label text-white" for="song-is-collaborative"><i class="bi bi-people-fill text-info"></i> Official Collaboration</label>
+            </div>
+            <div class="mb-3" id="upload-collaborator-container" style="display: none;">
+              <h6 class="text-white small mb-2">Manage Collaborators</h6>
+              <div class="position-relative mb-2">
+                <div class="input-group">
+                  <input type="text" id="upload-collab-search-input" class="form-control" placeholder="Search Artist Name...">
+                  <button type="button" class="btn btn-danger" id="upload-collab-add-btn">Add User</button>
+                </div>
+                <div id="upload-collab-search-dropdown" class="search-dropdown d-none w-100" style="top: 100%; position: absolute; z-index: 2000; background-color: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 0 0 8px 8px; max-height: 250px; overflow-y: auto;"></div>
+              </div>
+              <div id="upload-collab-list" class="list-group list-group-flush bg-transparent"></div>
+              <input type="hidden" id="song-artist" value="">
+            </div>
             <button id="start-upload-btn" class="btn btn-danger">Start Upload</button>
             <div id="upload-progress-area" class="mt-3"></div>
           </div>
@@ -17847,6 +18120,61 @@ function perform_cover_scan($db) {
         </div>
       </div>
     </div>
+    <div class="modal fade" id="song-collab-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header border-0">
+            <h5 class="modal-title">Manage Song Collaborators</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <input type="hidden" id="song-collab-song-id">
+            <div class="position-relative mb-3">
+              <div class="input-group">
+                <input type="text" id="song-collab-input" class="form-control" placeholder="Search Artist Name...">
+                <button class="btn btn-danger" id="song-collab-add-btn">Add User</button>
+              </div>
+              <div id="song-collab-search-dropdown" class="search-dropdown d-none w-100" style="top: 100%; position: absolute; z-index: 2000; background-color: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 0 0 8px 8px; max-height: 250px; overflow-y: auto;"></div>
+            </div>
+            <div class="mb-3 p-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid #404040;">
+              <label for="song-collab-expire-select" class="form-label text-white small mb-1">Invite Link Expiration</label>
+              <select id="song-collab-expire-select" class="form-select form-select-sm bg-dark text-white border-secondary mb-2">
+                <option value="1440">1 Day</option>
+                <option value="10080">1 Week</option>
+                <option value="43200">1 Month</option>
+                <option value="forever">Forever</option>
+                <option value="custom">Custom (Minutes)</option>
+              </select>
+              <input type="number" id="song-collab-custom-expire" class="form-control form-control-sm bg-dark text-white border-secondary d-none mb-2" placeholder="Enter minutes (e.g. 60)">
+              <button class="btn btn-outline-light w-100" id="song-collab-copy-link-btn"><i class="bi bi-link-45deg"></i> Generate & Copy Link</button>
+            </div>
+            <h6 class="text-secondary mt-2">Current Collaborators</h6>
+            <div id="song-collab-list" class="list-group list-group-flush bg-transparent"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="song-collab-invite-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-secondary">
+            <h5 class="modal-title text-white">Song Collaboration Invite</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-center p-4">
+            <i class="bi bi-music-note-list text-info mb-3" style="font-size: 3rem; display: block;"></i>
+            <h5 class="text-white mb-2">You've been invited!</h5>
+            <p class="text-secondary mb-4">You have been invited to collaborate on the song <strong id="invite-song-title" class="text-white"></strong> by <strong id="invite-song-creator" class="text-white"></strong>.</p>
+            <div class="d-flex gap-2 justify-content-center">
+              <button class="btn btn-outline-secondary px-4" data-bs-dismiss="modal" id="song-invite-reject-btn">Decline</button>
+              <button class="btn btn-danger px-4" id="song-invite-accept-btn">Accept & Join</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="collab-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -18094,8 +18422,8 @@ function perform_cover_scan($db) {
                 <input type="text" class="form-control" id="edit-metadata-title">
               </div>
               <div class="mb-3">
-                <label class="form-label">Artist</label>
-                <input type="text" class="form-control" id="edit-metadata-artist">
+                <label class="form-label">Artist(s) / Collaborators</label>
+                <input type="text" class="form-control" id="edit-metadata-artist" placeholder="Artist 1, Artist 2 (Comma separated)">
               </div>
               <div class="mb-3">
                 <label class="form-label">Album</label>
@@ -18112,6 +18440,14 @@ function perform_cover_scan($db) {
               <div class="form-check form-switch mb-3">
                 <input class="form-check-input" type="checkbox" id="edit-metadata-is-private">
                 <label class="form-check-label text-white" for="edit-metadata-is-private"><i class="bi bi-lock-fill text-warning"></i> Private Song</label>
+              </div>
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="edit-metadata-is-collaborative">
+                <label class="form-check-label text-white" for="edit-metadata-is-collaborative"><i class="bi bi-people-fill text-info"></i> Official Collaboration</label>
+              </div>
+              <div id="edit-song-collab-container" class="d-none mb-3 p-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid #404040;">
+                <label class="form-label text-white small mb-1">Manage Collaborators</label>
+                <button type="button" class="btn btn-outline-info btn-sm w-100 mb-2" id="manage-song-collab-btn">Manage Collaborators</button>
               </div>
               <button type="submit" class="btn btn-danger w-100" id="edit-metadata-submit-btn">Save Changes</button>
               <div class="progress mt-3 d-none" id="metadata-progress-container" style="height: 15px;">
@@ -18683,7 +19019,7 @@ function perform_cover_scan($db) {
                   <div class="tab-content mb-5">
                     <div class="tab-pane fade show active" id="js-1">
                       <pre class="bg-black p-4 rounded-bottom rounded-end border border-secondary text-light font-monospace m-0 shadow-sm" style="font-size: 0.9rem; overflow-x: auto;"><code>const fetchLibrary = async () => {
-  const endpoint = 'https://yourdomain.com/?access=api&action=get_songs&api_key=admin&page=1&sort=title_asc';
+  const endpoint = 'https://yourdomain.com/?access=api&action=get_songs&api_key=YOUR_API_KEY&page=1&sort=title_asc';
   
   try {
     const response = await fetch(endpoint, {
@@ -18720,7 +19056,7 @@ def get_all_songs():
     payload = {
         "access": "api",
         "action": "get_songs",
-        "api_key": "admin", # Replace with actual key
+        "api_key": "YOUR_API_KEY", # Replace with actual key
         "page": 1,
         "sort": "title_asc"
     }
@@ -18740,7 +19076,7 @@ get_all_songs()</code></pre>
                     </div>
                     <div class="tab-pane fade" id="php-1">
                       <pre class="bg-black p-4 rounded-bottom rounded-end border border-secondary text-light font-monospace m-0 shadow-sm" style="font-size: 0.9rem; overflow-x: auto;"><code>&lt;?php
-$url = "https://yourdomain.com/?access=api&action=get_songs&api_key=admin&page=1";
+$url = "https://yourdomain.com/?access=api&action=get_songs&api_key=YOUR_API_KEY&page=1";
 
 $ch = curl_init();
 curl_setopt($ch, CURLOPT_URL, $url);
@@ -22470,6 +22806,7 @@ SOFTWARE.</div>
               <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''}" 
                 data-song-id="${song.id}" 
                 data-is-favorite="${song.is_favorite == 1 ? '1' : '0'}"
+                data-is-collaborative="${song.is_collaborative == 1 ? '1' : '0'}"
                 data-song-title="${escapeAttr(song.title)}"
                 data-song-artist="${escapeAttr(song.artist)}"
                 data-song-album="${escapeAttr(song.album)}"
@@ -22481,7 +22818,7 @@ SOFTWARE.</div>
                 </div>
                 <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${song.title}</div></div>
                 <div class="song-artist text-truncate" data-userid="${song.user_id}">
-                  <div class="text-truncate">${formatArtistsHTML(song.artist, song.user_id)}</div>
+                  <div class="text-truncate">${formatArtistsHTML(song.artist, song.user_id, song.is_collaborative)}</div>
                   <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
                 </div>
                 <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
@@ -22490,7 +22827,7 @@ SOFTWARE.</div>
                 <div class="song-more"><button class="more-btn" data-song-id="${song.id}"><i class="bi bi-three-dots-vertical"></i></button></div>
                 <div class="song-artist-mobile w-100 flex-column align-items-start">
                   <div class="d-flex justify-content-between align-items-center w-100">
-                     <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${formatArtistsHTML(song.artist, song.user_id)}</span>
+                     <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${formatArtistsHTML(song.artist, song.user_id, song.is_collaborative)}</span>
                      <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
                   </div>
                   <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
@@ -24026,7 +24363,7 @@ SOFTWARE.</div>
                         ${details.playlists.map(p => `
                           <div class="col">
                             <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
-                              ${(currentUser && (currentUser.id == details.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${details.user_id}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
+                              ${(currentUser && (currentUser.id == details.user_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${details.user_id}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
                               <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
                                 <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
                                 ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ''}
@@ -24057,10 +24394,14 @@ SOFTWARE.</div>
           }
         };
 
-        const formatArtistsHTML = (artistString, userId) => {
+        const formatArtistsHTML = (artistString, userId, isCollaborative = 1) => {
           if (!artistString) return escapeHTML('Unknown Artist');
-          const artistsList = artistString.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
-          return artistsList.map(a => `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(a)}" data-userid="${userId || ''}">${escapeHTML(a)}</span>`).join(', ');
+          if (isCollaborative == 1) {
+            const artistsList = artistString.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+            return artistsList.map(a => `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(a)}" data-userid="${userId || ''}">${escapeHTML(a)}</span>`).join(', ') + ' <i class="bi bi-people-fill text-secondary ms-1" title="Official Collaboration" style="font-size: 0.75rem;"></i>';
+          } else {
+            return `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(artistString)}" data-userid="${userId || ''}">${escapeHTML(artistString)}</span>`;
+          }
         };
 
         const renderSongs = (songs, append = false) => {
@@ -24120,9 +24461,10 @@ SOFTWARE.</div>
             const playedAtHTML = isHistory ? `<div class="played-at-text text-truncate" title="${timeAgo(song.played_at)}">${timeAgo(song.played_at)}</div>` : '';
             const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
             return `
-            <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''} ${isHistory ? 'history-item' : ''}" 
+            <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''}" 
               data-song-id="${song.id}" 
               data-is-favorite="${song.is_favorite == 1 ? '1' : '0'}"
+              data-is-collaborative="${song.is_collaborative == 1 ? '1' : '0'}"
               data-song-title="${escapeAttr(song.title)}"
               data-song-artist="${escapeAttr(song.artist)}"
               data-song-album="${escapeAttr(song.album)}"
@@ -24134,7 +24476,7 @@ SOFTWARE.</div>
               </div>
               <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ''}${escapeHTML(song.title)}</div></div>
               <div class="song-artist text-truncate" data-userid="${song.user_id}">
-                <div class="text-truncate">${formatArtistsHTML(song.artist, song.user_id)}</div>
+                <div class="text-truncate">${formatArtistsHTML(song.artist, song.user_id, song.is_collaborative)}</div>
                 <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
                 ${song.added_by_name ? `<div style="font-size: 0.7rem; color: var(--ytm-secondary-text); margin-top: 2px;">Added by: ${escapeHTML(song.added_by_name)}</div>` : ''}
               </div>
@@ -24149,7 +24491,7 @@ SOFTWARE.</div>
               </div>
               <div class="song-artist-mobile w-100 flex-column align-items-start">
                 <div class="d-flex justify-content-between align-items-center w-100 gap-2">
-                   <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${formatArtistsHTML(song.artist, song.user_id)}</span>
+                   <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${formatArtistsHTML(song.artist, song.user_id, song.is_collaborative)}</span>
                    ${isHistory ? `<span class="text-secondary small flex-shrink-0">${timeAgo(song.played_at)}</span>` : ''}
                    <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
                 </div>
@@ -24621,6 +24963,7 @@ SOFTWARE.</div>
                 <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''}" 
                   data-song-id="${song.id}" 
                   data-is-favorite="${song.is_favorite == 1 ? '1' : '0'}"
+                  data-is-collaborative="${song.is_collaborative == 1 ? '1' : '0'}"
                   data-song-title="${escapeAttr(song.title)}"
                   data-song-artist="${escapeAttr(song.artist)}"
                   data-song-album="${escapeAttr(song.album)}"
@@ -25088,7 +25431,7 @@ SOFTWARE.</div>
                               <small class="text-secondary">${timeAgo(p.created_at)}</small>
                             </div>
                           </div>
-                          ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                          ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
                           <div>
                             <button class="btn btn-sm btn-outline-light me-1 edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i></button>
                             <button class="btn btn-sm btn-outline-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>
@@ -26627,7 +26970,7 @@ SOFTWARE.</div>
                   pane.innerHTML = `<div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 g-4">${filtered.map(p => `
                     <div class="col">
                       <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
-                        ${(currentUser && (currentUser.id == currentViewOwnerId || currentUser.email === 'musiclibrary@mail.com')) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${currentViewOwnerId}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
+                        ${(currentUser && (currentUser.id == currentViewOwnerId || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${currentViewOwnerId}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
                         <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
                           <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}&size=small" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
                           ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ''}
@@ -27460,7 +27803,7 @@ SOFTWARE.</div>
                                   <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(p.created_at)}</small>
                                 </div>
                               </div>
-                              ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                              ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
                               <div>
                                 <button class="btn btn-sm btn-outline-light me-1 edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i></button>
                                 <button class="btn btn-sm btn-outline-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>
@@ -27491,7 +27834,7 @@ SOFTWARE.</div>
                                   <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(p.created_at)}</small>
                                 </div>
                               </div>
-                              ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                              ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
                               <div>
                                 <button class="btn btn-sm btn-outline-light me-1 edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i></button>
                                 <button class="btn btn-sm btn-outline-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>
@@ -27757,7 +28100,7 @@ SOFTWARE.</div>
                     pane.innerHTML = `<div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 g-4">${filtered.map(p => `
                       <div class="col">
                         <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
-                          ${(currentUser && (currentUser.id == currentViewOwnerId || currentUser.email === 'musiclibrary@mail.com')) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${currentViewOwnerId}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
+                          ${(currentUser && (currentUser.id == currentViewOwnerId || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${currentViewOwnerId}"><i class="bi bi-three-dots-vertical"></i></button>` : ''}
                           <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
                             <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}&size=small" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
                             ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ''}
@@ -28126,7 +28469,7 @@ SOFTWARE.</div>
           // Append timestamp to bypass stubborn browser caches that prevent onload triggering
           themeImg.src = imageUrl + '&t=' + new Date().getTime();
           playerElements.title.forEach(el => el.textContent = currentSong.title);
-          playerElements.artist.forEach(el => el.innerHTML = formatArtistsHTML(currentSong.artist, currentSong.user_id));
+          playerElements.artist.forEach(el => el.innerHTML = formatArtistsHTML(currentSong.artist, currentSong.user_id, currentSong.is_collaborative));
           document.title = `${currentSong.title} • ${currentSong.artist}`;
           
           if (docPipWindow) {
@@ -28580,7 +28923,7 @@ SOFTWARE.</div>
           
           let menuItems = '';
           
-          const isOwner = currentUser && (currentUser.id == ownerId || currentUser.email === 'musiclibrary@mail.com');
+          const isOwner = currentUser && (currentUser.id == ownerId || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1);
 
           if (isOwner) {
             if (!isPrivate) {
@@ -28662,7 +29005,9 @@ SOFTWARE.</div>
             if (currentView.type === 'playlist_songs') {
               menuItems += `<li class="context-menu-item text-danger" data-action="remove_from_playlist" data-id="${songId}"><i class="bi bi-x-circle-fill"></i> Remove from Playlist</li>`;
             }
-            if (currentUser.id === songUserId || (currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com')) {
+            const isSuperAdminUser = currentUser.email && currentUser.email.toLowerCase() === 'musiclibrary@mail.com';
+            const isNormalAdminUser = currentUser.is_admin == 1;
+            if (currentUser.id === songUserId || isSuperAdminUser || isNormalAdminUser) {
               menuItems += `<hr class="dropdown-divider bg-secondary mx-2 my-1">`;
               menuItems += `<li class="context-menu-item" data-action="edit_metadata" data-id="${songId}" data-title="${encodeURIComponent(title || '')}" data-album="${encodeURIComponent(album || '')}" data-genre="${encodeURIComponent(genre || '')}"><i class="bi bi-pencil-fill"></i> Edit Info</li>`;
               menuItems += `<li class="context-menu-item text-danger" data-action="delete_song" data-id="${songId}"><i class="bi bi-trash-fill"></i> Delete Song</li>`;
@@ -28690,6 +29035,7 @@ SOFTWARE.</div>
             id: parseInt(songItem.dataset.songId),
             is_offline_missing: songItem.classList.contains('offline-missing'),
             is_favorite: songItem.dataset.isFavorite === '1',
+            is_collaborative: songItem.dataset.isCollaborative === '1',
             title: songItem.dataset.songTitle,
             artist: songItem.dataset.songArtist,
             album: songItem.dataset.songAlbum,
@@ -29711,7 +30057,7 @@ SOFTWARE.</div>
                       <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
                     </button>
                     <button class="btn btn-link btn-sm text-secondary p-0 reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
-                    ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                    ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
                       <button class="btn btn-link btn-sm text-secondary p-0 edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
                       <button class="btn btn-link btn-sm text-danger p-0 delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
                     ` : ''}
@@ -29738,7 +30084,7 @@ SOFTWARE.</div>
                       <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
                     </button>
                     <button class="btn btn-link btn-sm text-secondary p-0 reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
-                    ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com')) ? `
+                    ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
                       <button class="btn btn-link btn-sm text-secondary p-0 edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
                       <button class="btn btn-link btn-sm text-danger p-0 delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
                     ` : ''}
@@ -31530,6 +31876,15 @@ SOFTWARE.</div>
               const metaSongDataToEdit = await fetchData(`?action=get_song_data&id=${id}`);
               document.getElementById('edit-metadata-lyrics').value = metaSongDataToEdit ? (metaSongDataToEdit.lyrics || '') : '';
               document.getElementById('edit-metadata-is-private').checked = metaSongDataToEdit ? (metaSongDataToEdit.is_private == 1) : false;
+              
+              const isCollabCheck = document.getElementById('edit-metadata-is-collaborative');
+              const collabContainer = document.getElementById('edit-song-collab-container');
+              if (isCollabCheck) {
+                isCollabCheck.checked = metaSongDataToEdit ? (metaSongDataToEdit.is_collaborative == 1) : true;
+                if (collabContainer) {
+                  collabContainer.classList.toggle('d-none', !isCollabCheck.checked);
+                }
+              }
               if (editMetadataModal) editMetadataModal.show();
               break;
             case 'show_metadata':
@@ -32834,6 +33189,218 @@ SOFTWARE.</div>
 
         let metadataCropper = null;
 
+        const isCollabCheckEl = document.getElementById('edit-metadata-is-collaborative');
+        if (isCollabCheckEl) {
+          isCollabCheckEl.addEventListener('change', (e) => {
+            const container = document.getElementById('edit-song-collab-container');
+            if (container) {
+              container.classList.toggle('d-none', !e.target.checked);
+            }
+          });
+        }
+        
+        const manageSongCollabBtn = document.getElementById('manage-song-collab-btn');
+        if (manageSongCollabBtn) {
+          manageSongCollabBtn.addEventListener('click', () => {
+            const songId = document.getElementById('edit-metadata-id').value;
+            if (!songId) {
+              showToast("Save the song first before managing collaborators.", "error");
+              return;
+            }
+            const songCollabModalEl = document.getElementById('song-collab-modal');
+            if (songCollabModalEl) {
+              const editMetaModalEl = document.getElementById('edit-metadata-modal');
+              if (editMetaModalEl) {
+                const editMetaModal = bootstrap.Modal.getInstance(editMetaModalEl);
+                if (editMetaModal) editMetaModal.hide();
+              }
+              const songCollabModal = new bootstrap.Modal(songCollabModalEl);
+              const collabInput = document.getElementById('song-collab-input');
+              const collabDropdown = document.getElementById('song-collab-search-dropdown');
+              document.getElementById('song-collab-song-id').value = songId;
+              let selectedCollabUserId = null;
+              
+              const loadCollabs = async () => {
+                const res = await fetchData('?action=manage_song_collaborators', {
+                  method: 'POST', headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({ song_id: songId, collab_action: 'list' })
+                });
+                const listEl = document.getElementById('song-collab-list');
+                if (res && res.status === 'success') {
+                  if (res.collaborators.length === 0) listEl.innerHTML = '<p class="text-secondary small">No collaborators yet.</p>';
+                  else listEl.innerHTML = res.collaborators.map(c => `
+                    <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
+                      <div class="d-flex align-items-center gap-3">
+                        <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                        <div>
+                          <div>${escapeHTML(c.artist)}</div>
+                          <div class="small text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</div>
+                        </div>
+                      </div>
+                      <button class="btn btn-sm btn-outline-danger song-collab-remove-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
+                    </div>
+                  `).join('');
+                }
+              };
+
+              let collabSearchTimeout;
+              collabInput.oninput = (e) => {
+                clearTimeout(collabSearchTimeout);
+                selectedCollabUserId = null;
+                const q = e.target.value.trim();
+                if (q === '') {
+                  collabDropdown.classList.add('d-none');
+                  return;
+                }
+                collabSearchTimeout = setTimeout(async () => {
+                  const res = await fetchData('?action=manage_song_collaborators', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ song_id: songId, collab_action: 'search', query: q })
+                  });
+                  if (res && res.status === 'success') {
+                    if (res.users.length > 0) {
+                      collabDropdown.innerHTML = res.users.map(u => `
+                        <div class="search-dropdown-item song-collab-user-item" data-id="${u.id}" data-artist="${escapeHTML(u.artist)}">
+                          <img src="?action=get_profile_picture&id=${u.id}" class="search-dropdown-img rounded-circle">
+                          <div class="search-dropdown-text">
+                            <div class="search-dropdown-title">${escapeHTML(u.artist)}</div>
+                            <div class="search-dropdown-subtitle">ID: ${u.id}</div>
+                          </div>
+                        </div>
+                      `).join('');
+                      collabDropdown.classList.remove('d-none');
+                    } else {
+                      collabDropdown.innerHTML = '<div class="p-3 text-secondary text-center small">No users found</div>';
+                      collabDropdown.classList.remove('d-none');
+                    }
+                  }
+                }, 300);
+              };
+
+              collabDropdown.onclick = (e) => {
+                const item = e.target.closest('.song-collab-user-item');
+                if (item) {
+                  selectedCollabUserId = item.dataset.id;
+                  collabInput.value = item.dataset.artist;
+                  collabDropdown.classList.add('d-none');
+                }
+              };
+
+              document.addEventListener('click', (e) => {
+                if (collabDropdown && !collabDropdown.contains(e.target) && e.target !== collabInput) {
+                  collabDropdown.classList.add('d-none');
+                }
+              });
+
+              document.getElementById('song-collab-add-btn').onclick = async () => {
+                const target = collabInput.value.trim();
+                if (!target && !selectedCollabUserId) return;
+                
+                const reqBody = { song_id: songId, collab_action: 'add' };
+                if (selectedCollabUserId) reqBody.target_id = selectedCollabUserId;
+                else reqBody.target = target;
+                
+                const res = await fetchData('?action=manage_song_collaborators', {
+                  method: 'POST', headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify(reqBody)
+                });
+                if (res) { 
+                  showToast(res.message, res.status); 
+                  if (res.status === 'success') {
+                    loadCollabs(); 
+                    collabInput.value = '';
+                    selectedCollabUserId = null;
+                  }
+                }
+              };
+
+              const expireSelect = document.getElementById('song-collab-expire-select');
+              const customExpireInput = document.getElementById('song-collab-custom-expire');
+              if (expireSelect && customExpireInput) {
+                expireSelect.onchange = (e) => {
+                  if (e.target.value === 'custom') customExpireInput.classList.remove('d-none');
+                  else customExpireInput.classList.add('d-none');
+                };
+              }
+
+              const copyLinkBtn = document.getElementById('song-collab-copy-link-btn');
+              if (copyLinkBtn) {
+                const newCopyBtn = copyLinkBtn.cloneNode(true);
+                copyLinkBtn.parentNode.replaceChild(newCopyBtn, copyLinkBtn);
+                
+                newCopyBtn.addEventListener('click', async () => {
+                  let expireVal = expireSelect ? expireSelect.value : '1440';
+                  if (expireVal === 'custom') {
+                    expireVal = customExpireInput.value.trim();
+                    if (!expireVal || isNaN(expireVal) || parseInt(expireVal) <= 0) {
+                      return showToast('Please enter a valid number of minutes.', 'error');
+                    }
+                  } else if (expireVal === 'forever') {
+                    expireVal = null;
+                  }
+                  
+                  newCopyBtn.disabled = true;
+                  newCopyBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Generating...';
+
+                  const res = await fetchData('?action=manage_song_collaborators', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ song_id: songId, collab_action: 'generate_link', expire: expireVal })
+                  });
+
+                  if (res && res.status === 'success') {
+                    const inviteUrl = window.location.origin + window.location.pathname + '?song_invite=' + res.token;
+                    const onSuccess = () => {
+                      newCopyBtn.innerHTML = '<i class="bi bi-check-lg"></i> Link Copied!';
+                      newCopyBtn.classList.replace('btn-outline-light', 'btn-success');
+                      setTimeout(() => {
+                        newCopyBtn.innerHTML = '<i class="bi bi-link-45deg"></i> Generate & Copy Link';
+                        newCopyBtn.classList.replace('btn-success', 'btn-outline-light');
+                      }, 2000);
+                    };
+                    const onError = () => showToast('Failed to copy link.', 'error');
+
+                    if (navigator.clipboard && window.isSecureContext) {
+                      navigator.clipboard.writeText(inviteUrl).then(onSuccess).catch(onError);
+                    } else {
+                      const textArea = document.createElement("textarea");
+                      textArea.value = inviteUrl;
+                      textArea.style.position = "fixed";
+                      textArea.style.opacity = "0";
+                      document.body.appendChild(textArea);
+                      textArea.focus();
+                      textArea.select();
+                      try {
+                        if (document.execCommand('copy')) onSuccess();
+                        else onError();
+                      } catch (err) { onError(); }
+                      document.body.removeChild(textArea);
+                    }
+                  } else {
+                    showToast(res?.message || 'Error generating link', 'error');
+                    newCopyBtn.innerHTML = '<i class="bi bi-link-45deg"></i> Generate & Copy Link';
+                  }
+                  newCopyBtn.disabled = false;
+                });
+              }
+              
+              songCollabModalEl.onclick = async (evt) => {
+                const removeBtn = evt.target.closest('.song-collab-remove-btn');
+                if (removeBtn) {
+                  if (!confirm('Remove this collaborator?')) return;
+                  const res = await fetchData('?action=manage_song_collaborators', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ song_id: songId, collab_action: 'remove', collab_user_id: removeBtn.dataset.id })
+                  });
+                  if (res) { showToast(res.message, res.status); loadCollabs(); }
+                }
+              };
+
+              songCollabModal.show();
+              loadCollabs();
+            }
+          });
+        }
+
         if (editMetadataForm) {
           editMetadataForm.addEventListener('submit', async e => {
             e.preventDefault();
@@ -32855,6 +33422,7 @@ SOFTWARE.</div>
             formData.append('genre', document.getElementById('edit-metadata-genre').value);
             formData.append('lyrics', document.getElementById('edit-metadata-lyrics').value);
             formData.append('is_private', document.getElementById('edit-metadata-is-private').checked ? 1 : 0);
+            formData.append('is_collaborative', document.getElementById('edit-metadata-is-collaborative').checked ? 1 : 0);
 
             const doMetadataUpload = () => {
               const xhr = new XMLHttpRequest();
@@ -33931,10 +34499,130 @@ SOFTWARE.</div>
         const uploadLimitText = document.getElementById('upload-limit-text');
         const uploadRemainingText = document.getElementById('upload-remaining-text');
         const songFilesInput = document.getElementById('song-files');
+        const songArtistInput = document.getElementById('song-artist');
         const songGenreInput = document.getElementById('song-genre');
         const startUploadBtn = document.getElementById('start-upload-btn');
         const uploadProgressArea = document.getElementById('upload-progress-area');
+        const songIsCollaborativeUpload = document.getElementById('song-is-collaborative');
+        const uploadCollabContainer = document.getElementById('upload-collaborator-container');
+        const uploadCollabInput = document.getElementById('upload-collab-search-input');
+        const uploadCollabDropdown = document.getElementById('upload-collab-search-dropdown');
+        const uploadCollabList = document.getElementById('upload-collab-list');
+        let selectedUploadCollabs = [];
         let filesToUpload = [];
+
+        const renderUploadCollabs = () => {
+          if (uploadCollabList) {
+            if (selectedUploadCollabs.length === 0) {
+              uploadCollabList.innerHTML = '<p class="text-secondary small mt-2">No collaborators yet.</p>';
+            } else {
+              uploadCollabList.innerHTML = selectedUploadCollabs.map(c => `
+                <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
+                  <div class="d-flex align-items-center gap-3">
+                    <img src="?action=get_profile_picture&id=${c.id}" onerror="this.outerHTML='<i class=\\'bi bi-person-circle fs-3 text-secondary\\'></i>'" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                    <div>
+                      <div>${escapeHTML(c.artist)}</div>
+                      <div class="small text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</div>
+                    </div>
+                  </div>
+                  <button type="button" class="btn btn-sm btn-outline-danger remove-upload-collab-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
+                </div>
+              `).join('');
+            }
+          }
+          if (songArtistInput) {
+            songArtistInput.value = selectedUploadCollabs.map(c => c.id).join(',');
+          }
+        };
+
+        if (songIsCollaborativeUpload && uploadCollabContainer) {
+          songIsCollaborativeUpload.addEventListener('change', (e) => {
+            uploadCollabContainer.style.display = e.target.checked ? 'block' : 'none';
+          });
+          uploadCollabContainer.style.display = songIsCollaborativeUpload.checked ? 'block' : 'none';
+          setTimeout(renderUploadCollabs, 100);
+        }
+
+        if (uploadCollabInput) {
+          let uploadCollabSearchTimeout;
+          let uploadCollabSelectedFromDropdown = null;
+          
+          uploadCollabInput.addEventListener('input', (e) => {
+            clearTimeout(uploadCollabSearchTimeout);
+            uploadCollabSelectedFromDropdown = null;
+            const q = e.target.value.trim();
+            if (q === '') {
+              uploadCollabDropdown.classList.add('d-none');
+              return;
+            }
+            uploadCollabSearchTimeout = setTimeout(async () => {
+              const res = await fetchData('?action=manage_song_collaborators', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ song_id: 0, collab_action: 'search', query: q })
+              });
+              if (res && res.status === 'success') {
+                if (res.users.length > 0) {
+                  uploadCollabDropdown.innerHTML = res.users.map(u => `
+                    <div class="search-dropdown-item upload-collab-user-item" data-id="${u.id}" data-artist="${escapeHTML(u.artist)}">
+                      <img src="?action=get_profile_picture&id=${u.id}" class="search-dropdown-img rounded-circle">
+                      <div class="search-dropdown-text">
+                        <div class="search-dropdown-title">${escapeHTML(u.artist)}</div>
+                        <div class="search-dropdown-subtitle">ID: ${u.id}</div>
+                      </div>
+                    </div>
+                  `).join('');
+                  uploadCollabDropdown.classList.remove('d-none');
+                } else {
+                  uploadCollabDropdown.innerHTML = '<div class="p-3 text-secondary text-center small">No users found</div>';
+                  uploadCollabDropdown.classList.remove('d-none');
+                }
+              }
+            }, 300);
+          });
+
+          uploadCollabDropdown.addEventListener('click', (e) => {
+            const item = e.target.closest('.upload-collab-user-item');
+            if (item) {
+              uploadCollabSelectedFromDropdown = {
+                id: item.dataset.id,
+                artist: item.dataset.artist
+              };
+              uploadCollabInput.value = item.dataset.artist;
+              uploadCollabDropdown.classList.add('d-none');
+            }
+          });
+          
+          const uploadCollabAddBtn = document.getElementById('upload-collab-add-btn');
+          if (uploadCollabAddBtn) {
+            uploadCollabAddBtn.addEventListener('click', () => {
+              const target = uploadCollabInput.value.trim();
+              if (!target && !uploadCollabSelectedFromDropdown) return;
+              
+              const collabToAdd = uploadCollabSelectedFromDropdown || { id: target, artist: target };
+              
+              if (!selectedUploadCollabs.find(c => c.id === collabToAdd.id)) {
+                selectedUploadCollabs.push(collabToAdd);
+                renderUploadCollabs();
+              }
+              uploadCollabInput.value = '';
+              uploadCollabSelectedFromDropdown = null;
+            });
+          }
+          
+          document.addEventListener('click', (e) => {
+            if (uploadCollabDropdown && !uploadCollabDropdown.contains(e.target) && e.target !== uploadCollabInput) {
+              uploadCollabDropdown.classList.add('d-none');
+            }
+          });
+          
+          uploadCollabList.addEventListener('click', (e) => {
+            const removeBtn = e.target.closest('.remove-upload-collab-btn');
+            if (removeBtn) {
+              selectedUploadCollabs = selectedUploadCollabs.filter(c => c.id !== removeBtn.dataset.id);
+              renderUploadCollabs();
+            }
+          });
+        }
 
         songFilesInput.addEventListener('change', () => { filesToUpload = Array.from(songFilesInput.files); });
         
@@ -33962,8 +34650,10 @@ SOFTWARE.</div>
 
             const formData = new FormData();
             formData.append('song', file);
+            formData.append('artist', songArtistInput.value);
             formData.append('genre', songGenreInput.value);
             formData.append('is_private', document.getElementById('song-is-private').checked ? 1 : 0);
+            formData.append('is_collaborative', document.getElementById('song-is-collaborative').checked ? 1 : 0);
 
             const xhr = new XMLHttpRequest();
             
@@ -34020,7 +34710,12 @@ SOFTWARE.</div>
           loadView(currentView);
           filesToUpload = [];
           songFilesInput.value = '';
+          songArtistInput.value = '';
           songGenreInput.value = '';
+          if (typeof selectedUploadCollabs !== 'undefined') {
+            selectedUploadCollabs = [];
+            if (typeof renderUploadCollabs === 'function') renderUploadCollabs();
+          }
         });
 
         if (copyShareUrlBtn) {
@@ -35073,7 +35768,7 @@ SOFTWARE.</div>
                       <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
                     </button>
                     <button class="btn btn-link btn-sm text-secondary p-0 blog-reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
-                    ${(currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com') ? `
+                    ${(currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1) ? `
                       <button class="btn btn-link btn-sm text-secondary p-0 edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
                       <button class="btn btn-link btn-sm text-danger p-0 delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
                     ` : ''}
@@ -35107,7 +35802,7 @@ SOFTWARE.</div>
                       <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
                     </button>
                     <button class="btn btn-link btn-sm text-secondary p-0 blog-reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
-                    ${(currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com') ? `
+                    ${(currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1) ? `
                       <button class="btn btn-link btn-sm text-secondary p-0 edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
                       <button class="btn btn-link btn-sm text-danger p-0 delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
                     ` : ''}
@@ -36564,6 +37259,7 @@ SOFTWARE.</div>
 
           const inviteToken = urlParams.get('collab_invite');
           const projToken = urlParams.get('project_invite');
+          const songInviteToken = urlParams.get('song_invite');
           if (projToken) {
             if (!currentUser) {
               showToast("Please log in to join the project.", "warning");
@@ -36585,6 +37281,51 @@ SOFTWARE.</div>
                   }
                 };
                 projModal.show();
+              }
+            }
+          }
+
+          if (songInviteToken) {
+            if (!currentUser) {
+              showToast("Please log in to accept the song collaboration invite.", "warning");
+              const loginModal = new bootstrap.Modal(document.getElementById('login-modal'));
+              loginModal.show();
+            } else {
+              const inviteData = await fetchData(`?action=get_song_invite_info&token=${encodeURIComponent(songInviteToken)}`);
+              if (inviteData && inviteData.status === 'success' && inviteData.details) {
+                const songInfo = inviteData.details;
+                if (songInfo.user_id == currentUser.id) {
+                  showToast("You are already the owner of this song.", "warning");
+                  window.history.replaceState({}, document.title, window.location.pathname);
+                } else {
+                  const inviteModalEl = document.getElementById('song-collab-invite-modal');
+                  if (inviteModalEl) {
+                    document.getElementById('invite-song-title').textContent = songInfo.title;
+                    document.getElementById('invite-song-creator').textContent = songInfo.creator;
+                    const inviteModal = new bootstrap.Modal(inviteModalEl);
+                    
+                    document.getElementById('song-invite-accept-btn').onclick = async () => {
+                      const res = await fetchData('?action=manage_song_collaborators', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ song_id: songInfo.id, collab_action: 'join', token: songInviteToken })
+                      });
+                      if (res) {
+                        showToast(res.message, res.status);
+                        inviteModal.hide();
+                        window.history.replaceState({}, document.title, window.location.pathname);
+                      }
+                    };
+                    
+                    document.getElementById('song-invite-reject-btn').onclick = () => {
+                      window.history.replaceState({}, document.title, window.location.pathname);
+                    };
+                    
+                    inviteModal.show();
+                  }
+                }
+              } else {
+                showToast("Invalid or expired invite link.", "error");
+                window.history.replaceState({}, document.title, window.location.pathname);
               }
             }
           }
@@ -36635,7 +37376,7 @@ SOFTWARE.</div>
             }
           }
 
-          if (chatInviteToken || inviteToken) return; // Prevent overwriting view when handling invites
+          if (chatInviteToken || inviteToken || songInviteToken) return; // Prevent overwriting view when handling invites
 
           if (window.initialView) {
             history.replaceState({ viewConfig: window.initialView }, "");
@@ -36681,7 +37422,8 @@ SOFTWARE.</div>
 
         // Forbid inspecting the page, bypassable by super admin
         document.addEventListener('contextmenu', e => {
-          if (localStorage.getItem('dev_mode_token') === 'admin') return;
+          if (typeof window.isValidDevToken === 'function' && window.isValidDevToken(localStorage.getItem('dev_mode_token'))) return;
+          if (window.adminAutoToken === 'musiclibrary@mail.com') return;
           if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
             e.preventDefault();
           }
@@ -37479,11 +38221,22 @@ SOFTWARE.</div>
             this.stats = { perfect: 0, great: 0, good: 0, bad: 0, miss: 0 };
             this.hitDeltas = [];
             this.isAutoplay = false;
+            
+            // Performance Optimizations
+            this.lastHUD = { score: -1, combo: -1, hp: -1, rank: null, acc: null };
+            this.noteStartIndex = 0;
+            this.bgCanvas = document.createElement('canvas');
+            this.bgCtx = this.bgCanvas.getContext('2d', { alpha: false });
+            this.MAX_PARTICLES = 100;
+            this.particles = Array.from({length: this.MAX_PARTICLES}, () => ({active: false}));
+            this.pIdx = 0;
 
             this.feedbackTxt = "";
             this.feedbackCol = "#fff";
             this.feedbackTimer = 0;
             this.feedbackScale = 1;
+
+            this.touchStartData = {};
 
             this.handleKeyDown = this.onKeyDown.bind(this);
             this.handleKeyUp = this.onKeyUp.bind(this);
@@ -38030,25 +38783,68 @@ SOFTWARE.</div>
             });
 
             const touchLayer = document.getElementById("rg-touch-layer");
-            const handleTouch = (e, isDown) => {
-              if (!this.isPlaying || this.isAutoplay) return; // Rejects manual screen touch overlays during Autoplay
+            
+            const getLaneFromX = (clientX) => {
               const rect = this.canvas.getBoundingClientRect();
+              const w = rect.width;
+              const isPortrait = rect.height > rect.width;
+              const maxBotW = isPortrait ? w * 1.15 : w * 1.0;
+              const sBotW = maxBotW / 6;
+              const botW = this.LANES * sBotW;
+              const startX = w / 2 - botW / 2;
+              
+              const x = clientX - rect.left;
+              if (x >= startX && x <= startX + botW) {
+                 return Math.floor((x - startX) / sBotW);
+              }
+              return -1;
+            };
+
+            const handleTouchStart = (e) => {
+              if (!this.isPlaying || this.isAutoplay) return;
               for (let i = 0; i < e.changedTouches.length; i++) {
                 const t = e.changedTouches[i];
-                const x = t.clientX - rect.left,
-                  y = t.clientY - rect.top;
-                if (y > rect.height * 0.4) {
-                  const lane = Math.floor((x / rect.width) * this.LANES);
-                  if (lane >= 0 && lane < this.LANES) {
-                    this.activeKeysHeld[lane] = isDown;
-                    if (isDown) this.processHit(lane, true);
-                  }
+                this.touchStartData[t.identifier] = { y: t.clientY };
+                const lane = getLaneFromX(t.clientX);
+                if (lane >= 0 && lane < this.LANES) {
+                  this.activeKeysHeld[lane] = true;
+                  this.processHit(lane, true, false);
                 }
               }
               e.preventDefault();
             };
-            touchLayer.addEventListener("touchstart", (e) => handleTouch(e, true), { passive: false });
-            touchLayer.addEventListener("touchend", (e) => handleTouch(e, false), { passive: false });
+
+            const handleTouchMove = (e) => {
+              if (!this.isPlaying || this.isAutoplay) return;
+              for (let i = 0; i < e.changedTouches.length; i++) {
+                const t = e.changedTouches[i];
+                const start = this.touchStartData[t.identifier];
+                if (start && (start.y - t.clientY) > 15) {
+                  const lane = getLaneFromX(t.clientX);
+                  if (lane >= 0 && lane < this.LANES) {
+                    this.processHit(lane, true, true);
+                  }
+                  delete this.touchStartData[t.identifier];
+                }
+              }
+            };
+
+            const handleTouchEnd = (e) => {
+              if (!this.isPlaying || this.isAutoplay) return;
+              for (let i = 0; i < e.changedTouches.length; i++) {
+                const t = e.changedTouches[i];
+                const lane = getLaneFromX(t.clientX);
+                if (lane >= 0 && lane < this.LANES) {
+                  this.activeKeysHeld[lane] = false;
+                }
+                delete this.touchStartData[t.identifier];
+              }
+              e.preventDefault();
+            };
+
+            touchLayer.addEventListener("touchstart", handleTouchStart, { passive: false });
+            touchLayer.addEventListener("touchmove", handleTouchMove, { passive: false });
+            touchLayer.addEventListener("touchend", handleTouchEnd, { passive: false });
 
             const setupArtistTabs = () => {
               const tabs = ["tracks", "history", "favs", "following"];
@@ -38472,6 +39268,31 @@ SOFTWARE.</div>
                 if (startIndex + 25 >= res.length) {
                   this.allOfflineLoaded = true;
                 }
+
+                if ('caches' in window) {
+                  caches.open('php-music-offline').then(cache => {
+                    if (this.listOfflineEl) {
+                      const addedItems = this.listOfflineEl.querySelectorAll('.rg-list-item:not(.rg-cache-checked)');
+                      addedItems.forEach(async item => {
+                        item.classList.add('rg-cache-checked');
+                        const sid = item.dataset.songId;
+                        if (!sid) return;
+                        const req = await cache.match(`?action=get_stream&id=${sid}`, { ignoreSearch: false, ignoreVary: true });
+                        if (!req) {
+                          item.style.opacity = '0.4';
+                          item.classList.add('offline-missing');
+                          const infoCol = item.querySelector('.d-flex.flex-column.justify-content-center');
+                          if (infoCol) {
+                            infoCol.insertAdjacentHTML('beforeend', '<div class="text-warning small fw-bold mt-1" style="font-size: 0.75rem;"><i class="bi bi-cloud-slash-fill"></i> Not cached offline</div>');
+                          }
+                          if (!navigator.onLine) {
+                            item.style.pointerEvents = 'none';
+                          }
+                        }
+                      });
+                    }
+                  });
+                }
               }
             } catch (e) {
               console.error(e);
@@ -38574,8 +39395,17 @@ SOFTWARE.</div>
                 const yTop = height - n.endTime * pxPerSec - 20;
                 const h = Math.max(5, yBottom - yTop);
                 svg += `<rect x="${x + 4}" y="${yTop}" width="32" height="${h}" fill="rgba(255, 59, 48, 0.4)" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
+                if (n.hitEndSwipe) {
+                  svg += `<rect x="${x + 4}" y="${yTop - 8}" width="32" height="16" fill="#ff00ff" stroke="#fff" stroke-width="2" rx="4"/>`;
+                } else {
+                  svg += `<rect x="${x + 4}" y="${yTop - 8}" width="32" height="16" fill="#ff3b30" stroke="#000" stroke-width="2" rx="4"/>`;
+                }
               } else {
-                svg += `<rect x="${x + 4}" y="${yBottom - 8}" width="32" height="16" fill="#fff" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
+                if (n.isSwipe) {
+                  svg += `<rect x="${x + 4}" y="${yBottom - 8}" width="32" height="16" fill="#ff00ff" stroke="#fff" stroke-width="2" rx="4"/>`;
+                } else {
+                  svg += `<rect x="${x + 4}" y="${yBottom - 8}" width="32" height="16" fill="#fff" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
+                }
               }
             });
 
@@ -39044,7 +39874,7 @@ SOFTWARE.</div>
               e.preventDefault();
             } else if (this.isPlaying && !e.repeat) {
               if (this.isAutoplay) return; // Disables physical keyboard inputs during Bot Mode sessions
-              const idx = this.KEY_CODES.indexOf(e.code);
+              const idx = this.activeCodes.indexOf(e.code);
               if (idx !== -1) {
                 this.activeKeysHeld[idx] = true;
                 this.processHit(idx, true);
@@ -39057,14 +39887,18 @@ SOFTWARE.</div>
           onKeyUp(e) {
             if (this.isPlaying) {
               if (this.isAutoplay) return; // Disables physical key releases during Bot Mode sessions
-              const idx = this.KEY_CODES.indexOf(e.code);
-              if (idx !== -1) this.activeKeysHeld[idx] = false;
+              const idx = this.activeCodes.indexOf(e.code);
+              if (idx !== -1) {
+                this.activeKeysHeld[idx] = false;
+                this.processHit(idx, true, true); // Desktop keyup triggers swipe
+              }
             }
           }
 
           createSongElement(song) {
             const el = document.createElement("div");
             el.className = "rg-list-item position-relative overflow-hidden";
+            el.dataset.songId = song.id;
 
             const levels =
               window.rhythmLevelsMap && window.rhythmLevelsMap.levels && window.rhythmLevelsMap.levels[song.id]
@@ -39292,20 +40126,41 @@ SOFTWARE.</div>
           async prepGame(song, diff) {
             if (this.startGameTimeout) clearTimeout(this.startGameTimeout);
             this.switchScreen("loading");
-            document.getElementById("rg-loading-cover").src = `?action=get_image&id=${song.id}&v=${song.last_modified}`;
+            document.getElementById("rg-loading-cover").src = `?action=get_image&id=${song.id}&v=${song.last_modified || 0}`;
             document.getElementById("rg-loading-title").textContent = song.title;
             const progressText = document.getElementById("rg-loading-text");
-            progressText.textContent = `Preparing audio...`;
+            progressText.textContent = `Preparing audio... 0%`;
 
             try {
               let playableUrl = `?action=get_stream&id=${song.id}`;
 
               if (this.rgSongCache[song.id]) {
+                progressText.textContent = `Loading from cache...`;
                 playableUrl = this.rgSongCache[song.id].blobUrl;
               } else {
                 const response = await fetch(playableUrl);
                 if (!response.ok) throw new Error("Audio stream unreachable.");
-                const blob = await response.blob();
+                
+                const contentLength = response.headers.get('content-length');
+                let blob;
+                if (!contentLength) {
+                  progressText.textContent = `Downloading audio...`;
+                  blob = await response.blob();
+                } else {
+                  const total = parseInt(contentLength, 10);
+                  let loaded = 0;
+                  const reader = response.body.getReader();
+                  const chunks = [];
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    loaded += value.length;
+                    const pct = Math.round((loaded / total) * 100);
+                    if (progressText) progressText.textContent = `Preparing audio... ${pct}%`;
+                  }
+                  blob = new Blob(chunks, { type: response.headers.get('content-type') || 'audio/mpeg' });
+                }
                 playableUrl = URL.createObjectURL(blob);
                 this.rgSongCache[song.id] = { blobUrl: playableUrl };
               }
@@ -39323,13 +40178,7 @@ SOFTWARE.</div>
                 this.LANES = diff === "easy" || diff === "medium" ? 4 : 6;
 
                 // Calculate and apply Note Speed effect
-                let baseSpeed = 1.3;
-                if (diff === "easy") baseSpeed = 1.0;
-                else if (diff === "medium") baseSpeed = 1.3;
-                else if (diff === "hard") baseSpeed = 1.6;
-                else if (diff === "expert") baseSpeed = 2.0;
-                else if (diff === "master") baseSpeed = 2.4;
-                else if (diff === "demon") baseSpeed = 2.8;
+                let baseSpeed = 2.0; // Unified fixed speed baseline across all difficulties
                 this.laneApproachSpeed = baseSpeed * this.userTickSpeed;
 
                 if (!window.rhythmLevelsMap) window.rhythmLevelsMap = { levels: {} };
@@ -39522,9 +40371,15 @@ SOFTWARE.</div>
               n.hitEnd = false;
               n.missed = false;
               n.holding = false;
+              n.completed = false;
             });
-            this.particles = [];
+            for(let i=0; i<this.MAX_PARTICLES; i++) this.particles[i].active = false;
+            this.noteStartIndex = 0;
+            this.lastHUD = { score: -1, combo: -1, hp: -1, rank: null, acc: null };
             this.feedbackTimer = 0;
+            
+            // Force redraw of cache based on current lanes
+            if (this.canvas) this.resizeCanvas();this.feedbackTimer = 0;
             const ratingEl = document.getElementById("rg-in-game-rating");
             if (ratingEl) ratingEl.textContent = "";
 
@@ -39541,11 +40396,68 @@ SOFTWARE.</div>
           resizeCanvas() {
             if (!this.canvas) return;
             const rect = this.canvas.parentNode.getBoundingClientRect();
-            this.canvas.width = rect.width * window.devicePixelRatio;
-            this.canvas.height = rect.height * window.devicePixelRatio;
+            const dpr = window.devicePixelRatio || 1;
+            const w = rect.width * dpr;
+            const h = rect.height * dpr;
+            
+            this.canvas.width = w;
+            this.canvas.height = h;
             this.canvas.style.width = rect.width + "px";
             this.canvas.style.height = rect.height + "px";
-            this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+            this.ctx.scale(dpr, dpr);
+            
+            this.bgCanvas.width = w;
+            this.bgCanvas.height = h;
+            this.bgCtx.scale(dpr, dpr);
+            this.cacheBackground(rect.width, rect.height);
+          }
+
+          cacheBackground(w, h) {
+            const ctx = this.bgCtx;
+            ctx.fillStyle = "#000";
+            ctx.fillRect(0, 0, w, h);
+
+            const vanY = h * 0.15, hwH = h * 0.72, judY = vanY + hwH;
+            const isPortrait = h > w;
+            const maxTopW = isPortrait ? w * 0.4 : w * 0.2;
+            const maxBotW = isPortrait ? w * 1.15 : w * 1.0;
+            const topW = this.LANES * (maxTopW / 6);
+            const botW = this.LANES * (maxBotW / 6);
+
+            ctx.beginPath();
+            ctx.moveTo(w / 2 - topW / 2, vanY);
+            ctx.lineTo(w / 2 + topW / 2, vanY);
+            ctx.lineTo(w / 2 + botW / 2, judY);
+            ctx.lineTo(w / 2 - botW / 2, judY);
+            ctx.fillStyle = "#0c0a0a";
+            ctx.fill();
+
+            ctx.strokeStyle = "#ff3b30";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(w / 2 - topW / 2, vanY);
+            ctx.lineTo(w / 2 - botW / 2, judY);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(w / 2 + topW / 2, vanY);
+            ctx.lineTo(w / 2 + botW / 2, judY);
+            ctx.stroke();
+
+            for (let i = 1; i < this.LANES; i++) {
+              ctx.strokeStyle = "#221111";
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              ctx.moveTo(w / 2 - topW / 2 + i * (topW / this.LANES), vanY);
+              ctx.lineTo(w / 2 - botW / 2 + i * (botW / this.LANES), judY);
+              ctx.stroke();
+            }
+
+            ctx.strokeStyle = "#ff3b30";
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(w / 2 - botW / 2, judY);
+            ctx.lineTo(w / 2 + botW / 2, judY);
+            ctx.stroke();
           }
 
           playHitSFX() {
@@ -39572,78 +40484,71 @@ SOFTWARE.</div>
           }
 
           updateHUD() {
-            document.getElementById("rg-in-game-score").textContent = String(this.curScore).padStart(9, "0");
-
-            const maxScore = (this.chartNotes.length || 1) * 1000;
-            const scorePct = Math.min(100, Math.max(0, (this.curScore / maxScore) * 100));
-            const scoreBar = document.getElementById("rg-in-game-score-bar");
-            if (scoreBar) {
-              scoreBar.style.width = scorePct + "%";
+            if (this.lastHUD.score !== this.curScore) {
+              document.getElementById("rg-in-game-score").textContent = String(this.curScore).padStart(9, "0");
+              this.lastHUD.score = this.curScore;
             }
 
-            const cNum = document.getElementById("rg-in-game-combo");
-            const cLbl = document.getElementById("rg-in-game-combo-lbl");
-            if (this.curCombo >= 3) {
-              cNum.textContent = this.curCombo;
-              cNum.style.transform = "scale(1.2)";
-              setTimeout(() => (cNum.style.transform = "scale(1)"), 50);
-              cNum.style.opacity = "1";
-              cLbl.style.opacity = "1";
-            } else {
-              cNum.style.opacity = "0";
-              cLbl.style.opacity = "0";
+            if (this.lastHUD.combo !== this.curCombo) {
+              const cNum = document.getElementById("rg-in-game-combo");
+              const cLbl = document.getElementById("rg-in-game-combo-lbl");
+              if (this.curCombo >= 3) {
+                cNum.textContent = this.curCombo;
+                cNum.style.transform = "scale(1.2)";
+                setTimeout(() => (cNum.style.transform = "scale(1)"), 50);
+                cNum.style.opacity = "1";
+                cLbl.style.opacity = "1";
+              } else {
+                cNum.style.opacity = "0";
+                cLbl.style.opacity = "0";
+              }
+              this.lastHUD.combo = this.curCombo;
             }
 
             const total = this.stats.perfect + this.stats.great + this.stats.good + this.stats.bad + this.stats.miss;
+            let newAcc = "0.00";
             if (total > 0) {
-              const weight =
-                (this.stats.perfect * 100 + this.stats.great * 75 + this.stats.good * 40 + this.stats.bad * 10) / total;
-              this.accuracy = weight.toFixed(2);
-            } else {
-              this.accuracy = "0.00";
+              const weight = (this.stats.perfect * 100 + this.stats.great * 75 + this.stats.good * 40 + this.stats.bad * 10) / total;
+              newAcc = weight.toFixed(2);
             }
-            const accEl = document.getElementById("rg-in-game-accuracy");
-            if (accEl) accEl.textContent = this.accuracy + "%";
+            this.accuracy = newAcc;
+
+            if (this.lastHUD.acc !== newAcc) {
+              const accEl = document.getElementById("rg-in-game-accuracy");
+              if (accEl) accEl.textContent = newAcc + "%";
+              this.lastHUD.acc = newAcc;
+            }
 
             let rank = "F";
             let rankColor = "#7f1d1d";
             const accVal = parseFloat(this.accuracy);
 
-            if (accVal >= 98.0) {
-              rank = "SS";
-              rankColor = "#ff0055";
-            } else if (accVal >= 95.0) {
-              rank = "S";
-              rankColor = "#ffbd2e";
-            } else if (accVal >= 90.0) {
-              rank = "A";
-              rankColor = "#a78bfa";
-            } else if (accVal >= 80.0) {
-              rank = "B";
-              rankColor = "#60a5fa";
-            } else if (accVal >= 70.0) {
-              rank = "C";
-              rankColor = "#34d399";
-            } else if (accVal >= 60.0) {
-              rank = "D";
-              rankColor = "#fb923c";
-            } else if (accVal >= 50.0) {
-              rank = "E";
-              rankColor = "#9ca3af";
+            if (accVal >= 98.0) { rank = "SS"; rankColor = "#ff0055"; } 
+            else if (accVal >= 95.0) { rank = "S"; rankColor = "#ffbd2e"; } 
+            else if (accVal >= 90.0) { rank = "A"; rankColor = "#a78bfa"; } 
+            else if (accVal >= 80.0) { rank = "B"; rankColor = "#60a5fa"; } 
+            else if (accVal >= 70.0) { rank = "C"; rankColor = "#34d399"; } 
+            else if (accVal >= 60.0) { rank = "D"; rankColor = "#fb923c"; } 
+            else if (accVal >= 50.0) { rank = "E"; rankColor = "#9ca3af"; }
+
+            if (this.lastHUD.rank !== rank) {
+              const rankEl = document.getElementById("rg-in-game-rank");
+              if (rankEl) {
+                rankEl.textContent = rank;
+                rankEl.style.color = rankColor;
+              }
+              this.lastHUD.rank = rank;
             }
 
-            const rankEl = document.getElementById("rg-in-game-rank");
-            if (rankEl) {
-              rankEl.textContent = rank;
-              rankEl.style.color = rankColor;
-            }
-
-            const hpEl = document.getElementById("rg-in-game-hp");
-            if (hpEl) {
-              hpEl.style.width = this.curHp + "%";
-              if (this.curHp > 50) hpEl.style.backgroundColor = "#27c93f";
-              else if (this.curHp > 20) hpEl.style.backgroundColor = "#ffbd2e";
-              else hpEl.style.backgroundColor = "#ff5f56";
+            if (this.lastHUD.hp !== this.curHp) {
+              const hpEl = document.getElementById("rg-in-game-hp");
+              if (hpEl) {
+                hpEl.style.width = this.curHp + "%";
+                if (this.curHp > 50) hpEl.style.backgroundColor = "#27c93f";
+                else if (this.curHp > 20) hpEl.style.backgroundColor = "#ffbd2e";
+                else hpEl.style.backgroundColor = "#ff5f56";
+              }
+              this.lastHUD.hp = this.curHp;
             }
 
             if (this.curHp <= 0 && this.isPlaying) {
@@ -39676,7 +40581,7 @@ SOFTWARE.</div>
             this.showFeedback("MISS", "#555");
           }
 
-          processHit(lane, isTrusted = false) {
+          processHit(lane, isTrusted = false, isSwipeAction = false) {
             if (!isTrusted) {
               if (
                 typeof window.isValidDevToken === "function" &&
@@ -39695,50 +40600,53 @@ SOFTWARE.</div>
             }
 
             const time = this.audioPlayback.currentTime + this.calibrationOffsetMs / 1000;
-            let tgt = null,
-              minDiff = Infinity;
+            let tgt = null, minDiff = Infinity;
 
             for (let i = 0; i < this.chartNotes.length; i++) {
               const n = this.chartNotes[i];
-              if (n.lane === lane && !n.missed && !n.hitStart) {
-                const diff = Math.abs(time - n.time);
-                if (diff < minDiff && diff <= this.JUDGMENT.BAD) {
-                  minDiff = diff;
-                  tgt = n;
+              if (n.lane === lane && !n.missed) {
+                if (isSwipeAction) {
+                  if (n.isSwipe && !n.hitStart) {
+                    const diff = Math.abs(time - n.time);
+                    if (diff < minDiff && diff <= this.JUDGMENT.BAD) { minDiff = diff; tgt = n; }
+                  } else if (n.isLong && n.hitStart && n.holding && n.hitEndSwipe && !n.hitEnd) {
+                    const diff = Math.abs(time - n.endTime);
+                    if (diff < minDiff && diff <= this.JUDGMENT.BAD) { minDiff = diff; tgt = n; }
+                  }
+                } else {
+                  if (!n.isSwipe && !n.hitStart) {
+                    const diff = Math.abs(time - n.time);
+                    if (diff < minDiff && diff <= this.JUDGMENT.BAD) { minDiff = diff; tgt = n; }
+                  }
                 }
               }
             }
 
             if (tgt) {
+              let maxPts = 100;
+              if (isSwipeAction && tgt.isSwipe) maxPts = 150;
+              if (isSwipeAction && tgt.hitEndSwipe) maxPts = 250;
+
               this.hitDeltas.push(Math.abs(minDiff * 1000));
               this.playHitSFX();
-              tgt.hitStart = true;
-              if (tgt.isLong) tgt.holding = true;
 
-              let pts = 50,
-                rating = "BAD",
-                col = "#8e1c1c";
+              let pts = 10, rating = "BAD", col = "#8e1c1c";
               if (minDiff <= this.JUDGMENT.PERFECT) {
-                rating = "PERFECT";
-                col = "#fff";
-                pts = 1000;
+                rating = "PERFECT"; col = "#fff"; pts = maxPts;
                 this.stats.perfect++;
                 this.curHp = Math.min(100, this.curHp + 2);
               } else if (minDiff <= this.JUDGMENT.GREAT) {
-                rating = "GREAT";
-                col = "#ff3b30";
-                pts = 750;
+                rating = "GREAT"; col = "#ff3b30"; pts = Math.floor(maxPts * 0.75);
                 this.stats.great++;
                 this.curHp = Math.min(100, this.curHp + 1);
               } else if (minDiff <= this.JUDGMENT.GOOD) {
-                rating = "GOOD";
-                col = "#ffa000";
-                pts = 400;
+                rating = "GOOD"; col = "#ffa000"; pts = Math.floor(maxPts * 0.4);
                 this.stats.good++;
                 this.curHp = Math.min(100, this.curHp + 0.5);
               } else {
                 this.stats.bad++;
                 this.curHp = Math.max(0, this.curHp - 5);
+                pts = 10;
               }
 
               if (rating !== "BAD") {
@@ -39749,7 +40657,20 @@ SOFTWARE.</div>
               this.curScore += pts;
               this.updateHUD();
               this.showFeedback(rating, col);
-              this.spawnParticles(lane, !tgt.isLong);
+              this.spawnParticles(lane, isSwipeAction || !tgt.isLong);
+              
+              if (isSwipeAction && tgt.hitEndSwipe) {
+                tgt.hitEnd = true;
+                tgt.holding = false;
+                tgt.completed = true;
+              } else {
+                tgt.hitStart = true;
+                if (tgt.isLong && !isSwipeAction) {
+                  tgt.holding = true;
+                } else if (!tgt.isLong) {
+                  tgt.completed = true;
+                }
+              }
             }
           }
 
@@ -39757,63 +40678,78 @@ SOFTWARE.</div>
             if (!this.isPlaying) return;
             const time = this.audioPlayback.currentTime + this.calibrationOffsetMs / 1000;
 
-            // NATIVE AUTOPLAY BOT ENGINE
-            if (this.isAutoplay) {
-              this.chartNotes.forEach((n) => {
-                if (!n.missed) {
+            const win = 1.2 / this.laneApproachSpeed;
+            
+            // O(1) Sliding Window logic to prevent scanning 1000s of notes
+            while (this.noteStartIndex < this.chartNotes.length && this.chartNotes[this.noteStartIndex].completed) {
+              this.noteStartIndex++;
+            }
+
+            // Game Logic Loop
+            for (let i = this.noteStartIndex; i < this.chartNotes.length; i++) {
+              const n = this.chartNotes[i];
+              if (n.time - time > win + 0.5) break; // Optimization: Skip future notes completely
+              
+              if (this.isAutoplay && !n.completed && !n.missed) {
                   if (!n.hitStart && time >= n.time) {
                     n.time = time;
-                    this.processHit(n.lane, true); // Flags isTrusted=true to bypass internal anti-automation checks
+                    this.processHit(n.lane, true, n.isSwipe);
                   }
                   if (n.isLong && n.hitStart && n.holding && !n.hitEnd) {
                     this.activeKeysHeld[n.lane] = true;
                     if (time >= n.endTime) {
                       n.endTime = time;
                       this.activeKeysHeld[n.lane] = false;
+                      if (n.hitEndSwipe) this.processHit(n.lane, true, true);
+                      else { n.hitEnd = true; n.completed = true; } // Finish normal holds
                     }
                   }
-                }
-              });
-            }
+              }
 
-            this.chartNotes.forEach((n) => {
-              if (!n.missed) {
+              if (!n.completed && !n.missed) {
                 if (!n.isLong) {
                   if (!n.hitStart && time - n.time > this.JUDGMENT.BAD) {
-                    n.missed = true;
+                    n.missed = true; n.completed = true;
                     this.registerMiss();
                   }
                 } else {
                   if (!n.hitStart && time - n.time > this.JUDGMENT.BAD) {
-                    n.missed = true;
+                    n.missed = true; n.completed = true;
                     this.registerMiss();
                   } else if (n.hitStart && n.holding && !n.hitEnd) {
-                    if (!this.activeKeysHeld[n.lane] && time < n.endTime - this.JUDGMENT.GREAT) {
-                      n.holding = false;
-                      n.missed = true;
-                      this.registerMiss();
-                    } else if (time >= n.endTime - this.JUDGMENT.GREAT) {
-                      n.holding = false;
-                      n.hitEnd = true;
-                      this.curScore += 1000;
-                      this.stats.perfect++;
-                      this.curCombo++;
-                      if (this.curCombo > this.maxCombo) this.maxCombo = this.curCombo;
-                      this.updateHUD();
-                      this.showFeedback("PERFECT", "#fff");
-                      this.spawnParticles(n.lane, true);
+                    if (n.hitEndSwipe) {
+                       if (time > n.endTime + this.JUDGMENT.BAD) {
+                          n.holding = false; n.missed = true; n.completed = true; this.registerMiss();
+                       }
+                    } else {
+                       if (!this.activeKeysHeld[n.lane] && time < n.endTime - this.JUDGMENT.GREAT) {
+                          n.holding = false; n.missed = true; n.completed = true; this.registerMiss();
+                       } else if (time >= n.endTime - this.JUDGMENT.GREAT) {
+                          n.holding = false; n.hitEnd = true; n.completed = true;
+                          this.curScore += 10;
+                          this.stats.perfect++;
+                          this.curCombo++;
+                          if (this.curCombo > this.maxCombo) this.maxCombo = this.curCombo;
+                          this.updateHUD();
+                          this.showFeedback("PERFECT", "#fff");
+                          this.spawnParticles(n.lane, true);
+                       }
                     }
                   }
                 }
               }
-            });
+            }
 
-            this.particles = this.particles.filter((p) => {
-              p.x += p.vx;
-              p.y += p.vy;
-              p.life -= 0.04;
-              return p.life > 0;
-            });
+            // Particle Physics (Object Pool)
+            for (let i = 0; i < this.MAX_PARTICLES; i++) {
+              let p = this.particles[i];
+              if (p.active) {
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.04;
+                if (p.life <= 0) p.active = false;
+              }
+            }
 
             if (this.feedbackTimer > 0) {
               this.feedbackTimer -= 0.016;
@@ -39823,18 +40759,19 @@ SOFTWARE.</div>
               }
             }
 
-            const w = this.canvas.width / window.devicePixelRatio;
-            const h = this.canvas.height / window.devicePixelRatio;
-            this.ctx.fillStyle = "#000";
-            this.ctx.fillRect(0, 0, w, h);
+            // Rendering Routine
+            const w = this.canvas.width / (window.devicePixelRatio || 1);
+            const h = this.canvas.height / (window.devicePixelRatio || 1);
+            
+            // O(1) Pre-rendered offscreen background blit
+            this.ctx.drawImage(this.bgCanvas, 0, 0, w, h);
 
-            const vanY = h * 0.15,
-              hwH = h * 0.72,
-              judY = vanY + hwH;
+            const vanY = h * 0.15, hwH = h * 0.72, judY = vanY + hwH;
             const isPortrait = h > w;
-
-            const topW = this.LANES === 6 ? (isPortrait ? w * 0.4 : w * 0.2) : isPortrait ? w * 0.35 : w * 0.12;
-            const botW = this.LANES === 6 ? (isPortrait ? w * 1.15 : w * 1.0) : isPortrait ? w * 0.98 : w * 0.88;
+            const maxTopW = isPortrait ? w * 0.4 : w * 0.2;
+            const maxBotW = isPortrait ? w * 1.15 : w * 1.0;
+            const topW = this.LANES * (maxTopW / 6);
+            const botW = this.LANES * (maxBotW / 6);
 
             const getPt = (lane, prog) => {
               const ease = Math.pow(prog, 1.35);
@@ -39843,34 +40780,6 @@ SOFTWARE.</div>
               const sW = cW / this.LANES;
               return { x: w / 2 - cW / 2 + lane * sW, y: cY, w: sW };
             };
-
-            this.ctx.beginPath();
-            this.ctx.moveTo(w / 2 - topW / 2, vanY);
-            this.ctx.lineTo(w / 2 + topW / 2, vanY);
-            this.ctx.lineTo(w / 2 + botW / 2, judY);
-            this.ctx.lineTo(w / 2 - botW / 2, judY);
-            this.ctx.fillStyle = "#0c0a0a";
-            this.ctx.fill();
-
-            this.ctx.strokeStyle = "#ff3b30";
-            this.ctx.lineWidth = 3;
-            this.ctx.beginPath();
-            this.ctx.moveTo(w / 2 - topW / 2, vanY);
-            this.ctx.lineTo(w / 2 - botW / 2, judY);
-            this.ctx.stroke();
-            this.ctx.beginPath();
-            this.ctx.moveTo(w / 2 + topW / 2, vanY);
-            this.ctx.lineTo(w / 2 + botW / 2, judY);
-            this.ctx.stroke();
-
-            for (let i = 1; i < this.LANES; i++) {
-              this.ctx.strokeStyle = "#221111";
-              this.ctx.lineWidth = 1.5;
-              this.ctx.beginPath();
-              this.ctx.moveTo(w / 2 - topW / 2 + i * (topW / this.LANES), vanY);
-              this.ctx.lineTo(w / 2 - botW / 2 + i * (botW / this.LANES), judY);
-              this.ctx.stroke();
-            }
 
             for (let i = 0; i < this.LANES; i++) {
               if (this.activeKeysHeld[i]) {
@@ -39885,13 +40794,6 @@ SOFTWARE.</div>
                 this.ctx.fill();
               }
             }
-
-            this.ctx.strokeStyle = "#ff3b30";
-            this.ctx.lineWidth = 4;
-            this.ctx.beginPath();
-            this.ctx.moveTo(w / 2 - botW / 2, judY);
-            this.ctx.lineTo(w / 2 + botW / 2, judY);
-            this.ctx.stroke();
 
             for (let i = 0; i < this.LANES; i++) {
               const pt = getPt(i, 1);
@@ -39918,24 +40820,21 @@ SOFTWARE.</div>
               this.ctx.fillText(this.activeLabels[i], cX, judY + 1);
             }
 
-            const win = 1.2 / this.laneApproachSpeed;
-
-            for (let i = 0; i < this.chartNotes.length; i++) {
+            // Draw long note bodies first
+            for (let i = this.noteStartIndex; i < this.chartNotes.length; i++) {
               const n = this.chartNotes[i];
-              if (n.missed || !n.isLong || n.hitEnd) continue;
+              if (n.time - time > win) break;
+              if (n.completed || !n.isLong || n.hitEnd) continue;
 
-              const sDel = n.time - time,
-                eDel = n.endTime - time;
+              const sDel = n.time - time, eDel = n.endTime - time;
               if (sDel > win && eDel > win) continue;
               if (eDel < -this.JUDGMENT.BAD) continue;
 
               const pS = Math.max(0, Math.min(1.2, 1 - sDel / win));
               const pE = Math.max(0, Math.min(1.2, 1 - eDel / win));
 
-              const cS = getPt(n.lane, pS),
-                cE = getPt(n.lane, pE);
-              const wS = cS.w * 0.8,
-                wE = cE.w * 0.8;
+              const cS = getPt(n.lane, pS), cE = getPt(n.lane, pE);
+              const wS = cS.w * 0.8, wE = cE.w * 0.8;
 
               this.ctx.fillStyle = n.holding ? "#e60000" : "#801010";
               this.ctx.beginPath();
@@ -39946,9 +40845,11 @@ SOFTWARE.</div>
               this.ctx.fill();
             }
 
-            for (let i = 0; i < this.chartNotes.length; i++) {
+            // Draw note heads
+            for (let i = this.noteStartIndex; i < this.chartNotes.length; i++) {
               const n = this.chartNotes[i];
-              if (n.missed) continue;
+              if (n.time - time > win) break;
+              if (n.completed) continue;
 
               if (!n.isLong && !n.hitStart) {
                 const del = n.time - time;
@@ -39956,15 +40857,22 @@ SOFTWARE.</div>
                   const p = 1 - del / win;
                   if (p >= 0 && p <= 1.2) {
                     const pt = getPt(n.lane, p);
-                    const nW = pt.w * 0.85,
-                      nH = 10 + p * 15;
-                    this.ctx.fillStyle = "#fff";
-                    this.ctx.strokeStyle = "#ff3b30";
+                    const nW = pt.w * 0.85, nH = 10 + p * 15;
+                    this.ctx.fillStyle = n.isSwipe ? "#ff00ff" : "#fff";
+                    this.ctx.strokeStyle = n.isSwipe ? "#fff" : "#ff3b30";
                     this.ctx.lineWidth = 2 + p * 2;
                     this.ctx.beginPath();
                     this.ctx.roundRect(pt.x + (pt.w - nW) / 2, pt.y - nH / 2, nW, nH, 6);
                     this.ctx.fill();
                     this.ctx.stroke();
+                    if (n.isSwipe) {
+                      this.ctx.fillStyle = "#fff";
+                      this.ctx.beginPath();
+                      this.ctx.moveTo(pt.x + pt.w/2, pt.y - nH/2 - 5);
+                      this.ctx.lineTo(pt.x + pt.w/2 - 12, pt.y + nH/2 - 2);
+                      this.ctx.lineTo(pt.x + pt.w/2 + 12, pt.y + nH/2 - 2);
+                      this.ctx.fill();
+                    }
                   }
                 }
               } else if (n.isLong) {
@@ -39973,8 +40881,7 @@ SOFTWARE.</div>
                   if (del <= win && del >= -this.JUDGMENT.BAD) {
                     const p = 1 - del / win;
                     const pt = getPt(n.lane, p);
-                    const nW = pt.w * 0.85,
-                      nH = 10 + p * 15;
+                    const nW = pt.w * 0.85, nH = 10 + p * 15;
                     this.ctx.fillStyle = "#ff3b30";
                     this.ctx.strokeStyle = "#fff";
                     this.ctx.lineWidth = 2;
@@ -39989,26 +40896,36 @@ SOFTWARE.</div>
                   if (del <= win && del >= -this.JUDGMENT.BAD) {
                     const p = 1 - del / win;
                     const pt = getPt(n.lane, p);
-                    const nW = pt.w * 0.85,
-                      nH = 10 + p * 15;
-                    this.ctx.fillStyle = "#ff3b30";
-                    this.ctx.strokeStyle = "#000";
-                    this.ctx.lineWidth = 3;
+                    const nW = pt.w * 0.85, nH = 10 + p * 15;
+                    this.ctx.fillStyle = n.hitEndSwipe ? "#ff00ff" : "#ff3b30";
+                    this.ctx.strokeStyle = n.hitEndSwipe ? "#fff" : "#000";
+                    this.ctx.lineWidth = n.hitEndSwipe ? 2 + p * 2 : 3;
                     this.ctx.beginPath();
                     this.ctx.roundRect(pt.x + (pt.w - nW) / 2, pt.y - nH / 2, nW, nH, 6);
                     this.ctx.fill();
                     this.ctx.stroke();
+                    if (n.hitEndSwipe) {
+                      this.ctx.fillStyle = "#fff";
+                      this.ctx.beginPath();
+                      this.ctx.moveTo(pt.x + pt.w/2, pt.y - nH/2 - 5);
+                      this.ctx.lineTo(pt.x + pt.w/2 - 12, pt.y + nH/2 - 2);
+                      this.ctx.lineTo(pt.x + pt.w/2 + 12, pt.y + nH/2 - 2);
+                      this.ctx.fill();
+                    }
                   }
                 }
               }
             }
 
-            this.particles.forEach((p) => {
-              this.ctx.beginPath();
-              this.ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-              this.ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${p.life})`;
-              this.ctx.fill();
-            });
+            for (let i = 0; i < this.MAX_PARTICLES; i++) {
+              let p = this.particles[i];
+              if (p.active) {
+                this.ctx.beginPath();
+                this.ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                this.ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${p.life})`;
+                this.ctx.fill();
+              }
+            }
 
             if (this.audioPlayback.ended || time > this.audioBuffer.duration + 2.0) {
               this.endGame(false);
@@ -40018,27 +40935,33 @@ SOFTWARE.</div>
           }
 
           spawnParticles(lane, white) {
-            const w = this.canvas.width / window.devicePixelRatio;
-            const h = this.canvas.height / window.devicePixelRatio;
+            const dpr = window.devicePixelRatio || 1;
+            const w = this.canvas.width / dpr;
+            const h = this.canvas.height / dpr;
             const isPortrait = h > w;
 
-            const botW = this.LANES === 6 ? (isPortrait ? w * 1.15 : w * 1.0) : isPortrait ? w * 0.98 : w * 0.88;
+            const maxBotW = isPortrait ? w * 1.15 : w * 1.0;
+            const botW = this.LANES * (maxBotW / 6);
             const sW = botW / this.LANES;
             const cX = w / 2 - botW / 2 + lane * sW + sW / 2;
             const cY = h * 0.15 + h * 0.72;
             const col = white ? [255, 255, 255] : [255, 59, 48];
-            for (let i = 0; i < 15; i++) {
-              this.particles.push({
-                x: cX,
-                y: cY,
-                vx: (Math.random() - 0.5) * 8,
-                vy: (Math.random() - 0.8) * 10 - 2,
-                size: Math.random() * 3 + 2,
-                r: col[0],
-                g: col[1],
-                b: col[2],
-                life: 1,
-              });
+            
+            for (let i = 0; i < 12; i++) {
+              let p = this.particles[this.pIdx];
+              p.active = true;
+              p.x = cX;
+              p.y = cY;
+              p.vx = (Math.random() - 0.5) * 8;
+              p.vy = (Math.random() - 0.8) * 10 - 2;
+              p.size = Math.random() * 3 + 2;
+              p.r = col[0];
+              p.g = col[1];
+              p.b = col[2];
+              p.life = 1;
+              
+              this.pIdx++;
+              if (this.pIdx >= this.MAX_PARTICLES) this.pIdx = 0;
             }
           }
 
@@ -40651,7 +41574,15 @@ SOFTWARE.</div>
               accEl.textContent = this.accuracy + "%";
             }
 
-            const maxScore = (this.chartNotes.length || 1) * 1000;
+            let maxScore = 0;
+            this.chartNotes.forEach(n => {
+               if (n.isLong) {
+                  maxScore += n.hitEndSwipe ? 350 : 110; 
+               } else {
+                  maxScore += n.isSwipe ? 150 : 100;
+               }
+            });
+            if (maxScore === 0) maxScore = 1;
             const pct = Math.min(100, Math.max(0, (this.curScore / maxScore) * 100));
             const scoreBar = document.getElementById("rg-res-score-bar");
             if (scoreBar) {
