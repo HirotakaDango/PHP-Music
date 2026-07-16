@@ -48,6 +48,8 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 | **Community Social Feed** | Micro-blogging space for sharing status updates, announcements, or thoughts. | Operates on the `community_posts` and `community_reactions` tables. Allows full CRUD capabilities for post owners, with likes/dislikes and multi-sorting (Newest, Most Liked, Following Users). |
 | **Song & Blog Discussions** | Threaded comments and reaction metrics for tracks and blog posts. | Leverages dedicated comment tables (`song_comments`, `blog_comments`, reactions). Features nested reply trees, edit/delete controls, likes, dislikes, and `@` username tag highlighting. Comments are read-only for non-logged-in guests. |
 | **Blogging & Markdown Platform** | Write, publish, or draft blogs with live Markdown preview, Find & Replace, and multi-format exports. | Uses `blogs` and `blog_categories` tables. Features auto-saving drafts, word/character counter, categories, status toggles (*Public* vs *Private*), multi-select bulk actions (download ZIP/delete), debounced search, and multi-format exports (PDF, HTML, MD, TXT, or ZIP). |
+| **Blog Discussions** | Threaded comments and reaction metrics for blog posts. | Built on the `blog_comments` table. Nested reply trees, reactions (likes/dislikes) and user mentions. Comments are read-only for guests. |
+| **Upload Collaborators Search** | Choose multiple collaborators using a visual name/email search panel before uploading. | Integrates the exact same professional search dropdown and pill-based list as the edit collaborators modal directly inside the upload form. |
 | **Rhythm Game Engine** | Interactive game utilizing parsed tracks directly from your database. | Uses Web Audio API for fast decodes. Automatically builds note beatmaps via root-mean-square energy checks. Features lane speed scaling (up to 20x), pause states, and global standing leaderboards. |
 | **Advanced Image Editor** | Multi-layered image composition workspace. | Built on the HTML5 Canvas API. Renders text and vector shapes, calculates rotation transformations, applies graphic filters, and exports high-quality PNGs. |
 
@@ -83,6 +85,10 @@ A simple, fast, and modern self-hosted music player built in PHP, with a clean U
 | **ID3 Metadata & Lyrics Editor** | Overwrite metadata and LRC lyrics directly. | Modifies DB records and writes tags physically back into files using getID3 write functions. Automatically mirrors artwork in dedicated `covers/songs` and `covers/albums` folders. |
 | **Upload Quotas** | Multi-file uploads with quota tracking. | Restricts uploads to verified users with a daily limit of 10 songs/day (resetting at midnight). |
 | **PWA Cache Cleansing** | Force PWA and Service Worker hard-resets. | Offers a manual "Clear PWA Cache" option to wipe IndexedDB version tracking and unregister the service worker. |
+| **Rhythm Game Live Load Tracker** | Track exact audio compilation progression on load. | Emits real-time progress percentages (e.g. `Preparing audio... 45%`) during track downloads. |
+| **Rhythm Game Offline Checker** | Uncached offline play protection. | Checks the offline cache storage. Uncached tracks dim to 40% opacity, display a "Not cached offline" warning badge, and have pointer events locked when fully offline. |
+| **Dynamic Drive Editor Layouts** | Symmetrical UI layout, editor auto-refresh, and tab sync. | Implements tab title syncing, fixes overlapping CodeMirror initialization on consecutive file opens, and handles text scroll overflows on desktop views. |
+| **Admin Panel Independent Scroll** | Smooth sidebar workspace scrolling. | Revamps the layout containers to implement independent vertical scrolling for the admin sidebar. |
 | **Administrative Dashboard** | Full-scale administrative manager (`?access=admin`). | Paginated user table, search filters, account verification toggles, ban managers, and complete file/account purging tools. |
 | **Integrated Drive Manager** | Built-in file management backend for server assets. | Features native `.zip` extraction via context menus, dynamic URL deep linking for active files, an optimized 2-column mobile grid, and recursive folder property calculations (displaying total files, subdirectories, and byte size). |
 | **SQLite Backend Zero-Setup** | Completely self-hosted, lightweight architecture. | Auto-initializes SQLite database schemas on first run, with zero complex database setup required. |
@@ -223,7 +229,7 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite, follow
 
 ## Admin Panel
 
-Access the administrative dashboard by appending `?access=admin` to your URL. Log in using the admin password (default: `admin`). Admin sessions are highly persistent and securely cached in the browser via a 1-year cookie.
+Access the administrative dashboard by appending `?access=admin` to your URL. Log in using the admin password (default: `admin_password/your own password`). Admin sessions are highly persistent and securely cached in the browser via a 1-year cookie.
 
 | Admin Module | Functionality |
 | :--- | :--- |
