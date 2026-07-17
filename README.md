@@ -1,12 +1,11 @@
 # PHP Music
 
-A simple, fast, and modern self-hosted music player built in PHP, with a clean UI, SQLite backend, and full PWA (Progressive Web App) features. Scan your music collection, play songs in your browser, manage favorites/playlists, download entire playlists, upload and edit your own songs, view lyrics, write and publish Markdown blogs, edit images, play rhythm game beatmaps, and more—all in one lightweight app.
+A modern self-hosted music player built in PHP, with a clean UI, SQLite backend, and full PWA (Progressive Web App) features. Scan your music collection, play songs in your browser, manage favorites/playlists, download entire playlists, upload and edit your own songs, view lyrics, write and publish Markdown blogs, edit images, play rhythm game beatmaps, and more—all in one lightweight app.
 
 ![1](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/1.png)
 ![2](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/2.png) 
 ![3](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/3.png)
 ![4](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/4.png) 
-[![Star History Chart](https://api.star-history.com/svg?repos=HirotakaDango/PHP-Music&type=Date)](https://www.star-history.com/#HirotakaDango/PHP-Music&Date)
 
 ---
 

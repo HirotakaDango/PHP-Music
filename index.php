@@ -380,7 +380,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '6.3');
+define('APP_VERSION', '6.4');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -5738,38 +5738,60 @@ function generatePhpChart($song_id, $duration, $difficulty, $density_multiplier 
   
   $base_spacing = 0.500;
   if ($difficulty === 'easy') $base_spacing = 0.800;
-  elseif ($difficulty === 'medium') $base_spacing = 0.500;
-  elseif ($difficulty === 'hard') $base_spacing = 0.350;
-  elseif ($difficulty === 'expert') $base_spacing = 0.250;
-  elseif ($difficulty === 'master') $base_spacing = 0.180;
-  elseif ($difficulty === 'demon') $base_spacing = 0.130;
+  elseif ($difficulty === 'medium') $base_spacing = 0.450;
+  elseif ($difficulty === 'hard') $base_spacing = 0.280;
+  elseif ($difficulty === 'expert') $base_spacing = 0.180;
+  elseif ($difficulty === 'master') $base_spacing = 0.120;
+  elseif ($difficulty === 'demon') $base_spacing = 0.080;
 
   $spacing = $base_spacing / max(0.1, min(10.0, $density_multiplier));
 
   $notes = [];
   $totalTime = $duration ?: 180;
   
-  $chordChance = ($difficulty === 'easy' || $difficulty === 'medium') ? 0.0 : (($difficulty === 'hard') ? 0.1 : 0.25);
+  $chordChance = 0.0;
+  if ($difficulty === 'hard') $chordChance = 0.15;
+  elseif ($difficulty === 'expert') $chordChance = 0.30;
+  elseif ($difficulty === 'master') $chordChance = 0.45;
+  elseif ($difficulty === 'demon') $chordChance = 0.65;
+  
   $swipeChance = ($difficulty === 'easy') ? 0.0 : (($difficulty === 'medium') ? 0.05 : 0.15);
   $longChance = 0.15;
 
+  $lane_busy_until = array_fill(0, $lanesCount, 0.0);
+  $restrict_holds = in_array($difficulty, ['easy', 'medium', 'hard', 'expert']);
+  $any_hold_until = 0.0;
+
   for ($t = 1.0; $t < $totalTime - 2.0; $t += $spacing) {
+    if ($restrict_holds && $t < $any_hold_until) {
+      continue;
+    }
+
     $isChord = $rng() < $chordChance;
     $noteCount = $isChord ? 2 : 1;
+    $allowLong = !($restrict_holds && $noteCount > 1);
     $usedLanes = [];
     
     for ($i = 0; $i < $noteCount; $i++) {
       $lane = floor($rng() * $lanesCount) % $lanesCount;
-      while (in_array($lane, $usedLanes)) {
+      $attempts = 0;
+      while ((in_array($lane, $usedLanes) || $t < $lane_busy_until[$lane]) && $attempts < $lanesCount) {
         $lane = ($lane + 1) % $lanesCount;
+        $attempts++;
       }
+      if ($attempts >= $lanesCount) continue;
       $usedLanes[] = $lane;
       
-      $isLong = $rng() < $longChance;
+      $isLong = $allowLong && ($rng() < $longChance);
       $isSwipe = !$isLong && ($rng() < $swipeChance);
       $hitEndSwipe = $isLong && ($rng() < $swipeChance);
       
       $dur = $isLong ? (0.4 + ($rng() * 0.4)) : 0; 
+      
+      $lane_busy_until[$lane] = $t + $dur;
+      if ($isLong) {
+        $any_hold_until = max($any_hold_until, $t + $dur);
+      }
       
       $notes[] = [
         'time' => round($t + 2.0, 3),
@@ -5788,12 +5810,17 @@ function generatePhpChart($song_id, $duration, $difficulty, $density_multiplier 
   return $notes;
 }
 
-function calculatePhpLevel($notes, $duration, $density_multiplier = 1.0) {
+function calculatePhpLevel($notes, $duration, $difficulty = 'medium', $density_multiplier = 1.0) {
   if (!$duration || $duration <= 0) return 1;
-  $nps = count($notes) / $duration;
-  // Re-calibrated mapping multiplier dynamically divided by density multiplier to preserve the 1-30 scale under any custom speed bounds
-  $level = round($nps * (0.84 / max(0.1, min(10.0, $density_multiplier)))); 
-  return max(1, min(30, (int)$level));
+  $nps = (count($notes) / $duration) / max(0.1, min(10.0, $density_multiplier));
+  $level = 1;
+  if ($difficulty === 'easy') $level = round($nps * 1.5) + 3;
+  elseif ($difficulty === 'medium') $level = round($nps * 2.0) + 8;
+  elseif ($difficulty === 'hard') $level = round($nps * 2.5) + 14;
+  elseif ($difficulty === 'expert') $level = round($nps * 3.0) + 21;
+  elseif ($difficulty === 'master') $level = round($nps * 3.5) + 26;
+  elseif ($difficulty === 'demon') $level = round($nps * 4.0) + 30;
+  return max(1, min(40, (int)$level));
 }
 
 function sanitize_for_path($string) {
@@ -6108,6 +6135,7 @@ if (isset($_GET['action'])) {
     
     try { $db->exec("ALTER TABLE personal_notes ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE tasks ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE blogs ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE projects ADD COLUMN project_type TEXT DEFAULT 'note';"); } catch(Exception $e) {}
     try {
       $db->exec("
@@ -7245,7 +7273,7 @@ HTML;
             $stmt_chart = $db->prepare("INSERT OR REPLACE INTO rhythm_charts (song_id, difficulty, notes_json, level) VALUES (?, ?, ?, ?)");
             foreach ($rgDiffs as $diff) {
               $c_notes = generatePhpChart($new_song_id, $duration, $diff, 1.0);
-              $c_level = calculatePhpLevel($c_notes, $duration, 1.0);
+              $c_level = calculatePhpLevel($c_notes, $duration, $diff, 1.0);
               $stmt_chart->execute([$new_song_id, $diff, json_encode($c_notes), $c_level]);
             }
           } catch(Exception $e) {}
@@ -7672,7 +7700,26 @@ HTML;
       
       $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . $limit_clause);
       $stmt->execute($params);
-      send_json($stmt->fetchAll());
+      $songs_result = $stmt->fetchAll();
+
+      // Optimize local play: Embed level metadata directly into single request
+      if (!empty($songs_result)) {
+        $song_ids = array_column($songs_result, 'id');
+        $placeholders = implode(',', array_fill(0, count($song_ids), '?'));
+        $stmt_lvl = $db->prepare("SELECT song_id, difficulty, level FROM rhythm_charts WHERE song_id IN ($placeholders)");
+        $stmt_lvl->execute($song_ids);
+        $lvl_rows = $stmt_lvl->fetchAll();
+        $lvl_map = [];
+        foreach ($lvl_rows as $row) {
+          $lvl_map[$row['song_id']][$row['difficulty']] = (int)$row['level'];
+        }
+        foreach ($songs_result as &$song) {
+          $song['levels'] = $lvl_map[$song['id']] ?? null;
+        }
+        unset($song);
+      }
+
+      send_json($songs_result);
       break;
 
     case 'get_profile_songs':
@@ -7728,7 +7775,26 @@ HTML;
 
       $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count FROM music m JOIN offline_songs os ON m.id = os.song_id LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? " . $where_sql . " " . $order_by . " " . $current_limit);
       $stmt->execute($params);
-      send_json($stmt->fetchAll());
+      $songs_result = $stmt->fetchAll();
+
+      // Optimize local play: Embed level metadata directly
+      if (!empty($songs_result)) {
+        $song_ids = array_column($songs_result, 'id');
+        $placeholders = implode(',', array_fill(0, count($song_ids), '?'));
+        $stmt_lvl = $db->prepare("SELECT song_id, difficulty, level FROM rhythm_charts WHERE song_id IN ($placeholders)");
+        $stmt_lvl->execute($song_ids);
+        $lvl_rows = $stmt_lvl->fetchAll();
+        $lvl_map = [];
+        foreach ($lvl_rows as $row) {
+          $lvl_map[$row['song_id']][$row['difficulty']] = (int)$row['level'];
+        }
+        foreach ($songs_result as &$song) {
+          $song['levels'] = $lvl_map[$song['id']] ?? null;
+        }
+        unset($song);
+      }
+
+      send_json($songs_result);
       break;
 
     case 'toggle_offline':
@@ -7970,9 +8036,10 @@ HTML;
       $proj_type = $_GET['filter'] ?? 'note';
       $stmt = $db->prepare("
         SELECT p.*, u.artist as owner_name, 
-        (SELECT COUNT(*) FROM project_members WHERE project_id = p.id) as member_count,
-        (SELECT COUNT(*) FROM personal_notes WHERE project_id = p.id) as note_count,
-        (SELECT COUNT(*) FROM tasks WHERE project_id = p.id) as task_count
+        (SELECT COUNT(*) FROM project_members pm2 WHERE pm2.project_id = p.id) as member_count,
+        (SELECT COUNT(*) FROM personal_notes pn WHERE pn.project_id = p.id) as note_count,
+        (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) as task_count,
+        (SELECT COUNT(*) FROM blogs b WHERE b.project_id = p.id) as blog_count
         FROM projects p 
         JOIN project_members pm ON p.id = pm.project_id 
         JOIN users u ON p.owner_id = u.id
@@ -8033,9 +8100,9 @@ HTML;
         $db->prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, role) VALUES (?, ?, 'editor')")->execute([$inv_pid, $user_id]);
         send_json(['status' => 'success']);
       } elseif ($action_type === 'move_item') {
-        $table = $data['item_type'] === 'task' ? 'tasks' : 'personal_notes';
+        $table = $data['item_type'] === 'blog' ? 'blogs' : ($data['item_type'] === 'task' ? 'tasks' : 'personal_notes');
         $pid = $data['project_id'] ? (int)$data['project_id'] : null;
-        // Only owner can move notes or tasks
+        // Only owner can move notes, tasks or blogs
         $db->prepare("UPDATE $table SET project_id = ? WHERE id = ? AND user_id = ?")->execute([$pid, $data['item_id'], $user_id]);
         send_json(['status' => 'success']);
       }
@@ -8059,7 +8126,7 @@ HTML;
       $active_users = $stmt->fetchAll();
       
       // Return the absolute latest content timestamp so UI knows if it needs to pull fresh data
-      $table = $item_type === 'task' ? 'tasks' : 'personal_notes';
+      $table = $item_type === 'blog' ? 'blogs' : ($item_type === 'task' ? 'tasks' : 'personal_notes');
       $content_stmt = $db->prepare("SELECT updated_at, " . ($item_type === 'task' ? "items, title" : "content, title") . " FROM $table WHERE id = ?");
       $content_stmt->execute([$item_id]);
       $item_data = $content_stmt->fetch();
@@ -8541,8 +8608,17 @@ HTML;
         $stmt->execute([$artist_id]);
       } else {
         if (!$user_id) { send_json([]); }
-        $where = "WHERE b.user_id = ?";
-        $params = [$user_id];
+        $where = "";
+        $params = [];
+        if (strpos($filter, 'proj_') === 0) {
+          $pid = (int)str_replace('proj_', '', $filter);
+          $where = "WHERE b.project_id = ? AND (b.project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR b.project_id IN (SELECT id FROM projects WHERE is_public = 1))";
+          $params = [$pid, $user_id];
+        } else {
+          $where = "WHERE b.user_id = ?";
+          $params = [$user_id];
+        }
+
         if ($search !== '') {
           $where .= " AND (b.title LIKE ? OR b.content LIKE ?)";
           $params[] = "%$search%";
@@ -8552,7 +8628,7 @@ HTML;
           $where .= " AND b.status = 'public'"; 
         } elseif ($filter === 'private') { 
           $where .= " AND b.status = 'private'"; 
-        } elseif ($filter !== 'all') {
+        } elseif ($filter !== 'all' && strpos($filter, 'proj_') !== 0) {
           $where .= " AND b.category = ?";
           $params[] = $filter;
         }
@@ -8679,6 +8755,12 @@ HTML;
         if ($blog['status'] === 'private' && $blog['user_id'] != $user_id && $is_super_admin == 0) {
           http_response_code(403); send_json(['status' => 'error', 'message' => 'This blog is private.']);
         }
+        $blog['collaborators'] = [];
+        if (!empty($blog['project_id'])) {
+          $stmt_collabs = $db->prepare("SELECT u.id, u.artist, u.email FROM project_members pm JOIN users u ON pm.user_id = u.id WHERE pm.project_id = ? AND pm.user_id != ?");
+          $stmt_collabs->execute([$blog['project_id'], $blog['user_id']]);
+          $blog['collaborators'] = $stmt_collabs->fetchAll();
+        }
         send_json($blog);
       } else {
         http_response_code(404); send_json(['status' => 'error', 'message' => 'Blog not found.']);
@@ -8697,14 +8779,19 @@ HTML;
       $title = str_replace(['&#039;', '&#39;', '&quot;'], ["'", "'", '"'], $title);
       $content = str_replace(['&#039;', '&#39;', '&quot;'], ["'", "'", '"'], $content);
       
+      $proj_id = !empty($data['project_id']) ? (int)$data['project_id'] : null;
       if ($blog_id) {
-        $db->prepare("UPDATE blogs SET title = ?, content = ?, status = ?, category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")->execute([$title, $content, $status, $category, $blog_id, $user_id]);
+        $stmt = $db->prepare("SELECT user_id, category FROM blogs WHERE id = ?");
+        $stmt->execute([$blog_id]);
+        $existing = $stmt->fetch();
+        if ($existing && $existing['user_id'] != $user_id) { $category = $existing['category']; }
+        $db->prepare("UPDATE blogs SET title = ?, content = ?, status = ?, category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$title, $content, $status, $category, $blog_id, $user_id, $user_id]);
         $stmt = $db->prepare("SELECT public_id FROM blogs WHERE id = ?");
         $stmt->execute([$blog_id]);
         $public_id = $stmt->fetchColumn();
       } else {
         $public_id = bin2hex(random_bytes(8));
-        $db->prepare("INSERT INTO blogs (user_id, title, content, status, category, public_id) VALUES (?, ?, ?, ?, ?, ?)")->execute([$user_id, $title, $content, $status, $category, $public_id]);
+        $db->prepare("INSERT INTO blogs (user_id, title, content, status, category, public_id, project_id) VALUES (?, ?, ?, ?, ?, ?, ?)")->execute([$user_id, $title, $content, $status, $category, $public_id, $proj_id]);
         $blog_id = $db->lastInsertId();
       }
       send_json(['status' => 'success', 'id' => $blog_id, 'public_id' => $public_id]);
@@ -11660,7 +11747,7 @@ HTML;
         $duration = (int)$stmt_song->fetchColumn() ?: 180;
         
         $notes = generatePhpChart($song_id, $duration, $difficulty, 1.0);
-        $level = calculatePhpLevel($notes, $duration, 1.0);
+        $level = calculatePhpLevel($notes, $duration, $difficulty, 1.0);
         
         $db->prepare("INSERT OR REPLACE INTO rhythm_charts (song_id, difficulty, notes_json, level) VALUES (?, ?, ?, ?)")
            ->execute([$song_id, $difficulty, json_encode($notes), $level]);
@@ -12124,7 +12211,7 @@ HTML;
           $db->beginTransaction();
 
           $notes = generatePhpChart($song['id'], $duration, $current_diff, $density_multiplier);
-          $level = calculatePhpLevel($notes, $duration, $density_multiplier);
+          $level = calculatePhpLevel($notes, $duration, $current_diff, $density_multiplier);
 
           $db->prepare("INSERT OR REPLACE INTO rhythm_charts (song_id, difficulty, notes_json, level) VALUES (?, ?, ?, ?)")
              ->execute([$song['id'], $current_diff, json_encode($notes), $level]);
@@ -12234,7 +12321,26 @@ HTML;
         $where $order_by $limit_clause
       ");
       $stmt->execute($params);
-      send_json($stmt->fetchAll());
+      $songs_result = $stmt->fetchAll();
+
+      // Optimize local play: Embed level metadata directly
+      if (!empty($songs_result)) {
+        $song_ids = array_column($songs_result, 'id');
+        $placeholders = implode(',', array_fill(0, count($song_ids), '?'));
+        $stmt_lvl = $db->prepare("SELECT song_id, difficulty, level FROM rhythm_charts WHERE song_id IN ($placeholders)");
+        $stmt_lvl->execute($song_ids);
+        $lvl_rows = $stmt_lvl->fetchAll();
+        $lvl_map = [];
+        foreach ($lvl_rows as $row) {
+          $lvl_map[$row['song_id']][$row['difficulty']] = (int)$row['level'];
+        }
+        foreach ($songs_result as &$song) {
+          $song['levels'] = $lvl_map[$song['id']] ?? null;
+        }
+        unset($song);
+      }
+
+      send_json($songs_result);
       break;
 
     case 'get_rhythm_favorites':
@@ -15078,6 +15184,7 @@ function perform_cover_scan($db) {
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 blog-filter-link" data-view="get_blogs" data-filter="private"><i class="bi bi-lock"></i> Drafts</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="get_categories" data-cat-type="blog"><i class="bi bi-grid-fill"></i> View Blog Categories</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="manage_note_categories" data-cat-type="blog"><i class="bi bi-tags"></i> Edit Blog Categories</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 filter-nav-link" data-view="get_projects" data-filter="blog"><i class="bi bi-briefcase-fill text-danger"></i> Blog Projects</a></li>
                 <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0" id="import-txt-btn-blogs"><i class="bi bi-file-earmark-text"></i> Upload TXT</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0" id="import-json-btn-blogs"><i class="bi bi-filetype-json"></i> Import JSON</a></li>
@@ -16705,6 +16812,7 @@ function perform_cover_scan($db) {
               <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorCopyBtn" style="cursor: pointer;"><i class="bi bi-copy"></i> Copy Content</div>
               <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorUndoBtn" style="cursor: pointer;"><i class="bi bi-arrow-counterclockwise"></i> Undo</div>
               <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorRedoBtn" style="cursor: pointer;"><i class="bi bi-arrow-clockwise"></i> Redo</div>
+              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-info fw-bold" id="blogEditorMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal" style="cursor: pointer;"><i class="bi bi-arrow-left-right"></i> Move to Project...</div>
               <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" data-bs-toggle="modal" data-bs-target="#markdown-info-modal" style="cursor: pointer;"><i class="bi bi-info-circle"></i> Guide</div>
               <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" data-bs-toggle="modal" data-bs-target="#download-note-modal" style="cursor: pointer;"><i class="bi bi-download"></i> Download Blog...</div>
               <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger" id="blogEditorDeleteBtn" style="cursor: pointer;"><i class="bi bi-trash"></i> Delete</div>
@@ -16737,6 +16845,7 @@ function perform_cover_scan($db) {
       </div>
 
       <div class="editor-body position-relative">
+        <div id="blogFloatingPresence" class="floating-presence-container"></div>
         <div class="flex-shrink-0 mb-4">
           <input type="hidden" id="blogEditorId">
           <input type="text" class="editor-title" id="blogEditorTitle" placeholder="Blog Title" />
@@ -21679,10 +21788,15 @@ SOFTWARE.</div>
                   `;
                 }).join('');
                 
-                if (window.forceScrollToBottomNext || isScrolledToBottom) {
-                  listEl.scrollTop = listEl.scrollHeight;
-                  setTimeout(() => { if (listEl) listEl.scrollTop = listEl.scrollHeight; }, 50);
-                  setTimeout(() => { if (listEl) listEl.scrollTop = listEl.scrollHeight; }, 150);
+                // Force continuous downward scroll tracking during active PiP sessions [1]
+                if (window.chatPipWindow || window.forceScrollToBottomNext || isScrolledToBottom) {
+                  const scrollBottom = () => {
+                    if (listEl) listEl.scrollTop = listEl.scrollHeight + 10000;
+                  };
+                  scrollBottom();
+                  setTimeout(scrollBottom, 50);
+                  setTimeout(scrollBottom, 150);
+                  setTimeout(scrollBottom, 300); // 300ms accounts for late image/video renders expanding height
                   window.forceScrollToBottomNext = false;
                 }
               } else {
@@ -21704,18 +21818,116 @@ SOFTWARE.</div>
             doc.getElementById('chat-reply-bar').classList.add('active');
             doc.getElementById('chat-input').focus();
           };
-          window.clearChatReply = (doc = document) => {
-            const getEl = id => doc.getElementById(id) || document.getElementById(id);
-            getEl('chat-reply-id').value = '';
-            getEl('chat-reply-bar').classList.remove('active');
-          };
           
+          window.showFormattingHelp = (targetDoc) => {
+            const doc = targetDoc || document;
+            let helpBox = doc.getElementById('dynamic-formatting-help');
+            if (!helpBox) {
+              helpBox = doc.createElement('div');
+              helpBox.id = 'dynamic-formatting-help';
+              helpBox.style.cssText = 'position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); background:#1a1a1a; border:1px solid #444; border-radius:12px; padding:24px; z-index:9999; box-shadow:0 10px 40px rgba(0,0,0,0.9); max-width:90%; width:380px; color:#fff;';
+              helpBox.innerHTML = `
+                <h6 class="fw-bold mb-3 border-bottom border-secondary pb-3"><i class="bi bi-info-circle text-info me-2"></i>Formatting Help</h6>
+                <ul class="list-unstyled small text-secondary mb-4" style="line-height: 1.8; font-size: 0.9rem;">
+                  <li class="mb-2"><strong class="text-white">Links:</strong> <code class="bg-black px-2 py-1 rounded border border-secondary">[url] link.com [/url]</code></li>
+                  <li class="mb-2"><strong class="text-white">Images:</strong> <code class="bg-black px-2 py-1 rounded border border-secondary">[img] image.jpg [/img]</code></li>
+                  <li class="mb-2"><strong class="text-white">Video:</strong> <code class="bg-black px-2 py-1 rounded border border-secondary">[video] link.mp4 [/video]</code></li>
+                  <li class="mb-2"><strong class="text-white">Mentions:</strong> <code class="bg-black px-2 py-1 rounded border border-secondary">@Username</code></li>
+                </ul>
+                <button class="btn btn-outline-light btn-sm w-100 fw-bold py-2 rounded-pill" onclick="this.parentElement.remove()">Close</button>
+              `;
+              doc.body.appendChild(helpBox);
+            }
+          };
+
+          window.handleManualDropdownClick = (e) => {
+            const activeDoc = e.target.ownerDocument;
+            const toggle = e.target.closest('[data-bs-toggle="dropdown"]');
+            
+            if (toggle) {
+              e.preventDefault();
+              e.stopPropagation();
+              const menu = toggle.nextElementSibling;
+              const isOpen = menu.classList.contains('show');
+              
+              activeDoc.querySelectorAll('.dropdown-menu.show').forEach(m => {
+                m.classList.remove('show');
+                m.style.display = 'none';
+              });
+              
+              if (!isOpen) {
+                menu.classList.add('show');
+                menu.style.display = 'block';
+                
+                const rect = toggle.getBoundingClientRect();
+                const winHeight = activeDoc.defaultView.innerHeight;
+                const winWidth = activeDoc.defaultView.innerWidth;
+                
+                // Show temporarily to grab actual dimensions
+                const menuHeight = menu.offsetHeight || 250;
+                const menuWidth = menu.offsetWidth || 180;
+                
+                menu.style.position = 'fixed';
+                
+                // Dynamic Dropup Logic to prevent bottom cutoff
+                if (rect.bottom + menuHeight > winHeight && rect.top - menuHeight > 0) {
+                  menu.style.top = (rect.top - menuHeight - 4) + 'px';
+                } else {
+                  menu.style.top = (rect.bottom + 4) + 'px';
+                }
+                
+                // Prevent right cutoff
+                if (rect.right - menuWidth < 0) {
+                  menu.style.left = Math.max(8, rect.left) + 'px';
+                } else {
+                  menu.style.left = Math.max(8, rect.right - menuWidth) + 'px';
+                }
+              }
+            } else if (!e.target.closest('.dropdown-menu')) {
+              const activeDoc = e.target.ownerDocument;
+              activeDoc.querySelectorAll('.dropdown-menu.show').forEach(m => {
+                m.classList.remove('show');
+                m.style.display = 'none';
+              });
+            }
+          };
+          document.addEventListener('click', window.handleManualDropdownClick);
+          
+          // Back button logic bridging PiP and normal window
+          document.addEventListener('click', (e) => {
+            const backBtn = e.target.closest('#chat-back-btn');
+            if (backBtn) {
+              e.preventDefault();
+              if (window.chatPipWindow) {
+                window.chatPipWindow.close();
+              } else {
+                const main = document.querySelector('.chat-main');
+                const sidebar = document.querySelector('.chat-sidebar');
+                if (main) main.classList.remove('active');
+                if (sidebar) sidebar.classList.remove('hidden');
+                if (window.chatPollingInterval) clearInterval(window.chatPollingInterval);
+              }
+            }
+          });
+
+          // Auto-hide drop menus on chat scroll so they don't float around disconnected
+          document.addEventListener('scroll', (e) => {
+            if (e.target.classList && e.target.classList.contains('chat-messages')) {
+               const activeDoc = e.target.ownerDocument;
+               activeDoc.querySelectorAll('.dropdown-menu.show').forEach(m => {
+                  m.classList.remove('show');
+                  m.style.display = 'none';
+               });
+            }
+          }, true);
+
           window.toggleMsgReaction = async (msgId, emoji) => {
             window.isReacting = true; // Lock background polling
             window.currentChatFetchId++; // Invalidate any currently running background polls
 
             // Optimistic UI Update: Apply visually before network confirms
-            const msgBubble = document.querySelector(`.msg-anchor-${msgId}`);
+            const doc = window.chatPipWindow ? window.chatPipWindow.document : document;
+            const msgBubble = doc.querySelector(`.msg-anchor-${msgId}`);
             if (msgBubble) {
               let container = msgBubble.querySelector('.reactions-container');
               if (!container) {
@@ -21878,20 +22090,21 @@ SOFTWARE.</div>
           }
 
           // Chat Media Preview logic
-          window.handleChatImageSelection = (file) => {
+          window.handleChatImageSelection = (file, targetDoc = document) => {
             if (file) {
               if (file.size > 50 * 1024 * 1024) {
                 showToast('File exceeds 50MB limit.', 'error');
                 return;
               }
+              const doc = targetDoc || (window.chatPipWindow ? window.chatPipWindow.document : document);
               const dataTransfer = new DataTransfer();
               dataTransfer.items.add(file);
-              document.getElementById('chat-image-input').files = dataTransfer.files;
+              doc.getElementById('chat-image-input').files = dataTransfer.files;
                
-              const previewBar = document.getElementById('chat-img-preview-bar');
-              const previewImg = document.getElementById('chat-img-preview-src');
-              const previewVid = document.getElementById('chat-video-preview-src');
-              const previewAud = document.getElementById('chat-audio-preview-src');
+              const previewBar = doc.getElementById('chat-img-preview-bar');
+              const previewImg = doc.getElementById('chat-img-preview-src');
+              const previewVid = doc.getElementById('chat-video-preview-src');
+              const previewAud = doc.getElementById('chat-audio-preview-src');
               
               previewImg.classList.add('d-none');
               previewVid.classList.add('d-none');
@@ -21925,14 +22138,14 @@ SOFTWARE.</div>
                 previewBar.classList.add('active');
               } else {
                 showToast('Format not supported.', 'error');
-                document.getElementById('chat-image-input').value = '';
+                doc.getElementById('chat-image-input').value = '';
               }
             }
           };
 
           window.handleChatChangeGlob = e => {
             if (e.target.id === 'chat-image-input') {
-              window.handleChatImageSelection(e.target.files[0]);
+              window.handleChatImageSelection(e.target.files[0], e.target.ownerDocument);
             }
           };
           document.addEventListener('change', window.handleChatChangeGlob);
@@ -21955,23 +22168,29 @@ SOFTWARE.</div>
               e.stopPropagation();
               chatMainArea.style.opacity = '1';
               if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                handleChatImageSelection(e.dataTransfer.files[0]);
+                handleChatImageSelection(e.dataTransfer.files[0], e.target.ownerDocument);
               }
             });
           }
 
-          window.clearChatImage = (doc = document) => {
-            const getEl = id => doc.getElementById(id) || document.getElementById(id);
-            getEl('chat-image-input').value = '';
-            getEl('chat-img-preview-bar').classList.remove('active');
-            getEl('chat-img-preview-src').classList.add('d-none');
-            const vid = getEl('chat-video-preview-src');
-            const aud = getEl('chat-audio-preview-src');
+          window.clearChatImage = (targetDoc) => {
+            const doc = targetDoc || (window.chatPipWindow ? window.chatPipWindow.document : document);
+            doc.getElementById('chat-image-input').value = '';
+            doc.getElementById('chat-img-preview-bar').classList.remove('active');
+            doc.getElementById('chat-img-preview-src').classList.add('d-none');
+            const vid = doc.getElementById('chat-video-preview-src');
+            const aud = doc.getElementById('chat-audio-preview-src');
             vid.classList.add('d-none');
             aud.classList.add('d-none');
             vid.pause(); aud.pause();
             if (vid.src) URL.revokeObjectURL(vid.src);
             if (aud.src) URL.revokeObjectURL(aud.src);
+          };
+
+          window.clearChatReply = (targetDoc) => {
+            const doc = targetDoc || (window.chatPipWindow ? window.chatPipWindow.document : document);
+            doc.getElementById('chat-reply-id').value = '';
+            doc.getElementById('chat-reply-bar').classList.remove('active');
           };
 
           window.handleChatInputGlob = (e) => {
@@ -22284,15 +22503,48 @@ SOFTWARE.</div>
                 
                 window.chatPipWindow.document.body.style.background = 'var(--ytm-bg)';
                 window.chatPipWindow.document.body.style.margin = '0';
+                window.chatPipWindow.document.body.classList.add('pip-active');
                 window.chatPipWindow.document.body.appendChild(chatMain);
+
+                // Directly hide the PiP trigger button in the PiP window's document
+                const pipBtnInPip = window.chatPipWindow.document.getElementById('chat-pip-btn');
+                if (pipBtnInPip) {
+                  pipBtnInPip.style.setProperty('display', 'none', 'important');
+                }
+                const backBtnInPip = window.chatPipWindow.document.getElementById('chat-back-btn');
+                if (backBtnInPip) {
+                  backBtnInPip.style.setProperty('display', 'none', 'important');
+                }
+                const formatHelpInPip = window.chatPipWindow.document.querySelector('.chat-formatting-help');
+                if (formatHelpInPip) {
+                  formatHelpInPip.style.setProperty('display', 'none', 'important');
+                }
+
+                // Force downward scroll on initialization
+                setTimeout(() => {
+                  const listEl = window.chatPipWindow.document.getElementById('chat-messages-container');
+                  if (listEl) listEl.scrollTop = listEl.scrollHeight + 10000;
+                }, 100);
 
                 window.chatPipWindow.document.addEventListener('input', window.handleChatInputGlob);
                 window.chatPipWindow.document.addEventListener('change', window.handleChatChangeGlob);
                 window.chatPipWindow.document.addEventListener('keydown', window.handleChatKeydownGlob);
                 window.chatPipWindow.document.addEventListener('submit', window.handleChatSubmitGlob);
+                window.chatPipWindow.document.addEventListener('click', window.handleManualDropdownClick);
 
                 window.chatPipWindow.addEventListener('pagehide', () => {
                   if (chatWrapper && chatMain) chatWrapper.appendChild(chatMain);
+                  
+                  // CRITICAL FIX: Restore PiP button visibility in main document!
+                  const mainPipBtn = document.getElementById('chat-pip-btn');
+                  if (mainPipBtn) mainPipBtn.style.removeProperty('display');
+                  
+                  const mainBackBtn = document.getElementById('chat-back-btn');
+                  if (mainBackBtn) mainBackBtn.style.removeProperty('display');
+                  
+                  const mainFormatHelp = document.querySelector('.chat-formatting-help');
+                  if (mainFormatHelp) mainFormatHelp.style.removeProperty('display');
+                  
                   window.chatPipWindow = null;
                 });
               } catch (err) {
@@ -23413,30 +23665,39 @@ SOFTWARE.</div>
         };
         
         window.openMediaPreview = (url, type) => {
-          const body = document.getElementById('media-preview-body');
+          const rootDoc = window.document;
+          const body = rootDoc.getElementById('media-preview-body');
+          if (!body) return;
+          
+          // Use 100vh to ensure it scales correctly inside the fullscreen modal bounds
           if (type && type.startsWith('video/')) {
-            body.innerHTML = `<video src="${url}" controls autoplay style="max-width: 100%; max-height: 100%; object-fit: contain;"></video>`;
+            body.innerHTML = `<video src="${url}" controls autoplay style="max-width: 100%; max-height: 100vh; object-fit: contain;"></video>`;
           } else {
-            body.innerHTML = `<img src="${url}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
+            body.innerHTML = `<img src="${url}" style="max-width: 100%; max-height: 100vh; object-fit: contain;">`;
           }
           
-          // Setup direct download button action in modal header
-          const dlBtn = document.getElementById('media-preview-download-btn');
+          const dlBtn = rootDoc.getElementById('media-preview-download-btn');
           if (dlBtn) {
             const newDlBtn = dlBtn.cloneNode(true);
             dlBtn.parentNode.replaceChild(newDlBtn, dlBtn);
-            newDlBtn.addEventListener('click', () => {
-              const a = document.createElement('a');
-              a.href = url;
-              const ext = type.startsWith('video/') ? 'mp4' : 'webp';
-              a.download = `media_${Date.now()}.${ext}`;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
+            newDlBtn.addEventListener('click', async () => {
+              try {
+                // Blob URLs cross-origin can fail basic <a> download tags depending on browser restrictions
+                const a = rootDoc.createElement('a');
+                a.href = url;
+                const ext = type.startsWith('video/') ? 'mp4' : 'png';
+                a.download = `media_${Date.now()}.${ext}`;
+                rootDoc.body.appendChild(a);
+                a.click();
+                rootDoc.body.removeChild(a);
+              } catch(e) {
+                // Safe fallback to just opening the raw blob
+                window.open(url, '_blank');
+              }
             });
           }
           
-          bootstrap.Modal.getOrCreateInstance(document.getElementById('media-preview-modal')).show();
+          bootstrap.Modal.getOrCreateInstance(rootDoc.getElementById('media-preview-modal')).show();
         };
 
         document.getElementById('media-preview-modal')?.addEventListener('hidden.bs.modal', () => {
@@ -23457,16 +23718,22 @@ SOFTWARE.</div>
           const isVideo = type.startsWith('video/');
           const videoIcon = isVideo ? `<div class="lazy-video-icon"><i class="bi bi-camera-video-fill"></i></div>` : '';
 
+          // Fix: Enforce min-height to prevent UI clipping when lazy image is a 1x1 transparent pixel
           return `
-            <div class="lazy-media-wrapper mt-1 mb-2 shadow-sm w-100" data-media-src="${url}" data-media-type="${type}" style="${bgStyle} max-width: 400px; display: inline-block;">
+            <div class="lazy-media-wrapper mt-1 mb-2 shadow-sm w-100" data-media-src="${url}" data-media-type="${type}" style="${bgStyle} max-width: 400px; min-height: 150px; display: inline-block;">
               ${videoIcon}
-              <img src="${displayThumb}" class="lazy-blur" alt="Media" loading="lazy" style="width: 100%; height: auto; max-height: 400px; object-fit: contain; display: block; margin: 0 auto;">
+              <img src="${displayThumb}" class="lazy-blur" alt="Media" loading="lazy" style="width: 100%; height: auto; min-height: 150px; max-height: 400px; object-fit: contain; display: block; margin: 0 auto;">
               <div class="lazy-overlay" onclick="window.downloadLazyMedia(this)">
                  <i class="bi bi-download lazy-download-icon"></i>
                  <div class="spinner-border text-light d-none lazy-download-spinner" style="width: 1.5rem; height: 1.5rem; border-width: 0.2em;"></div>
                  <span class="lazy-download-text">Download</span>
               </div>
             </div>`;
+        };
+
+        const getOpfsMediaDir = async () => {
+          const root = await navigator.storage.getDirectory();
+          return await root.getDirectoryHandle('chat_media_cache', { create: true });
         };
 
         window.downloadLazyMedia = async (overlayEl) => {
@@ -23486,20 +23753,40 @@ SOFTWARE.</div>
           if (spinner) spinner.classList.remove('d-none');
           
           try {
-            const cache = await caches.open('php-music-media-cache');
-            let res = await cache.match(url);
-            
-            if (!res) {
-              res = await fetch(url);
-              if (res.ok) {
-                await cache.put(url, res.clone());
-              } else {
-                throw new Error('Download failed');
+            let blobUrl;
+            try {
+              if (!navigator.storage || !navigator.storage.getDirectory) throw new Error("No OPFS Support");
+              
+              const mediaDir = await getOpfsMediaDir();
+              const fileName = (url.split('/').pop().split('?')[0] || 'media_unknown') + '_' + (url.split('id=')[1] || Date.now());
+              
+              try {
+                // Try to grab it from OPFS first
+                const fileHandle = await mediaDir.getFileHandle(fileName);
+                const file = await fileHandle.getFile();
+                blobUrl = URL.createObjectURL(file);
+              } catch (e) {
+                // File doesn't exist in OPFS, fetch it over network
+                const res = await fetch(url);
+                if (!res.ok) throw new Error('Network download failed');
+                const blob = await res.blob();
+                
+                // Save raw blob heavily into OPFS
+                const fileHandle = await mediaDir.getFileHandle(fileName, { create: true });
+                const writable = await fileHandle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+                
+                blobUrl = URL.createObjectURL(blob);
               }
+            } catch (opfsError) {
+              // Fallback for browsers/Private Mode blocking OPFS: Directly download to RAM
+              console.warn("OPFS caching bypassed, buffering to RAM.");
+              const res = await fetch(url);
+              if (!res.ok) throw new Error('Network download failed');
+              const blob = await res.blob();
+              blobUrl = URL.createObjectURL(blob);
             }
-            
-            const blob = await res.blob();
-            const blobUrl = URL.createObjectURL(blob);
             
             if (type.startsWith('video/')) {
               wrapper.innerHTML = `<video src="${blobUrl}" controls class="w-100 h-100 rounded" style="max-height: 400px; display: block; object-fit: contain; cursor: pointer;" onclick="window.openMediaPreview('${blobUrl}', '${type}')"></video>`;
@@ -23521,29 +23808,38 @@ SOFTWARE.</div>
         };
 
         window.checkMediaCache = async () => {
-          if (!('caches' in window)) return;
-          const cache = await caches.open('php-music-media-cache');
-          const wrappers = document.querySelectorAll('.lazy-media-wrapper:not(.cache-checked)');
-          
-          for (let wrapper of wrappers) {
-            wrapper.classList.add('cache-checked');
-            const url = wrapper.dataset.mediaSrc;
-            const type = wrapper.dataset.mediaType || 'image/webp';
-            try {
-              const res = await cache.match(url);
-              if (res) {
-                const blob = await res.blob();
-                const blobUrl = URL.createObjectURL(blob);
-                if (type.startsWith('video/')) {
-                  wrapper.innerHTML = `<video src="${blobUrl}" controls class="w-100 h-100 rounded" style="max-height: 400px; display: block; object-fit: contain; cursor: pointer;" onclick="window.openMediaPreview('${blobUrl}', '${type}')"></video>`;
-                } else {
-                  wrapper.innerHTML = `<img src="${blobUrl}" class="w-100 h-100 rounded" style="max-height: 400px; display: block; object-fit: contain; cursor: zoom-in;" onclick="window.openMediaPreview('${blobUrl}', '${type}')">`;
+          if (!navigator.storage || !navigator.storage.getDirectory) return;
+          try {
+              const mediaDir = await getOpfsMediaDir();
+              const docs = [document];
+              if (window.chatPipWindow) docs.push(window.chatPipWindow.document);
+              
+              for (let doc of docs) {
+                const wrappers = doc.querySelectorAll('.lazy-media-wrapper:not(.cache-checked)');
+                for (let wrapper of wrappers) {
+                  wrapper.classList.add('cache-checked');
+                  const url = wrapper.dataset.mediaSrc;
+                  const type = wrapper.dataset.mediaType || 'image/webp';
+                  const fileName = (url.split('/').pop().split('?')[0] || 'media_unknown') + '_' + (url.split('id=')[1] || Date.now());
+                  
+                  try {
+                    const fileHandle = await mediaDir.getFileHandle(fileName);
+                    const file = await fileHandle.getFile();
+                    const blobUrl = URL.createObjectURL(file);
+                    
+                    if (type.startsWith('video/')) {
+                      wrapper.innerHTML = `<video src="${blobUrl}" controls class="w-100 h-100 rounded" style="max-height: 400px; display: block; object-fit: contain; cursor: pointer;" onclick="window.openMediaPreview('${blobUrl}', '${type}')"></video>`;
+                    } else {
+                      wrapper.innerHTML = `<img src="${blobUrl}" class="w-100 h-100 rounded" style="max-height: 400px; display: block; object-fit: contain; cursor: zoom-in;" onclick="window.openMediaPreview('${blobUrl}', '${type}')">`;
+                    }
+                    wrapper.classList.add('loaded');
+                    wrapper.style.background = 'transparent';
+                  } catch (e) {
+                    // Not cached in OPFS yet
+                  }
                 }
-                wrapper.classList.add('loaded');
-                wrapper.style.background = 'transparent';
               }
-            } catch (e) {}
-          }
+          } catch(e) {}
         };
 
         // Safely decodes HTML entities back into symbols (like I&#039;m -> I'm) before pasting them into Input fields.
@@ -25506,30 +25802,38 @@ SOFTWARE.</div>
               }
               activeLink = document.querySelector('a[href="#notesSubmenu"]');
               break;
+            case 'get_projects':
             case 'manage_note_categories':
             case 'get_categories':
+              let navSelector = '';
+              if (viewType === 'get_projects') {
+                navSelector = `.filter-nav-link[data-view="${viewType}"][data-filter="${currentView.filter || 'note'}"]`;
+              } else {
+                navSelector = `.cat-nav-link[data-view="${viewType}"][data-cat-type="${currentView.filter || 'note'}"]`;
+              }
+              
               if (currentView.filter === 'task') {
                 activeLink = document.querySelector('a[href="#tasksSubmenu"]');
-                const catLink = document.querySelector(`.cat-nav-link[data-view="${viewType}"][data-cat-type="task"]`);
-                if (catLink) {
-                  catLink.classList.add('active', 'text-white');
-                  const collapseParent = catLink.closest('.collapse');
+                const subLink = document.querySelector(navSelector);
+                if (subLink) {
+                  subLink.classList.add('active', 'text-white');
+                  const collapseParent = subLink.closest('.collapse');
                   if (collapseParent && !collapseParent.classList.contains('show')) bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
                 }
               } else if (currentView.filter === 'blog') {
                 activeLink = document.querySelector('a[href="#blogsSubmenu"]');
-                const catLink = document.querySelector(`.cat-nav-link[data-view="${viewType}"][data-cat-type="blog"]`);
-                if (catLink) {
-                  catLink.classList.add('active', 'text-white');
-                  const collapseParent = catLink.closest('.collapse');
+                const subLink = document.querySelector(navSelector);
+                if (subLink) {
+                  subLink.classList.add('active', 'text-white');
+                  const collapseParent = subLink.closest('.collapse');
                   if (collapseParent && !collapseParent.classList.contains('show')) bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
                 }
               } else {
                 activeLink = document.querySelector('a[href="#notesSubmenu"]');
-                const catLink = document.querySelector(`.cat-nav-link[data-view="${viewType}"][data-cat-type="note"]`);
-                if (catLink) {
-                  catLink.classList.add('active', 'text-white');
-                  const collapseParent = catLink.closest('.collapse');
+                const subLink = document.querySelector(navSelector);
+                if (subLink) {
+                  subLink.classList.add('active', 'text-white');
+                  const collapseParent = subLink.closest('.collapse');
                   if (collapseParent && !collapseParent.classList.contains('show')) bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
                 }
               }
@@ -25546,27 +25850,6 @@ SOFTWARE.</div>
                 }
               }
               activeLink = document.querySelector('a[href="#tasksSubmenu"]');
-              break;
-            case 'get_projects':
-            case 'get_categories':
-            case 'manage_note_categories':
-              if (currentView.filter === 'task') {
-                activeLink = document.querySelector('a[href="#tasksSubmenu"]');
-                const catLink = document.querySelector(`.cat-nav-link[data-view="${viewType}"][data-cat-type="task"]`);
-                if (catLink) {
-                  catLink.classList.add('active', 'text-white');
-                  const collapseParent = catLink.closest('.collapse');
-                  if (collapseParent && !collapseParent.classList.contains('show')) bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
-                }
-              } else {
-                activeLink = document.querySelector('a[href="#notesSubmenu"]');
-                const catLink = document.querySelector(`.cat-nav-link[data-view="${viewType}"][data-cat-type="note"]`);
-                if (catLink) {
-                  catLink.classList.add('active', 'text-white');
-                  const collapseParent = catLink.closest('.collapse');
-                  if (collapseParent && !collapseParent.classList.contains('show')) bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
-                }
-              }
               break;
             default: activeLink = document.querySelector(`.nav-link[data-view="${viewType}"]`);
           }
@@ -25935,7 +26218,11 @@ SOFTWARE.</div>
                                     <span>Audio Latency Offset</span>
                                     <span id="rg-offset-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">0ms</span>
                                   </div>
-                                  <input type="range" id="rg-offset-slider" min="-250" max="250" value="0" step="5" style="width: 100%; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                  <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
+                                    <button type="button" id="rg-offset-minus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">-</button>
+                                    <input type="range" id="rg-offset-slider" min="-250" max="250" value="0" step="5" style="flex-grow: 1; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                    <button type="button" id="rg-offset-plus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">+</button>
+                                  </div>
                                 </div>
                                 
                                 <div style="margin-bottom: 28px;">
@@ -25943,7 +26230,11 @@ SOFTWARE.</div>
                                     <span>Note Speed (Tick)</span>
                                     <span id="rg-speed-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">1.0x</span>
                                   </div>
-                                  <input type="range" id="rg-speed-slider" min="0.5" max="20" value="1.0" step="0.1" style="width: 100%; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                  <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
+                                    <button type="button" id="rg-speed-minus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">-</button>
+                                    <input type="range" id="rg-speed-slider" min="0.5" max="20" value="1.0" step="0.1" style="flex-grow: 1; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                    <button type="button" id="rg-speed-plus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">+</button>
+                                  </div>
                                 </div>
 
                                 <div>
@@ -25951,7 +26242,11 @@ SOFTWARE.</div>
                                     <span>Hit SFX Volume</span>
                                     <span id="rg-sfx-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">30%</span>
                                   </div>
-                                  <input type="range" id="rg-sfx-slider" min="0" max="1" value="0.3" step="0.05" style="width: 100%; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                  <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
+                                    <button type="button" id="rg-sfx-minus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">-</button>
+                                    <input type="range" id="rg-sfx-slider" min="0" max="1" value="0.3" step="0.05" style="flex-grow: 1; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                    <button type="button" id="rg-sfx-plus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">+</button>
+                                  </div>
                                 </div>
                               </div>
 
@@ -26001,22 +26296,22 @@ SOFTWARE.</div>
                       <div style="width: 100%; max-width: 900px; margin: 0 auto; padding: 48px 16px 120px 16px;">
                         <div class="row g-4 w-100 m-0 align-items-center justify-content-center">
                           <div class="col-12 col-lg-6 d-flex flex-column align-items-center text-center">
-                            <img id="rg-dialog-cover" src="" style="width: 180px; height: 180px; object-fit: cover; border-radius: 16px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); margin-bottom: 24px; flex-shrink: 0; background-color: var(--rg-surface-variant);">
-                            <div class="rg-dialog-title w-100" id="rg-dialog-song-name" style="margin-bottom: 32px; font-size: 1.8rem; font-weight: 800; color: var(--rg-primary); line-height: 1.2;">Song Name</div>
+                            <img id="rg-dialog-cover" src="" style="width: 200px; height: 200px; object-fit: cover; border-radius: 16px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); margin-bottom: 24px; flex-shrink: 0; background-color: var(--rg-surface-variant);">
+                            <div class="rg-dialog-title w-100" id="rg-dialog-song-name" style="margin-bottom: 32px; font-size: 2.2rem; font-weight: 800; color: var(--rg-primary); line-height: 1.2;">Song Name</div>
 
                             <div style="width: 100%; max-width: 360px; margin: 0 auto;">
                               <div style="font-size: 0.8rem; font-weight: 700; color: #777; margin-bottom: 12px; text-align: left; text-transform: uppercase;">Select Difficulty</div>
                               <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
-                                <button class="rg-diff-btn active" data-diff="easy">Easy</button>
-                                <button class="rg-diff-btn" data-diff="medium">Med</button>
-                                <button class="rg-diff-btn" data-diff="hard">Hard</button>
-                                <button class="rg-diff-btn" data-diff="expert">Exprt</button>
-                                <button class="rg-diff-btn" data-diff="master">Mstr</button>
-                                <button class="rg-diff-btn" style="color: #ff3b30;" data-diff="demon">Demon</button>
+                                <button class="rg-diff-btn active" data-diff="easy" style="background-color: #1a1a1a; border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">EASY <span class="lvl" style="font-size: 0.7rem; color: #aaa; font-weight: bold;">LV.--</span></button>
+                                <button class="rg-diff-btn" data-diff="medium" style="background-color: #1a1a1a; border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">MED <span class="lvl" style="font-size: 0.7rem; color: #aaa; font-weight: bold;">LV.--</span></button>
+                                <button class="rg-diff-btn" data-diff="hard" style="background-color: #1a1a1a; border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">HARD <span class="lvl" style="font-size: 0.7rem; color: #aaa; font-weight: bold;">LV.--</span></button>
+                                <button class="rg-diff-btn" data-diff="expert" style="background-color: #1a1a1a; border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">EXPRT <span class="lvl" style="font-size: 0.7rem; color: #aaa; font-weight: bold;">LV.--</span></button>
+                                <button class="rg-diff-btn" data-diff="master" style="background-color: #1a1a1a; border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">MSTR <span class="lvl" style="font-size: 0.7rem; color: #aaa; font-weight: bold;">LV.--</span></button>
+                                <button class="rg-diff-btn" data-diff="demon" style="background-color: #1a1a1a; border: 1px solid #333; color: #ff3b30; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">DEMON <span class="lvl" style="font-size: 0.7rem; color: #ff3b30; font-weight: bold;">LV.--</span></button>
                               </div>
                             </div>
 
-                            <div style="width: 100%; max-width: 360px; margin: 24px auto 0 auto; display: flex; align-items: center; justify-content: space-between; background: var(--rg-surface-variant); padding: 12px 16px; border-radius: 12px; border: 1px solid #333;">
+                            <div style="width: 100%; max-width: 360px; margin: 24px auto 0 auto; display: flex; align-items: center; justify-content: space-between; background: #1a1a1a; padding: 12px 16px; border-radius: 12px; border: 1px solid #333;">
                               <div class="text-start" style="min-width: 0;">
                                 <div style="font-size: 0.9rem; font-weight: 700; color: #fff;">Autoplay (Bot Mode)</div>
                                 <div style="font-size: 0.75rem; color: #aaa;">Watch the bot play perfectly. Scores will not be saved.</div>
@@ -26027,17 +26322,17 @@ SOFTWARE.</div>
                             </div>
                             
                             <div style="width: 100%; max-width: 360px; margin: 12px auto 0 auto;">
-                              <button id="rg-btn-view-chart" class="btn btn-outline-light w-100 rounded-pill fw-bold" style="font-size: 0.9rem; border-color: rgba(255,255,255,0.2);"><i class="bi bi-map me-1"></i> View Chart Map</button>
+                              <button id="rg-btn-view-chart" class="btn btn-outline-light w-100 rounded-pill fw-bold" style="font-size: 0.9rem; border-color: rgba(255,255,255,0.2); background: transparent;"><i class="bi bi-map me-1"></i> View Chart Map</button>
                             </div>
                           
                             <div style="display: flex; justify-content: center; gap: 16px; margin-top: 32px; width: 100%; max-width: 360px;">
-                              <button class="btn btn-link text-secondary text-decoration-none fw-bold" id="rg-btn-dialog-cancel" style="font-size: 1.1rem;">Cancel</button>
-                              <button class="btn btn-danger rounded-pill px-5 fw-bold flex-grow-1" id="rg-btn-dialog-play" style="font-size: 1.1rem; padding-top: 12px; padding-bottom: 12px; box-shadow: 0 4px 16px rgba(255,59,48,0.4);">Play</button>
+                              <button class="btn btn-link text-secondary text-decoration-none fw-bold" id="rg-btn-dialog-cancel" style="font-size: 1.1rem; width: 100px;">Cancel</button>
+                              <button class="btn btn-danger rounded-pill px-5 fw-bold flex-grow-1" id="rg-btn-dialog-play" style="font-size: 1.1rem; padding-top: 12px; padding-bottom: 12px; background-color: #dc3545; border: none; box-shadow: 0 4px 16px rgba(220,53,69,0.4);">Play</button>
                             </div>
                           </div>
                           
                           <div class="col-12 col-lg-6 d-flex flex-column" style="min-height: 400px;">
-                            <div style="display: flex; flex-direction: column; height: 100%; background-color: var(--rg-surface-variant); border-radius: 16px; border: 1px solid #333; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+                            <div style="display: flex; flex-direction: column; height: 100%; background-color: #1a1a1a; border-radius: 16px; border: 1px solid #333; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
                               <div style="font-size: 0.9rem; font-weight: 700; color: #aaa; padding: 16px; border-bottom: 1px solid #333; background-color: rgba(0,0,0,0.3); text-transform: uppercase;">Top Scores</div>
                               <div id="rg-song-leaderboard" style="overflow-y: auto; padding: 12px; flex-grow: 1; max-height: 450px;">
                                 <div class="text-center text-secondary small py-4">Loading scores...</div>
@@ -26376,12 +26671,12 @@ SOFTWARE.</div>
                     <div class="chat-main">
                       <div class="chat-header position-relative">
                         <div class="d-flex align-items-center gap-3">
-                          <button class="btn btn-link text-white p-0 d-md-none" onclick="document.querySelector('.chat-main').classList.remove('active'); document.querySelector('.chat-sidebar').classList.remove('hidden'); if (window.chatPollingInterval) clearInterval(window.chatPollingInterval);"><i class="bi bi-arrow-left fs-4"></i></button>
+                          <button class="btn btn-link text-white p-0 d-md-none" id="chat-back-btn"><i class="bi bi-arrow-left fs-4"></i></button>
                           <h5 class="text-white fw-bold m-0 d-flex align-items-center" id="chat-header-title" style="font-size: 1.3rem;">Select a chat</h5>
                         </div>
                         <div class="d-flex align-items-center gap-2 ms-auto">
-                          <button class="btn btn-outline-light rounded-circle d-none" id="chat-info-btn" style="width: 44px; height: 44px;" title="Details"><i class="bi bi-person fs-5"></i></button>
-                          <button class="btn btn-outline-light rounded-circle d-none d-md-flex align-items-center justify-content-center" id="chat-pip-btn" style="width: 44px; height: 44px;" title="Pop Out Chat"><i class="bi bi-pip"></i></button>
+                          <button class="btn btn-link text-secondary hover-white p-0 border-0 d-none align-items-center justify-content-center" id="chat-info-btn" style="width: 44px; height: 44px; text-decoration: none;" title="Details"><i class="bi bi-info-circle fs-5"></i></button>
+                          <button class="btn btn-link text-secondary hover-white p-0 border-0 d-none d-md-flex align-items-center justify-content-center" id="chat-pip-btn" style="width: 44px; height: 44px; text-decoration: none;" title="Pop Out Chat"><i class="bi bi-pip fs-5"></i></button>
                           <div class="dropdown d-none" id="chat-header-dropdown">
                             <button class="btn btn-link text-white p-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" aria-expanded="false" style="width: 44px; height: 44px;" title="Options">
                               <i class="bi bi-three-dots-vertical fs-5"></i>
@@ -26409,19 +26704,19 @@ SOFTWARE.</div>
                       </div>
                       
                       <div class="chat-input-area">
-                        <div class="d-flex justify-content-end w-100 mb-1">
-                          <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+                        <div class="d-flex justify-content-end w-100 mb-1 chat-formatting-help">
+                          <a href="#" class="text-info small text-decoration-none" onclick="window.showFormattingHelp(event.target.ownerDocument); return false;"><i class="bi bi-info-circle"></i> Formatting Help</a>
                         </div>
                         <div class="reply-preview-bar" id="chat-reply-bar">
                            <div id="chat-reply-preview" class="text-truncate" style="max-width: 85%;"></div>
-                           <button class="btn-close btn-close-white" onclick="window.clearChatReply()"></button>
+                           <button class="btn-close btn-close-white" type="button" onclick="window.clearChatReply(event.target.ownerDocument)"></button>
                         </div>
                         
                         <div class="chat-img-upload-preview" id="chat-img-preview-bar">
                            <img src="" id="chat-img-preview-src" class="d-none">
                            <video src="" id="chat-video-preview-src" controls class="d-none"></video>
                            <audio src="" id="chat-audio-preview-src" controls class="d-none w-100 mt-2"></audio>
-                           <button class="chat-img-remove" onclick="window.clearChatImage()"><i class="bi bi-x"></i></button>
+                           <button class="chat-img-remove" type="button" onclick="window.clearChatImage(event.target.ownerDocument)"><i class="bi bi-x"></i></button>
                            <div class="progress mt-3 d-none" id="chat-upload-progress-container" style="height: 8px; background-color: var(--ytm-bg);">
                              <div class="progress-bar bg-danger progress-bar-striped progress-bar-animated" id="chat-upload-progress" role="progressbar" style="width: 0%;"></div>
                            </div>
@@ -26431,10 +26726,10 @@ SOFTWARE.</div>
                           <input type="hidden" id="chat-reply-id">
                           <div class="chat-input-wrapper flex-grow-1">
                             <div class="dropup d-flex align-items-center justify-content-center">
-                              <button class="btn btn-link text-secondary p-0 border-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" aria-expanded="false" style="width: 28px; height: 28px; transition: color 0.2s;" onmouseover="this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.color='var(--ytm-secondary-text)'" title="Attach Media">
+                              <button class="btn btn-link text-secondary p-0 border-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" aria-expanded="false" style="width: 28px; height: 28px; transition: color 0.2s;" onmouseover="this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.color='var(--ytm-secondary-text)'" title="Attach Media">
                                 <i class="bi bi-paperclip fs-4"></i>
                               </button>
-                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg mb-2" style="background-color: var(--ytm-surface-2); border: 1px solid var(--ytm-border); border-radius: 12px; min-width: 150px; padding: 0.5rem 0;">
+                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg mb-2" style="background-color: var(--ytm-surface-2); border: 1px solid var(--ytm-border); border-radius: 12px; min-width: 150px; padding: 0.5rem 0; z-index: 1070;">
                                 <li>
                                   <a class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" href="#" onclick="document.getElementById('chat-image-input').accept='image/*'; document.getElementById('chat-image-input').click(); return false;">
                                     <i class="bi bi-image fs-5 text-info"></i> Photo
@@ -27380,6 +27675,21 @@ SOFTWARE.</div>
                   finalContent = `<pre style="white-space: pre-wrap; font-family: sans-serif;">${escapeHTML(finalContent)}</pre>`;
                 }
 
+                let collaboratorsHTML = '';
+                if (blogData.collaborators && blogData.collaborators.length > 0) {
+                  collaboratorsHTML = `
+                    <div class="mt-2 d-flex flex-wrap align-items-center gap-2 small text-secondary">
+                      <span class="fw-bold" style="font-size: 0.8rem;">Collaborators:</span>
+                      ${blogData.collaborators.map(c => `
+                        <span class="badge bg-dark border border-secondary text-light user-profile-link px-2 py-1" data-userid="${c.id}" data-artist="${encodeURIComponent(c.artist)}" style="cursor: pointer; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 4px;">
+                          <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 16px; height: 16px; object-fit: cover;">
+                          ${escapeHTML(c.artist)}
+                        </span>
+                      `).join('')}
+                    </div>
+                  `;
+                }
+
                 contentArea.innerHTML = `
                   <div class="container pb-5 mt-4" style="max-width: 900px;">
                     <nav aria-label="breadcrumb" class="mb-4">
@@ -27391,10 +27701,14 @@ SOFTWARE.</div>
                     <h1 class="text-white fw-bold mb-4" style="font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.2;">${escapeHTML(decodeHTML(blogData.title))}</h1>
                     <div class="d-flex justify-content-between align-items-center mb-5 border-bottom border-secondary pb-4 flex-wrap gap-3">
                       <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${blogData.user_id}" data-artist="${encodeURIComponent(blogData.author)}" style="cursor: pointer;">
-                         <img src="?action=get_profile_picture&id=${blogData.user_id}" class="rounded-circle shadow-sm" style="width: 45px; height: 45px; object-fit: cover;">
+                         <img src="?action=get_profile_picture&id=${blogData.user_id}" class="rounded-circle" style="width: 45px; height: 45px; object-fit: cover;">
                          <div>
                            <div class="fw-bold text-white hover-underline">${escapeHTML(blogData.author)}</div>
-                           <div class="text-secondary small">${new Date(blogData.created_at.replace(' ', 'T')+'Z').toLocaleDateString()} ${blogData.updated_at !== blogData.created_at ? `(Edited ${new Date(blogData.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()})` : ''}</div>
+                           <div class="text-secondary small">
+                             ${new Date(blogData.created_at.replace(' ', 'T')+'Z').toLocaleDateString()} 
+                             ${blogData.updated_at !== blogData.created_at ? `(Edited ${new Date(blogData.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()})` : ''}
+                           </div>
+                           ${collaboratorsHTML}
                          </div>
                       </div>
                       <div class="d-flex align-items-center">
@@ -27978,8 +28292,8 @@ SOFTWARE.</div>
 
             case 'get_projects': {
               const pType = currentView.filter || 'note';
-              const pTitle = pType === 'task' ? 'Task Projects' : 'Note Projects';
-              const pIcon = pType === 'task' ? 'bi-check2-square text-success' : 'bi-journal-text text-warning';
+              const pTitle = pType === 'task' ? 'Task Projects' : (pType === 'blog' ? 'Blog Projects' : 'Note Projects');
+              const pIcon = pType === 'task' ? 'bi-check2-square text-success' : (pType === 'blog' ? 'bi-journal-richtext text-info' : 'bi-journal-text text-warning');
               
               updateContentTitle(pTitle, !!currentUser);
               if (currentUser) {
@@ -28005,6 +28319,7 @@ SOFTWARE.</div>
                       <div class="d-flex gap-2 mt-3">
                         ${pType === 'note' ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_notes" data-filter="proj_${p.id}"><i class="bi bi-journal-text text-warning"></i> ${p.note_count} Notes</button>` : ''}
                         ${pType === 'task' ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_tasks" data-filter="proj_${p.id}"><i class="bi bi-check2-square text-success"></i> ${p.task_count} Tasks</button>` : ''}
+                        ${pType === 'blog' ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_blogs" data-filter="proj_${p.id}"><i class="bi bi-journal-text text-info"></i> ${p.blog_count} Blogs</button>` : ''}
                         ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-info text-dark fw-bold invite-project-btn" data-id="${p.id}"><i class="bi bi-people-fill"></i> Manage</button>` : ''}
                       </div>
                     </div>
@@ -31226,8 +31541,12 @@ SOFTWARE.</div>
                     <div class="d-flex align-items-center gap-3">
                       <img src="?action=get_profile_picture&id=${m.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
                       <div>
-                        <div>${escapeHTML(m.artist)} ${m.role === 'owner' ? '<span class="badge bg-warning text-dark ms-1">Owner</span>' : ''}</div>
-                        <div class="small text-secondary" style="font-size: 0.75rem;">ID: ${m.id}</div>
+                        <div class="d-flex align-items-center gap-2">
+                          <span class="badge bg-dark border border-secondary text-secondary" style="font-size: 0.75rem;">ID: ${m.id}</span>
+                          <strong class="text-white">${escapeHTML(m.artist)}</strong>
+                          ${m.role === 'owner' ? '<span class="badge bg-warning text-dark">Owner</span>' : ''}
+                        </div>
+                        <div class="small text-secondary" style="font-size: 0.75rem; margin-top: 2px;">${escapeHTML(m.email || '')}</div>
                       </div>
                     </div>
                     ${m.role !== 'owner' ? `<button class="btn btn-sm btn-outline-danger project-member-remove-btn" data-id="${m.id}"><i class="bi bi-x-lg"></i></button>` : ''}
@@ -31639,19 +31958,25 @@ SOFTWARE.</div>
                   });
                   const listEl = document.getElementById('collab-list');
                   if (res && res.status === 'success') {
-                    if (res.collaborators.length === 0) listEl.innerHTML = '<p class="text-secondary small">No collaborators yet.</p>';
-                    else listEl.innerHTML = res.collaborators.map(c => `
-                      <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
-                        <div class="d-flex align-items-center gap-3">
-                          <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
-                          <div>
-                            <div>${escapeHTML(c.artist)}</div>
-                            <div class="small text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</div>
+                    if (res.collaborators.length === 0) {
+                      listEl.innerHTML = '<p class="text-secondary small">No collaborators yet.</p>';
+                    } else {
+                      listEl.innerHTML = res.collaborators.map(c => `
+                        <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
+                          <div class="d-flex align-items-center gap-3">
+                            <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                            <div>
+                              <div class="d-flex align-items-center gap-2">
+                                <span class="badge bg-dark border border-secondary text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</span>
+                                <strong class="text-white">${escapeHTML(c.artist)}</strong>
+                              </div>
+                              <div class="small text-secondary" style="font-size: 0.75rem; margin-top: 2px;">${escapeHTML(c.email || '')}</div>
+                            </div>
                           </div>
+                          <button class="btn btn-sm btn-outline-danger collab-remove-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
                         </div>
-                        <button class="btn btn-sm btn-outline-danger collab-remove-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
-                      </div>
-                    `).join('');
+                      `).join('');
+                    }
                   }
                 };
 
@@ -31689,7 +32014,6 @@ SOFTWARE.</div>
                   }, 300);
                 };
 
-                // Handle dropdown clicks natively on the element
                 collabDropdown.onclick = (e) => {
                   const item = e.target.closest('.collab-user-item');
                   if (item) {
@@ -31699,7 +32023,6 @@ SOFTWARE.</div>
                   }
                 };
 
-                // Close dropdown if clicked outside
                 document.addEventListener('click', (e) => {
                   if (collabDropdown && !collabDropdown.contains(e.target) && e.target !== collabInput) {
                     collabDropdown.classList.add('d-none');
@@ -32384,7 +32707,10 @@ SOFTWARE.</div>
                   body.theme-light-bg .play-btn { background-color: #000000 !important; color: #ffffff !important; }
                   body.theme-light-bg .progress-bar-bg { background-color: rgba(0, 0, 0, 0.2) !important; }
                   body.theme-light-bg .progress-bar-fg { background-color: #000000 !important; }
-            
+                  body.pip-active #chat-pip-btn,
+                  body.pip-active #chat-back-btn,
+                  body.pip-active .chat-formatting-help { display: none !important; }
+                
                   /* Force bootstrap icon tags inside control buttons to inherit their parent's inline font-sizes */
                   .player-modal-controls .player-btn .bi { font-size: inherit !important; }
                   .player-modal-controls .play-btn .bi { font-size: inherit !important; }
@@ -33227,19 +33553,25 @@ SOFTWARE.</div>
                 });
                 const listEl = document.getElementById('song-collab-list');
                 if (res && res.status === 'success') {
-                  if (res.collaborators.length === 0) listEl.innerHTML = '<p class="text-secondary small">No collaborators yet.</p>';
-                  else listEl.innerHTML = res.collaborators.map(c => `
-                    <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
-                      <div class="d-flex align-items-center gap-3">
-                        <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
-                        <div>
-                          <div>${escapeHTML(c.artist)}</div>
-                          <div class="small text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</div>
+                  if (res.collaborators.length === 0) {
+                    listEl.innerHTML = '<p class="text-secondary small">No collaborators yet.</p>';
+                  } else {
+                    listEl.innerHTML = res.collaborators.map(c => `
+                      <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
+                        <div class="d-flex align-items-center gap-3">
+                          <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                          <div>
+                            <div class="d-flex align-items-center gap-2">
+                              <span class="badge bg-dark border border-secondary text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</span>
+                              <strong class="text-white">${escapeHTML(c.artist)}</strong>
+                            </div>
+                            <div class="small text-secondary" style="font-size: 0.75rem; margin-top: 2px;">${escapeHTML(c.email || '')}</div>
+                          </div>
                         </div>
+                        <button class="btn btn-sm btn-outline-danger song-collab-remove-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
                       </div>
-                      <button class="btn btn-sm btn-outline-danger song-collab-remove-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
-                    </div>
-                  `).join('');
+                    `).join('');
+                  }
                 }
               };
 
@@ -35598,13 +35930,13 @@ SOFTWARE.</div>
 
         const startPresenceSync = (itemId, itemType) => {
           if (presenceSyncInterval) clearInterval(presenceSyncInterval);
-          const avContainer = document.getElementById(itemType === 'task' ? 'taskFloatingPresence' : 'editorFloatingPresence');
+          const avContainer = document.getElementById(itemType === 'task' ? 'taskFloatingPresence' : (itemType === 'blog' ? 'blogFloatingPresence' : 'editorFloatingPresence'));
           
           presenceSyncInterval = setInterval(async () => {
             if (!itemId) return;
             const res = await fetchData('?action=sync_presence', {
               method: 'POST', body: JSON.stringify({ item_id: itemId, item_type: itemType })
-            }, true); // Silent fetch
+            }, true);
             
             if (res && res.active_users) {
               if (res.active_users.length > 0) {
@@ -35618,52 +35950,58 @@ SOFTWARE.</div>
                 avContainer.innerHTML = '';
               }
               
-              // Soft conflict detection
               if (res.latest_update && lastSyncContentTime && res.latest_update !== lastSyncContentTime) {
                 lastSyncContentTime = res.latest_update;
                 
-                // Real-time UI update logic
-                const isUserTyping = ['TEXTAREA', 'INPUT'].includes(document.activeElement?.tagName);
-                
+                const safeUpdateField = (el, newText) => {
+                  if (!el || !newText) return;
+                  const decodedText = decodeHTML(newText);
+                  if (el.value === decodedText) return;
+                  
+                  if (document.activeElement === el) {
+                    // Preserve cursor position during live collaborative injection
+                    const start = el.selectionStart;
+                    const end = el.selectionEnd;
+                    const oldLen = el.value.length;
+                    el.value = decodedText;
+                    const diff = decodedText.length - oldLen;
+                    el.setSelectionRange(start + diff, end + diff);
+                  } else {
+                    el.value = decodedText;
+                  }
+                };
+
+                let statusIndicator = null;
+
                 if (itemType === 'note') {
-                   const titleEl = document.getElementById('editorTitle');
-                   const contentEl = document.getElementById('editorContent');
-                   
-                   if (document.activeElement !== titleEl && res.item_data && res.item_data.title) {
-                     titleEl.value = decodeHTML(res.item_data.title);
-                   }
-                   if (document.activeElement !== contentEl && res.item_data && res.item_data.content) {
-                     contentEl.value = decodeHTML(res.item_data.content);
-                   }
-                   
-                   const indicator = document.getElementById('noteSaveStatus');
-                   if (indicator) {
-                     indicator.innerHTML = '<span class="text-success"><i class="bi bi-arrow-repeat"></i> Updated in real-time</span>';
-                     setTimeout(() => { if (indicator.textContent.includes('real-time')) indicator.textContent = ""; }, 2000);
-                   }
+                   safeUpdateField(document.getElementById('editorTitle'), res.item_data.title);
+                   safeUpdateField(document.getElementById('editorContent'), res.item_data.content);
+                   statusIndicator = document.getElementById('noteSaveStatus');
+                } else if (itemType === 'blog') {
+                   safeUpdateField(document.getElementById('blogEditorTitle'), res.item_data.title);
+                   safeUpdateField(document.getElementById('blogEditorContent'), res.item_data.content);
+                   statusIndicator = document.getElementById('blogSaveStatus');
                 } else if (itemType === 'task') {
-                   const titleEl = document.getElementById('taskEditorTitle');
-                   if (document.activeElement !== titleEl && res.item_data && res.item_data.title) {
-                     titleEl.value = decodeHTML(res.item_data.title);
-                   }
+                   safeUpdateField(document.getElementById('taskEditorTitle'), res.item_data.title);
                    
+                   const isUserTyping = ['TEXTAREA', 'INPUT'].includes(document.activeElement?.tagName);
                    if (!isUserTyping && res.item_data && res.item_data.items) {
                      try {
                        window.currentTaskItems = JSON.parse(res.item_data.items);
                        window.renderTaskItems();
                      } catch(e) {}
                    }
-                   
-                   const indicator = document.getElementById('taskSaveStatus');
-                   if (indicator) {
-                     indicator.innerHTML = '<span class="text-success"><i class="bi bi-arrow-repeat"></i> Updated in real-time</span>';
-                     setTimeout(() => { if (indicator.textContent.includes('real-time')) indicator.textContent = ""; }, 2000);
-                   }
+                   statusIndicator = document.getElementById('taskSaveStatus');
+                }
+
+                if (statusIndicator) {
+                   statusIndicator.innerHTML = '<span class="text-success"><i class="bi bi-cloud-download"></i> Live Sync</span>';
+                   setTimeout(() => { if (statusIndicator.textContent.includes('Sync')) statusIndicator.textContent = ""; }, 2000);
                 }
               }
               lastSyncContentTime = res.latest_update || lastSyncContentTime;
             }
-          }, 800);
+          }, 500);
         };
         
         const stopPresenceSync = () => {
@@ -35672,8 +36010,10 @@ SOFTWARE.</div>
           lastSyncContentTime = null;
           const noteAv = document.getElementById('editorFloatingPresence');
           const taskAv = document.getElementById('taskFloatingPresence');
+          const blogAv = document.getElementById('blogFloatingPresence');
           if (noteAv) noteAv.innerHTML = '';
           if (taskAv) taskAv.innerHTML = '';
+          if (blogAv) blogAv.innerHTML = '';
         };
 
         const populateProjectMoveSelect = async (type) => {
@@ -35698,6 +36038,9 @@ SOFTWARE.</div>
           if (document.getElementById('editorOverlay').classList.contains('active')) {
             itemId = document.getElementById('editorNoteId').value;
             itemType = 'note';
+          } else if (document.getElementById('blogEditorOverlay').classList.contains('active')) {
+            itemId = document.getElementById('blogEditorId').value;
+            itemType = 'blog';
           } else {
             itemId = document.getElementById('taskEditorId').value;
             itemType = 'task';
@@ -35715,8 +36058,20 @@ SOFTWARE.</div>
           }
         });
 
-        document.getElementById('editorMoveProjectBtn')?.addEventListener('click', () => { document.getElementById('editorMoreMenu').classList.remove('active'); populateProjectMoveSelect('note'); });
-        document.getElementById('taskMoveProjectBtn')?.addEventListener('click', () => { document.getElementById('taskEditorMoreMenu').classList.remove('active'); populateProjectMoveSelect('task'); });
+        document.getElementById('editorMoveProjectBtn')?.addEventListener('click', () => { 
+          document.getElementById('editorMoreMenu')?.classList.remove('active'); 
+          populateProjectMoveSelect('note'); 
+        });
+        
+        document.getElementById('taskMoveProjectBtn')?.addEventListener('click', () => { 
+          document.getElementById('taskEditorMoreMenu')?.classList.remove('active'); 
+          populateProjectMoveSelect('task'); 
+        });
+        
+        document.getElementById('blogEditorMoveProjectBtn')?.addEventListener('click', () => { 
+          document.getElementById('blogEditorMoreMenu')?.classList.remove('active'); 
+          populateProjectMoveSelect('blog'); 
+        });
         
         window.activeBlogPublicId = null;
         let currentBlogCommentsPage = 1;
@@ -36548,18 +36903,32 @@ SOFTWARE.</div>
         let isBlogMarkdownPreview = false;
 
         window.openBlogEditor = (blog) => {
+          const isOwner = !blog.id || blog.user_id == (currentUser ? currentUser.id : null);
+          
+          const catSelect = document.getElementById('blogEditorCategorySelect');
+          if (catSelect) {
+            catSelect.disabled = !isOwner;
+            catSelect.style.opacity = isOwner ? '1' : '0.6';
+            catSelect.style.cursor = isOwner ? 'pointer' : 'default';
+            if (blog.category) catSelect.value = blog.category;
+          }
+          
+          const moveBtn = document.getElementById('blogEditorMoveProjectBtn');
+          if (moveBtn) moveBtn.style.display = isOwner ? 'flex' : 'none';
+          
+          const delBtn = document.getElementById('blogEditorDeleteBtn');
+          if (delBtn) delBtn.style.display = isOwner ? 'flex' : 'none';
+
           const titleEl = document.getElementById('blogEditorTitle');
           const contentEl = document.getElementById('blogEditorContent');
           const idEl = document.getElementById('blogEditorId');
           const statusSelect = document.getElementById('blogEditorStatusSelect');
-          const catSelect = document.getElementById('blogEditorCategorySelect');
           const dateEl = document.getElementById('blogEditorDate');
           
           idEl.value = blog.id || '';
           titleEl.value = blog.title ? decodeHTML(blog.title) : '';
           contentEl.value = blog.content ? decodeHTML(blog.content) : '';
           statusSelect.value = blog.status || 'private';
-          if (catSelect && blog.category) catSelect.value = blog.category;
           dateEl.innerText = blog.updated_at ? new Date(blog.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString() : new Date().toLocaleDateString();
 
           isBlogMarkdownPreview = false;
@@ -36573,6 +36942,11 @@ SOFTWARE.</div>
           updateBlogEditorWordCount();
 
           document.getElementById('blogEditorOverlay').classList.add('active');
+          
+          if (blog.id) {
+            lastSyncContentTime = blog.updated_at;
+            startPresenceSync(blog.id, 'blog');
+          }
         };
 
         const saveCurrentBlog = async (force = false) => {
@@ -36586,12 +36960,18 @@ SOFTWARE.</div>
           const category = document.getElementById('blogEditorCategorySelect').value;
           
           if (!title && !content) return;
+          if (!id && !force) return;
+          
+          let projId = null;
+          if (currentView.filter && currentView.filter.startsWith('proj_')) {
+            projId = currentView.filter.replace('proj_', '');
+          }
           
           const res = await fetchData('?action=save_blog', { 
-            method: 'POST', body: JSON.stringify({id: id || null, title, content, status, category}) 
+            method: 'POST', body: JSON.stringify({id: id || null, title, content, status, category, project_id: projId}) 
           }, true);
 
-          if (res && res.status === 'success' && res.id) {
+          if (res && res.status === 'success' && res.id && !id) {
             idInput.value = res.id;
           }
           if (statusIndicator && res && res.status === 'success') {
@@ -36603,6 +36983,7 @@ SOFTWARE.</div>
         document.getElementById('closeBlogEditorBtn')?.addEventListener('click', async () => {
           if (blogPipWin) { blogPipWin.close(); blogPipWin = null; }
           await saveCurrentBlog(true);
+          stopPresenceSync();
           document.getElementById('blogEditorOverlay').classList.remove('active');
           if (currentView.type === 'get_blogs' || currentView.type === 'view_blog') loadView(currentView);
         });
@@ -38226,7 +38607,7 @@ SOFTWARE.</div>
             this.lastHUD = { score: -1, combo: -1, hp: -1, rank: null, acc: null };
             this.noteStartIndex = 0;
             this.bgCanvas = document.createElement('canvas');
-            this.bgCtx = this.bgCanvas.getContext('2d', { alpha: false });
+            this.bgCtx = this.bgCanvas.getContext('2d');
             this.MAX_PARTICLES = 100;
             this.particles = Array.from({length: this.MAX_PARTICLES}, () => ({active: false}));
             this.pIdx = 0;
@@ -38526,6 +38907,15 @@ SOFTWARE.</div>
                   `${this.calibrationOffsetMs >= 0 ? "+" : ""}${this.calibrationOffsetMs}ms`;
                 localStorage.setItem("rg_cal_offset", this.calibrationOffsetMs);
               });
+
+              document.getElementById("rg-offset-minus")?.addEventListener("click", () => {
+                offsetSlider.value = Math.max(parseInt(offsetSlider.min), parseInt(offsetSlider.value) - parseInt(offsetSlider.step || 1));
+                offsetSlider.dispatchEvent(new Event("input"));
+              });
+              document.getElementById("rg-offset-plus")?.addEventListener("click", () => {
+                offsetSlider.value = Math.min(parseInt(offsetSlider.max), parseInt(offsetSlider.value) + parseInt(offsetSlider.step || 1));
+                offsetSlider.dispatchEvent(new Event("input"));
+              });
             }
 
             const speedSlider = document.getElementById("rg-speed-slider");
@@ -38534,8 +38924,18 @@ SOFTWARE.</div>
               document.getElementById("rg-speed-display").textContent = `${this.userTickSpeed}x`;
               speedSlider.addEventListener("input", (e) => {
                 this.userTickSpeed = parseFloat(e.target.value);
+                this.userTickSpeed = Math.round(this.userTickSpeed * 10) / 10;
                 document.getElementById("rg-speed-display").textContent = `${this.userTickSpeed}x`;
                 localStorage.setItem("rg_tick_speed", this.userTickSpeed);
+              });
+
+              document.getElementById("rg-speed-minus")?.addEventListener("click", () => {
+                speedSlider.value = Math.max(parseFloat(speedSlider.min), parseFloat(speedSlider.value) - parseFloat(speedSlider.step || 0.1));
+                speedSlider.dispatchEvent(new Event("input"));
+              });
+              document.getElementById("rg-speed-plus")?.addEventListener("click", () => {
+                speedSlider.value = Math.min(parseFloat(speedSlider.max), parseFloat(speedSlider.value) + parseFloat(speedSlider.step || 0.1));
+                speedSlider.dispatchEvent(new Event("input"));
               });
             }
 
@@ -38545,12 +38945,22 @@ SOFTWARE.</div>
               document.getElementById("rg-sfx-display").textContent = Math.round(this.sfxVolume * 100) + "%";
               sfxSlider.addEventListener("input", (e) => {
                 this.sfxVolume = parseFloat(e.target.value);
+                this.sfxVolume = Math.round(this.sfxVolume * 100) / 100;
                 document.getElementById("rg-sfx-display").textContent = Math.round(this.sfxVolume * 100) + "%";
                 localStorage.setItem("rg_sfx_volume", this.sfxVolume);
                 if (this.sfxVolume > 0 && !this.sfxCtx) {
                   this.sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
                 }
                 this.playHitSFX();
+              });
+
+              document.getElementById("rg-sfx-minus")?.addEventListener("click", () => {
+                sfxSlider.value = Math.max(parseFloat(sfxSlider.min), parseFloat(sfxSlider.value) - parseFloat(sfxSlider.step || 0.05));
+                sfxSlider.dispatchEvent(new Event("input"));
+              });
+              document.getElementById("rg-sfx-plus")?.addEventListener("click", () => {
+                sfxSlider.value = Math.min(parseFloat(sfxSlider.max), parseFloat(sfxSlider.value) + parseFloat(sfxSlider.step || 0.05));
+                sfxSlider.dispatchEvent(new Event("input"));
               });
             }
 
@@ -38758,9 +39168,13 @@ SOFTWARE.</div>
             document.getElementById("rg-btn-quit").addEventListener("click", () => {
               pauseDialog.classList.add("rg-hidden");
               this.switchScreen("hub");
+              document.getElementById("rg-dialog-play").classList.remove("rg-hidden");
             });
 
-            document.getElementById("rg-btn-result-back").addEventListener("click", () => this.switchScreen("hub"));
+            document.getElementById("rg-btn-result-back").addEventListener("click", () => {
+              this.switchScreen("hub");
+              document.getElementById("rg-dialog-play").classList.remove("rg-hidden");
+            });
             document.getElementById("rg-btn-result-retry").addEventListener("click", () => {
               this.switchScreen("loading");
               this.prepGame(this.selectedSong, this.selectedDiff);
@@ -38788,7 +39202,7 @@ SOFTWARE.</div>
               const rect = this.canvas.getBoundingClientRect();
               const w = rect.width;
               const isPortrait = rect.height > rect.width;
-              const maxBotW = isPortrait ? w * 1.15 : w * 1.0;
+              const maxBotW = isPortrait ? w * 1.15 : w * 0.85;
               const sBotW = maxBotW / 6;
               const botW = this.LANES * sBotW;
               const startX = w / 2 - botW / 2;
@@ -38842,9 +39256,28 @@ SOFTWARE.</div>
               e.preventDefault();
             };
 
+            const handleMouseDown = (e) => {
+              if (!this.isPlaying || this.isAutoplay) return;
+              const lane = getLaneFromX(e.clientX);
+              if (lane >= 0 && lane < this.LANES) {
+                this.activeKeysHeld[lane] = true;
+                this.processHit(lane, true, false);
+              }
+            };
+
+            const handleMouseUp = (e) => {
+              if (!this.isPlaying || this.isAutoplay) return;
+              for (let i = 0; i < this.LANES; i++) {
+                this.activeKeysHeld[i] = false;
+              }
+            };
+
             touchLayer.addEventListener("touchstart", handleTouchStart, { passive: false });
             touchLayer.addEventListener("touchmove", handleTouchMove, { passive: false });
             touchLayer.addEventListener("touchend", handleTouchEnd, { passive: false });
+            touchLayer.addEventListener("mousedown", handleMouseDown);
+            touchLayer.addEventListener("mouseup", handleMouseUp);
+            touchLayer.addEventListener("mouseleave", handleMouseUp);
 
             const setupArtistTabs = () => {
               const tabs = ["tracks", "history", "favs", "following"];
@@ -38902,30 +39335,33 @@ SOFTWARE.</div>
             if (q) url += `&q=${encodeURIComponent(q)}`;
 
             try {
-              if (!window.rhythmLevelsMap) {
-                const levelsRes = await fetchData("?action=get_all_rhythm_levels", {}, true);
-                window.rhythmLevelsMap = levelsRes || { levels: {} };
+              // Cache favorites globally only once during the active game session to eliminate HTTP loops
+              if (!window.rhythmFavsSet) {
+                const favData = (await fetchData("?action=get_rhythm_favorites", {}, true)) || [];
+                window.rhythmFavsSet = new Set(Array.isArray(favData) ? favData.map((id) => parseInt(id)) : []);
               }
-              // Sequential pacing (50ms) prevents shared-hosting concurrent socket blocks
-              await new Promise((r) => setTimeout(r, 50));
-              const favData = (await fetchData("?action=get_rhythm_favorites", {}, true)) || [];
-              const favSet = new Set(Array.isArray(favData) ? favData.map((id) => parseInt(id)) : []);
 
-              await new Promise((r) => setTimeout(r, 50));
               const res = await fetchData(url, {}, true);
 
               if (!Array.isArray(res) || res.length === 0) {
                 if (!append && this.listSongsEl)
                   this.listSongsEl.innerHTML =
-                    '<div style="text-align:center; padding: 24px; color: #aaa;">No songs found.</div>';
+                    '<div style="grid-column: 1 / -1; text-align:center; padding: 24px; color: #aaa; width: 100%;">No songs found.</div>';
                 this.allSongsLoaded = true;
               } else {
                 if (!append && this.listSongsEl) {
                   this.listSongsEl.innerHTML = "";
+                  
+                  // Map retrieved levels directly into client cache memory
+                  res.forEach(song => {
+                    if (song.levels) {
+                      if (!window.rhythmLevelsMap) window.rhythmLevelsMap = { levels: {} };
+                      window.rhythmLevelsMap.levels[song.id] = song.levels;
+                    }
+                  });
+
                   if (
-                    window.rhythmLevelsMap &&
-                    window.rhythmLevelsMap.levels &&
-                    Object.keys(window.rhythmLevelsMap.levels).length === 0 &&
+                    (!window.rhythmLevelsMap || !window.rhythmLevelsMap.levels || Object.keys(window.rhythmLevelsMap.levels).length === 0) &&
                     !q
                   ) {
                     const isAdmin =
@@ -38944,7 +39380,7 @@ SOFTWARE.</div>
                   }
                 }
                 res.forEach((song) => {
-                  song.rg_favorite = favSet.has(parseInt(song.id)) ? 1 : 0;
+                  song.rg_favorite = window.rhythmFavsSet.has(parseInt(song.id)) ? 1 : 0;
                   if (this.listSongsEl) this.listSongsEl.appendChild(this.createSongElement(song));
                 });
                 if (res.length < 25) this.allSongsLoaded = true;
@@ -39042,7 +39478,7 @@ SOFTWARE.</div>
               if (!Array.isArray(res) || res.length === 0) {
                 if (!append && this.listFavsEl)
                   this.listFavsEl.innerHTML =
-                    '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite songs yet. Add some!</div>';
+                    '<div style="grid-column: 1 / -1; text-align:center; padding: 24px; color: #aaa; width: 100%;">No favorite songs yet. Add some!</div>';
                 this.allFavsLoaded = true;
               } else {
                 if (!append && this.listFavsEl) this.listFavsEl.innerHTML = "";
@@ -39231,7 +39667,7 @@ SOFTWARE.</div>
               if (!Array.isArray(res) || res.length === 0) {
                 if (!append && this.listOfflineEl)
                   this.listOfflineEl.innerHTML =
-                    '<div style="text-align:center; padding: 24px; color: #aaa;">No offline tracks found.</div>';
+                    '<div style="grid-column: 1 / -1; text-align:center; padding: 24px; color: #aaa; width: 100%;">No offline tracks found.</div>';
                 this.allOfflineLoaded = true;
               } else {
                 // Apply Sorting Client-Side to support pure offline sorting without backend queries
@@ -39257,7 +39693,7 @@ SOFTWARE.</div>
 
                 if (!append && chunk.length === 0 && this.listOfflineEl) {
                   this.listOfflineEl.innerHTML =
-                    '<div style="text-align:center; padding: 24px; color: #aaa;">No offline tracks matching search found.</div>';
+                    '<div style="grid-column: 1 / -1; text-align:center; padding: 24px; color: #aaa; width: 100%;">No offline tracks matching search found.</div>';
                 }
 
                 chunk.forEach((song) => {
@@ -39331,7 +39767,7 @@ SOFTWARE.</div>
               if (!Array.isArray(res) || res.length === 0) {
                 if (!append && container)
                   container.innerHTML =
-                    '<div style="text-align:center; padding: 24px; color: #aaa;">Not following anyone.</div>';
+                    '<div style="grid-column: 1 / -1; text-align:center; padding: 24px; color: #aaa; width: 100%;">Not following anyone.</div>';
                 this.allArtistFollowingLoaded = true;
               } else {
                 if (!append && container) container.innerHTML = "";
@@ -39394,10 +39830,11 @@ SOFTWARE.</div>
               if (n.isLong) {
                 const yTop = height - n.endTime * pxPerSec - 20;
                 const h = Math.max(5, yBottom - yTop);
-                svg += `<rect x="${x + 4}" y="${yTop}" width="32" height="${h}" fill="rgba(255, 59, 48, 0.4)" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
                 if (n.hitEndSwipe) {
+                  svg += `<rect x="${x + 4}" y="${yTop}" width="32" height="${h}" fill="rgba(255, 0, 255, 0.4)" stroke="#ff00ff" stroke-width="2" rx="4"/>`;
                   svg += `<rect x="${x + 4}" y="${yTop - 8}" width="32" height="16" fill="#ff00ff" stroke="#fff" stroke-width="2" rx="4"/>`;
                 } else {
+                  svg += `<rect x="${x + 4}" y="${yTop}" width="32" height="${h}" fill="rgba(255, 59, 48, 0.4)" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
                   svg += `<rect x="${x + 4}" y="${yTop - 8}" width="32" height="16" fill="#ff3b30" stroke="#000" stroke-width="2" rx="4"/>`;
                 }
               } else {
@@ -39455,10 +39892,29 @@ SOFTWARE.</div>
             document.querySelectorAll(".rg-diff-btn").forEach((btn) => {
               const diffKey = btn.dataset.diff;
               const defaultText = diffMap[diffKey] || "Diff";
-              if (lvlData && lvlData.levels && lvlData.levels[diffKey] !== undefined) {
-                btn.innerHTML = `${defaultText} <span style="font-size:0.7rem; opacity:0.65; display:block; font-weight:bold; margin-top:2px;">Lv.${lvlData.levels[diffKey]}</span>`;
+              let textColor = diffKey === 'demon' ? '#ff3b30' : '#aaa';
+              
+              if (btn.classList.contains('active')) {
+                 btn.style.backgroundColor = diffKey === 'demon' ? '#4a0000' : '#2a2a2a';
+                 btn.style.borderColor = diffKey === 'demon' ? '#ff3b30' : '#555';
               } else {
-                btn.innerHTML = `${defaultText} <span style="font-size:0.7rem; opacity:0.4; display:block; margin-top:2px;">Lv.--</span>`;
+                 btn.style.backgroundColor = '#1a1a1a';
+                 btn.style.borderColor = '#333';
+              }
+
+              btn.addEventListener('click', () => {
+                 document.querySelectorAll(".rg-diff-btn").forEach((b) => {
+                    b.style.backgroundColor = '#1a1a1a';
+                    b.style.borderColor = '#333';
+                 });
+                 btn.style.backgroundColor = diffKey === 'demon' ? '#4a0000' : '#2a2a2a';
+                 btn.style.borderColor = diffKey === 'demon' ? '#ff3b30' : '#555';
+              });
+
+              if (lvlData && lvlData.levels && lvlData.levels[diffKey] !== undefined) {
+                btn.innerHTML = `${defaultText} <span class="lvl" style="font-size:0.7rem; color:${textColor}; display:block; font-weight:bold; margin-top:2px;">LV.${lvlData.levels[diffKey]}</span>`;
+              } else {
+                btn.innerHTML = `${defaultText} <span class="lvl" style="font-size:0.7rem; color:${textColor}; opacity:0.4; display:block; margin-top:2px;">LV.--</span>`;
               }
             });
 
@@ -39877,7 +40333,7 @@ SOFTWARE.</div>
               const idx = this.activeCodes.indexOf(e.code);
               if (idx !== -1) {
                 this.activeKeysHeld[idx] = true;
-                this.processHit(idx, true);
+                this.processHit(idx, true, false, true); // Passes isDesktopKeyboard flag
                 e.preventDefault();
                 e.stopPropagation();
               }
@@ -39890,7 +40346,7 @@ SOFTWARE.</div>
               const idx = this.activeCodes.indexOf(e.code);
               if (idx !== -1) {
                 this.activeKeysHeld[idx] = false;
-                this.processHit(idx, true, true); // Desktop keyup triggers swipe
+                this.processHit(idx, true, true, true); // Desktop keyup triggers swipe
               }
             }
           }
@@ -40091,11 +40547,17 @@ SOFTWARE.</div>
             chunk.forEach((song) => this.listFavsEl.appendChild(this.createSongElement(song)));
           }
 
-          calculateLevel(notes, duration) {
+          calculateLevel(notes, duration, diff = "medium", density_multiplier = 1.0) {
             if (!duration || duration <= 0) return 1;
-            const nps = notes.length / duration;
-            const level = Math.round(nps * 0.42);
-            return Math.max(1, Math.min(30, level));
+            const nps = (notes.length / duration) / Math.max(0.1, Math.min(10.0, density_multiplier));
+            let level = 1;
+            if (diff === "easy") level = Math.round(nps * 1.5) + 3;
+            else if (diff === "medium") level = Math.round(nps * 2.0) + 8;
+            else if (diff === "hard") level = Math.round(nps * 2.5) + 14;
+            else if (diff === "expert") level = Math.round(nps * 3.0) + 21;
+            else if (diff === "master") level = Math.round(nps * 3.5) + 26;
+            else if (diff === "demon") level = Math.round(nps * 4.0) + 30;
+            return Math.max(1, Math.min(40, level));
           }
 
           getRankFromStats(perfect, great, good, bad, miss) {
@@ -40137,32 +40599,20 @@ SOFTWARE.</div>
               if (this.rgSongCache[song.id]) {
                 progressText.textContent = `Loading from cache...`;
                 playableUrl = this.rgSongCache[song.id].blobUrl;
-              } else {
-                const response = await fetch(playableUrl);
-                if (!response.ok) throw new Error("Audio stream unreachable.");
-                
-                const contentLength = response.headers.get('content-length');
-                let blob;
-                if (!contentLength) {
-                  progressText.textContent = `Downloading audio...`;
-                  blob = await response.blob();
+              } else if (!navigator.onLine) {
+                progressText.textContent = `Extracting from hardware cache...`;
+                const response = await caches.match(`?action=get_stream&id=${song.id}`);
+                if (response) {
+                  const blob = await response.blob();
+                  playableUrl = URL.createObjectURL(blob);
+                  this.rgSongCache[song.id] = { blobUrl: playableUrl };
                 } else {
-                  const total = parseInt(contentLength, 10);
-                  let loaded = 0;
-                  const reader = response.body.getReader();
-                  const chunks = [];
-                  while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    chunks.push(value);
-                    loaded += value.length;
-                    const pct = Math.round((loaded / total) * 100);
-                    if (progressText) progressText.textContent = `Preparing audio... ${pct}%`;
-                  }
-                  blob = new Blob(chunks, { type: response.headers.get('content-type') || 'audio/mpeg' });
+                  throw new Error("Song not available offline.");
                 }
-                playableUrl = URL.createObjectURL(blob);
-                this.rgSongCache[song.id] = { blobUrl: playableUrl };
+              } else {
+                progressText.textContent = `Connecting to stream...`;
+                // Instant load bypass! Let HTML5 Audio handle the buffering directly.
+                playableUrl = `?action=get_stream&id=${song.id}`;
               }
 
               progressText.textContent = `Loading note chart...`;
@@ -40195,6 +40645,13 @@ SOFTWARE.</div>
 
               this.audioPlayback = new Audio(playableUrl);
               this.audioPlayback.crossOrigin = "anonymous";
+              
+              // ANTI-CHEAT: Prevent pausing via hardware buttons or OS interruptions
+              this.audioPlayback.addEventListener('pause', () => {
+                if (this.isPlaying && !this.isAutoplay) {
+                  this.audioPlayback.play().catch(e => console.warn("Anti-cheat resume blocked:", e));
+                }
+              });
 
               this.startGame(song.title, diff);
             } catch (err) {
@@ -40298,37 +40755,53 @@ SOFTWARE.</div>
             this.LANES = diff === "easy" || diff === "medium" ? 4 : 6;
             this.audioBuffer = { duration: duration || 180, sampleRate: 44100 };
             let spacing = 0.5;
-            if (diff === "easy") spacing = 0.6;
+            if (diff === "easy") spacing = 0.8;
             else if (diff === "medium") spacing = 0.45;
-            else if (diff === "hard") spacing = 0.35;
-            else if (diff === "expert") spacing = 0.25;
-            else if (diff === "master") spacing = 0.18;
-            else if (diff === "demon") spacing = 0.12;
+            else if (diff === "hard") spacing = 0.28;
+            else if (diff === "expert") spacing = 0.18;
+            else if (diff === "master") spacing = 0.12;
+            else if (diff === "demon") spacing = 0.08;
 
             const notes = [];
             let lastLane = -1;
             const totalTime = duration || 180;
+            
+            const restrictHolds = ['easy', 'medium', 'hard', 'expert'].includes(diff);
+            let anyHoldUntil = 0;
+            let laneBusyUntil = Array(this.LANES).fill(0);
 
             for (let t = 1.0; t < totalTime - 2.0; t += spacing) {
+              if (restrictHolds && t < anyHoldUntil) continue;
+
               if (Math.sin(t * 1.5) > -0.4) {
                 let lane = Math.floor(Math.abs(Math.sin(t * 8)) * this.LANES) % this.LANES;
-                if (lane === lastLane) lane = (lane + 1) % this.LANES;
+                
+                let attempts = 0;
+                while ((lane === lastLane || t < laneBusyUntil[lane]) && attempts < this.LANES) {
+                  lane = (lane + 1) % this.LANES;
+                  attempts++;
+                }
+                if (attempts >= this.LANES) continue;
 
                 const isLong = Math.sin(t * 4) > 0.85;
                 const dur = isLong ? 0.4 : 0;
+                const hitEndSwipe = isLong && (Math.sin(t * 10) > 0.2);
+
+                laneBusyUntil[lane] = t + dur;
+                if (isLong) anyHoldUntil = Math.max(anyHoldUntil, t + dur);
 
                 notes.push({
                   time: t + 2.0,
                   lane,
                   isLong,
                   endTime: t + 2.0 + dur,
+                  hitEndSwipe: hitEndSwipe,
                   hitStart: false,
                   hitEnd: false,
                   missed: false,
                   holding: false,
                 });
                 lastLane = lane;
-                t += dur;
               }
             }
             this.chartNotes = notes;
@@ -40339,6 +40812,22 @@ SOFTWARE.</div>
             document.getElementById("rg-in-game-title").textContent = title;
             const pauseDiffEl = document.getElementById("rg-pause-diff-display");
             if (pauseDiffEl) pauseDiffEl.textContent = diff;
+
+            // Inject dynamic blurred cover background
+            const gameScreen = document.getElementById("rg-screen-game");
+            if (gameScreen) {
+              gameScreen.style.backgroundColor = "transparent";
+              let gameBg = document.getElementById("rg-game-bg");
+              if (!gameBg) {
+                gameBg = document.createElement("div");
+                gameBg.id = "rg-game-bg";
+                gameBg.style.cssText = "position:absolute; top:-40px; left:-40px; right:-40px; bottom:-40px; background-size:cover; background-position:center; filter:blur(40px) brightness(0.35); z-index:0; pointer-events:none; transition: background-image 0.5s ease;";
+                gameScreen.insertBefore(gameBg, gameScreen.firstChild);
+              }
+              if (this.selectedSong) {
+                gameBg.style.backgroundImage = `url('?action=get_image&id=${this.selectedSong.id}&v=${this.selectedSong.last_modified || 0}')`;
+              }
+            }
 
             this.curScore = 0;
             this.curCombo = 0;
@@ -40389,6 +40878,18 @@ SOFTWARE.</div>
             this.startGameTimeout = setTimeout(() => {
               if (this.audioPlayback) this.audioPlayback.play().catch((e) => console.warn(e));
               this.isPlaying = true;
+              
+              // ANTI-CHEAT: completely nuke the media session so it hides from the lock screen
+              if ('mediaSession' in navigator) {
+                navigator.mediaSession.metadata = null;
+                navigator.mediaSession.setActionHandler('play', null);
+                navigator.mediaSession.setActionHandler('pause', null);
+                navigator.mediaSession.setActionHandler('previoustrack', null);
+                navigator.mediaSession.setActionHandler('nexttrack', null);
+                navigator.mediaSession.setActionHandler('seekbackward', null);
+                navigator.mediaSession.setActionHandler('seekforward', null);
+              }
+              
               requestAnimationFrame(this.gameLoop.bind(this));
             }, 1000);
           }
@@ -40413,50 +40914,85 @@ SOFTWARE.</div>
           }
 
           cacheBackground(w, h) {
+            this.cw = w;
+            this.ch = h;
+            this.wHalf = w / 2;
+            this.vanY = h * 0.15;
+            this.hwH = h * 0.72;
+            this.judY = this.vanY + this.hwH;
+            const isPortrait = h > w;
+            // Extremely narrow top lanes to simulate deep 3D perspective
+            const maxTopW = isPortrait ? w * 0.15 : w * 0.08; 
+            const maxBotW = isPortrait ? w * 1.15 : w * 0.85;
+            this.topW = this.LANES * (maxTopW / 6);
+            this.botW = this.LANES * (maxBotW / 6);
+
             const ctx = this.bgCtx;
-            ctx.fillStyle = "#000";
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = "rgba(10, 10, 10, 0.45)"; // Dim the blurred backdrop
             ctx.fillRect(0, 0, w, h);
 
-            const vanY = h * 0.15, hwH = h * 0.72, judY = vanY + hwH;
-            const isPortrait = h > w;
-            const maxTopW = isPortrait ? w * 0.4 : w * 0.2;
-            const maxBotW = isPortrait ? w * 1.15 : w * 1.0;
-            const topW = this.LANES * (maxTopW / 6);
-            const botW = this.LANES * (maxBotW / 6);
+            // Stage Floor Glass Gradient
+            const floorGrad = ctx.createLinearGradient(0, this.vanY, 0, this.judY);
+            floorGrad.addColorStop(0, "rgba(15, 15, 25, 0.0)");
+            floorGrad.addColorStop(0.5, "rgba(25, 25, 40, 0.4)");
+            floorGrad.addColorStop(1, "rgba(45, 45, 65, 0.85)");
 
             ctx.beginPath();
-            ctx.moveTo(w / 2 - topW / 2, vanY);
-            ctx.lineTo(w / 2 + topW / 2, vanY);
-            ctx.lineTo(w / 2 + botW / 2, judY);
-            ctx.lineTo(w / 2 - botW / 2, judY);
-            ctx.fillStyle = "#0c0a0a";
+            ctx.moveTo(this.wHalf - this.topW / 2, this.vanY);
+            ctx.lineTo(this.wHalf + this.topW / 2, this.vanY);
+            ctx.lineTo(this.wHalf + this.botW / 2, this.judY);
+            ctx.lineTo(this.wHalf - this.botW / 2, this.judY);
+            ctx.fillStyle = floorGrad;
             ctx.fill();
 
-            ctx.strokeStyle = "#ff3b30";
-            ctx.lineWidth = 3;
-            ctx.beginPath();
-            ctx.moveTo(w / 2 - topW / 2, vanY);
-            ctx.lineTo(w / 2 - botW / 2, judY);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(w / 2 + topW / 2, vanY);
-            ctx.lineTo(w / 2 + botW / 2, judY);
-            ctx.stroke();
-
+            // Lane Divider Lines (Fading gradient for depth)
             for (let i = 1; i < this.LANES; i++) {
-              ctx.strokeStyle = "#221111";
+              const lineGrad = ctx.createLinearGradient(0, this.vanY, 0, this.judY);
+              lineGrad.addColorStop(0, "rgba(255, 255, 255, 0.0)");
+              lineGrad.addColorStop(0.2, "rgba(255, 255, 255, 0.05)");
+              lineGrad.addColorStop(1, "rgba(255, 255, 255, 0.4)");
+              
+              ctx.strokeStyle = lineGrad;
               ctx.lineWidth = 1.5;
               ctx.beginPath();
-              ctx.moveTo(w / 2 - topW / 2 + i * (topW / this.LANES), vanY);
-              ctx.lineTo(w / 2 - botW / 2 + i * (botW / this.LANES), judY);
+              ctx.moveTo(this.wHalf - this.topW / 2 + i * (this.topW / this.LANES), this.vanY);
+              ctx.lineTo(this.wHalf - this.botW / 2 + i * (this.botW / this.LANES), this.judY);
               ctx.stroke();
             }
 
-            ctx.strokeStyle = "#ff3b30";
-            ctx.lineWidth = 4;
+            // Outer Edge Glows
+            const edgeGrad = ctx.createLinearGradient(0, this.vanY, 0, this.judY);
+            edgeGrad.addColorStop(0, "rgba(255, 59, 48, 0.0)");
+            edgeGrad.addColorStop(0.5, "rgba(255, 59, 48, 0.6)");
+            edgeGrad.addColorStop(1, "rgba(255, 59, 48, 1.0)");
+
+            ctx.strokeStyle = edgeGrad;
+            ctx.lineWidth = 3;
             ctx.beginPath();
-            ctx.moveTo(w / 2 - botW / 2, judY);
-            ctx.lineTo(w / 2 + botW / 2, judY);
+            ctx.moveTo(this.wHalf - this.topW / 2, this.vanY);
+            ctx.lineTo(this.wHalf - this.botW / 2, this.judY);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(this.wHalf + this.topW / 2, this.vanY);
+            ctx.lineTo(this.wHalf + this.botW / 2, this.judY);
+            ctx.stroke();
+
+            // Judgment Line (Thick, bright, neon glow)
+            ctx.shadowColor = "#ff3b30";
+            ctx.shadowBlur = 15;
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 6;
+            ctx.lineCap = "round";
+            ctx.beginPath();
+            ctx.moveTo(this.wHalf - this.botW / 2 - 5, this.judY);
+            ctx.lineTo(this.wHalf + this.botW / 2 + 5, this.judY);
+            ctx.stroke();
+            
+            // Core inner line overlay to finalize neon effect
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = "#ffb4ab";
+            ctx.lineWidth = 2;
             ctx.stroke();
           }
 
@@ -40581,7 +41117,7 @@ SOFTWARE.</div>
             this.showFeedback("MISS", "#555");
           }
 
-          processHit(lane, isTrusted = false, isSwipeAction = false) {
+          processHit(lane, isTrusted = false, isSwipeAction = false, isDesktopKeyboard = false) {
             if (!isTrusted) {
               if (
                 typeof window.isValidDevToken === "function" &&
@@ -40614,9 +41150,11 @@ SOFTWARE.</div>
                     if (diff < minDiff && diff <= this.JUDGMENT.BAD) { minDiff = diff; tgt = n; }
                   }
                 } else {
-                  if (!n.isSwipe && !n.hitStart) {
-                    const diff = Math.abs(time - n.time);
-                    if (diff < minDiff && diff <= this.JUDGMENT.BAD) { minDiff = diff; tgt = n; }
+                  if (!n.hitStart) {
+                    if (!n.isSwipe || isDesktopKeyboard) {
+                      const diff = Math.abs(time - n.time);
+                      if (diff < minDiff && diff <= this.JUDGMENT.BAD) { minDiff = diff; tgt = n; }
+                    }
                   }
                 }
               }
@@ -40677,6 +41215,12 @@ SOFTWARE.</div>
           gameLoop() {
             if (!this.isPlaying) return;
             const time = this.audioPlayback.currentTime + this.calibrationOffsetMs / 1000;
+            
+            if (this.audioBuffer && this.audioBuffer.duration) {
+              const progressPct = Math.max(0, Math.min(100, (time / this.audioBuffer.duration) * 100));
+              const scoreBar = document.getElementById("rg-in-game-score-bar");
+              if (scoreBar) scoreBar.style.width = progressPct + "%";
+            }
 
             const win = 1.2 / this.laneApproachSpeed;
             
@@ -40718,7 +41262,9 @@ SOFTWARE.</div>
                     this.registerMiss();
                   } else if (n.hitStart && n.holding && !n.hitEnd) {
                     if (n.hitEndSwipe) {
-                       if (time > n.endTime + this.JUDGMENT.BAD) {
+                       if (!this.activeKeysHeld[n.lane] && time < n.endTime - this.JUDGMENT.BAD) {
+                          n.holding = false; n.missed = true; n.completed = true; this.registerMiss();
+                       } else if (time > n.endTime + this.JUDGMENT.BAD) {
                           n.holding = false; n.missed = true; n.completed = true; this.registerMiss();
                        }
                     } else {
@@ -40740,17 +41286,6 @@ SOFTWARE.</div>
               }
             }
 
-            // Particle Physics (Object Pool)
-            for (let i = 0; i < this.MAX_PARTICLES; i++) {
-              let p = this.particles[i];
-              if (p.active) {
-                p.x += p.vx;
-                p.y += p.vy;
-                p.life -= 0.04;
-                if (p.life <= 0) p.active = false;
-              }
-            }
-
             if (this.feedbackTimer > 0) {
               this.feedbackTimer -= 0.016;
               if (this.feedbackTimer <= 0) {
@@ -40759,68 +41294,102 @@ SOFTWARE.</div>
               }
             }
 
-            // Rendering Routine
-            const w = this.canvas.width / (window.devicePixelRatio || 1);
-            const h = this.canvas.height / (window.devicePixelRatio || 1);
+            // Rendering Routine - Ultra Optimized for 60FPS on old hardware
+            const w = this.cw || this.canvas.width / (window.devicePixelRatio || 1);
+            const h = this.ch || this.canvas.height / (window.devicePixelRatio || 1);
             
             // O(1) Pre-rendered offscreen background blit
+            this.ctx.clearRect(0, 0, w, h);
             this.ctx.drawImage(this.bgCanvas, 0, 0, w, h);
 
-            const vanY = h * 0.15, hwH = h * 0.72, judY = vanY + hwH;
-            const isPortrait = h > w;
-            const maxTopW = isPortrait ? w * 0.4 : w * 0.2;
-            const maxBotW = isPortrait ? w * 1.15 : w * 1.0;
-            const topW = this.LANES * (maxTopW / 6);
-            const botW = this.LANES * (maxBotW / 6);
-
-            const getPt = (lane, prog) => {
-              const ease = Math.pow(prog, 1.35);
-              const cY = vanY + ease * hwH;
-              const cW = topW + ease * (botW - topW);
-              const sW = cW / this.LANES;
-              return { x: w / 2 - cW / 2 + lane * sW, y: cY, w: sW };
+            // Fast inline coordinate calculators (0 Object allocations)
+            const calcY = (p) => this.vanY + Math.pow(p, 1.35) * this.hwH;
+            const calcW = (p) => (this.topW + Math.pow(p, 1.35) * (this.botW - this.topW)) / this.LANES;
+            const calcX = (lane, p) => {
+              const cW = this.topW + Math.pow(p, 1.35) * (this.botW - this.topW);
+              return this.wHalf - cW / 2 + lane * (cW / this.LANES);
             };
 
             for (let i = 0; i < this.LANES; i++) {
               if (this.activeKeysHeld[i]) {
-                const pTop = getPt(i, 0),
-                  pBot = getPt(i, 1);
-                this.ctx.fillStyle = "rgba(255, 59, 48, 0.15)";
+                const pyTop = calcY(0), pyBot = calcY(1);
+                const pwTop = calcW(0), pwBot = calcW(1);
+                const pxTop = calcX(i, 0), pxBot = calcX(i, 1);
+                
+                const beamGrad = this.ctx.createLinearGradient(0, pyTop, 0, pyBot);
+                beamGrad.addColorStop(0, "rgba(255, 255, 255, 0.0)");
+                beamGrad.addColorStop(0.6, "rgba(255, 59, 48, 0.15)");
+                beamGrad.addColorStop(1, "rgba(255, 59, 48, 0.65)");
+                
+                this.ctx.fillStyle = beamGrad;
                 this.ctx.beginPath();
-                this.ctx.moveTo(pTop.x, pTop.y);
-                this.ctx.lineTo(pTop.x + pTop.w, pTop.y);
-                this.ctx.lineTo(pBot.x + pBot.w, pBot.y);
-                this.ctx.lineTo(pBot.x, pBot.y);
+                this.ctx.moveTo(pxTop, pyTop);
+                this.ctx.lineTo(pxTop + pwTop, pyTop);
+                this.ctx.lineTo(pxBot + pwBot, pyBot);
+                this.ctx.lineTo(pxBot, pyBot);
                 this.ctx.fill();
               }
             }
 
+            // Target Keys (Sleek Thin Perspective 3D Buttons)
             for (let i = 0; i < this.LANES; i++) {
-              const pt = getPt(i, 1);
-              const cX = pt.x + pt.w / 2;
+              const pTop = 1.0;
+              const pBot = 1.04; // Micro-extension for ultra-thin 3D bottom edge
+
+              const yTop = calcY(pTop);
+              const yBot = calcY(pBot);
+
+              const pwTop = calcW(pTop);
+              const pxTop = calcX(i, pTop);
+              const pwBot = calcW(pBot);
+              const pxBot = calcX(i, pBot);
+
+              const padTop = pwTop * 0.05;
+              const padBot = pwBot * 0.05;
+
+              const xTL = pxTop + padTop;
+              const xTR = pxTop + pwTop - padTop;
+              const xBL = pxBot + padBot;
+              const xBR = pxBot + pwBot - padBot;
+
+              const cX = (xTL + xTR + xBL + xBR) / 4;
+              const keyY = (yTop + yBot) / 2;
+
               this.ctx.beginPath();
-              this.ctx.arc(cX, judY, 16, 0, Math.PI * 2);
-              this.ctx.fillStyle = "#121212";
-              this.ctx.strokeStyle = this.activeKeysHeld[i] ? "#fff" : "#ff3b30";
-              this.ctx.lineWidth = this.activeKeysHeld[i] ? 4 : 2;
+              this.ctx.moveTo(xTL, yTop);
+              this.ctx.lineTo(xTR, yTop);
+              this.ctx.lineTo(xBR, yBot);
+              this.ctx.lineTo(xBL, yBot);
+              this.ctx.closePath();
+
+              // Semi-translucent base filled key for a glassy appearance
+              this.ctx.fillStyle = this.activeKeysHeld[i] ? "rgba(255, 255, 255, 0.35)" : "rgba(30, 30, 40, 0.35)";
               this.ctx.fill();
+              
+              // Very thin sleek outline stroke
+              this.ctx.lineJoin = "round";
+              this.ctx.lineWidth = 1.5;
+              this.ctx.strokeStyle = this.activeKeysHeld[i] ? "#ffffff" : "rgba(255, 255, 255, 0.15)";
+              this.ctx.stroke();
+              
+              // Top glowing edge (Judgment line segment)
+              this.ctx.beginPath();
+              this.ctx.moveTo(xTL, yTop);
+              this.ctx.lineTo(xTR, yTop);
+              this.ctx.strokeStyle = this.activeKeysHeld[i] ? "#06b6d4" : "rgba(255, 255, 255, 0.45)";
+              this.ctx.lineWidth = 3;
+              this.ctx.lineCap = "round";
               this.ctx.stroke();
 
-              this.ctx.fillStyle = this.activeKeysHeld[i] ? "#000" : "#fff";
-              if (this.activeKeysHeld[i]) {
-                this.ctx.beginPath();
-                this.ctx.arc(cX, judY, 14, 0, Math.PI * 2);
-                this.ctx.fillStyle = "#fff";
-                this.ctx.fill();
-                this.ctx.fillStyle = "#000";
-              }
-              this.ctx.font = "bold 14px sans-serif";
+              // Key label (Clean, small, and centered)
+              this.ctx.fillStyle = this.activeKeysHeld[i] ? "#ffffff" : "rgba(255, 255, 255, 0.65)";
+              this.ctx.font = "bold 9px sans-serif";
               this.ctx.textAlign = "center";
               this.ctx.textBaseline = "middle";
-              this.ctx.fillText(this.activeLabels[i], cX, judY + 1);
+              this.ctx.fillText(this.activeLabels[i], cX, keyY);
             }
 
-            // Draw long note bodies first
+            // Draw long note bodies first (Green translucent connection lines)
             for (let i = this.noteStartIndex; i < this.chartNotes.length; i++) {
               const n = this.chartNotes[i];
               if (n.time - time > win) break;
@@ -40830,49 +41399,154 @@ SOFTWARE.</div>
               if (sDel > win && eDel > win) continue;
               if (eDel < -this.JUDGMENT.BAD) continue;
 
-              const pS = Math.max(0, Math.min(1.2, 1 - sDel / win));
-              const pE = Math.max(0, Math.min(1.2, 1 - eDel / win));
+              let pS = 1 - sDel / win;
+              if (pS < 0) pS = 0; else if (pS > 1.2) pS = 1.2;
+              if (n.holding) pS = 1;
+              
+              let pE = 1 - eDel / win;
+              if (pE < 0) pE = 0; else if (pE > 1.2) pE = 1.2;
 
-              const cS = getPt(n.lane, pS), cE = getPt(n.lane, pE);
-              const wS = cS.w * 0.8, wE = cE.w * 0.8;
+              const sY = calcY(pS), eY = calcY(pE);
+              
+              // Pad the width to leave distinct horizontal gaps between lanes
+              const pad = 0.08;
+              const sW = calcW(pS);
+              const eW = calcW(pE);
+              
+              const sXLeft = calcX(n.lane, pS) + (sW * pad);
+              const sXRight = calcX(n.lane, pS) + sW - (sW * pad);
+              const eXLeft = calcX(n.lane, pE) + (eW * pad);
+              const eXRight = calcX(n.lane, pE) + eW - (eW * pad);
 
-              this.ctx.fillStyle = n.holding ? "#e60000" : "#801010";
+              // Elegant Green for Hold, Pink for Swipe-Holds (Sekai Style)
+              let baseFill = n.holding ? "rgba(46, 204, 113, 0.55)" : "rgba(46, 204, 113, 0.35)";
+              if (n.hitEndSwipe) {
+                baseFill = n.holding ? "rgba(255, 77, 166, 0.55)" : "rgba(255, 77, 166, 0.35)";
+              }
+              this.ctx.fillStyle = baseFill;
+              
               this.ctx.beginPath();
-              this.ctx.moveTo(cS.x + (cS.w - wS) / 2, cS.y);
-              this.ctx.lineTo(cS.x + (cS.w + wS) / 2, cS.y);
-              this.ctx.lineTo(cE.x + (cE.w + wE) / 2, cE.y);
-              this.ctx.lineTo(cE.x + (cE.w - wE) / 2, cE.y);
+              this.ctx.moveTo(sXLeft, sY);
+              this.ctx.lineTo(sXRight, sY);
+              this.ctx.lineTo(eXRight, eY);
+              this.ctx.lineTo(eXLeft, eY);
+              this.ctx.closePath();
               this.ctx.fill();
             }
 
-            // Draw note heads
+            // Draw note heads (Flat 2D Perspective Polygons with rounded corners)
             for (let i = this.noteStartIndex; i < this.chartNotes.length; i++) {
               const n = this.chartNotes[i];
               if (n.time - time > win) break;
               if (n.completed) continue;
+
+              const drawPerspectiveNote = (lane, pBottom, type) => {
+                let pTop = pBottom - 0.022; // Sleek thin note bodies (2.2% of track length)
+                if (pTop < 0) pTop = 0;
+                
+                const yBot = calcY(pBottom);
+                const yTop = calcY(pTop);
+                
+                const pad = 0.08; // Noticeable gap between lanes
+                const wBot = calcW(pBottom);
+                const xBotLeft = calcX(lane, pBottom) + (wBot * pad);
+                const xBotRight = calcX(lane, pBottom) + wBot - (wBot * pad);
+                
+                const wTop = calcW(pTop);
+                const xTopLeft = calcX(lane, pTop) + (wTop * pad);
+                const xTopRight = calcX(lane, pTop) + wTop - (wTop * pad);
+
+                // 1. Draw Outer Dark Border (Creates high contrast against background lanes) [1]
+                this.ctx.beginPath();
+                this.ctx.moveTo(xBotLeft, yBot);
+                this.ctx.lineTo(xBotRight, yBot);
+                this.ctx.lineTo(xTopRight, yTop);
+                this.ctx.lineTo(xTopLeft, yTop);
+                this.ctx.closePath();
+                
+                this.ctx.lineJoin = "round";
+                this.ctx.lineWidth = Math.max(5, 14 * pBottom);
+                this.ctx.strokeStyle = "rgba(0, 0, 0, 0.6)";
+                this.ctx.stroke();
+
+                // Base Colors (Vibrant Project Sekai Palette)
+                let mainColor, lightColor, shadowColor;
+                if (type === 'swipe') {
+                  mainColor = "#ff4da6";   // Hot Pink
+                  lightColor = "#ffb3df";  // Light Pink
+                  shadowColor = "#cc0066"; // Deep Magenta
+                } else if (type === 'hold' || type === 'holdEnd') {
+                  mainColor = "#2ecc71";   // Emerald Green
+                  lightColor = "#a3ebd6";  // Mint Green
+                  shadowColor = "#1b8a47"; // Forest Green
+                } else {
+                  mainColor = "#00d2ff";   // Cyan/Vibrant Blue
+                  lightColor = "#99efff";  // Ice Blue
+                  shadowColor = "#008da6"; // Deep Teal
+                }
+
+                // 2. Draw Main Filled Body
+                this.ctx.fillStyle = mainColor;
+                this.ctx.fill();
+                
+                this.ctx.lineWidth = Math.max(3, 10 * pBottom);
+                this.ctx.strokeStyle = mainColor;
+                this.ctx.stroke();
+
+                // 3. Draw Bottom shadow inside the capsule
+                this.ctx.beginPath();
+                this.ctx.moveTo(xBotLeft, yBot);
+                this.ctx.lineTo(xBotRight, yBot);
+                this.ctx.strokeStyle = shadowColor;
+                this.ctx.lineWidth = Math.max(1.5, 4 * pBottom);
+                this.ctx.stroke();
+
+                // 4. Draw Top Highlight
+                this.ctx.beginPath();
+                this.ctx.moveTo(xTopLeft, yTop);
+                this.ctx.lineTo(xTopRight, yTop);
+                this.ctx.strokeStyle = lightColor;
+                this.ctx.lineWidth = Math.max(1.5, 4 * pBottom);
+                this.ctx.stroke();
+
+                // 5. Draw the iconic inner white horizontal bar
+                const midY = (yBot + yTop) / 2;
+                const midXLeft = (xBotLeft + xTopLeft) / 2;
+                const midXRight = (xBotRight + xTopRight) / 2;
+                
+                this.ctx.beginPath();
+                this.ctx.moveTo(midXLeft + 4, midY);
+                this.ctx.lineTo(midXRight - 4, midY);
+                this.ctx.strokeStyle = "#ffffff";
+                this.ctx.lineWidth = Math.max(1.5, 4 * pBottom);
+                this.ctx.lineCap = "round";
+                this.ctx.stroke();
+
+                if (type === 'swipe') {
+                  // Beautiful sleek Chevron arrow inside the pink note
+                  const cX = (xBotLeft + xBotRight) / 2;
+                  const arrowH = (yBot - yTop) * 1.6;
+                  const arrowW = (xBotRight - xBotLeft) * 0.18;
+                  
+                  this.ctx.beginPath();
+                  this.ctx.moveTo(cX - arrowW, midY + arrowH/6);
+                  this.ctx.lineTo(cX, midY - arrowH/3);
+                  this.ctx.lineTo(cX + arrowW, midY + arrowH/6);
+                  
+                  this.ctx.strokeStyle = "#ffffff";
+                  this.ctx.lineWidth = Math.max(2, 5 * pBottom);
+                  this.ctx.lineCap = "round";
+                  this.ctx.lineJoin = "round";
+                  this.ctx.stroke();
+                }
+              };
 
               if (!n.isLong && !n.hitStart) {
                 const del = n.time - time;
                 if (del <= win && del >= -this.JUDGMENT.BAD) {
                   const p = 1 - del / win;
                   if (p >= 0 && p <= 1.2) {
-                    const pt = getPt(n.lane, p);
-                    const nW = pt.w * 0.85, nH = 10 + p * 15;
-                    this.ctx.fillStyle = n.isSwipe ? "#ff00ff" : "#fff";
-                    this.ctx.strokeStyle = n.isSwipe ? "#fff" : "#ff3b30";
-                    this.ctx.lineWidth = 2 + p * 2;
-                    this.ctx.beginPath();
-                    this.ctx.roundRect(pt.x + (pt.w - nW) / 2, pt.y - nH / 2, nW, nH, 6);
-                    this.ctx.fill();
-                    this.ctx.stroke();
-                    if (n.isSwipe) {
-                      this.ctx.fillStyle = "#fff";
-                      this.ctx.beginPath();
-                      this.ctx.moveTo(pt.x + pt.w/2, pt.y - nH/2 - 5);
-                      this.ctx.lineTo(pt.x + pt.w/2 - 12, pt.y + nH/2 - 2);
-                      this.ctx.lineTo(pt.x + pt.w/2 + 12, pt.y + nH/2 - 2);
-                      this.ctx.fill();
-                    }
+                    drawPerspectiveNote(n.lane, p, n.isSwipe ? 'swipe' : 'normal');
                   }
                 }
               } else if (n.isLong) {
@@ -40880,52 +41554,36 @@ SOFTWARE.</div>
                   const del = n.time - time;
                   if (del <= win && del >= -this.JUDGMENT.BAD) {
                     const p = 1 - del / win;
-                    const pt = getPt(n.lane, p);
-                    const nW = pt.w * 0.85, nH = 10 + p * 15;
-                    this.ctx.fillStyle = "#ff3b30";
-                    this.ctx.strokeStyle = "#fff";
-                    this.ctx.lineWidth = 2;
-                    this.ctx.beginPath();
-                    this.ctx.roundRect(pt.x + (pt.w - nW) / 2, pt.y - nH / 2, nW, nH, 6);
-                    this.ctx.fill();
-                    this.ctx.stroke();
+                    drawPerspectiveNote(n.lane, p, 'hold');
                   }
                 }
                 if (!n.hitEnd) {
                   const del = n.endTime - time;
                   if (del <= win && del >= -this.JUDGMENT.BAD) {
                     const p = 1 - del / win;
-                    const pt = getPt(n.lane, p);
-                    const nW = pt.w * 0.85, nH = 10 + p * 15;
-                    this.ctx.fillStyle = n.hitEndSwipe ? "#ff00ff" : "#ff3b30";
-                    this.ctx.strokeStyle = n.hitEndSwipe ? "#fff" : "#000";
-                    this.ctx.lineWidth = n.hitEndSwipe ? 2 + p * 2 : 3;
-                    this.ctx.beginPath();
-                    this.ctx.roundRect(pt.x + (pt.w - nW) / 2, pt.y - nH / 2, nW, nH, 6);
-                    this.ctx.fill();
-                    this.ctx.stroke();
-                    if (n.hitEndSwipe) {
-                      this.ctx.fillStyle = "#fff";
-                      this.ctx.beginPath();
-                      this.ctx.moveTo(pt.x + pt.w/2, pt.y - nH/2 - 5);
-                      this.ctx.lineTo(pt.x + pt.w/2 - 12, pt.y + nH/2 - 2);
-                      this.ctx.lineTo(pt.x + pt.w/2 + 12, pt.y + nH/2 - 2);
-                      this.ctx.fill();
-                    }
+                    drawPerspectiveNote(n.lane, p, n.hitEndSwipe ? 'swipe' : 'holdEnd');
                   }
                 }
               }
             }
 
+            // Particle Physics (Object Pool) - Highly optimized using fillRect and globalAlpha
             for (let i = 0; i < this.MAX_PARTICLES; i++) {
               let p = this.particles[i];
               if (p.active) {
-                this.ctx.beginPath();
-                this.ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-                this.ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${p.life})`;
-                this.ctx.fill();
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.04;
+                if (p.life <= 0) {
+                  p.active = false;
+                } else {
+                  this.ctx.globalAlpha = p.life;
+                  this.ctx.fillStyle = p.color;
+                  this.ctx.fillRect(p.x - p.size, p.y - p.size, p.size * 2, p.size * 2);
+                }
               }
             }
+            this.ctx.globalAlpha = 1.0;
 
             if (this.audioPlayback.ended || time > this.audioBuffer.duration + 2.0) {
               this.endGame(false);
@@ -40945,7 +41603,7 @@ SOFTWARE.</div>
             const sW = botW / this.LANES;
             const cX = w / 2 - botW / 2 + lane * sW + sW / 2;
             const cY = h * 0.15 + h * 0.72;
-            const col = white ? [255, 255, 255] : [255, 59, 48];
+            const colorStr = white ? "#ffffff" : "#ff3b30";
             
             for (let i = 0; i < 12; i++) {
               let p = this.particles[this.pIdx];
@@ -40954,11 +41612,9 @@ SOFTWARE.</div>
               p.y = cY;
               p.vx = (Math.random() - 0.5) * 8;
               p.vy = (Math.random() - 0.8) * 10 - 2;
-              p.size = Math.random() * 3 + 2;
-              p.r = col[0];
-              p.g = col[1];
-              p.b = col[2];
-              p.life = 1;
+              p.size = Math.random() * 4 + 2;
+              p.color = colorStr;
+              p.life = 1.0;
               
               this.pIdx++;
               if (this.pIdx >= this.MAX_PARTICLES) this.pIdx = 0;
@@ -41003,7 +41659,7 @@ SOFTWARE.</div>
               if (!Array.isArray(res) || res.length === 0) {
                 if (!append && container)
                   container.innerHTML =
-                    '<div style="text-align:center; padding: 24px; color: #888;">No artists found.</div>';
+                    '<div style="grid-column: 1 / -1; text-align:center; padding: 24px; color: #888; width: 100%;">No artists found.</div>';
                 this.allArtistsLoaded = true;
               } else {
                 if (!append && container) container.innerHTML = "";
@@ -41168,7 +41824,7 @@ SOFTWARE.</div>
               if (!Array.isArray(res) || res.length === 0) {
                 if (!append && container)
                   container.innerHTML =
-                    '<div style="text-align:center; padding: 24px; color: #888;">No tracks found.</div>';
+                    '<div style="grid-column: 1 / -1; text-align:center; padding: 24px; color: #888; width: 100%;">No tracks found.</div>';
                 this.allArtistSongsLoaded = true;
               } else {
                 if (!append && container) container.innerHTML = "";
@@ -41212,7 +41868,7 @@ SOFTWARE.</div>
               if (!Array.isArray(res) || res.length === 0) {
                 if (!append && container)
                   container.innerHTML =
-                    '<div style="text-align:center; padding: 24px; color: #aaa;">No favorite tracks found.</div>';
+                    '<div style="grid-column: 1 / -1; text-align:center; padding: 24px; color: #aaa; width: 100%;">No favorite tracks found.</div>';
                 this.allArtistFavsLoaded = true;
               } else {
                 if (!append && container) container.innerHTML = "";
