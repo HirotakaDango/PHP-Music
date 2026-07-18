@@ -380,7 +380,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '6.4');
+define('APP_VERSION', '6.5');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -5728,67 +5728,105 @@ function romanize_string($string) {
 }
 
 function generatePhpChart($song_id, $duration, $difficulty, $density_multiplier = 1.0) {
-  $seed = crc32($song_id . '_' . $difficulty);
+  // 1. Highly sophisticated deterministic seed generator based on song ID and duration
+  $seed_string = $song_id . '_' . $difficulty . '_' . $duration;
+  $seed = crc32($seed_string) + hexdec(substr(md5($seed_string), 0, 8));
+  
+  // 2. Xorshift RNG for superior distribution compared to standard LCG
   $rng = function() use (&$seed) {
-    $seed = ($seed * 1103515245 + 12345) & 0x7fffffff;
-    return $seed / 0x7fffffff;
+    $seed ^= $seed << 13;
+    $seed ^= $seed >> 17;
+    $seed ^= $seed << 5;
+    // Keep within 32-bit unsigned bounds and return float 0.0 to 1.0
+    return abs($seed % 1000000) / 1000000;
   };
 
-  $lanesCount = ($difficulty === 'easy' || $difficulty === 'medium') ? 4 : 6;
+  $lanesCount = ($difficulty === 'easy' || $difficulty === 'medium') ? 4 : ($difficulty === 'demon' ? 10 : 6);
   
+  // 3. Dynamic base spacing calculation
   $base_spacing = 0.500;
-  if ($difficulty === 'easy') $base_spacing = 0.800;
-  elseif ($difficulty === 'medium') $base_spacing = 0.450;
-  elseif ($difficulty === 'hard') $base_spacing = 0.280;
-  elseif ($difficulty === 'expert') $base_spacing = 0.180;
-  elseif ($difficulty === 'master') $base_spacing = 0.120;
-  elseif ($difficulty === 'demon') $base_spacing = 0.080;
+  if ($difficulty === 'easy') $base_spacing = 0.850;
+  elseif ($difficulty === 'medium') $base_spacing = 0.500;
+  elseif ($difficulty === 'hard') $base_spacing = 0.320;
+  elseif ($difficulty === 'expert') $base_spacing = 0.200;
+  elseif ($difficulty === 'master') $base_spacing = 0.140;
+  elseif ($difficulty === 'demon') $base_spacing = 0.025; // 3x extreme density for 10-lane demon
 
   $spacing = $base_spacing / max(0.1, min(10.0, $density_multiplier));
 
   $notes = [];
   $totalTime = $duration ?: 180;
   
+  // 4. Advanced mechanic probabilities per difficulty tier
   $chordChance = 0.0;
-  if ($difficulty === 'hard') $chordChance = 0.15;
-  elseif ($difficulty === 'expert') $chordChance = 0.30;
-  elseif ($difficulty === 'master') $chordChance = 0.45;
-  elseif ($difficulty === 'demon') $chordChance = 0.65;
+  $tripleChordChance = 0.0;
   
-  $swipeChance = ($difficulty === 'easy') ? 0.0 : (($difficulty === 'medium') ? 0.05 : 0.15);
-  $longChance = 0.15;
+  if ($difficulty === 'hard') { $chordChance = 0.18; }
+  elseif ($difficulty === 'expert') { $chordChance = 0.35; $tripleChordChance = 0.05; }
+  elseif ($difficulty === 'master') { $chordChance = 0.55; $tripleChordChance = 0.15; }
+  elseif ($difficulty === 'demon') { $chordChance = 0.75; $tripleChordChance = 0.30; }
+  
+  $swipeChance = ($difficulty === 'easy') ? 0.0 : (($difficulty === 'medium') ? 0.08 : 0.25);
+  $longChance = ($difficulty === 'demon') ? 0.10 : 0.20; // Less holds in demon, more tap stamina drain
 
   $lane_busy_until = array_fill(0, $lanesCount, 0.0);
-  $restrict_holds = in_array($difficulty, ['easy', 'medium', 'hard', 'expert']);
+  $restrict_holds = in_array($difficulty, ['easy', 'medium', 'hard']);
   $any_hold_until = 0.0;
 
-  for ($t = 1.0; $t < $totalTime - 2.0; $t += $spacing) {
+  $is_drop = false;
+  $current_step = $spacing;
+  
+  // 5. Chart Generation Loop with Musical Phrasing Simulation
+  for ($t = 1.0; $t < $totalTime - 2.0; $t += $current_step) {
+    
+    // Simulate musical phrasing/drops (increases density by 20% during 'chorus' sections)
+    if ($t % 20 < 1) {
+      $is_drop = ($rng() > 0.5);
+    }
+    $current_step = $is_drop ? ($spacing * 0.8) : $spacing;
+
+    // Add micro-stutters and syncopation to high difficulties
+    if ($difficulty === 'demon' || $difficulty === 'master') {
+      if ($rng() > 0.85) $current_step *= 0.5; // Double time burst
+      if ($rng() > 0.96) $current_step *= 1.5; // Rest/syncopation break
+    }
+
     if ($restrict_holds && $t < $any_hold_until) {
       continue;
     }
 
-    $isChord = $rng() < $chordChance;
-    $noteCount = $isChord ? 2 : 1;
+    $noteCount = 1;
+    if ($rng() < $chordChance) $noteCount = 2;
+    if ($rng() < $tripleChordChance && $lanesCount === 6) $noteCount = 3;
+
     $allowLong = !($restrict_holds && $noteCount > 1);
     $usedLanes = [];
     
     for ($i = 0; $i < $noteCount; $i++) {
       $lane = floor($rng() * $lanesCount) % $lanesCount;
       $attempts = 0;
-      while ((in_array($lane, $usedLanes) || $t < $lane_busy_until[$lane]) && $attempts < $lanesCount) {
-        $lane = ($lane + 1) % $lanesCount;
+      
+      // Semi-random lane searching to create stairs/trills instead of vertical stacks
+      while ((in_array($lane, $usedLanes) || $t < $lane_busy_until[$lane]) && $attempts < $lanesCount * 2) {
+        $lane = ($lane + ($rng() > 0.5 ? 1 : -1) + $lanesCount) % $lanesCount;
         $attempts++;
       }
-      if ($attempts >= $lanesCount) continue;
+      if ($attempts >= $lanesCount * 2) continue;
+      
       $usedLanes[] = $lane;
       
       $isLong = $allowLong && ($rng() < $longChance);
       $isSwipe = !$isLong && ($rng() < $swipeChance);
       $hitEndSwipe = $isLong && ($rng() < $swipeChance);
       
-      $dur = $isLong ? (0.4 + ($rng() * 0.4)) : 0; 
+      $dur = 0;
+      if ($isLong) {
+        $durBase = 0.2 + ($rng() * 0.6);
+        $dur = round($durBase / $spacing) * $spacing;
+        if ($dur < 0.2) $dur = 0.2;
+      }
       
-      $lane_busy_until[$lane] = $t + $dur;
+      $lane_busy_until[$lane] = $t + $dur + 0.05; // 50ms anti-overlap buffer
       if ($isLong) {
         $any_hold_until = max($any_hold_until, $t + $dur);
       }
@@ -5811,16 +5849,110 @@ function generatePhpChart($song_id, $duration, $difficulty, $density_multiplier 
 }
 
 function calculatePhpLevel($notes, $duration, $difficulty = 'medium', $density_multiplier = 1.0) {
-  if (!$duration || $duration <= 0) return 1;
-  $nps = (count($notes) / $duration) / max(0.1, min(10.0, $density_multiplier));
+  if (!$duration || $duration <= 0 || empty($notes)) return 1;
+
+  $total_notes = count($notes);
+  $nps = ($total_notes / $duration) / max(0.1, min(10.0, $density_multiplier));
+  
+  // 1. Calculate Peak NPS (Rolling 5-second intense window analysis)
+  $peak_nps = 0;
+  $window_size = 5.0;
+  for ($i = 0; $i < $duration; $i += 1.0) {
+    $window_notes = 0;
+    foreach ($notes as $n) {
+      if ($n['time'] >= $i && $n['time'] < $i + $window_size) {
+        $window_notes++;
+      }
+      if ($n['time'] >= $i + $window_size) break; // Optimization exit
+    }
+    $current_window_nps = $window_notes / $window_size;
+    if ($current_window_nps > $peak_nps) {
+      $peak_nps = $current_window_nps;
+    }
+  }
+
+  // 2. Compute Pattern Complexity (Lane variance & Chords & Rhythm irregularity)
+  $chords = 0;
+  $swipes = 0;
+  $holds = 0;
+  $cross_lane_distance = 0;
+  $last_lane = 1;
+  $last_time = 0;
+  $time_variance_sum = 0;
+  $interval_count = 0;
+
+  foreach ($notes as $n) {
+    if ($n['isLong']) $holds++;
+    if ($n['isSwipe']) $swipes++;
+    
+    // Detect simultaneous chords (time diff < 0.05s)
+    if (($n['time'] - $last_time) < 0.05) {
+      $chords++;
+    } else {
+      if ($interval_count > 0 && $nps > 0) {
+        $time_variance_sum += pow(($n['time'] - $last_time) - (1/$nps), 2);
+      }
+      $interval_count++;
+    }
+    
+    $cross_lane_distance += abs($n['lane'] - $last_lane);
+    $last_lane = $n['lane'];
+    $last_time = $n['time'];
+  }
+
+  $chord_ratio = $total_notes > 0 ? ($chords / $total_notes) : 0;
+  $swipe_ratio = $total_notes > 0 ? ($swipes / $total_notes) : 0;
+  $hold_ratio = $total_notes > 0 ? ($holds / $total_notes) : 0;
+  $avg_jump = $total_notes > 0 ? ($cross_lane_distance / $total_notes) : 0;
+  $rhythm_irregularity = $interval_count > 0 ? sqrt($time_variance_sum / $interval_count) : 0;
+
+  // 3. Base Algorithmic Polynomial Score Generation
+  $base_complexity = ($nps * 1.4) + ($peak_nps * 0.9) + ($avg_jump * 3.0) + ($rhythm_irregularity * 12);
+  $mechanic_weight = ($chord_ratio * 18) + ($swipe_ratio * 22) + ($hold_ratio * 5);
+  
+  $raw_score = $base_complexity + $mechanic_weight;
+
+  // 4. Bracket Definition & Tier Multipliers
   $level = 1;
-  if ($difficulty === 'easy') $level = round($nps * 1.5) + 3;
-  elseif ($difficulty === 'medium') $level = round($nps * 2.0) + 8;
-  elseif ($difficulty === 'hard') $level = round($nps * 2.5) + 14;
-  elseif ($difficulty === 'expert') $level = round($nps * 3.0) + 21;
-  elseif ($difficulty === 'master') $level = round($nps * 3.5) + 26;
-  elseif ($difficulty === 'demon') $level = round($nps * 4.0) + 30;
-  return max(1, min(40, (int)$level));
+
+  switch ($difficulty) {
+    case 'easy':
+      $level = ($raw_score * 0.15) + 1;
+      $level = max(1, min(5, $level));
+      break;
+    case 'medium':
+      $level = ($raw_score * 0.35) + 4;
+      $level = max(6, min(12, $level));
+      break;
+    case 'hard':
+      $level = ($raw_score * 0.65) + 10;
+      $level = max(13, min(24, $level));
+      break;
+    case 'expert':
+      $level = ($raw_score * 1.1) + 22;
+      $level = max(25, min(45, $level));
+      break;
+    case 'master':
+      $level = ($raw_score * 1.8) + 40;
+      $level = max(46, min(75, $level));
+      break;
+    case 'demon':
+      // 20x multiplier compared to baseline metrics to represent a massive, yet logical leap
+      $level = ($raw_score * 20.0) + 80;
+      
+      // Adds deterministic chaos based on absolute note count to ensure every song has vastly unique numbers
+      $level += ($total_notes % 50) + ($duration % 10); 
+      $level = max(76, min(999, $level));
+      break;
+    default:
+      $level = 1;
+  }
+
+  // 5. Apply micro-variance offset based on CRC validation so songs with identical stats still have unique difficulty footprints
+  $variance = (crc32($total_notes . $duration) % 5) - 2;
+  $final_level = round($level) + $variance;
+
+  return max(1, (int)$final_level);
 }
 
 function sanitize_for_path($string) {
@@ -14801,8 +14933,49 @@ function perform_cover_scan($db) {
         background-color: var(--rg-bg); overflow: hidden; display: flex; flex-direction: column;
       }
       @media (min-width: 768px) {
-        .rg-app { border-radius: 12px; }
-        .rg-list-container { display: grid !important; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); align-content: start; }
+        .rg-app { border-radius: 0; }
+        .rg-list-container { display: flex !important; flex-direction: column; align-items: stretch; }
+      }
+      
+      /* Project Sekai Style Song Card Row */
+      .rg-song-card-row {
+        background: linear-gradient(90deg, rgba(20, 20, 25, 0.9) 0%, rgba(10, 10, 12, 0.95) 100%);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-left: 4px solid var(--rg-primary);
+        border-radius: 12px;
+        padding: 12px 16px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        cursor: pointer;
+        transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s, border-color 0.2s, background 0.2s;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        width: 100%;
+        margin-bottom: 0.25em;
+      }
+      .rg-song-card-row:hover {
+        transform: scale(1.01) translateX(4px);
+        background: linear-gradient(90deg, rgba(30, 30, 35, 0.95) 0%, rgba(15, 15, 18, 0.98) 100%);
+        border-color: rgba(255, 255, 255, 0.15);
+        border-left-color: var(--rg-primary);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+      }
+      .rg-diff-badge-pill {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 8px 2px 4px;
+        border-radius: 50px;
+        font-family: 'Arial Black', sans-serif;
+        font-size: 0.7rem;
+        font-weight: 900;
+        letter-spacing: 0.5px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+      }
+      .rg-diff-badge-pill .diff-label {
+        background: rgba(0,0,0,0.4);
+        padding: 2px 6px;
+        border-radius: 50px;
       }
       .rg-screen {
         position: absolute; top: 0; left: 0; width: 100%; height: 100%;
@@ -14855,8 +15028,32 @@ function perform_cover_scan($db) {
       .rg-dialog-backdrop { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.85); display: flex; justify-content: center; align-items: center; z-index: 50; }
       .rg-dialog-surface { background-color: var(--rg-surface); border: 1px solid #333; border-radius: 28px; padding: 24px; width: 90%; max-width: 400px; display: flex; flex-direction: column; gap: 24px; }
       .rg-dialog-title { font-size: 1.2rem; font-weight: 700; color: var(--rg-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .rg-diff-btn { background-color: var(--rg-surface-variant); border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.8rem; font-weight: 700; cursor: pointer; text-transform: uppercase; }
-      .rg-diff-btn.active { background-color: #4a0000; border-color: var(--rg-primary); color: var(--rg-primary); }
+      .rg-play-menu-container { width: 100%; max-width: 1000px; padding: 2rem 1rem; margin: 0 auto; height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 2rem; }
+      @media (min-width: 992px) {
+        .rg-play-menu-container { max-width: 100%; padding: 0; flex-direction: row; overflow-y: hidden; align-items: stretch; gap: 0; }
+        .rg-play-menu-left { flex-grow: 1; overflow-y: auto; padding: 4rem 2rem; max-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        .rg-play-menu-right { width: 450px; flex-shrink: 0; height: 100%; max-height: 100%; display: flex; flex-direction: column; border-left: 1px solid #333; background-color: #0a0a0a; }
+        .rg-play-menu-right-inner { background-color: transparent !important; border: none !important; box-shadow: none !important; border-radius: 0 !important; }
+      }
+      @media (max-width: 991.98px) {
+        .rg-play-menu-right-inner { background-color: var(--ytm-surface-2); border-radius: 12px; border: 1px solid #444; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+      }
+
+      .rg-diff-btn { 
+        background-color: var(--ytm-surface-2); border: 1px solid #444; color: #fff; padding: 10px 4px; border-radius: 8px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; transition: all 0.2s;
+      }
+      .rg-diff-btn-inner { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+      .rg-diff-btn:hover { background-color: #333; }
+      
+      .rg-diff-btn[data-diff="easy"].active { background-color: #064E3B; border-color: #10b981; color: #6EE7B7; }
+      .rg-diff-btn[data-diff="medium"].active { background-color: #1E3A8A; border-color: #3b82f6; color: #93C5FD; }
+      .rg-diff-btn[data-diff="hard"].active { background-color: #78350F; border-color: #f59e0b; color: #FCD34D; }
+      .rg-diff-btn[data-diff="expert"].active { background-color: #7f1d1d; border-color: #f43f5e; color: #FDA4AF; }
+      .rg-diff-btn[data-diff="master"].active { background-color: #4C1D95; border-color: #a855f7; color: #D8B4FE; }
+      .rg-diff-btn[data-diff="demon"].active { background-color: #450a0a; border-color: #ff3b30; color: #fca5a5; }
+      
+      .rg-diff-btn .lvl { font-size: 0.7rem; font-weight: bold; opacity: 0.6; }
+      .rg-diff-btn.active .lvl { opacity: 1; }
       .rg-key-btn { background-color: #2a2a2a; border: 2px solid #444; border-radius: 6px; padding: 12px 0; color: #fff; cursor: pointer; font-size: 1.1rem; font-weight: 800; text-align: center; transition: all 0.15s ease; }
       .rg-key-btn:active { background-color: #444; }
       .rg-key-btn.listening { background-color: #fff; border-color: #fff; color: #000; }
@@ -26198,15 +26395,19 @@ SOFTWARE.</div>
                               <!-- Keybindings Card -->
                               <div style="background-color: #1a1a1a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 24px; margin-bottom: 20px;">
                                 <div style="font-size: 0.95rem; font-weight: 700; color: #fff; text-transform: uppercase; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; letter-spacing: 1px;"><i class="bi bi-keyboard fs-5 text-secondary"></i> Lane Keybindings</div>
-                                <div style="display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px;">
-                                  <button class="rg-key-btn" data-lane="0">S</button>
-                                  <button class="rg-key-btn" data-lane="1">D</button>
-                                  <button class="rg-key-btn" data-lane="2">F</button>
-                                  <button class="rg-key-btn" data-lane="3">J</button>
-                                  <button class="rg-key-btn" data-lane="4">K</button>
-                                  <button class="rg-key-btn" data-lane="5">L</button>
+                                <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px;">
+                                  <button class="rg-key-btn" data-lane="0">A</button>
+                                  <button class="rg-key-btn" data-lane="1">S</button>
+                                  <button class="rg-key-btn" data-lane="2">D</button>
+                                  <button class="rg-key-btn" data-lane="3">F</button>
+                                  <button class="rg-key-btn" data-lane="4">G</button>
+                                  <button class="rg-key-btn" data-lane="5">H</button>
+                                  <button class="rg-key-btn" data-lane="6">J</button>
+                                  <button class="rg-key-btn" data-lane="7">K</button>
+                                  <button class="rg-key-btn" data-lane="8">L</button>
+                                  <button class="rg-key-btn" data-lane="9">;</button>
                                 </div>
-                                <div style="font-size: 0.8rem; color: #888; margin-top: 16px; font-weight: 500;"><i class="bi bi-info-circle me-1"></i>Tap a key to rebind. Easy/Med use 4 center lanes.</div>
+                                <div style="font-size: 0.8rem; color: #888; margin-top: 16px; font-weight: 500;"><i class="bi bi-info-circle me-1"></i>Tap a key to rebind. Easy/Med uses 4 center lanes, Demon uses all 10 lanes!</div>
                               </div>
 
                               <!-- Gameplay Sliders Card -->
@@ -26292,54 +26493,66 @@ SOFTWARE.</div>
                       </div>
                     </div>
 
-                    <div id="rg-dialog-play" class="rg-screen rg-hidden" style="z-index: 55; background-color: var(--rg-bg); overflow-y: auto; display: block;">
-                      <div style="width: 100%; max-width: 900px; margin: 0 auto; padding: 48px 16px 120px 16px;">
-                        <div class="row g-4 w-100 m-0 align-items-center justify-content-center">
-                          <div class="col-12 col-lg-6 d-flex flex-column align-items-center text-center">
-                            <img id="rg-dialog-cover" src="" style="width: 200px; height: 200px; object-fit: cover; border-radius: 16px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); margin-bottom: 24px; flex-shrink: 0; background-color: var(--rg-surface-variant);">
-                            <div class="rg-dialog-title w-100" id="rg-dialog-song-name" style="margin-bottom: 32px; font-size: 2.2rem; font-weight: 800; color: var(--rg-primary); line-height: 1.2;">Song Name</div>
+                    <div id="rg-dialog-play" class="rg-screen rg-hidden" style="z-index: 55; background-color: rgba(0,0,0,0.85); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); display: flex;">
+                      
+                      <div class="rg-play-menu-container">
+                        <!-- LEFT COLUMN: Track Details & Controls -->
+                        <div class="rg-play-menu-left d-flex flex-column align-items-center text-center modern-custom-scroll">
+                          
+                          <img id="rg-dialog-cover" src="" style="width: 200px; height: 200px; object-fit: cover; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 8px 24px rgba(0,0,0,0.8); margin-bottom: 24px; flex-shrink: 0;">
+                          
+                          <div class="rg-dialog-title w-100 text-truncate" id="rg-dialog-song-name" style="margin-bottom: 32px; font-size: 2rem; font-weight: 800; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">Song Name</div>
 
-                            <div style="width: 100%; max-width: 360px; margin: 0 auto;">
-                              <div style="font-size: 0.8rem; font-weight: 700; color: #777; margin-bottom: 12px; text-align: left; text-transform: uppercase;">Select Difficulty</div>
-                              <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
-                                <button class="rg-diff-btn active" data-diff="easy" style="background-color: #1a1a1a; border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">EASY <span class="lvl" style="font-size: 0.7rem; color: #aaa; font-weight: bold;">LV.--</span></button>
-                                <button class="rg-diff-btn" data-diff="medium" style="background-color: #1a1a1a; border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">MED <span class="lvl" style="font-size: 0.7rem; color: #aaa; font-weight: bold;">LV.--</span></button>
-                                <button class="rg-diff-btn" data-diff="hard" style="background-color: #1a1a1a; border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">HARD <span class="lvl" style="font-size: 0.7rem; color: #aaa; font-weight: bold;">LV.--</span></button>
-                                <button class="rg-diff-btn" data-diff="expert" style="background-color: #1a1a1a; border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">EXPRT <span class="lvl" style="font-size: 0.7rem; color: #aaa; font-weight: bold;">LV.--</span></button>
-                                <button class="rg-diff-btn" data-diff="master" style="background-color: #1a1a1a; border: 1px solid #333; color: #fff; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">MSTR <span class="lvl" style="font-size: 0.7rem; color: #aaa; font-weight: bold;">LV.--</span></button>
-                                <button class="rg-diff-btn" data-diff="demon" style="background-color: #1a1a1a; border: 1px solid #333; color: #ff3b30; padding: 12px 4px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.2s;">DEMON <span class="lvl" style="font-size: 0.7rem; color: #ff3b30; font-weight: bold;">LV.--</span></button>
-                              </div>
-                            </div>
-
-                            <div style="width: 100%; max-width: 360px; margin: 24px auto 0 auto; display: flex; align-items: center; justify-content: space-between; background: #1a1a1a; padding: 12px 16px; border-radius: 12px; border: 1px solid #333;">
-                              <div class="text-start" style="min-width: 0;">
-                                <div style="font-size: 0.9rem; font-weight: 700; color: #fff;">Autoplay (Bot Mode)</div>
-                                <div style="font-size: 0.75rem; color: #aaa;">Watch the bot play perfectly. Scores will not be saved.</div>
-                              </div>
-                              <div class="form-check form-switch m-0 fs-4">
-                                <input class="form-check-input" type="checkbox" id="rg-autoplay-toggle" style="cursor: pointer; accent-color: var(--rg-primary);">
-                              </div>
+                          <div style="width: 100%; max-width: 400px; margin: 0 auto;">
+                            <div style="font-size: 0.8rem; font-weight: 700; color: #777; margin-bottom: 12px; text-align: left; text-transform: uppercase;">Select Difficulty</div>
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+                              <button class="rg-diff-btn active" data-diff="easy"><div class="rg-diff-btn-inner">EASY <span class="lvl">LV.--</span></div></button>
+                              <button class="rg-diff-btn" data-diff="medium"><div class="rg-diff-btn-inner">NORMAL <span class="lvl">LV.--</span></div></button>
+                              <button class="rg-diff-btn" data-diff="hard"><div class="rg-diff-btn-inner">HARD <span class="lvl">LV.--</span></div></button>
+                              <button class="rg-diff-btn" data-diff="expert"><div class="rg-diff-btn-inner">EXPERT <span class="lvl">LV.--</span></div></button>
+                              <button class="rg-diff-btn" data-diff="master"><div class="rg-diff-btn-inner">MASTER <span class="lvl">LV.--</span></div></button>
+                              <button class="rg-diff-btn" data-diff="demon"><div class="rg-diff-btn-inner">DEMON <span class="lvl">LV.--</span></div></button>
                             </div>
                             
-                            <div style="width: 100%; max-width: 360px; margin: 12px auto 0 auto;">
-                              <button id="rg-btn-view-chart" class="btn btn-outline-light w-100 rounded-pill fw-bold" style="font-size: 0.9rem; border-color: rgba(255,255,255,0.2); background: transparent;"><i class="bi bi-map me-1"></i> View Chart Map</button>
+                            <div id="rg-demon-warning" class="rounded-3 text-center" style="background-color: rgba(255, 59, 48, 0.15); border-color: #ff3b30; border-style: solid; max-height: 0; opacity: 0; margin-top: 0; padding: 0 0.5rem; overflow: hidden; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border-width: 0;">
+                              <i class="bi bi-phone-landscape text-danger fs-4 d-block mb-1 mt-1"></i>
+                              <span class="text-danger fw-bold" style="font-size: 0.8rem; display: block; padding-bottom: 8px;">Demon mode uses 10 lanes!<br>Rotate device to landscape or use a desktop.</span>
                             </div>
-                          
-                            <div style="display: flex; justify-content: center; gap: 16px; margin-top: 32px; width: 100%; max-width: 360px;">
-                              <button class="btn btn-link text-secondary text-decoration-none fw-bold" id="rg-btn-dialog-cancel" style="font-size: 1.1rem; width: 100px;">Cancel</button>
-                              <button class="btn btn-danger rounded-pill px-5 fw-bold flex-grow-1" id="rg-btn-dialog-play" style="font-size: 1.1rem; padding-top: 12px; padding-bottom: 12px; background-color: #dc3545; border: none; box-shadow: 0 4px 16px rgba(220,53,69,0.4);">Play</button>
+                          </div>
+
+                          <div style="width: 100%; max-width: 400px; margin: 24px auto 0 auto; display: flex; align-items: center; justify-content: space-between; background: var(--ytm-surface-2); padding: 12px 16px; border-radius: 8px; border: 1px solid #444;">
+                            <div class="text-start" style="min-width: 0;">
+                              <div style="font-size: 0.95rem; font-weight: 700; color: #fff;">Autoplay (Bot Mode)</div>
+                              <div style="font-size: 0.75rem; color: #aaa;">Watch the bot play perfectly. Scores will not be saved.</div>
+                            </div>
+                            <div class="form-check form-switch m-0 fs-4">
+                              <input class="form-check-input" type="checkbox" id="rg-autoplay-toggle" style="cursor: pointer; accent-color: var(--ytm-accent);">
                             </div>
                           </div>
                           
-                          <div class="col-12 col-lg-6 d-flex flex-column" style="min-height: 400px;">
-                            <div style="display: flex; flex-direction: column; height: 100%; background-color: #1a1a1a; border-radius: 16px; border: 1px solid #333; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
-                              <div style="font-size: 0.9rem; font-weight: 700; color: #aaa; padding: 16px; border-bottom: 1px solid #333; background-color: rgba(0,0,0,0.3); text-transform: uppercase;">Top Scores</div>
-                              <div id="rg-song-leaderboard" style="overflow-y: auto; padding: 12px; flex-grow: 1; max-height: 450px;">
-                                <div class="text-center text-secondary small py-4">Loading scores...</div>
-                              </div>
+                          <div style="width: 100%; max-width: 400px; margin: 12px auto 0 auto;">
+                            <button id="rg-btn-view-chart" class="btn btn-outline-light w-100 fw-bold" style="font-size: 0.9rem; border-radius: 8px;"><i class="bi bi-map me-1"></i> View Chart Map</button>
+                          </div>
+                        
+                          <div style="display: flex; justify-content: center; align-items: center; gap: 16px; margin-top: 36px; margin-bottom: 2rem; width: 100%; max-width: 400px;">
+                            <button class="btn btn-link text-secondary text-decoration-none fw-bold" id="rg-btn-dialog-cancel" style="font-size: 1.1rem; width: 100px;">Cancel</button>
+                            <button class="btn btn-danger flex-grow-1 fw-bold fs-5 shadow-sm" id="rg-btn-dialog-play" style="padding: 12px; border-radius: 8px;">Play</button>
+                          </div>
+                        </div>
+
+                        <!-- RIGHT COLUMN: Leaderboard -->
+                        <div class="rg-play-menu-right">
+                          <div class="d-flex flex-column h-100 overflow-hidden w-100 rg-play-menu-right-inner">
+                            <div class="p-3 border-bottom border-secondary bg-black d-flex align-items-center gap-2 flex-shrink-0">
+                              <i class="bi bi-trophy-fill text-warning fs-5"></i>
+                              <h5 class="m-0 text-white fw-bold text-uppercase" style="font-size: 1rem; letter-spacing: 1px;">Top Scores</h5>
+                            </div>
+                            <div id="rg-song-leaderboard" class="overflow-auto flex-grow-1 p-3 modern-custom-scroll">
+                              <div class="text-center text-secondary small py-4">Loading scores...</div>
                             </div>
                           </div>
                         </div>
+
                       </div>
                     </div>
 
@@ -26394,7 +26607,7 @@ SOFTWARE.</div>
                     </div>
 
                     <div id="rg-dialog-chart-modal" class="rg-dialog-backdrop rg-hidden" style="z-index: 60;">
-                      <div class="rg-dialog-surface text-center" style="max-width: 90%; width: 500px; max-height: 80vh; padding: 0; overflow: hidden; gap: 0;">
+                      <div class="rg-dialog-surface text-center" style="max-width: 95%; width: 100%; max-width: 600px; max-height: 80vh; padding: 0; overflow: hidden; gap: 0;">
                         <div style="padding: 16px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: var(--rg-surface-variant); flex-shrink: 0;">
                           <h5 class="text-white m-0 fw-bold" style="font-size: 1.1rem;"><i class="bi bi-map text-danger me-2"></i> Chart Map</h5>
                           <button class="btn-close btn-close-white" id="rg-btn-close-chart"></button>
@@ -38522,14 +38735,12 @@ SOFTWARE.</div>
 
             // Load saved settings and keybindings from local storage cache
             this.KEY_CODES = JSON.parse(localStorage.getItem("rg_key_codes")) || [
-              "KeyS",
-              "KeyD",
-              "KeyF",
-              "KeyJ",
-              "KeyK",
-              "KeyL",
+              "KeyA", "KeyS", "KeyD", "KeyF", "KeyG",
+              "KeyH", "KeyJ", "KeyK", "KeyL", "Semicolon"
             ];
-            this.KEY_LABELS = JSON.parse(localStorage.getItem("rg_key_labels")) || ["S", "D", "F", "J", "K", "L"];
+            this.KEY_LABELS = JSON.parse(localStorage.getItem("rg_key_labels")) || [
+              "A", "S", "D", "F", "G", "H", "J", "K", "L", ";"
+            ];
             this.calibrationOffsetMs =
               localStorage.getItem("rg_cal_offset") !== null ? parseInt(localStorage.getItem("rg_cal_offset")) : 0;
             this.userTickSpeed =
@@ -38584,7 +38795,7 @@ SOFTWARE.</div>
             this.audioPlayback = null;
             this.chartNotes = [];
             this.isPlaying = false;
-            this.activeKeysHeld = [false, false, false, false, false, false];
+            this.activeKeysHeld = Array(10).fill(false);
             this.particles = [];
             this.laneApproachSpeed = 1.3;
             this.rgSongCache = {};
@@ -38819,7 +39030,7 @@ SOFTWARE.</div>
                     const tempAudio = this.audioBuffer;
 
                     this.chartNotes = dbChart.notes;
-                    this.LANES = this.selectedDiff === "easy" || this.selectedDiff === "medium" ? 4 : 6;
+                    this.LANES = this.selectedDiff === "easy" || this.selectedDiff === "medium" ? 4 : (this.selectedDiff === "demon" ? 10 : 6);
                     this.audioBuffer = { duration: this.selectedSong.duration || 180 };
 
                     const svgHtml = this.generateChartSVG();
@@ -39117,6 +39328,22 @@ SOFTWARE.</div>
                 diffBtns.forEach((b) => b.classList.remove("active"));
                 btn.classList.add("active");
                 this.selectedDiff = btn.getAttribute("data-diff");
+                
+                // Show/hide landscape warning based on Demon selection
+                const demonWarning = document.getElementById("rg-demon-warning");
+                if (demonWarning) {
+                  if (this.selectedDiff === "demon") {
+                    demonWarning.style.maxHeight = "120px";
+                    demonWarning.style.opacity = "1";
+                    demonWarning.style.marginTop = "16px";
+                    demonWarning.style.borderWidth = "1px";
+                  } else {
+                    demonWarning.style.maxHeight = "0";
+                    demonWarning.style.opacity = "0";
+                    demonWarning.style.marginTop = "0";
+                    demonWarning.style.borderWidth = "0";
+                  }
+                }
               });
             });
 
@@ -39132,6 +39359,12 @@ SOFTWARE.</div>
               .getElementById("rg-btn-dialog-cancel")
               .addEventListener("click", () => document.getElementById("rg-dialog-play").classList.add("rg-hidden"));
             document.getElementById("rg-btn-dialog-play").addEventListener("click", () => {
+              // Block mobile portrait users from starting a Demon mode session
+              if (this.selectedDiff === "demon" && window.innerWidth < window.innerHeight) {
+                showToast("Demon difficulty requires Landscape orientation or Desktop screen width!", "error");
+                return;
+              }
+              
               document.getElementById("rg-dialog-play").classList.add("rg-hidden");
               const apToggle = document.getElementById("rg-autoplay-toggle");
               this.isAutoplay = apToggle ? apToggle.checked : false;
@@ -39202,9 +39435,17 @@ SOFTWARE.</div>
               const rect = this.canvas.getBoundingClientRect();
               const w = rect.width;
               const isPortrait = rect.height > rect.width;
-              const maxBotW = isPortrait ? w * 1.15 : w * 0.85;
-              const sBotW = maxBotW / 6;
-              const botW = this.LANES * sBotW;
+              
+              let botW;
+              if (this.LANES === 10) {
+                botW = isPortrait ? w * 1.15 : w * 0.96;
+              } else if (this.LANES === 6) {
+                botW = isPortrait ? w * 1.15 : w * 0.85;
+              } else {
+                botW = isPortrait ? w * 0.85 : w * 0.60;
+              }
+              
+              const sBotW = botW / this.LANES;
               const startX = w / 2 - botW / 2;
               
               const x = clientX - rect.left;
@@ -39806,48 +40047,54 @@ SOFTWARE.</div>
             if (!this.chartNotes || this.chartNotes.length === 0) return "";
             const lanes = this.LANES;
             const duration = this.audioBuffer ? this.audioBuffer.duration : 180;
-            const width = lanes * 40 + 20;
+            // Dynamically widen lanes so 10 lanes don't look cramped
+            const laneWidth = lanes === 10 ? 45 : 40; 
+            const width = lanes * laneWidth + 20;
             const pxPerSec = 150;
             const height = Math.ceil(duration * pxPerSec) + 40;
 
-            let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="background:#0a0a0a; display: block; margin: 0 auto;">`;
+            let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" style="width: 100%; height: auto; max-width: ${width}px; background:#0a0a0a; display: block; margin: 0 auto;">`;
 
             // Draw lane dividers
             for (let i = 0; i <= lanes; i++) {
-              svg += `<line x1="${10 + i * 40}" y1="0" x2="${10 + i * 40}" y2="${height}" stroke="#333" stroke-width="2"/>`;
+              svg += `<line x1="${10 + i * laneWidth}" y1="0" x2="${10 + i * laneWidth}" y2="${height}" stroke="#333" stroke-width="2"/>`;
             }
 
             // Draw horizontal measure lines (every 1 second)
             for (let t = 0; t <= Math.ceil(duration); t++) {
               const y = height - t * pxPerSec - 20;
-              svg += `<line x1="10" y1="${y}" x2="${10 + lanes * 40}" y2="${y}" stroke="#222" stroke-width="1"/>`;
+              svg += `<line x1="10" y1="${y}" x2="${10 + lanes * laneWidth}" y2="${y}" stroke="#222" stroke-width="1"/>`;
             }
 
             // Draw notes
             this.chartNotes.forEach((n) => {
-              const x = 10 + n.lane * 40;
+              const x = 10 + n.lane * laneWidth;
               const yBottom = height - n.time * pxPerSec - 20; // Bottom edge of note (since time goes up)
+              
+              const noteW = laneWidth - 8;
+              const offsetX = x + 4;
+              
               if (n.isLong) {
                 const yTop = height - n.endTime * pxPerSec - 20;
                 const h = Math.max(5, yBottom - yTop);
                 if (n.hitEndSwipe) {
-                  svg += `<rect x="${x + 4}" y="${yTop}" width="32" height="${h}" fill="rgba(255, 0, 255, 0.4)" stroke="#ff00ff" stroke-width="2" rx="4"/>`;
-                  svg += `<rect x="${x + 4}" y="${yTop - 8}" width="32" height="16" fill="#ff00ff" stroke="#fff" stroke-width="2" rx="4"/>`;
+                  svg += `<rect x="${offsetX}" y="${yTop}" width="${noteW}" height="${h}" fill="rgba(255, 0, 255, 0.4)" stroke="#ff00ff" stroke-width="2" rx="4"/>`;
+                  svg += `<rect x="${offsetX}" y="${yTop - 8}" width="${noteW}" height="16" fill="#ff00ff" stroke="#fff" stroke-width="2" rx="4"/>`;
                 } else {
-                  svg += `<rect x="${x + 4}" y="${yTop}" width="32" height="${h}" fill="rgba(255, 59, 48, 0.4)" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
-                  svg += `<rect x="${x + 4}" y="${yTop - 8}" width="32" height="16" fill="#ff3b30" stroke="#000" stroke-width="2" rx="4"/>`;
+                  svg += `<rect x="${offsetX}" y="${yTop}" width="${noteW}" height="${h}" fill="rgba(255, 59, 48, 0.4)" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
+                  svg += `<rect x="${offsetX}" y="${yTop - 8}" width="${noteW}" height="16" fill="#ff3b30" stroke="#000" stroke-width="2" rx="4"/>`;
                 }
               } else {
                 if (n.isSwipe) {
-                  svg += `<rect x="${x + 4}" y="${yBottom - 8}" width="32" height="16" fill="#ff00ff" stroke="#fff" stroke-width="2" rx="4"/>`;
+                  svg += `<rect x="${offsetX}" y="${yBottom - 8}" width="${noteW}" height="16" fill="#ff00ff" stroke="#fff" stroke-width="2" rx="4"/>`;
                 } else {
-                  svg += `<rect x="${x + 4}" y="${yBottom - 8}" width="32" height="16" fill="#fff" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
+                  svg += `<rect x="${offsetX}" y="${yBottom - 8}" width="${noteW}" height="16" fill="#fff" stroke="#ff3b30" stroke-width="2" rx="4"/>`;
                 }
               }
             });
 
             // Draw hit bar at y=height-20
-            svg += `<line x1="5" y1="${height - 20}" x2="${15 + lanes * 40}" y2="${height - 20}" stroke="#ff3b30" stroke-width="4"/>`;
+            svg += `<line x1="5" y1="${height - 20}" x2="${15 + lanes * laneWidth}" y2="${height - 20}" stroke="#ff3b30" stroke-width="4"/>`;
 
             svg += `</svg>`;
             return svg;
@@ -39892,31 +40139,29 @@ SOFTWARE.</div>
             document.querySelectorAll(".rg-diff-btn").forEach((btn) => {
               const diffKey = btn.dataset.diff;
               const defaultText = diffMap[diffKey] || "Diff";
-              let textColor = diffKey === 'demon' ? '#ff3b30' : '#aaa';
               
-              if (btn.classList.contains('active')) {
-                 btn.style.backgroundColor = diffKey === 'demon' ? '#4a0000' : '#2a2a2a';
-                 btn.style.borderColor = diffKey === 'demon' ? '#ff3b30' : '#555';
-              } else {
-                 btn.style.backgroundColor = '#1a1a1a';
-                 btn.style.borderColor = '#333';
-              }
-
-              btn.addEventListener('click', () => {
-                 document.querySelectorAll(".rg-diff-btn").forEach((b) => {
-                    b.style.backgroundColor = '#1a1a1a';
-                    b.style.borderColor = '#333';
-                 });
-                 btn.style.backgroundColor = diffKey === 'demon' ? '#4a0000' : '#2a2a2a';
-                 btn.style.borderColor = diffKey === 'demon' ? '#ff3b30' : '#555';
-              });
-
               if (lvlData && lvlData.levels && lvlData.levels[diffKey] !== undefined) {
-                btn.innerHTML = `${defaultText} <span class="lvl" style="font-size:0.7rem; color:${textColor}; display:block; font-weight:bold; margin-top:2px;">LV.${lvlData.levels[diffKey]}</span>`;
+                btn.innerHTML = `<div class="rg-diff-btn-inner">${defaultText} <span class="lvl" style="font-size:0.75rem; font-weight:900; opacity:0.9;">LV.${lvlData.levels[diffKey]}</span></div>`;
               } else {
-                btn.innerHTML = `${defaultText} <span class="lvl" style="font-size:0.7rem; color:${textColor}; opacity:0.4; display:block; margin-top:2px;">LV.--</span>`;
+                btn.innerHTML = `<div class="rg-diff-btn-inner">${defaultText} <span class="lvl" style="font-size:0.75rem; font-weight:900; opacity:0.5;">LV.--</span></div>`;
               }
             });
+
+            // Sync Demon warning state when opening the dialog
+            const demonWarning = document.getElementById("rg-demon-warning");
+            if (demonWarning) {
+              if (this.selectedDiff === "demon") {
+                demonWarning.style.maxHeight = "120px";
+                demonWarning.style.opacity = "1";
+                demonWarning.style.marginTop = "16px";
+                demonWarning.style.borderWidth = "1px";
+              } else {
+                demonWarning.style.maxHeight = "0";
+                demonWarning.style.opacity = "0";
+                demonWarning.style.marginTop = "0";
+                demonWarning.style.borderWidth = "0";
+              }
+            }
 
             const container = document.getElementById("rg-song-leaderboard");
             container.innerHTML =
@@ -40625,7 +40870,7 @@ SOFTWARE.</div>
               if (dbChart && dbChart.found) {
                 this.chartNotes = dbChart.notes;
                 this.audioBuffer = { duration: song.duration || 180, sampleRate: 44100 };
-                this.LANES = diff === "easy" || diff === "medium" ? 4 : 6;
+                this.LANES = diff === "easy" || diff === "medium" ? 4 : (diff === "demon" ? 10 : 6);
 
                 // Calculate and apply Note Speed effect
                 let baseSpeed = 2.0; // Unified fixed speed baseline across all difficulties
@@ -40662,7 +40907,7 @@ SOFTWARE.</div>
           }
 
           generateChart(diff) {
-            this.LANES = diff === "easy" || diff === "medium" ? 4 : 6;
+            this.LANES = diff === "easy" || diff === "medium" ? 4 : (diff === "demon" ? 10 : 6);
             const channel = this.audioBuffer.getChannelData(0);
             const sampleRate = this.audioBuffer.sampleRate;
 
@@ -40752,7 +40997,7 @@ SOFTWARE.</div>
           }
 
           generateSyntheticChart(duration, diff) {
-            this.LANES = diff === "easy" || diff === "medium" ? 4 : 6;
+            this.LANES = diff === "easy" || diff === "medium" ? 4 : (diff === "demon" ? 10 : 6);
             this.audioBuffer = { duration: duration || 180, sampleRate: 44100 };
             let spacing = 0.5;
             if (diff === "easy") spacing = 0.8;
@@ -40844,9 +41089,15 @@ SOFTWARE.</div>
             }
 
             if (this.LANES === 4) {
-              this.activeCodes = [this.KEY_CODES[1], this.KEY_CODES[2], this.KEY_CODES[3], this.KEY_CODES[4]];
-              this.activeLabels = [this.KEY_LABELS[1], this.KEY_LABELS[2], this.KEY_LABELS[3], this.KEY_LABELS[4]];
+              // Center 4 lanes for Easy/Medium
+              this.activeCodes = [this.KEY_CODES[3], this.KEY_CODES[4], this.KEY_CODES[5], this.KEY_CODES[6]];
+              this.activeLabels = [this.KEY_LABELS[3], this.KEY_LABELS[4], this.KEY_LABELS[5], this.KEY_LABELS[6]];
+            } else if (this.LANES === 6) {
+              // Center 6 lanes for Hard/Expert/Master
+              this.activeCodes = [this.KEY_CODES[2], this.KEY_CODES[3], this.KEY_CODES[4], this.KEY_CODES[5], this.KEY_CODES[6], this.KEY_CODES[7]];
+              this.activeLabels = [this.KEY_LABELS[2], this.KEY_LABELS[3], this.KEY_LABELS[4], this.KEY_LABELS[5], this.KEY_LABELS[6], this.KEY_LABELS[7]];
             } else {
+              // All 10 lanes for Demon
               this.activeCodes = [...this.KEY_CODES];
               this.activeLabels = [...this.KEY_LABELS];
             }
@@ -40921,11 +41172,18 @@ SOFTWARE.</div>
             this.hwH = h * 0.72;
             this.judY = this.vanY + this.hwH;
             const isPortrait = h > w;
-            // Extremely narrow top lanes to simulate deep 3D perspective
-            const maxTopW = isPortrait ? w * 0.15 : w * 0.08; 
-            const maxBotW = isPortrait ? w * 1.15 : w * 0.85;
-            this.topW = this.LANES * (maxTopW / 6);
-            this.botW = this.LANES * (maxBotW / 6);
+            
+            // Dynamically constrain maximum track width so Demon (10 lanes) doesn't bleed off-screen
+            if (this.LANES === 10) {
+              this.botW = isPortrait ? w * 1.15 : w * 0.96; // Max 96% of screen width
+              this.topW = isPortrait ? w * 0.20 : w * 0.12;
+            } else if (this.LANES === 6) {
+              this.botW = isPortrait ? w * 1.15 : w * 0.85;
+              this.topW = isPortrait ? w * 0.15 : w * 0.08;
+            } else {
+              this.botW = isPortrait ? w * 0.85 : w * 0.60;
+              this.topW = isPortrait ? w * 0.10 : w * 0.05;
+            }
 
             const ctx = this.bgCtx;
             ctx.clearRect(0, 0, w, h);
@@ -41598,8 +41856,15 @@ SOFTWARE.</div>
             const h = this.canvas.height / dpr;
             const isPortrait = h > w;
 
-            const maxBotW = isPortrait ? w * 1.15 : w * 1.0;
-            const botW = this.LANES * (maxBotW / 6);
+            let botW;
+            if (this.LANES === 10) {
+              botW = isPortrait ? w * 1.15 : w * 0.96;
+            } else if (this.LANES === 6) {
+              botW = isPortrait ? w * 1.15 : w * 0.85;
+            } else {
+              botW = isPortrait ? w * 0.85 : w * 0.60;
+            }
+            
             const sW = botW / this.LANES;
             const cX = w / 2 - botW / 2 + lane * sW + sW / 2;
             const cY = h * 0.15 + h * 0.72;
