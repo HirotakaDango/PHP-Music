@@ -22040,11 +22040,16 @@ SOFTWARE.</div>
           window.handleManualDropdownClick = (e) => {
             const activeDoc = e.target.ownerDocument;
             const toggle = e.target.closest('[data-bs-toggle="dropdown"]');
-            
+          
+            if (toggle && (toggle.id === 'profile-picture-header-desktop' || toggle.id === 'profile-picture-header-mobile')) {
+              return;
+            }
+          
             if (toggle) {
               e.preventDefault();
               e.stopPropagation();
-              const menu = toggle.nextElementSibling;
+              const menu = toggle.closest('.dropdown, .dropup')?.querySelector('.dropdown-menu');
+              if (!menu) return;
               const isOpen = menu.classList.contains('show');
               
               activeDoc.querySelectorAll('.dropdown-menu.show').forEach(m => {
