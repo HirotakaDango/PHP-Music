@@ -380,7 +380,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '6.5');
+define('APP_VERSION', '6.6');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1845,15 +1845,34 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       :root { --ytm-bg: #030303; --ytm-surface: #121212; --ytm-surface-2: #282828; --ytm-primary-text: #ffffff; --ytm-secondary-text: #aaaaaa; --ytm-accent: #ff0000; }
       body { background-color: var(--ytm-bg); color: var(--ytm-primary-text); font-family: 'Roboto', sans-serif; }
       .app-container { display: flex; height: 100dvh; flex-direction: column; overflow: hidden; }
-      .sidebar { width: 250px; background-color: var(--ytm-surface); border-right: 1px solid var(--ytm-surface-2); display: flex; flex-direction: column; flex-shrink: 0; z-index: 1045; transition: transform 0.3s ease; overflow-y: auto; }
+      .sidebar { width: 260px; background-color: var(--ytm-surface); border-right: 1px solid var(--ytm-surface-2); display: flex; flex-direction: column; flex-shrink: 0; z-index: 1045; transition: transform 0.3s ease; overflow-y: auto; box-shadow: inset -1px 0 0 rgba(255,255,255,0.02); }
       .main-content { flex-grow: 1; display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; background-color: var(--ytm-bg); }
       .content-area-wrapper { padding: 1.5rem 2rem; }
       .sidebar .logo { font-size: 1.25rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
       .sidebar .logo span { color: var(--ytm-accent); }
-      .nav-link { color: var(--ytm-secondary-text); display: flex; align-items: center; font-weight: 500; border-left: 3px solid transparent; gap: 1rem; text-decoration: none; padding: 0.85rem 1.5rem; transition: all 0.2s; }
-      .nav-link:hover { color: var(--ytm-primary-text); background-color: rgba(255,255,255,0.03); }
-      .nav-link.active { background-color: rgba(255,0,0,0.1); color: var(--ytm-primary-text); border-left-color: var(--ytm-accent); font-weight: 700; }
-      .nav-link .bi { font-size: 1.25rem; width: 24px; text-align: center; }
+      .nav-link {
+        color: var(--ytm-secondary-text); display: flex; align-items: center;
+        font-weight: 500; gap: 1rem; text-decoration: none;
+        padding: 0.75rem 1.25rem; margin: 0.2rem 0.75rem; border-radius: 12px; transition: all 0.2s ease-in-out;
+        border: none;
+        border-left: 4px solid transparent; /* Left red indicator base */
+        border-radius: 0 12px 12px 0; /* Flat left side, rounded right */
+      }
+      .nav-link:hover {
+        color: var(--ytm-primary-text);
+        background-color: rgba(255, 255, 255, 0.05);
+        border-left-color: var(--ytm-accent);
+      }
+      .nav-link.active {
+        background-color: rgba(255, 0, 0, 0.1);
+        color: var(--ytm-accent);
+        font-weight: 700;
+        border-left-color: var(--ytm-accent);
+      }
+      .nav-link .bi { font-size: 1.25rem; width: 24px; text-align: center; transition: color 0.2s; }
+      .nav-link:hover .bi { color: var(--ytm-primary-text); }
+      .nav-link.active .bi { color: var(--ytm-accent); }
+      .offcanvas-lg { background-color: var(--ytm-surface) !important; box-shadow: 0 10px 30px rgba(0,0,0,0.8) !important; }
       .page-header { padding: 1.5rem 2rem 1.5rem 2rem; }
       .content-title { font-size: 2rem; font-weight: 700; margin-bottom: 0; }
       .user-list { display: flex; flex-direction: column; gap: 12px; }
@@ -5831,18 +5850,20 @@ function generatePhpChart($song_id, $duration, $difficulty, $density_multiplier 
         $any_hold_until = max($any_hold_until, $t + $dur);
       }
       
-      $notes[] = [
+      $note = [
         'time' => round($t + 2.0, 3),
-        'lane' => (int)$lane,
-        'isLong' => $isLong,
-        'isSwipe' => $isSwipe,
-        'endTime' => round($t + 2.0 + $dur, 3),
-        'hitEndSwipe' => $hitEndSwipe,
-        'hitStart' => false,
-        'hitEnd' => false,
-        'missed' => false,
-        'holding' => false
+        'lane' => (int)$lane
       ];
+      if ($isLong) {
+        $note['isLong'] = true;
+        $note['endTime'] = round($t + 2.0 + $dur, 3);
+        if ($hitEndSwipe) {
+          $note['hitEndSwipe'] = true;
+        }
+      } elseif ($isSwipe) {
+        $note['isSwipe'] = true;
+      }
+      $notes[] = $note;
     }
   }
   return $notes;
@@ -5882,8 +5903,8 @@ function calculatePhpLevel($notes, $duration, $difficulty = 'medium', $density_m
   $interval_count = 0;
 
   foreach ($notes as $n) {
-    if ($n['isLong']) $holds++;
-    if ($n['isSwipe']) $swipes++;
+    if (!empty($n['isLong'])) $holds++;
+    if (!empty($n['isSwipe'])) $swipes++;
     
     // Detect simultaneous chords (time diff < 0.05s)
     if (($n['time'] - $last_time) < 0.05) {
@@ -7972,6 +7993,190 @@ HTML;
       send_json(['status' => 'success', 'message' => 'All offline songs removed.']);
       break;
 
+    case 'export_user_data':
+      if (!$user_id) { http_response_code(403); exit; }
+      $export = ['version' => APP_VERSION, 'date' => date('Y-m-d H:i:s')];
+
+      $stmt = $db->prepare("SELECT u.artist FROM follows f JOIN users u ON f.following_id = u.id WHERE f.follower_id = ?");
+      $stmt->execute([$user_id]);
+      $export['followings'] = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+      $stmt = $db->prepare("SELECT title, content, category, starred, note_type, created_at, updated_at FROM personal_notes WHERE user_id = ?");
+      $stmt->execute([$user_id]);
+      $export['notes'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+      $stmt = $db->prepare("SELECT title, items, category, starred, created_at, updated_at FROM tasks WHERE user_id = ?");
+      $stmt->execute([$user_id]);
+      $export['tasks'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+      $stmt = $db->prepare("SELECT title, content, status, category, created_at, updated_at FROM blogs WHERE user_id = ?");
+      $stmt->execute([$user_id]);
+      $export['blogs'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+      try { $db->exec("CREATE TABLE IF NOT EXISTS rhythm_favorites (user_id INTEGER NOT NULL, song_id INTEGER NOT NULL, sort_order INTEGER, PRIMARY KEY (user_id, song_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE);"); } catch(Exception $e) {}
+      $stmt = $db->prepare("SELECT m.title, m.artist, m.album, rf.sort_order FROM rhythm_favorites rf JOIN music m ON rf.song_id = m.id WHERE rf.user_id = ?");
+      $stmt->execute([$user_id]);
+      $export['rhythm_favorites'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+      $stmt = $db->prepare("SELECT id, name, description, is_private, is_collaborative, created_at FROM playlists WHERE user_id = ?");
+      $stmt->execute([$user_id]);
+      $playlists = $stmt->fetchAll(PDO::FETCH_ASSOC);
+      foreach ($playlists as &$p) {
+        $pId = $p['id'];
+        unset($p['id']);
+        $stmt2 = $db->prepare("SELECT m.title, m.artist, m.album, ps.sort_order FROM playlist_songs ps JOIN music m ON ps.song_id = m.id WHERE ps.playlist_id = ? ORDER BY ps.sort_order ASC");
+        $stmt2->execute([$pId]);
+        $p['songs'] = $stmt2->fetchAll(PDO::FETCH_ASSOC);
+      }
+      $export['playlists'] = $playlists;
+
+      header('Content-Type: application/json');
+      header('Content-Disposition: attachment; filename="phpmusic_backup_' . date('Ymd_His') . '.json"');
+      echo json_encode($export, JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE);
+      exit;
+
+    case 'import_user_data':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      if (!$data || !is_array($data)) {
+        http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid JSON payload.']);
+      }
+
+      $db->beginTransaction();
+      try {
+        $stmt_song_taa = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE AND album = ? COLLATE NOCASE LIMIT 1");
+        $stmt_song_ta = $db->prepare("SELECT id FROM music WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE LIMIT 1");
+
+        $find_song = function($title, $artist, $album) use ($stmt_song_taa, $stmt_song_ta) {
+          $stmt_song_taa->execute([$title, $artist, $album]);
+          $id = $stmt_song_taa->fetchColumn();
+          if (!$id) {
+            $stmt_song_ta->execute([$title, $artist]);
+            $id = $stmt_song_ta->fetchColumn();
+          }
+          return $id;
+        };
+
+        $imported = 0;
+        $duplicates = 0;
+
+        if (!empty($data['followings'])) {
+          $stmt_find_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE LIMIT 1");
+          $stmt_follow_check = $db->prepare("SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?");
+          $stmt_follow = $db->prepare("INSERT INTO follows (follower_id, following_id) VALUES (?, ?)");
+          foreach ($data['followings'] as $f_artist) {
+            $stmt_find_user->execute([$f_artist]);
+            $f_id = $stmt_find_user->fetchColumn();
+            if ($f_id && $f_id != $user_id) {
+              $stmt_follow_check->execute([$user_id, $f_id]);
+              if (!$stmt_follow_check->fetch()) {
+                $stmt_follow->execute([$user_id, $f_id]);
+                $imported++;
+              } else {
+                $duplicates++;
+              }
+            }
+          }
+        }
+
+        if (!empty($data['notes'])) {
+          $stmt_note_chk = $db->prepare("SELECT id FROM personal_notes WHERE user_id = ? AND title = ? AND content = ? LIMIT 1");
+          $stmt_note = $db->prepare("INSERT INTO personal_notes (user_id, title, content, category, starred, note_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+          foreach ($data['notes'] as $n) {
+            $t = $n['title'] ?? ''; $c = $n['content'] ?? '';
+            $stmt_note_chk->execute([$user_id, $t, $c]);
+            if (!$stmt_note_chk->fetch()) {
+              $stmt_note->execute([$user_id, $t, $c, $n['category'] ?? 'all', $n['starred'] ?? 0, $n['note_type'] ?? 'note', $n['created_at'] ?? date('Y-m-d H:i:s'), $n['updated_at'] ?? date('Y-m-d H:i:s')]);
+              $imported++;
+            } else {
+              $duplicates++;
+            }
+          }
+        }
+
+        if (!empty($data['tasks'])) {
+          $stmt_task_chk = $db->prepare("SELECT id FROM tasks WHERE user_id = ? AND title = ? LIMIT 1");
+          $stmt_task = $db->prepare("INSERT INTO tasks (user_id, title, items, category, starred, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+          foreach ($data['tasks'] as $t) {
+            $title = $t['title'] ?? '';
+            $stmt_task_chk->execute([$user_id, $title]);
+            if (!$stmt_task_chk->fetch()) {
+              $stmt_task->execute([$user_id, $title, is_string($t['items']) ? $t['items'] : json_encode($t['items'] ?? []), $t['category'] ?? 'all', $t['starred'] ?? 0, $t['created_at'] ?? date('Y-m-d H:i:s'), $t['updated_at'] ?? date('Y-m-d H:i:s')]);
+              $imported++;
+            } else {
+              $duplicates++;
+            }
+          }
+        }
+
+        if (!empty($data['blogs'])) {
+          $stmt_blog_chk = $db->prepare("SELECT id FROM blogs WHERE user_id = ? AND title = ? AND content = ? LIMIT 1");
+          $stmt_blog = $db->prepare("INSERT INTO blogs (user_id, title, content, status, category, public_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+          foreach ($data['blogs'] as $b) {
+            $t = $b['title'] ?? ''; $c = $b['content'] ?? '';
+            $stmt_blog_chk->execute([$user_id, $t, $c]);
+            if (!$stmt_blog_chk->fetch()) {
+              $stmt_blog->execute([$user_id, $t, $c, $b['status'] ?? 'private', $b['category'] ?? 'all', bin2hex(random_bytes(8)), $b['created_at'] ?? date('Y-m-d H:i:s'), $b['updated_at'] ?? date('Y-m-d H:i:s')]);
+              $imported++;
+            } else {
+              $duplicates++;
+            }
+          }
+        }
+
+        if (!empty($data['rhythm_favorites'])) {
+          try { $db->exec("CREATE TABLE IF NOT EXISTS rhythm_favorites (user_id INTEGER NOT NULL, song_id INTEGER NOT NULL, sort_order INTEGER, PRIMARY KEY (user_id, song_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE);"); } catch(Exception $e) {}
+          $stmt_rf_chk = $db->prepare("SELECT 1 FROM rhythm_favorites WHERE user_id = ? AND song_id = ?");
+          $stmt_rf = $db->prepare("INSERT INTO rhythm_favorites (user_id, song_id, sort_order) VALUES (?, ?, ?)");
+          foreach ($data['rhythm_favorites'] as $rf) {
+            $s_id = $find_song($rf['title'] ?? '', $rf['artist'] ?? '', $rf['album'] ?? '');
+            if ($s_id) {
+              $stmt_rf_chk->execute([$user_id, $s_id]);
+              if (!$stmt_rf_chk->fetch()) {
+                $stmt_rf->execute([$user_id, $s_id, $rf['sort_order'] ?? 0]);
+                $imported++;
+              } else {
+                $duplicates++;
+              }
+            }
+          }
+        }
+
+        if (!empty($data['playlists'])) {
+          $stmt_pl_chk = $db->prepare("SELECT id FROM playlists WHERE user_id = ? AND name = ? LIMIT 1");
+          $stmt_pl = $db->prepare("INSERT INTO playlists (user_id, name, description, public_id, is_private, is_collaborative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+          $stmt_pls = $db->prepare("INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, sort_order) VALUES (?, ?, ?)");
+          foreach ($data['playlists'] as $p) {
+            $n = $p['name'] ?? 'Imported Playlist';
+            $stmt_pl_chk->execute([$user_id, $n]);
+            if (!$stmt_pl_chk->fetch()) {
+              $stmt_pl->execute([$user_id, $n, $p['description'] ?? '', bin2hex(random_bytes(8)), $p['is_private'] ?? 1, $p['is_collaborative'] ?? 0, $p['created_at'] ?? date('Y-m-d H:i:s')]);
+              $p_id = $db->lastInsertId();
+              $imported++;
+              if (!empty($p['songs'])) {
+                foreach ($p['songs'] as $ps) {
+                  $s_id = $find_song($ps['title'] ?? '', $ps['artist'] ?? '', $ps['album'] ?? '');
+                  if ($s_id) $stmt_pls->execute([$p_id, $s_id, $ps['sort_order'] ?? 0]);
+                }
+              }
+            } else {
+              $duplicates++;
+            }
+          }
+        }
+
+        $db->commit();
+        if ($imported === 0 && $duplicates > 0) {
+          send_json(['status' => 'error', 'message' => 'You already have the data. No changes were made.']);
+        } else {
+          send_json(['status' => 'success', 'message' => "Account data imported! ($imported added, $duplicates skipped)"]);
+        }
+      } catch (Exception $e) {
+        $db->rollBack();
+        http_response_code(500); send_json(['status' => 'error', 'message' => 'Database error during import.']);
+      }
+      break;
+
     case 'export_offline':
       if (!$user_id) { http_response_code(403); exit; }
       $stmt = $db->prepare("SELECT m.file, m.title, m.artist, m.album FROM offline_songs os JOIN music m ON os.song_id = m.id WHERE os.user_id = ? ORDER BY os.sort_order ASC");
@@ -8081,7 +8286,25 @@ HTML;
         {$order_by} {$current_limit}
       ");
       $stmt->execute([$user_id, $public_id, $user_id, $user_id]);
-      send_json($stmt->fetchAll());
+      $songs_result = $stmt->fetchAll();
+
+      if (!empty($songs_result)) {
+        $song_ids = array_column($songs_result, 'id');
+        $placeholders = implode(',', array_fill(0, count($song_ids), '?'));
+        $stmt_lvl = $db->prepare("SELECT song_id, difficulty, level FROM rhythm_charts WHERE song_id IN ($placeholders)");
+        $stmt_lvl->execute($song_ids);
+        $lvl_rows = $stmt_lvl->fetchAll();
+        $lvl_map = [];
+        foreach ($lvl_rows as $row) {
+          $lvl_map[$row['song_id']][$row['difficulty']] = (int)$row['level'];
+        }
+        foreach ($songs_result as &$song) {
+          $song['levels'] = $lvl_map[$song['id']] ?? null;
+        }
+        unset($song);
+      }
+
+      send_json($songs_result);
       break;
 
     case 'get_following':
@@ -12077,6 +12300,155 @@ HTML;
       send_json($stmt->fetchAll());
       break;
 
+    case 'vacuum_database':
+      $is_super_admin_check = false;
+      if (isset($_SESSION['user_id'])) {
+        $db_check = get_db();
+        $stmt_chk = $db_check->prepare("SELECT email FROM users WHERE id = ?");
+        $stmt_chk->execute([$_SESSION['user_id']]);
+        $email = $stmt_chk->fetchColumn();
+        if ($email && strtolower(trim($email)) === 'musiclibrary@mail.com') {
+          $is_super_admin_check = true;
+        }
+      }
+      if (!$is_super_admin_check) {
+        die("Security violation: Super Admin required to optimize database.");
+      }
+      
+      $attempt = isset($_GET['attempt']) ? (int)$_GET['attempt'] : 1;
+      
+      session_write_close();
+      header('Content-Type: text/html; charset=utf-8');
+      ob_implicit_flush();
+      ?>
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <title>Database Optimization</title>
+          <style>
+            body { color: #e0e0e0; background-color: #030303; font-family: Consolas, 'Courier New', monospace; padding: 15px; margin: 0; }
+            pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; margin-top: 115px; }
+            #header-wrap { position: fixed; top: 0; left: 0; right: 0; background: #121212; border-bottom: 1px solid #333; z-index: 10; }
+            #prog-wrap { padding: 16px 15px 16px 15px; display: flex; align-items: center; }
+            #prog-track { flex-grow: 1; background: #000; height: 12px; border-radius: 6px; overflow: hidden; margin-right: 15px; }
+            #prog-bar { width: 0%; height: 100%; background: #00bcd4; transition: width 0.1s; }
+            #prog-txt { font-weight: bold; min-width: 45px; text-align: right; font-size: 14px;}
+            #warning-txt { padding: 0 15px 12px 15px; color: #ffbd2e; font-size: 12px; font-weight: bold; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
+            .success { color: #27c93f; }
+            .warn { color: #ffbd2e; }
+            .error { color: #ff3b30; }
+          </style>
+        </head>
+        <body>
+          <div id='header-wrap'>
+            <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
+            <div id='warning-txt'>⚠️ Optimizing database layout. Do not close this window!</div>
+          </div>
+          <pre id="log-output">PHP Music Library - SQLite VACUUM
+===================================================
+
+</pre>
+          <script>
+            const logArea = document.getElementById('log-output');
+            const log = (msg, className = '') => {
+              const span = document.createElement('span');
+              span.className = className;
+              span.textContent = msg + '\n';
+              logArea.appendChild(span);
+              window.scrollTo(0, document.body.scrollHeight);
+            };
+            const setProgress = (pct) => {
+              document.getElementById('prog-bar').style.width = pct + '%';
+              document.getElementById('prog-txt').innerText = pct + '%';
+            };
+          </script>
+      <?php
+      flush();
+      
+      $progress = min(90, $attempt * 5);
+      echo "<script>setProgress({$progress}); log('Attempt {$attempt}: Requesting exclusive database lock...');</script>";
+      flush();
+      
+      // CRITICAL FIX: Release all lingering PDOStatement read-locks from earlier script execution!
+      $stmt_check = null; $stmt_fw = null; $stmt_sess = null; $stmt_key = null;
+      $stmt_rl = null; $stmt_admin = null; $stmt_chk = null;
+      
+      $db = get_db();
+      try {
+        $before_size = filesize(DB_FILE);
+        if ($attempt === 1) {
+          echo "<script>log('Original database size: " . number_format($before_size / 1048576, 2) . " MB');</script>";
+          flush();
+        }
+        
+        // 1. Check if the server actually has enough physical disk space (needs ~1.5x the DB size)
+        $free_space = @disk_free_space(__DIR__);
+        if ($free_space !== false && $free_space < ($before_size * 1.5)) {
+          throw new Exception("Insufficient Disk Space: You have " . number_format($free_space / 1048576, 2) . " MB free, but need at least " . number_format(($before_size * 1.5) / 1048576, 2) . " MB to safely vacuum.");
+        }
+
+        // 2. Prevent RAM exhaustion crashes. Default get_db() sets temp_store=MEMORY, which crashes on 1.5GB DBs!
+        $db->exec("PRAGMA temp_store = FILE;");
+        
+        // 3. Force SQLite to use a local temp directory to bypass tiny /tmp RAM-disk limits on shared hosts
+        $temp_dir = __DIR__ . '/.tmp_db';
+        if (!is_dir($temp_dir)) @mkdir($temp_dir, 0755, true);
+        putenv("TMPDIR=" . $temp_dir);
+        putenv("SQLITE_TMPDIR=" . $temp_dir);
+        @$db->exec("PRAGMA temp_store_directory = " . $db->quote($temp_dir) . ";");
+        
+        $db->exec("VACUUM");
+        
+        // 4. Clean up and restore memory pragma
+        @$db->exec("PRAGMA temp_store_directory = '';");
+        $db->exec("PRAGMA temp_store = MEMORY;");
+        if (is_dir($temp_dir)) {
+          array_map('unlink', glob("$temp_dir/*.*"));
+          @rmdir($temp_dir);
+        }
+        
+        clearstatcache(true, DB_FILE);
+        $after_size = filesize(DB_FILE);
+        $saved = $before_size - $after_size;
+        $saved_mb = number_format($saved / 1048576, 2);
+        $after_mb = number_format($after_size / 1048576, 2);
+        
+        echo "<script>setProgress(100); log('Database optimized successfully!', 'success');</script>";
+        echo "<script>log('New database size: {$after_mb} MB');</script>";
+        if ($saved > 0) {
+          echo "<script>log('Space reclaimed: {$saved_mb} MB', 'success');</script>";
+        } else {
+          echo "<script>log('No significant fragmentation found. Database is optimal.');</script>";
+        }
+
+        // Bridge to automatically trigger the next scan step if called by the Rhythm Resetter
+        $next_action = $_GET['next_action'] ?? '';
+        $density = $_GET['density'] ?? '1.0';
+        if ($next_action === 'rescan_charts') {
+          echo "<script>log('\\nRedirecting to Division 1/6 (EASY) scan start...', 'info');</script>";
+          echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=1&run=1&density={$density}'; }, 2000);</script>";
+        }
+
+      } catch (Exception $e) {
+        $msg = strtolower($e->getMessage());
+        if (strpos($msg, 'locked') !== false || strpos($msg, 'busy') !== false || strpos($msg, 'in progress') !== false) {
+          if ($attempt < 30) {
+            $next = $attempt + 1;
+            $pass_next = isset($_GET['next_action']) ? "&next_action=" . urlencode($_GET['next_action']) : "";
+            $pass_dens = isset($_GET['density']) ? "&density=" . urlencode($_GET['density']) : "";
+            echo "<script>log('Database is currently busy/locked by other readers. Retrying in 2 seconds...', 'warn');</script>";
+            echo "<script>setTimeout(() => { window.location.href = '?action=vacuum_database&attempt={$next}{$pass_next}{$pass_dens}'; }, 2000);</script>";
+          } else {
+            echo "<script>setProgress(100); log('Failed to acquire lock after 30 attempts. Please try again later when traffic is lower.', 'error');</script>";
+          }
+        } else {
+          echo "<script>setProgress(100); log('VACUUM failed: " . addslashes($e->getMessage()) . "', 'error');</script>";
+        }
+      }
+      echo "</body></html>";
+      exit;
+
     case 'reset_rhythm_charts':
       // Robust, direct database validation to verify Super Admin credentials
       $is_super_admin = false;
@@ -12121,7 +12493,7 @@ HTML;
         <body>
           <div id='header-wrap'>
             <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-            <div id='warning-txt'>⚠️ Wiping note charts in small batches on the server to prevent database locks!</div>
+            <div id='warning-txt'>⚠️ Wiping note charts to prepare for regeneration!</div>
           </div>
           <pre id="log-output">PHP Music Library - Note Charts Reset & Wipe Scanner
 ===================================================
@@ -12145,42 +12517,33 @@ HTML;
       flush();
 
       $db = get_db();
-      
-      // Calculate remaining charts in DB
-      $total_songs = (int)$db->query("SELECT COUNT(id) FROM music")->fetchColumn();
-      $remaining_songs = (int)$db->query("SELECT COUNT(DISTINCT song_id) FROM rhythm_charts")->fetchColumn();
-
       $density_multiplier = isset($_GET['density']) ? max(0.1, min(10.0, (float)$_GET['density'])) : 1.0;
-      if ($remaining_songs === 0) {
-        echo "<script>setProgress(100); log('All note charts successfully wiped!', 'success');</script>";
-        echo "<script>log('Redirecting to Division 1/6 (EASY) scan start...', 'info');</script>";
-        echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=1&density=" . $density_multiplier . "'; }, 1000);</script>";
-        echo "</body></html>";
-        exit;
-      }
 
-      $density_multiplier = isset($_GET['density']) ? max(0.1, min(10.0, (float)$_GET['density'])) : 1.0;
-      $pct = round((($total_songs - $remaining_songs) / $total_songs) * 100);
-      echo "<script>setProgress({$pct}); log('Wiping batch of 50 songs\' charts. Remaining songs with charts: {$remaining_songs}...', 'info');</script>";
+      echo "<script>setProgress(50); log('Dropping rhythm_charts table to instantly wipe all charts...', 'info');</script>";
       flush();
 
-      // Delete the charts for up to 50 songs atomically
-      $db->beginTransaction();
+      // CRITICAL FIX: Release all lingering PDOStatement read-locks from earlier script execution before DDL!
+      $stmt_check = null; $stmt_fw = null; $stmt_sess = null; $stmt_key = null;
+      $stmt_rl = null; $stmt_admin = null; $stmt_chk = null;
+
       try {
-        $db->exec("
-          DELETE FROM rhythm_charts WHERE song_id IN (
-            SELECT DISTINCT song_id FROM rhythm_charts LIMIT 50
-          )
-        ");
-        $db->commit();
+        $db->exec("DROP TABLE IF EXISTS rhythm_charts");
+        $db->exec("CREATE TABLE IF NOT EXISTS rhythm_charts (
+          song_id INTEGER NOT NULL,
+          difficulty TEXT NOT NULL,
+          notes_json TEXT,
+          level INTEGER DEFAULT 1,
+          PRIMARY KEY (song_id, difficulty),
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+        
+        echo "<script>setProgress(100); log('All note charts successfully wiped and table recreated!', 'success');</script>";
+        echo "<script>log('Redirecting to Chart Generator...', 'info');</script>";
+        echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=1&run=1&density=" . $density_multiplier . "'; }, 1000);</script>";
       } catch (Exception $e) {
-        if ($db->inTransaction()) $db->rollBack();
-        echo "<script>log('Error during wipe transaction: " . addslashes($e->getMessage()) . "', 'warn');</script>";
-        flush();
+        echo "<script>log('Error during wipe: " . addslashes($e->getMessage()) . "', 'warn');</script>";
       }
 
-      // Auto-reload to delete the next 50 songs, maintaining the density parameter safely
-      echo "<script>setTimeout(() => { window.location.href = '?action=reset_rhythm_charts&density=" . $density_multiplier . "'; }, 300);</script>";
       echo "</body></html>";
       exit;
 
@@ -13248,13 +13611,7 @@ function perform_full_scan($db) {
   }
   echo "'Music Library' user ID: {$library_user_id}\n\n";
 
-  echo "Step 3: Fetching existing music records from database...\n";
-  $db->exec("UPDATE music SET file = REPLACE(file, '\\', '/')"); 
-  $stmt = $db->query("SELECT file, last_modified FROM music");
-  $db_files = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-  echo "Found " . count($db_files) . " records in the database.\n\n";
-
-  echo "Step 4: Scanning music directory for files...\n";
+  echo "Step 3: Scanning music directory for files...\n";
   $files_on_disk = [];
   
   $music_folders = [MUSIC_DIR]; 
@@ -13280,7 +13637,70 @@ function perform_full_scan($db) {
   
   echo "Found " . count($files_on_disk) . " music files on disk.\n\n";
 
-  echo "Step 5: Comparing disk files with database records...\n";
+  echo "Step 4: Aligning database file paths with current environment...\n";
+  $db->exec("UPDATE music SET file = REPLACE(file, '\\', '/')"); 
+  $sample_file = $db->query("SELECT file FROM music LIMIT 1")->fetchColumn();
+  if ($sample_file) {
+    $sample_file = str_replace('\\', '/', $sample_file);
+    $old_base = null;
+    $new_base = null;
+
+    if (preg_match('#^(.*?)/(uploads/.*)$#i', $sample_file, $matches)) {
+      $old_base = $matches[1];
+      $new_base = MUSIC_DIR;
+    } else {
+      $basename = basename($sample_file);
+      foreach ($files_on_disk as $disk_path => $mtime) {
+        if (basename($disk_path) === $basename) {
+          $db_parts = explode('/', $sample_file);
+          $disk_parts = explode('/', $disk_path);
+          $match_len = 0;
+          $db_count = count($db_parts);
+          $disk_count = count($disk_parts);
+          for ($i = 1; $i <= min($db_count, $disk_count); $i++) {
+            if ($db_parts[$db_count - $i] === $disk_parts[$disk_count - $i]) {
+              $match_len = $i;
+            } else {
+              break;
+            }
+          }
+          if ($match_len > 0) {
+            $suffix = implode('/', array_slice($db_parts, -$match_len));
+            $old_base = substr($sample_file, 0, -strlen($suffix) - 1);
+            $new_base = substr($disk_path, 0, -strlen($suffix) - 1);
+            break;
+          }
+        }
+      }
+    }
+
+    if ($old_base && $new_base && strcasecmp($old_base, $new_base) !== 0) {
+      echo " -> Mismatch detected: Database base path ('{$old_base}') differs from Current environment ('{$new_base}').\n";
+      echo " -> Automatically correcting all file paths in the database to prevent losing playlists, favorites, and metadata...\n";
+      
+      $update_stmt = $db->prepare("UPDATE music SET file = ? || SUBSTR(file, ?)");
+      $old_base_len = strlen($old_base) + 1;
+      
+      $db->beginTransaction();
+      try {
+        $update_stmt->execute([$new_base, $old_base_len]);
+        $db->commit();
+        echo " -> Successfully corrected all file paths in the database.\n\n";
+      } catch (Exception $e) {
+        $db->rollBack();
+        echo " -> Error correcting database paths: " . $e->getMessage() . "\n\n";
+      }
+    } else {
+      echo " -> Database base path is already aligned with current server environment.\n\n";
+    }
+  }
+
+  echo "Step 5: Fetching existing music records from database...\n";
+  $stmt = $db->query("SELECT file, last_modified FROM music");
+  $db_files = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+  echo "Found " . count($db_files) . " records in the database.\n\n";
+
+  echo "Step 6: Comparing disk files with database records...\n";
   $files_to_add = array_diff_key($files_on_disk, $db_files);
   $files_to_delete = array_diff_key($db_files, $files_on_disk);
   $files_to_update = [];
@@ -13843,6 +14263,7 @@ function perform_cover_scan($db) {
         --ytm-secondary-text: #aaaaaa;
         --ytm-accent: #ff0000;
         --header-height-mobile: 64px;
+        --sidebar-width: 260px;
       }
       html, body { height: 100%; }
       body {
@@ -13856,7 +14277,7 @@ function perform_cover_scan($db) {
       ::-webkit-scrollbar-thumb { background: var(--ytm-surface-2); border-radius: 4px; }
       ::-webkit-scrollbar-thumb:hover { background: #555; }
       .nav-tabs { border-bottom-color: var(--ytm-surface-2) !important; }
-      .nav-tabs .nav-link { color: var(--ytm-primary-text) !important; border: none !important; border-bottom: 2px solid transparent !important; padding: 0.75rem 1.5rem; font-weight: 500; cursor: pointer; background: transparent !important; transition: color 0.2s, border-color 0.2s; }
+      .nav-tabs .nav-link { color: var(--ytm-primary-text) !important; border: none !important; border-bottom: 2px solid transparent !important; padding: 0.75rem 1.5rem; font-weight: 500; cursor: pointer; background: transparent !important; transition: color 0.2s, border-color 0.2s, background-color 0.2s; }
       .nav-tabs .nav-link:hover { border-bottom: 2px solid rgba(255,255,255,0.2) !important; }
       /* Locks the active tab highlight so it never vanishes */
       .nav-tabs .nav-link.active,
@@ -13868,6 +14289,73 @@ function perform_cover_scan($db) {
         font-weight: bold !important; 
         border-radius: 6px 6px 0 0 !important; 
         text-shadow: none !important; 
+      }
+      
+      /* Distinct Unified Pill Tabs for Modals and Profiles */
+      .player-modal-content .nav-tabs,
+      #artistTabs,
+      #rg-artist-detail-tabs {
+        border-bottom: none !important;
+        border-radius: 12px !important;
+        padding: 4px !important;
+        display: flex !important;
+        flex-wrap: nowrap !important;
+        overflow-x: auto !important;
+        flex-shrink: 0 !important; /* Prevents vertical crushing under flex parent */
+        scrollbar-width: none !important;
+      }
+      .player-modal-content .nav-tabs::-webkit-scrollbar,
+      #artistTabs::-webkit-scrollbar,
+      #rg-artist-detail-tabs::-webkit-scrollbar {
+        display: none !important;
+      }
+      
+      .player-modal-content .nav-tabs { background: transparent !important; }
+      #artistTabs, #rg-artist-detail-tabs { background: transparent !important; margin-bottom: 1rem !important; max-width: 100%; }
+
+      .player-modal-content .nav-tabs .nav-link,
+      #artistTabs .nav-link,
+      #rg-artist-detail-tabs .nav-link {
+        color: var(--ytm-secondary-text) !important;
+        border: none !important;
+        border-radius: 50rem !important; /* Perfect pill shape on all sides */
+        padding: 0.5rem 1.25rem !important;
+        font-weight: 600 !important;
+        background: transparent !important;
+        margin: 0 !important;
+        white-space: nowrap;
+        transition: color 0.2s, background-color 0.2s; /* Replaced transform transition with basic colors */
+      }
+      .player-modal-content .nav-tabs .nav-link.active,
+      .player-modal-content .nav-tabs .nav-link.active:hover,
+      .player-modal-content .nav-tabs .nav-link.active:focus,
+      #artistTabs .nav-link.active,
+      #artistTabs .nav-link.active:hover,
+      #artistTabs .nav-link.active:focus,
+      #rg-artist-detail-tabs .nav-link.active,
+      #rg-artist-detail-tabs .nav-link.active:hover,
+      #rg-artist-detail-tabs .nav-link.active:focus {
+        background: var(--ytm-surface-2) !important;
+        color: #ffffff !important;
+        box-shadow: none !important; /* Removed 3D box-shadow */
+        transform: none !important; /* Prevents transforming when active */
+        border-bottom: none !important;
+      }
+      .player-modal-content .nav-tabs .nav-link.active,
+      .player-modal-content .nav-tabs .nav-link.active:hover,
+      .player-modal-content .nav-tabs .nav-link.active:focus,
+      #artistTabs .nav-link.active,
+      #artistTabs .nav-link.active:hover,
+      #artistTabs .nav-link.active:focus,
+      #rg-artist-detail-tabs .nav-link.active,
+      #rg-artist-detail-tabs .nav-link.active:hover,
+      #rg-artist-detail-tabs .nav-link.active:focus {
+        background: rgba(255, 255, 255, 0.15) !important; /* Clean translucent white overlay */
+        color: #ffffff !important;
+        border-radius: 50rem !important; /* Perfect pill shape on all sides */
+        box-shadow: none !important; /* Removed 3D box-shadow */
+        transform: none !important; /* Prevents transforming when active */
+        border-bottom: none !important;
       }
       .app-container { display: flex; height: 100%; }
       .sidebar {
@@ -13905,17 +14393,33 @@ function perform_cover_scan($db) {
         .song-item.history-item { grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 80px 40px; }
       }
       .song-item { cursor: pointer; border-radius: 0.5em; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; content-visibility: auto; contain-intrinsic-size: auto 72px; }
-      .offcanvas-body .nav-link { padding: 0.75rem 1.5rem; }
+      .offcanvas-body .nav-link { padding: 0.75rem 1.25rem; }
       .sidebar .logo { font-size: 1.5rem; font-weight: 700; padding: 0 1.5rem 1.5rem 1.5rem; }
       .sidebar .logo span { color: var(--ytm-accent); }
       .nav-link {
         color: var(--ytm-secondary-text); display: flex; align-items: center;
-        font-weight: 500; border-left: 3px solid transparent; gap: 1rem; text-decoration: none;
+        font-weight: 500; gap: 1rem; text-decoration: none;
+        padding: 0.75rem 1.25rem !important; margin: 0.2rem 0.75rem; border-radius: 12px; transition: all 0.2s ease-in-out;
+        border: none !important;
+        border-left: 4px solid transparent !important; /* Left red indicator base */
+        border-radius: 0 12px 12px 0 !important; /* Flat left side, rounded right */
       }
-      .nav-link:hover, .nav-link.active { background-color: var(--ytm-surface); color: var(--ytm-primary-text); }
-      .nav-link.active { border-left-color: var(--ytm-accent); }
-      .nav-link .bi { font-size: 1.25rem; width: 24px; text-align: center; }
-      .offcanvas { background-color: var(--ytm-bg); color: var(--ytm-primary-text); z-index: 999; }
+      .collapse .nav-link { margin-left: 1.5rem !important; margin-right: 0.75rem !important; }
+      .nav-link:hover {
+        background-color: rgba(255, 255, 255, 0.05) !important;
+        color: var(--ytm-primary-text) !important;
+        border-left-color: var(--ytm-accent) !important;
+      }
+      .nav-link.active {
+        background-color: rgba(255, 0, 0, 0.1) !important;
+        color: var(--ytm-accent) !important;
+        font-weight: 700;
+        border-left-color: var(--ytm-accent) !important;
+      }
+      .nav-link .bi { font-size: 1.25rem; width: 24px; text-align: center; transition: color 0.2s; }
+      .nav-link:hover .bi { color: var(--ytm-primary-text) !important; }
+      .nav-link.active .bi { color: var(--ytm-accent) !important; }
+      .offcanvas { background-color: var(--ytm-surface) !important; color: var(--ytm-primary-text); z-index: 999; box-shadow: 0 10px 30px rgba(0,0,0,0.8) !important; }
       .offcanvas .offcanvas-header { padding: 0.75rem 1.5rem; }
       .page-header { padding: 1.5rem 2rem; display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
       .header-controls { display: flex; gap: 1rem; align-items: center; margin-left: auto; }
@@ -14252,18 +14756,20 @@ function perform_cover_scan($db) {
       .player-modal-content.theme-light-bg .progress-bar-fg { background-color: #000000 !important; }
       .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg { background-color: var(--ytm-accent) !important; }
       .player-modal-content.theme-light-bg .progress-bar-fg::after { background-color: #000000 !important; }
-      .player-modal-content.theme-light-bg .nav-tabs .nav-link { color: #000000 !important; font-weight: 600 !important; border-bottom: 2px solid transparent !important; }
-      .player-modal-content.theme-light-bg .nav-tabs .nav-link:hover { border-bottom: 2px solid rgba(0,0,0,0.2) !important; }
-      /* Locks the active tab highlight in Light Mode */
+      .player-modal-content.theme-light-bg .nav-tabs { background: transparent !important; }
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link { color: rgba(0, 0, 0, 0.6) !important; }
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link:hover { color: #000000 !important; background: rgba(0, 0, 0, 0.05) !important; }
       .player-modal-content.theme-light-bg .nav-tabs .nav-link.active,
       .player-modal-content.theme-light-bg .nav-tabs .nav-link.active:hover,
       .player-modal-content.theme-light-bg .nav-tabs .nav-link.active:focus { 
-        background-color: rgba(0,0,0,0.1) !important; 
+        background: rgba(255, 255, 255, 0.5) !important; /* Elegant translucent white for light themes */
         color: #000000 !important; 
-        border-bottom: 2px solid #000000 !important; 
+        border-radius: 50rem !important; /* Perfect pill shape on all sides */
+        box-shadow: none !important; /* Removed 3D box-shadow */
+        border: none !important;
         font-weight: 800 !important; 
-        border-radius: 6px 6px 0 0 !important; 
         text-shadow: none !important; 
+        transform: none !important; /* Prevents active tab hover transforms */
       }
       .player-modal-content.theme-light-bg .song-item .song-title,
       .player-modal-content.theme-light-bg .song-item .song-artist,
@@ -14505,6 +15011,7 @@ function perform_cover_scan($db) {
         padding: 12px 32px; border-top: 1px solid var(--ytm-surface-2); display: flex; justify-content: space-between;
         font-size: 0.85rem; color: var(--ytm-secondary-text); background-color: var(--ytm-bg);
       }
+
       .floating-presence-container {
         position: absolute; bottom: 30px; right: 40px; display: flex; flex-direction: column; gap: 8px; z-index: 1060; pointer-events: none; align-items: flex-end;
       }
@@ -14645,24 +15152,33 @@ function perform_cover_scan($db) {
       .phpmusic-settings-nav .nav-link {
         color: var(--ytm-secondary-text);
         text-align: left;
-        padding: 1.15rem 1.5rem;
-        border-radius: 0;
-        border-left: 3px solid transparent;
-        transition: all 0.2s;
+        padding: 0.75rem 1.25rem !important;
+        margin: 0.2rem 0.75rem;
+        border-radius: 12px !important;
+        border: none !important;
+        transition: all 0.2s ease-in-out;
         font-weight: 500;
         display: flex;
         align-items: center;
         gap: 1rem;
         cursor: pointer;
       }
-      .phpmusic-settings-nav .nav-link i { font-size: 1.25rem; }
-      .phpmusic-settings-nav .nav-link:hover { color: var(--ytm-primary-text); background-color: rgba(255,255,255,0.03); }
-      .phpmusic-settings-nav .nav-link.active {
-        background-color: rgba(255,0,0,0.1);
-        color: var(--ytm-primary-text);
-        border-left-color: var(--ytm-accent);
-        font-weight: 700;
+      .phpmusic-settings-nav .nav-link i { font-size: 1.25rem; transition: color 0.2s; }
+      .phpmusic-settings-nav .nav-link:hover { background-color: var(--ytm-surface-2) !important; color: var(--ytm-primary-text) !important; }
+      .phpmusic-settings-nav .nav-link:hover {
+        background-color: var(--ytm-surface-2) !important;
+        color: var(--ytm-primary-text) !important;
+        transform: none !important; /* Removed horizontal slide 3D effect on hover */
       }
+      .phpmusic-settings-nav .nav-link.active {
+        background-color: var(--ytm-surface-2) !important;
+        color: #ffffff !important;
+        font-weight: 700;
+        box-shadow: none !important; /* Removed 3D box-shadow */
+        transform: none !important;
+      }
+      .phpmusic-settings-nav .nav-link:hover i { color: var(--ytm-primary-text) !important; }
+      .phpmusic-settings-nav .nav-link.active i { color: #ffffff !important; }
       .phpmusic-settings-content { overflow-y: auto; background-color: var(--ytm-bg); scrollbar-width: thin; }
       .phpmusic-settings-pane { max-width: 800px; margin: 0 auto; padding-bottom: 3rem; }
       .phpmusic-settings-section {
@@ -14693,23 +15209,44 @@ function perform_cover_scan($db) {
           overflow-x: auto;
           overflow-y: hidden;
           scrollbar-width: none;
+          padding: 12px 0; /* Cleared horizontal padding to let flex spacers handle margins */
+          box-sizing: border-box;
+          display: flex !important;
         }
         .phpmusic-settings-sidebar::-webkit-scrollbar { display: none; }
+        .phpmusic-settings-sidebar::before,
+        .phpmusic-settings-sidebar::after {
+          content: '';
+          width: 1rem; /* Solid 1rem physical margins on both scroll boundaries */
+          flex-shrink: 0;
+          display: block;
+        }
         .phpmusic-settings-nav {
           flex-direction: row !important;
           flex-wrap: nowrap;
-          padding: 0;
+          padding: 4px !important;
+          gap: 0;
+          background: rgba(255, 255, 255, 0.05);
+          border-radius: 12px;
+          display: inline-flex !important;
+          width: max-content;
+          margin: 0 auto; /* Centers the navigation bar when it fits the screen width */
         }
         .phpmusic-settings-nav .nav-link {
           white-space: nowrap;
-          padding: 1rem 1.25rem;
-          border-left: none;
-          border-bottom: 3px solid transparent;
+          padding: 0.5rem 1.25rem !important;
+          margin: 0 !important;
+          border-radius: 8px !important;
           justify-content: center;
         }
+        .phpmusic-settings-nav .nav-link:hover {
+          transform: none !important; /* Removed vertical lift 3D effect on mobile hover */
+        }
         .phpmusic-settings-nav .nav-link.active {
-          border-left-color: transparent;
-          border-bottom-color: var(--ytm-accent);
+          background-color: var(--ytm-surface-2) !important;
+          color: #ffffff !important;
+          box-shadow: none !important; /* Removed 3D box-shadow */
+          transform: none !important;
         }
         .phpmusic-settings-content { padding: 1rem 0.5rem !important; }
         .phpmusic-settings-section { padding: 1rem; border-radius: 8px; }
@@ -14850,26 +15387,26 @@ function perform_cover_scan($db) {
       body.rg-session-active #player-bar { display: none !important; }
       
       /* Responsive Artist Rhythm Page Layout */
-      .rg-artist-layout { display: flex; flex-direction: column; gap: 16px; width: 100%; height: 100%; overflow-y: auto; padding: 16px; }
-      .rg-artist-left { display: flex; flex-direction: column; gap: 16px; width: 100%; flex-shrink: 0; }
-      .rg-artist-right { display: flex; flex-direction: column; gap: 16px; width: 100%; flex-grow: 1; }
+      .rg-artist-layout { display: flex; flex-direction: column; gap: 12px; width: 100%; height: 100%; overflow-y: auto; padding: 12px; }
+      .rg-artist-left { display: flex; flex-direction: column; gap: 12px; width: 100%; flex-shrink: 0; }
+      .rg-artist-right { display: flex; flex-direction: column; gap: 12px; width: 100%; flex-grow: 1; }
       
       @media (min-width: 992px) {
         .rg-artist-layout {
           flex-direction: row !important;
           align-items: stretch !important; /* Stretches left & right columns to full page height */
-          gap: 24px;
+          gap: 16px;
           overflow-y: hidden !important; /* Disables main layout page scrolling */
         }
         .rg-artist-left {
-          width: 350px;
+          width: 320px;
           height: 100%;
           display: flex !important;
           flex-direction: column !important;
-          gap: 16px;
+          gap: 12px;
         }
         .rg-artist-right {
-          width: calc(100% - 374px);
+          width: calc(100% - 336px);
           height: 100%;
           display: flex !important;
           flex-direction: column !important;
@@ -14901,7 +15438,7 @@ function perform_cover_scan($db) {
         }
 
         /* Force left sub-panes (History/Favorites/Following) to fill height below tabs */
-        #rg-art-pane-history, #rg-art-pane-favs, #rg-art-pane-following {
+        #rg-art-pane-history, #rg-art-pane-favs, #rg-art-pane-following, #rg-art-pane-playlists {
           flex-grow: 1;
           min-height: 0;
           display: flex;
@@ -14909,7 +15446,7 @@ function perform_cover_scan($db) {
         }
 
         /* Make the inner History, Favorites and Following lists scroll independently on the left column */
-        #rg-list-artist-history, #rg-list-artist-favs, #rg-list-artist-following {
+        #rg-list-artist-history, #rg-list-artist-favs, #rg-list-artist-following, #rg-list-artist-playlists {
           overflow-y: auto !important;
           flex-grow: 1;
           min-height: 0;
@@ -14918,7 +15455,7 @@ function perform_cover_scan($db) {
         }
 
         /* Overwrite hidden states for Desktop */
-        #rg-art-pane-history.d-none, #rg-art-pane-favs.d-none, #rg-art-pane-following.d-none {
+        #rg-art-pane-history.d-none, #rg-art-pane-favs.d-none, #rg-art-pane-following.d-none, #rg-art-pane-playlists.d-none {
           display: none !important;
         }
       }
@@ -17709,7 +18246,7 @@ function perform_cover_scan($db) {
       <div class="modal-dialog modal-fullscreen">
         <div class="modal-content" style="background-color: var(--ytm-bg);">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
-            <h5 class="modal-title text-white"><i class="bi bi-gear-fill text-secondary me-2"></i> Settings</h5>
+            <h5 class="modal-title text-white"><i class="bi bi-sliders text-secondary me-2"></i> Settings</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body p-0 d-flex flex-column flex-md-row phpmusic-settings-wrapper">
@@ -18220,6 +18757,16 @@ function perform_cover_scan($db) {
                   <h6 class="phpmusic-settings-section-title"><i class="bi bi-shield-exclamation text-warning"></i> Game Ban Status</h6>
                   <p class="text-secondary small mb-3">If you are locked out of the Rhythm Game due to false anti-cheat flags, you can appeal the restriction here.</p>
                   <button type="button" class="btn btn-warning text-dark w-100 fw-bold" data-bs-toggle="modal" data-bs-target="#settings-appeal-modal" data-bs-dismiss="modal"><i class="bi bi-envelope-paper me-2"></i> Submit Game Ban Appeal</button>
+                </div>
+
+                <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-box-arrow-down text-info"></i> Data Backup</h6>
+                  <p class="text-secondary small mb-3">Export or import your account data (Followings, Notes, Tasks, Blogs, Rhythm Favorites, and Playlists) as a structured JSON file.</p>
+                  <div class="d-flex gap-2 mb-2">
+                    <button type="button" class="btn btn-outline-light w-50 fw-bold" id="btn-export-user-data"><i class="bi bi-box-arrow-up me-2"></i>Export</button>
+                    <button type="button" class="btn btn-outline-light w-50 fw-bold" id="btn-import-user-data-trigger"><i class="bi bi-box-arrow-in-down me-2"></i>Import</button>
+                    <input type="file" id="import-user-data-file" accept=".json" class="d-none">
+                  </div>
                 </div>
 
                 <div class="phpmusic-settings-section border-danger" style="background-color: rgba(255,0,0,0.03);">
@@ -19051,7 +19598,24 @@ function perform_cover_scan($db) {
               </select>
               <i class="bi bi-chevron-down text-secondary" style="position: absolute; right: 16px; pointer-events: none; font-size: 1.2rem; z-index: 2;"></i>
             </div>
-            <button type="button" class="btn btn-danger w-100 fw-bold" id="save-rhythm-global-density-btn" style="height: 45px;">Save Settings</button>
+            <button type="button" class="btn btn-danger w-100 fw-bold mb-3" id="save-rhythm-global-density-btn" style="height: 45px;">Save Settings</button>
+            <hr class="border-secondary opacity-50 mb-3">
+            <button type="button" class="btn btn-outline-warning w-100 fw-bold" id="vacuum-database-btn" data-bs-dismiss="modal" data-bs-toggle="modal" data-bs-target="#vacuum-modal" style="height: 45px;"><i class="bi bi-database-fill-gear me-1"></i> Optimize Storage</button>
+            <div class="text-secondary small mt-2 text-center" style="line-height: 1.4;">Frees up disk space by removing remnants of old replaced charts. Does not delete active data.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="vacuum-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header border-0">
+            <h5 class="modal-title">Database Optimization Log</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-0">
+            <iframe id="vacuum-iframe" src="about:blank" style="width: 100%; height: 60vh; border: none; background-color: #030303;"></iframe>
           </div>
         </div>
       </div>
@@ -19066,6 +19630,156 @@ function perform_cover_scan($db) {
           </div>
           <div class="modal-body p-4" id="rg-player-stats-body">
             <!-- Populated dynamically via JS -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="rg-how-to-play-modal" tabindex="-1">
+      <div class="modal-dialog modal-fullscreen">
+        <div class="modal-content" style="background-color: var(--ytm-bg); border: none;">
+          <div class="modal-header border-0 pb-2 px-4" style="border-bottom: 1px solid var(--ytm-surface-2) !important; background-color: var(--ytm-surface);">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-info-circle-fill text-info me-2"></i>How to Play: Rhythm Game</h5>
+            <button type="button" class="btn-close btn-close-white fs-5" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-light px-4 py-4 mx-auto" style="width: 100%;">
+            
+            <div class="text-center mb-5 mt-2">
+              <i class="bi bi-controller text-danger" style="font-size: 4rem;"></i>
+              <h2 class="fw-bold mt-3 text-white">Master the Beat</h2>
+              <p class="text-secondary">Learn the core mechanics, note types, and scoring system to climb the leaderboards.</p>
+            </div>
+
+            <div class="d-flex flex-column gap-3">
+              
+              <h5 class="text-white mt-2 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Note Types</h5>
+              
+              <!-- Tap Notes -->
+              <div class="d-flex flex-column p-4 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-4 mb-3">
+                  <div class="d-flex align-items-center justify-content-center" style="width: 80px; height: 60px;">
+                    <svg width="60" height="20" viewBox="0 0 60 20" xmlns="http://www.w3.org/2000/svg">
+                      <rect x="0" y="0" width="60" height="20" fill="#00d2ff" stroke="#ffffff" stroke-width="2" rx="4"/>
+                      <line x1="10" y1="10" x2="50" y2="10" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <span class="fw-bold text-white fs-4 d-block mb-1">Tap Notes (Cyan)</span>
+                    <span class="text-secondary" style="font-size: 0.9rem;">The standard note. Tap the corresponding lane key exactly when the note aligns with the red judgment line at the bottom.</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Hold Notes -->
+              <div class="d-flex flex-column p-4 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-4 mb-3">
+                  <div class="d-flex align-items-center justify-content-center" style="width: 80px; height: 100px;">
+                    <svg width="60" height="90" viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+                      <rect x="0" y="0" width="60" height="90" fill="rgba(46, 204, 113, 0.4)" stroke="#2ecc71" stroke-width="2" rx="4"/>
+                      <rect x="0" y="0" width="60" height="20" fill="#2ecc71" stroke="#ffffff" stroke-width="2" rx="4"/>
+                      <line x1="10" y1="10" x2="50" y2="10" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <span class="fw-bold text-white fs-4 d-block mb-1">Hold Notes (Green)</span>
+                    <span class="text-secondary" style="font-size: 0.9rem;">Press and hold the key when the bottom of the note reaches the line, and release it exactly when the top tail passes. Letting go too early breaks your combo.</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Swipe Notes -->
+              <div class="d-flex flex-column p-4 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-4 mb-3">
+                  <div class="d-flex align-items-center justify-content-center" style="width: 80px; height: 60px;">
+                    <svg width="60" height="20" viewBox="0 0 60 20" xmlns="http://www.w3.org/2000/svg">
+                      <rect x="0" y="0" width="60" height="20" fill="#ff4da6" stroke="#ffffff" stroke-width="2" rx="4"/>
+                      <polyline points="20,14 30,6 40,14" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <span class="fw-bold text-white fs-4 d-block mb-1">Flick Notes (Pink)</span>
+                    <span class="text-secondary" style="font-size: 0.9rem;">Swipe up or quickly flick your finger/mouse on the lane when it hits the line. On desktop, releasing the key rapidly counts as a flick.</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Hold + Swipe Notes -->
+              <div class="d-flex flex-column p-4 rounded mt-3" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-4 mb-3">
+                  <div class="d-flex align-items-center justify-content-center" style="width: 80px; height: 100px;">
+                    <svg width="60" height="90" viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+                      <rect x="0" y="0" width="60" height="90" fill="rgba(255, 77, 166, 0.4)" stroke="#ff4da6" stroke-width="2" rx="4"/>
+                      <rect x="0" y="0" width="60" height="20" fill="#ff4da6" stroke="#ffffff" stroke-width="2" rx="4"/>
+                      <polyline points="20,14 30,6 40,14" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <span class="fw-bold text-white fs-4 d-block mb-1">Hold + Flick Notes</span>
+                    <span class="text-secondary" style="font-size: 0.9rem;">A combination of Hold and Flick. Keep the key pressed during the transparent body, and release it with a flick/swipe exactly as the pink tail passes the judgment line.</span>
+                  </div>
+                </div>
+              </div>
+
+              <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Navigation & Difficulties</h5>
+              
+              <div class="p-4 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <ul class="text-secondary mb-0" style="font-size: 0.95rem; line-height: 1.8;">
+                  <li><strong class="text-white"><i class="bi bi-compass text-info"></i> Hub Navigation:</strong> Use the bottom navigation bar to switch between <strong>Songs</strong>, <strong>Artists</strong>, <strong>Favorites</strong>, <strong>Ranks</strong>, your <strong>Profile</strong>, or <strong>Offline</strong> tracks.</li>
+                  <li><strong class="text-white"><i class="bi bi-bar-chart-fill text-warning"></i> Difficulty Scaling:</strong>
+                    <ul class="mt-1 mb-2">
+                      <li><strong>Easy / Normal:</strong> Uses 4 lanes (D, F, J, K). Best for beginners.</li>
+                      <li><strong>Hard / Expert / Master:</strong> Uses 6 lanes (S, D, F, J, K, L). Requires faster reaction times.</li>
+                      <li><strong>Demon:</strong> Uses all 10 lanes! <span class="text-danger fw-bold">Requires Landscape orientation on mobile devices.</span></li>
+                    </ul>
+                  </li>
+                  <li><strong class="text-white"><i class="bi bi-robot text-primary"></i> Autoplay (Bot Mode):</strong> Toggle "Autoplay" on the song menu to let the bot achieve a perfect score automatically. <i>Note: Autoplay scores are not saved to the leaderboards.</i></li>
+                </ul>
+              </div>
+
+              <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Scoring & Ranks</h5>
+              
+              <div class="p-4 rounded" style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="row g-3 text-center mb-4">
+                  <div class="col-3">
+                    <div class="fw-bold fs-5 text-white">PERFECT</div>
+                    <div class="text-success small">±45ms</div>
+                    <div class="text-secondary small">100% Acc</div>
+                  </div>
+                  <div class="col-3">
+                    <div class="fw-bold fs-5" style="color: #ff3b30;">GREAT</div>
+                    <div class="text-success small">±80ms</div>
+                    <div class="text-secondary small">75% Acc</div>
+                  </div>
+                  <div class="col-3">
+                    <div class="fw-bold fs-5" style="color: #ffa000;">GOOD</div>
+                    <div class="text-success small">±125ms</div>
+                    <div class="text-secondary small">40% Acc</div>
+                  </div>
+                  <div class="col-3">
+                    <div class="fw-bold fs-5" style="color: #8e1c1c;">BAD / MISS</div>
+                    <div class="text-danger small">&gt;125ms</div>
+                    <div class="text-secondary small">Breaks Combo</div>
+                  </div>
+                </div>
+                
+                <div class="d-flex flex-wrap gap-2 justify-content-center">
+                  <span class="badge bg-danger text-white fs-6 px-3 py-2">SS <small>(98%+)</small></span>
+                  <span class="badge bg-warning text-dark fs-6 px-3 py-2">S <small>(95%+)</small></span>
+                  <span class="badge text-white fs-6 px-3 py-2" style="background: #a78bfa;">A <small>(90%+)</small></span>
+                  <span class="badge text-white fs-6 px-3 py-2" style="background: #60a5fa;">B <small>(80%+)</small></span>
+                  <span class="badge text-dark fs-6 px-3 py-2" style="background: #34d399;">C <small>(70%+)</small></span>
+                </div>
+              </div>
+
+              <h5 class="text-white mt-4 mb-2 fw-bold" style="border-bottom: 2px solid #444; padding-bottom: 8px;">Tips & Settings</h5>
+              <ul class="text-secondary" style="font-size: 0.95rem; line-height: 1.8;">
+                <li><strong class="text-white">Calibration:</strong> If notes feel out of sync with the beat, use the Calibration Tool in the Settings tab to adjust your audio offset (in milliseconds).</li>
+                <li><strong class="text-white">Note Speed:</strong> Adjusting the Tick Speed in settings spreads the notes further apart, making fast sections easier to read without altering the song's BPM.</li>
+                <li><strong class="text-white">HP Bar:</strong> Missing notes drains your green health bar. If it empties completely, you fail the stage!</li>
+                <li><strong class="text-white">Anti-Cheat:</strong> The server actively detects inhuman macros and auto-clickers. Do not use scripts, or you will be permanently banned.</li>
+              </ul>
+
+            </div>
           </div>
         </div>
       </div>
@@ -23214,26 +23928,51 @@ SOFTWARE.</div>
           }
         };
 
-        const renderQueue = async (reset = false) => {
+        window.renderQueue = async (reset = false, direction = 'down') => {
           const queueContainerDesktop = document.getElementById('desktop-player-queue-list');
           const queueContainerMobile = document.getElementById('mobile-player-queue-list');
           
-          if (reset) {
-            renderedQueueCount = 0;
-            if (queueContainerDesktop) queueContainerDesktop.innerHTML = '<div class="song-list"></div>';
-            if (queueContainerMobile) queueContainerMobile.innerHTML = '<div class="song-list"></div>';
-          }
-          
-          if (renderedQueueCount >= queue.length || isQueueLoading) return;
+          if (isQueueLoading) return;
           isQueueLoading = true;
-          
-          // Determine chunk size. If resetting, ensure we render up to the active song so it can be scrolled to immediately.
-          let chunkSize = 25;
-          if (reset && typeof queueIndex !== 'undefined' && queueIndex >= 25) {
-            chunkSize = queueIndex + 15;
+
+          if (reset) {
+            // Render a chunk specifically around the active song to save DOM memory!
+            renderedQueueStart = Math.max(0, (typeof queueIndex !== 'undefined' && queueIndex > -1 ? queueIndex : 0) - 25);
+            renderedQueueEnd = Math.min(queue.length, renderedQueueStart + 50);
+            
+            const listHtml = '<div class="text-center py-2 d-none" id="queue-load-prev"><button class="btn btn-sm btn-outline-secondary rounded-pill px-4" onclick="window.renderQueue(false, \'up\')"><i class="bi bi-arrow-up"></i> Load Previous</button></div><div class="song-list"></div><div class="text-center py-3 d-none" id="queue-load-next"><div class="spinner-border spinner-border-sm text-secondary"></div></div>';
+            
+            if (queueContainerDesktop) queueContainerDesktop.innerHTML = listHtml;
+            if (queueContainerMobile) queueContainerMobile.innerHTML = listHtml;
+          } else {
+            if (direction === 'down') {
+              if (renderedQueueEnd >= queue.length) {
+                isQueueLoading = false;
+                return;
+              }
+            } else if (direction === 'up') {
+              if (renderedQueueStart <= 0) {
+                isQueueLoading = false;
+                return;
+              }
+            }
           }
           
-          const nextChunkIds = queue.slice(renderedQueueCount, renderedQueueCount + chunkSize);
+          let chunkStart = 0;
+          let chunkEnd = 0;
+          
+          if (reset) {
+            chunkStart = renderedQueueStart;
+            chunkEnd = renderedQueueEnd;
+          } else if (direction === 'down') {
+            chunkStart = renderedQueueEnd;
+            chunkEnd = Math.min(queue.length, renderedQueueEnd + 25);
+          } else if (direction === 'up') {
+            chunkEnd = renderedQueueStart;
+            chunkStart = Math.max(0, renderedQueueStart - 25);
+          }
+
+          const nextChunkIds = queue.slice(chunkStart, chunkEnd);
           const missingIds = nextChunkIds.filter(id => !globalSongCache[id]);
           
           // Fetch any data that isn't cached yet
@@ -23241,7 +23980,7 @@ SOFTWARE.</div>
             const fetchedData = await fetchData('?action=get_queue_songs', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ ids: missingIds })
-            }, true); // Silent flag set to true
+            }, true);
             if (fetchedData) {
               fetchedData.forEach(song => globalSongCache[song.id] = song);
             }
@@ -23288,20 +24027,54 @@ SOFTWARE.</div>
                 </div>
               </div>`;
           });
-          
-          // Append to the queue DOM
-          if (queueContainerDesktop && queueContainerDesktop.querySelector('.song-list')) {
-            const lst = queueContainerDesktop.querySelector('.song-list');
-            lst.insertAdjacentHTML('beforeend', html);
-            lst.querySelectorAll('.song-item:not(.v-obs)').forEach(el => { el.classList.add('v-obs'); virtualObserver.observe(el); });
+
+          const appendHtmlToQueues = (action) => {
+            [queueContainerDesktop, queueContainerMobile].forEach(container => {
+              if (container) {
+                const lst = container.querySelector('.song-list');
+                if (lst) {
+                  let oldScrollHeight = 0;
+                  const pane = container.closest('.overflow-auto');
+                  if (pane) oldScrollHeight = pane.scrollHeight;
+
+                  if (action === 'append') lst.insertAdjacentHTML('beforeend', html);
+                  else lst.insertAdjacentHTML('afterbegin', html);
+                  
+                  lst.querySelectorAll('.song-item:not(.v-obs)').forEach(el => { el.classList.add('v-obs'); virtualObserver.observe(el); });
+
+                  if (action === 'prepend' && pane) {
+                    pane.scrollTop += (pane.scrollHeight - oldScrollHeight);
+                  }
+                }
+              }
+            });
+          };
+
+          if (reset || direction === 'down') {
+            appendHtmlToQueues('append');
+            renderedQueueEnd = chunkEnd;
+            if (reset) renderedQueueStart = chunkStart;
+          } else if (direction === 'up') {
+            appendHtmlToQueues('prepend');
+            renderedQueueStart = chunkStart;
           }
-          if (queueContainerMobile && queueContainerMobile.querySelector('.song-list')) {
-            const lst = queueContainerMobile.querySelector('.song-list');
-            lst.insertAdjacentHTML('beforeend', html);
-            lst.querySelectorAll('.song-item:not(.v-obs)').forEach(el => { el.classList.add('v-obs'); virtualObserver.observe(el); });
-          }
-          
-          renderedQueueCount += nextChunkIds.length;
+
+          // Update load prev/next buttons safely
+          [queueContainerDesktop, queueContainerMobile].forEach(container => {
+             if (container) {
+               const loadPrev = container.querySelector('#queue-load-prev');
+               const loadNext = container.querySelector('#queue-load-next');
+               if (loadPrev) {
+                 if (renderedQueueStart > 0) loadPrev.classList.remove('d-none');
+                 else loadPrev.classList.add('d-none');
+               }
+               if (loadNext) {
+                 if (renderedQueueEnd < queue.length) loadNext.classList.remove('d-none');
+                 else loadNext.classList.add('d-none');
+               }
+             }
+          });
+
           isQueueLoading = false;
 
           // Dynamically indicate offline availability for ALL queue items
@@ -23314,7 +24087,6 @@ SOFTWARE.</div>
               const titleWrapper = item.querySelector('.song-title-wrapper');
               
               if (!req) {
-                // It is NOT offline
                 item.classList.add('offline-missing');
                 if (!navigator.onLine) {
                   item.style.transition = 'opacity 0.3s ease';
@@ -23324,7 +24096,6 @@ SOFTWARE.</div>
                    titleWrapper.insertAdjacentHTML('beforeend', ' <i class="bi bi-cloud-slash text-secondary offline-status-icon ms-1" title="Not saved offline" style="font-size: 0.85rem;"></i>');
                 }
               } else {
-                // It IS offline
                 item.classList.remove('offline-missing');
                 item.style.opacity = '1';
                 if (titleWrapper && !titleWrapper.querySelector('.offline-status-icon')) {
@@ -23342,6 +24113,8 @@ SOFTWARE.</div>
             }
           }
         };
+        // Safely alias it into the global scope
+        const renderQueue = window.renderQueue;
 
         const playerArtDesktop = document.getElementById('player-art-desktop');
         if (playerArtDesktop) {
@@ -23711,7 +24484,8 @@ SOFTWARE.</div>
         let globalSongCache = {};
         let offlineSongsSet = new Set();
         let listenLaterSet = new Set();
-        let renderedQueueCount = 0;
+        let renderedQueueStart = 0;
+        let renderedQueueEnd = 0;
         let isQueueLoading = false;
         let sleepTimerInterval = null;
         let sleepTimerEndTime = 0;
@@ -26302,9 +27076,10 @@ SOFTWARE.</div>
                               <div id="rg-artist-detail-header" class="p-3 rounded-4" style="background: linear-gradient(135deg, rgba(255,59,48,0.15) 0%, rgba(0,0,0,0.4) 100%); border: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 16px;"></div>
 
                               <!-- Sub Navigation Tabs -->
-                              <ul class="nav nav-tabs border-secondary border-0 d-flex gap-2" id="rg-artist-detail-tabs" style="margin-bottom: 8px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;">
+                              <ul class="nav nav-tabs border-secondary border-0 d-flex gap-2 w-100" id="rg-artist-detail-tabs" style="margin-bottom: 8px; flex-wrap: nowrap !important; overflow-x: auto !important; flex-shrink: 0 !important; scrollbar-width: none; max-width: 100%;">
                                 <li class="nav-item"><button class="nav-link active" id="rg-art-tab-tracks" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Tracks</button></li>
                                 <li class="nav-item"><button class="nav-link" id="rg-art-tab-history" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">History</button></li>
+                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-playlists" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Playlists</button></li>
                                 <li class="nav-item"><button class="nav-link" id="rg-art-tab-favs" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Favorites</button></li>
                                 <li class="nav-item"><button class="nav-link" id="rg-art-tab-following" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Following</button></li>
                               </ul>
@@ -26345,6 +27120,11 @@ SOFTWARE.</div>
                                   </select>
                                 </div>
                                 <div id="rg-list-artist-following" class="d-flex flex-column gap-2"></div>
+                              </div>
+
+                              <!-- Playlists Pane -->
+                              <div id="rg-art-pane-playlists" class="d-none flex-column gap-2 w-100">
+                                <div id="rg-list-artist-playlists" class="d-flex flex-column gap-2 overflow-auto modern-custom-scroll" style="flex-grow: 1; min-height: 0; padding-right: 4px;"></div>
                               </div>
                             </div>
 
@@ -26412,7 +27192,12 @@ SOFTWARE.</div>
                                   <button class="rg-key-btn" data-lane="8">L</button>
                                   <button class="rg-key-btn" data-lane="9">;</button>
                                 </div>
-                                <div style="font-size: 0.8rem; color: #888; margin-top: 16px; font-weight: 500;"><i class="bi bi-info-circle me-1"></i>Tap a key to rebind. Easy/Med uses 4 center lanes, Demon uses all 10 lanes!</div>
+                                <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: 16px; gap: 16px; flex-wrap: wrap;">
+                                  <div style="font-size: 0.8rem; color: #888; font-weight: 500;"><i class="bi bi-info-circle me-1"></i>Tap a key to rebind. Easy/Med uses 4 keys (D,F,J,K), Hard-Master uses 6 keys (S,D,F,J,K,L), Demon uses all 10 lanes!</div>
+                                  <button class="btn btn-info text-dark rounded-pill fw-bold d-flex align-items-center gap-2 flex-shrink-0" data-bs-toggle="modal" data-bs-target="#rg-how-to-play-modal" style="font-size: 0.85rem;">
+                                    <i class="bi bi-info-circle-fill"></i> How to Play
+                                  </button>
+                                </div>
                               </div>
 
                               <!-- Gameplay Sliders Card -->
@@ -26453,6 +27238,10 @@ SOFTWARE.</div>
                                     <input type="range" id="rg-sfx-slider" min="0" max="1" value="0.3" step="0.05" style="flex-grow: 1; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
                                     <button type="button" id="rg-sfx-plus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">+</button>
                                   </div>
+                                </div>
+
+                                <div style="display: flex; justify-content: flex-end; margin-top: 24px; padding-top: 24px; border-top: 1px solid rgba(255,255,255,0.1);">
+                                  <button id="rg-btn-reset-options" class="btn btn-outline-danger btn-sm rounded-pill fw-bold px-3 py-1"><i class="bi bi-arrow-counterclockwise"></i> Reset Options</button>
                                 </div>
                               </div>
 
@@ -28818,7 +29607,7 @@ SOFTWARE.</div>
             allContentloaded = true;
           }
           if (viewConfig.highlight) {
-            setTimeout(() => {
+            const findAndHighlight = () => {
               const songToHighlight = contentArea.querySelector(`.song-item[data-song-id="${viewConfig.highlight}"]`);
               if (songToHighlight) {
                 songToHighlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -28827,8 +29616,14 @@ SOFTWARE.</div>
                 setTimeout(() => {
                   songToHighlight.style.backgroundColor = '';
                 }, 2000);
+              } else if (!allContentloaded) {
+                // Auto-load next page recursively until the highlighted track is found!
+                loadMoreContent().then(() => {
+                  setTimeout(findAndHighlight, 100);
+                });
               }
-            }, 500);
+            };
+            setTimeout(findAndHighlight, 500);
           }
 
           hideLoader();
@@ -28907,8 +29702,8 @@ SOFTWARE.</div>
           currentSong.logged = false;
           
           // Ensure the new song is physically rendered in the DOM queues before highlighting
-          if (typeof queueIndex !== 'undefined' && queueIndex >= renderedQueueCount && renderedQueueCount < queue.length) {
-            await renderQueue(false);
+          if (typeof queueIndex !== 'undefined' && (queueIndex < renderedQueueStart || queueIndex >= renderedQueueEnd)) {
+            await window.renderQueue(true); // Force a re-render centered around the active song
           }
           
           initWebAudio();
@@ -30329,6 +31124,17 @@ SOFTWARE.</div>
           });
         }
 
+        const vacuumModalEl = document.getElementById('vacuum-modal');
+        const vacuumIframe = document.getElementById('vacuum-iframe');
+        if (vacuumModalEl && vacuumIframe) {
+          vacuumModalEl.addEventListener('show.bs.modal', () => {
+            vacuumIframe.src = '?action=vacuum_database';
+          });
+          vacuumModalEl.addEventListener('hidden.bs.modal', () => {
+            vacuumIframe.src = 'about:blank';
+          });
+        }
+
         const chartScanModalEl = document.getElementById('chart-scan-modal');
         const chartScanIframe = document.getElementById('chart-scan-iframe');
         if (chartScanModalEl && chartScanIframe) {
@@ -30355,13 +31161,8 @@ SOFTWARE.</div>
           const scanBtn = document.getElementById('nav-chart-scan');
           const configBtn = document.getElementById('nav-chart-config');
           
-          const validateAndOpen = async (modalId, loadIframe) => {
+          const validateAndOpen = (modalId, loadIframe) => {
             try {
-              const songs = await fetchData('?access=api&action=get_songs&page=1&all=1&limit=1&api_key=ADMIN_SESSION_BYPASS', {}, true);
-              if (!songs || !Array.isArray(songs) || songs.length === 0) {
-                alert("Your library is empty! Please run the 'Scan All' (Full Library Scan) tool first to populate your database with songs.");
-                return;
-              }
               const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById(modalId));
               if (loadIframe && chartScanIframe) {
                 const lastStep = localStorage.getItem('rhythm_scan_step') || '1';
@@ -30370,7 +31171,7 @@ SOFTWARE.</div>
               }
               modal.show();
             } catch (err) {
-              alert("Network error. Could not verify library state.");
+              alert("Error opening interface.");
             }
           };
 
@@ -30944,7 +31745,15 @@ SOFTWARE.</div>
              const text = await file.text();
              try {
                let importData = JSON.parse(text);
-               if (importData.name === "Tasks" && importData.tasks) {
+               let proceed = false;
+               if (importData.tasks) {
+                 if (importData.name === "Tasks") {
+                   proceed = true;
+                 } else {
+                   proceed = confirm("Data name doesn't match. Do you want to add new data anyway?");
+                 }
+               }
+               if (proceed) {
                   const response = await fetch('?action=import_tasks', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(importData)
                   });
@@ -30953,7 +31762,7 @@ SOFTWARE.</div>
                     showToast(result.message, result.status);
                     if (currentView.type === 'get_tasks') loadView(currentView);
                   }
-               } else {
+               } else if (!importData.tasks) {
                  showToast('Invalid Task JSON format.', 'error');
                }
              } catch(err) { showToast('Invalid JSON file.', 'error'); }
@@ -30990,7 +31799,15 @@ SOFTWARE.</div>
              const text = await file.text();
              try {
                let importData = JSON.parse(text);
-               if (importData.name === "My Blogs" && importData.blogs) {
+               let proceed = false;
+               if (importData.blogs) {
+                 if (importData.name === "My Blogs") {
+                   proceed = true;
+                 } else {
+                   proceed = confirm("Data name doesn't match. Do you want to add new data anyway?");
+                 }
+               }
+               if (proceed) {
                   const response = await fetch('?action=import_blogs', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(importData)
                   });
@@ -30999,7 +31816,7 @@ SOFTWARE.</div>
                     showToast(result.message, result.status);
                     if (currentView.type === 'get_blogs') loadView(currentView);
                   }
-               } else {
+               } else if (!importData.blogs) {
                  showToast('Invalid Blog JSON format.', 'error');
                }
              } catch(err) { showToast('Invalid JSON file.', 'error'); }
@@ -32727,7 +33544,7 @@ SOFTWARE.</div>
         if (dpQueuePane) {
           dpQueuePane.addEventListener('scroll', () => {
             if (dpQueuePane.scrollTop + dpQueuePane.clientHeight >= dpQueuePane.scrollHeight - 300) {
-              renderQueue(false); // Triggers infinite scroll for desktop Up Next
+              window.renderQueue(false, 'down'); // Triggers infinite chunk loading for desktop Up Next
             }
           });
         }
@@ -32736,7 +33553,7 @@ SOFTWARE.</div>
         if (mpQueuePane) {
           mpQueuePane.addEventListener('scroll', () => {
             if (mpQueuePane.scrollTop + mpQueuePane.clientHeight >= mpQueuePane.scrollHeight - 300) {
-              renderQueue(false); // Triggers infinite scroll for mobile Up Next
+              window.renderQueue(false, 'down'); // Triggers infinite chunk loading for mobile Up Next
             }
           });
         }
@@ -33586,9 +34403,17 @@ SOFTWARE.</div>
           reader.onload = async (event) => {
             try {
               const importData = JSON.parse(event.target.result);
-              if (!importData.name || !importData.songs || !Array.isArray(importData.songs)) {
+              if (!importData.songs || !Array.isArray(importData.songs)) {
                 showToast('Invalid JSON format.', 'error');
                 return;
+              }
+              if (!importData.name) {
+                if (confirm("Playlist name is missing or data doesn't match perfectly. Do you want to add new data anyway?")) {
+                  importData.name = "Imported Playlist";
+                } else {
+                  fileInput.value = '';
+                  return;
+                }
               }
               
               const btn = importPlaylistForm.querySelector('button[type="submit"]');
@@ -33639,6 +34464,12 @@ SOFTWARE.</div>
                 if (!importData.songs || !Array.isArray(importData.songs)) {
                   showToast('Invalid JSON format.', 'error');
                   return;
+                }
+                if (importData.name !== "Offline Music") {
+                  if (!confirm("Data name doesn't match standard offline backup. Do you want to add new data anyway?")) {
+                    fileInput.value = '';
+                    return;
+                  }
                 }
                 
                 const btn = importOfflineForm.querySelector('button[type="submit"]');
@@ -33696,6 +34527,12 @@ SOFTWARE.</div>
                 if (!importData.songs || !Array.isArray(importData.songs)) {
                   showToast('Invalid JSON format.', 'error');
                   return;
+                }
+                if (importData.name !== "Favorites") {
+                  if (!confirm("Data name doesn't match standard favorites backup. Do you want to add new data anyway?")) {
+                    fileInput.value = '';
+                    return;
+                  }
                 }
                 
                 const btn = importFavoritesForm.querySelector('button[type="submit"]');
@@ -35043,6 +35880,164 @@ SOFTWARE.</div>
                 loadView(currentView);
               }
             }
+          });
+        }
+
+        const btnExportUserData = document.getElementById('btn-export-user-data');
+        if (btnExportUserData) {
+          btnExportUserData.addEventListener('click', (e) => {
+            e.preventDefault();
+            window.exportData('?action=export_user_data', `phpmusic_backup_${Date.now()}.json`);
+          });
+        }
+
+        const btnImportUserDataTrigger = document.getElementById('btn-import-user-data-trigger');
+        const fileImportUserData = document.getElementById('import-user-data-file');
+        if (btnImportUserDataTrigger && fileImportUserData) {
+          btnImportUserDataTrigger.addEventListener('click', (e) => {
+            e.preventDefault();
+            fileImportUserData.click();
+          });
+
+          fileImportUserData.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            const originalText = btnImportUserDataTrigger.innerHTML;
+            btnImportUserDataTrigger.disabled = true;
+            
+            // Inject Progress Bar Dynamically
+            let progContainer = document.getElementById('import-user-data-progress-container');
+            if (!progContainer) {
+              progContainer = document.createElement('div');
+              progContainer.id = 'import-user-data-progress-container';
+              progContainer.className = 'progress mt-3';
+              progContainer.style.height = '15px';
+              progContainer.innerHTML = '<div id="import-user-data-progress" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: 0%;">0%</div>';
+              btnImportUserDataTrigger.parentElement.parentElement.appendChild(progContainer);
+            } else {
+              progContainer.classList.remove('d-none');
+            }
+            
+            const progBar = document.getElementById('import-user-data-progress');
+            progBar.style.width = '0%';
+            progBar.textContent = 'Checking data... 0%';
+            progBar.classList.remove('bg-success', 'bg-danger', 'bg-warning');
+            progBar.classList.add('bg-info');
+            btnImportUserDataTrigger.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Checking data...';
+
+            const reader = new FileReader();
+
+            // Track local file reading progress (Validation Phase)
+            reader.onprogress = (evt) => {
+              if (evt.lengthComputable) {
+                const pct = Math.round((evt.loaded / evt.total) * 100);
+                progBar.style.width = pct + '%';
+                progBar.textContent = 'Checking data... ' + pct + '%';
+              }
+            };
+
+            reader.onload = (event) => {
+              try {
+                // Validate JSON formatting client-side before uploading
+                progBar.style.width = '100%';
+                progBar.textContent = 'Validating JSON...';
+                const parsedData = JSON.parse(event.target.result);
+                
+                if (parsedData.version === undefined || !parsedData.date) {
+                  if (!confirm("Data structure doesn't fully match standard backup. Do you want to add new data anyway?")) {
+                    btnImportUserDataTrigger.disabled = false;
+                    btnImportUserDataTrigger.innerHTML = originalText;
+                    progContainer.classList.add('d-none');
+                    fileImportUserData.value = '';
+                    return;
+                  }
+                }
+                
+                // Switch to Upload Phase
+                progBar.style.width = '0%';
+                progBar.textContent = 'Uploading... 0%';
+                btnImportUserDataTrigger.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Uploading...';
+                
+                const xhr = new XMLHttpRequest();
+                
+                // Track precise network upload percentage
+                xhr.upload.onprogress = (evt) => {
+                  if (evt.lengthComputable) {
+                    const pct = Math.round((evt.loaded / evt.total) * 100);
+                    progBar.style.width = pct + '%';
+                    progBar.textContent = 'Uploading... ' + pct + '%';
+                    if (pct >= 100) {
+                      progBar.classList.replace('bg-info', 'bg-warning');
+                      progBar.textContent = 'Processing DB...';
+                      btnImportUserDataTrigger.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Processing...';
+                    }
+                  }
+                };
+
+                xhr.open('POST', '?action=import_user_data', true);
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                
+                xhr.onload = () => {
+                  btnImportUserDataTrigger.disabled = false;
+                  btnImportUserDataTrigger.innerHTML = originalText;
+                  
+                  if (xhr.status === 200) {
+                    try {
+                      const result = JSON.parse(xhr.responseText);
+                      if (result && result.status === 'success') {
+                        progBar.classList.replace('bg-warning', 'bg-success');
+                        progBar.classList.replace('bg-info', 'bg-success');
+                        progBar.textContent = 'Complete!';
+                        showToast(result.message, 'success');
+                        setTimeout(() => progContainer.classList.add('d-none'), 4000);
+                        loadView(currentView);
+                      } else {
+                        progBar.classList.replace('bg-warning', 'bg-danger');
+                        progBar.classList.replace('bg-info', 'bg-danger');
+                        progBar.textContent = 'Failed';
+                        showToast(result.message || 'Import failed', 'error');
+                        setTimeout(() => progContainer.classList.add('d-none'), 5000);
+                      }
+                    } catch(err) {
+                      progBar.classList.replace('bg-warning', 'bg-danger');
+                      progBar.classList.replace('bg-info', 'bg-danger');
+                      progBar.textContent = 'Error';
+                      showToast('Invalid server response.', 'error');
+                    }
+                  } else {
+                    progBar.classList.replace('bg-warning', 'bg-danger');
+                    progBar.classList.replace('bg-info', 'bg-danger');
+                    progBar.textContent = 'Error';
+                    showToast('Network error during import. Payload might be too large.', 'error');
+                  }
+                  fileImportUserData.value = '';
+                };
+
+                xhr.onerror = () => {
+                  btnImportUserDataTrigger.disabled = false;
+                  btnImportUserDataTrigger.innerHTML = originalText;
+                  progBar.classList.replace('bg-warning', 'bg-danger');
+                  progBar.classList.replace('bg-info', 'bg-danger');
+                  progBar.textContent = 'Network Error';
+                  showToast('Network error during import. Connection failed.', 'error');
+                  fileImportUserData.value = '';
+                };
+
+                // Send the raw file directly to bypass RAM stringification exhaustion on XHR
+                xhr.send(file);
+                
+              } catch (err) {
+                showToast('Failed to parse JSON. File might be corrupted.', 'error');
+                btnImportUserDataTrigger.disabled = false;
+                btnImportUserDataTrigger.innerHTML = '<i class="bi bi-box-arrow-in-down me-2"></i>Import';
+                progBar.classList.replace('bg-info', 'bg-danger');
+                progBar.textContent = 'Validation Failed';
+                setTimeout(() => progContainer.classList.add('d-none'), 4000);
+                fileImportUserData.value = '';
+              }
+            };
+            reader.readAsText(file);
           });
         }
 
@@ -38838,6 +39833,12 @@ SOFTWARE.</div>
             this.handleKeyDown = this.onKeyDown.bind(this);
             this.handleKeyUp = this.onKeyUp.bind(this);
             this.handleResize = this.resizeCanvas.bind(this);
+            this.boundGameLoop = this.gameLoop.bind(this);
+            this.boundCalLoop = this.runCalibrationLoop.bind(this);
+            
+            this.smoothTime = 0;
+            this.lastReportedTime = 0;
+            this.lastTimeUpdate = performance.now();
           }
 
           destroy() {
@@ -39180,6 +40181,27 @@ SOFTWARE.</div>
               });
             }
 
+            const btnResetOptions = document.getElementById("rg-btn-reset-options");
+            if (btnResetOptions) {
+              btnResetOptions.addEventListener("click", () => {
+                if (confirm("Reset gameplay options to defaults?")) {
+                  this.calibrationOffsetMs = 0;
+                  this.userTickSpeed = 1.0;
+                  this.sfxVolume = 0.3;
+                  
+                  localStorage.removeItem("rg_cal_offset");
+                  localStorage.removeItem("rg_tick_speed");
+                  localStorage.removeItem("rg_sfx_volume");
+                  
+                  if (offsetSlider) { offsetSlider.value = 0; offsetSlider.dispatchEvent(new Event("input")); }
+                  if (speedSlider) { speedSlider.value = 1.0; speedSlider.dispatchEvent(new Event("input")); }
+                  if (sfxSlider) { sfxSlider.value = 0.3; sfxSlider.dispatchEvent(new Event("input")); }
+                  
+                  showToast("Options reset to default.", "success");
+                }
+              });
+            }
+
             const calBtn = document.getElementById("rg-btn-cal-test");
             if (calBtn) {
               calBtn.addEventListener("click", (e) => {
@@ -39395,8 +40417,10 @@ SOFTWARE.</div>
             document.getElementById("rg-btn-resume").addEventListener("click", () => {
               pauseDialog.classList.add("rg-hidden");
               this.isPlaying = true;
+              this.lastReportedTime = 0;
+              this.lastTimeUpdate = performance.now();
               if (this.audioPlayback) this.audioPlayback.play();
-              requestAnimationFrame(this.gameLoop.bind(this));
+              requestAnimationFrame(this.boundGameLoop);
             });
             document.getElementById("rg-btn-retry-pause").addEventListener("click", () => {
               pauseDialog.classList.add("rg-hidden");
@@ -39526,7 +40550,7 @@ SOFTWARE.</div>
             touchLayer.addEventListener("mouseleave", handleMouseUp);
 
             const setupArtistTabs = () => {
-              const tabs = ["tracks", "history", "favs", "following"];
+              const tabs = ["tracks", "history", "favs", "following", "playlists"];
               tabs.forEach((tab) => {
                 const btn = document.getElementById(`rg-art-tab-${tab}`);
                 if (btn) {
@@ -40518,7 +41542,7 @@ SOFTWARE.</div>
               }
             });
 
-            this.calAnimId = requestAnimationFrame(this.runCalibrationLoop.bind(this));
+            this.calAnimId = requestAnimationFrame(this.boundCalLoop);
           }
 
           processCalHit() {
@@ -40898,8 +41922,15 @@ SOFTWARE.</div>
               
               // ANTI-CHEAT: Prevent pausing via hardware buttons or OS interruptions
               this.audioPlayback.addEventListener('pause', () => {
-                if (this.isPlaying && !this.isAutoplay) {
+                if (this.isPlaying && !this.isAutoplay && !this.audioPlayback.ended) {
                   this.audioPlayback.play().catch(e => console.warn("Anti-cheat resume blocked:", e));
+                }
+              });
+
+              // Reliable event-driven end game trigger to prevent stalled loops
+              this.audioPlayback.addEventListener('ended', () => {
+                if (this.isPlaying) {
+                  this.endGame(false);
                 }
               });
 
@@ -41040,17 +42071,18 @@ SOFTWARE.</div>
                 laneBusyUntil[lane] = t + dur;
                 if (isLong) anyHoldUntil = Math.max(anyHoldUntil, t + dur);
 
-                notes.push({
-                  time: t + 2.0,
-                  lane,
-                  isLong,
-                  endTime: t + 2.0 + dur,
-                  hitEndSwipe: hitEndSwipe,
-                  hitStart: false,
-                  hitEnd: false,
-                  missed: false,
-                  holding: false,
-                });
+                let note = {
+                  time: Math.round((t + 2.0) * 1000) / 1000,
+                  lane: lane
+                };
+                if (isLong) {
+                  note.isLong = true;
+                  note.endTime = Math.round((t + 2.0 + dur) * 1000) / 1000;
+                  if (hitEndSwipe) {
+                    note.hitEndSwipe = true;
+                  }
+                }
+                notes.push(note);
                 lastLane = lane;
               }
             }
@@ -41094,15 +42126,15 @@ SOFTWARE.</div>
             }
 
             if (this.LANES === 4) {
-              // Center 4 lanes for Easy/Medium
-              this.activeCodes = [this.KEY_CODES[3], this.KEY_CODES[4], this.KEY_CODES[5], this.KEY_CODES[6]];
-              this.activeLabels = [this.KEY_LABELS[3], this.KEY_LABELS[4], this.KEY_LABELS[5], this.KEY_LABELS[6]];
+              // osu!mania style 4 lanes (D, F, J, K)
+              this.activeCodes = [this.KEY_CODES[2], this.KEY_CODES[3], this.KEY_CODES[6], this.KEY_CODES[7]];
+              this.activeLabels = [this.KEY_LABELS[2], this.KEY_LABELS[3], this.KEY_LABELS[6], this.KEY_LABELS[7]];
             } else if (this.LANES === 6) {
-              // Center 6 lanes for Hard/Expert/Master
-              this.activeCodes = [this.KEY_CODES[2], this.KEY_CODES[3], this.KEY_CODES[4], this.KEY_CODES[5], this.KEY_CODES[6], this.KEY_CODES[7]];
-              this.activeLabels = [this.KEY_LABELS[2], this.KEY_LABELS[3], this.KEY_LABELS[4], this.KEY_LABELS[5], this.KEY_LABELS[6], this.KEY_LABELS[7]];
+              // osu!mania style 6 lanes (S, D, F, J, K, L)
+              this.activeCodes = [this.KEY_CODES[1], this.KEY_CODES[2], this.KEY_CODES[3], this.KEY_CODES[6], this.KEY_CODES[7], this.KEY_CODES[8]];
+              this.activeLabels = [this.KEY_LABELS[1], this.KEY_LABELS[2], this.KEY_LABELS[3], this.KEY_LABELS[6], this.KEY_LABELS[7], this.KEY_LABELS[8]];
             } else {
-              // All 10 lanes for Demon
+              // All 10 lanes for Demon (A, S, D, F, G, H, J, K, L, ;)
               this.activeCodes = [...this.KEY_CODES];
               this.activeLabels = [...this.KEY_LABELS];
             }
@@ -41132,8 +42164,13 @@ SOFTWARE.</div>
 
             if (this.startGameTimeout) clearTimeout(this.startGameTimeout);
             this.startGameTimeout = setTimeout(() => {
-              if (this.audioPlayback) this.audioPlayback.play().catch((e) => console.warn(e));
+              if (this.audioPlayback) {
+                this.audioPlayback.play().catch((e) => console.warn(e));
+              }
               this.isPlaying = true;
+              this.lastReportedTime = 0;
+              this.lastTimeUpdate = performance.now();
+              this.smoothTime = 0;
               
               // ANTI-CHEAT: completely nuke the media session so it hides from the lock screen
               if ('mediaSession' in navigator) {
@@ -41146,7 +42183,7 @@ SOFTWARE.</div>
                 navigator.mediaSession.setActionHandler('seekforward', null);
               }
               
-              requestAnimationFrame(this.gameLoop.bind(this));
+              requestAnimationFrame(this.boundGameLoop);
             }, 1000);
           }
 
@@ -41398,11 +42435,14 @@ SOFTWARE.</div>
               }
             }
 
-            const time = this.audioPlayback.currentTime + this.calibrationOffsetMs / 1000;
+            // O(1) Time Interpolation & Search bounds for flawless 144hz sync without lag spikes
+            const time = (this.smoothTime || this.audioPlayback.currentTime) + this.calibrationOffsetMs / 1000;
             let tgt = null, minDiff = Infinity;
-
-            for (let i = 0; i < this.chartNotes.length; i++) {
+            
+            const startIdx = Math.max(0, this.noteStartIndex - 20);
+            for (let i = startIdx; i < this.chartNotes.length; i++) {
               const n = this.chartNotes[i];
+              if (n.time - time > 1.5) break; // Break early! Eliminates keystroke lag by avoiding full-chart iteration
               if (n.lane === lane && !n.missed) {
                 if (isSwipeAction) {
                   if (n.isSwipe && !n.hitStart) {
@@ -41477,7 +42517,21 @@ SOFTWARE.</div>
 
           gameLoop() {
             if (!this.isPlaying) return;
-            const time = this.audioPlayback.currentTime + this.calibrationOffsetMs / 1000;
+            
+            // Ultra-Smooth Time Interpolation (Fixes 250ms HTML5 Audio jumps and terrible timings)
+            const rawTime = this.audioPlayback.currentTime;
+            const now = performance.now();
+            if (rawTime !== this.lastReportedTime) {
+              this.lastReportedTime = rawTime;
+              this.lastTimeUpdate = now;
+              this.smoothTime = rawTime;
+            } else {
+              this.smoothTime = this.lastReportedTime + (now - this.lastTimeUpdate) / 1000;
+              // Hard cap interpolation to 200ms to prevent desync during physical buffering pauses
+              if (this.smoothTime - rawTime > 0.20) this.smoothTime = rawTime + 0.20; 
+            }
+            
+            const time = this.smoothTime + this.calibrationOffsetMs / 1000;
             
             if (this.audioBuffer && this.audioBuffer.duration) {
               const progressPct = Math.max(0, Math.min(100, (time / this.audioBuffer.duration) * 100));
@@ -41848,11 +42902,14 @@ SOFTWARE.</div>
             }
             this.ctx.globalAlpha = 1.0;
 
-            if (this.audioPlayback.ended || time > this.audioBuffer.duration + 2.0) {
+            const lastNote = this.chartNotes.length > 0 ? this.chartNotes[this.chartNotes.length - 1] : null;
+            const lastNoteTime = lastNote ? (lastNote.isLong ? lastNote.endTime : lastNote.time) : 0;
+
+            if (this.audioPlayback.ended || time > this.audioBuffer.duration + 2.0 || (this.noteStartIndex >= this.chartNotes.length && time > lastNoteTime + 1.5)) {
               this.endGame(false);
               return;
             }
-            requestAnimationFrame(this.gameLoop.bind(this));
+            requestAnimationFrame(this.boundGameLoop);
           }
 
           spawnParticles(lane, white) {
@@ -42063,6 +43120,44 @@ SOFTWARE.</div>
             return el;
           }
 
+          async loadRgPlaylistSongs(publicId, playlistName) {
+            const container = document.getElementById("rg-list-artist-songs");
+            if (!container) return;
+            
+            container.innerHTML = `<div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;"><div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div></div>`;
+            
+            // Switch to tracks tab visually (for mobile users)
+            const trackTab = document.getElementById("rg-art-tab-tracks");
+            if (trackTab) trackTab.click();
+            
+            const searchInput = document.getElementById("rg-search-artist-songs");
+            if (searchInput) searchInput.placeholder = `Search in ${playlistName}...`;
+
+            try {
+              const res = await fetchData(`?action=get_playlist_songs&public_id=${publicId}&sort=manual_order&all=1`, {}, true);
+              const favData = (await fetchData("?action=get_rhythm_favorites", {}, true)) || [];
+              const favSet = new Set(Array.isArray(favData) ? favData.map((id) => parseInt(id)) : []);
+
+              if (!Array.isArray(res) || res.length === 0) {
+                container.innerHTML = `<div style="grid-column: 1 / -1; text-align:center; padding: 24px; color: #888; width: 100%;">No tracks in this playlist.</div>`;
+              } else {
+                container.innerHTML = `<div class="d-flex align-items-center justify-content-between mb-3 px-2 w-100"><h6 class="text-white fw-bold m-0 text-truncate pe-3" style="font-size: 1.1rem;"><i class="bi bi-music-note-list text-info me-2"></i>${escapeHTML(playlistName)}</h6></div>`;
+                
+                res.forEach((song) => {
+                  if (song.levels) {
+                    if (!window.rhythmLevelsMap) window.rhythmLevelsMap = { levels: {} };
+                    window.rhythmLevelsMap.levels[song.id] = song.levels;
+                  }
+                  song.rg_favorite = favSet.has(parseInt(song.id)) ? 1 : 0;
+                  container.appendChild(this.createSongElement(song));
+                });
+              }
+            } catch (e) {
+              console.error(e);
+              container.innerHTML = `<div style="grid-column: 1 / -1; text-align:center; padding: 24px; color: #888; width: 100%;">Failed to load playlist.</div>`;
+            }
+          }
+
           async loadArtistSongs(artistName, append = false) {
             if (!append) {
               this.artistSongsPage = 1;
@@ -42078,8 +43173,14 @@ SOFTWARE.</div>
             if (this.allArtistSongsLoaded) return;
             this.isLoadingArtistSongs = true;
 
-            const sort = document.getElementById("rg-sort-artist-songs").value;
-            const q = document.getElementById("rg-search-artist-songs").value.trim();
+            const sortSelect = document.getElementById("rg-sort-artist-songs");
+            const searchInput = document.getElementById("rg-search-artist-songs");
+            const sort = sortSelect ? sortSelect.value : "random";
+            const q = searchInput ? searchInput.value.trim() : "";
+            
+            if (searchInput && !append) {
+              searchInput.placeholder = "Search tracks...";
+            }
 
             let url = `?action=get_songs&artist=${encodeURIComponent(artistName)}&page=${this.artistSongsPage}&sort=${sort}&rhythm_game=1`;
             if (q) url += `&q=${encodeURIComponent(q)}`;
@@ -42099,6 +43200,10 @@ SOFTWARE.</div>
               } else {
                 if (!append && container) container.innerHTML = "";
                 res.forEach((song) => {
+                  if (song.levels) {
+                    if (!window.rhythmLevelsMap) window.rhythmLevelsMap = { levels: {} };
+                    window.rhythmLevelsMap.levels[song.id] = song.levels;
+                  }
                   song.rg_favorite = favSet.has(parseInt(song.id)) ? 1 : 0;
                   if (container) container.appendChild(this.createSongElement(song));
                 });
@@ -42143,6 +43248,10 @@ SOFTWARE.</div>
               } else {
                 if (!append && container) container.innerHTML = "";
                 res.forEach((song) => {
+                  if (song.levels) {
+                    if (!window.rhythmLevelsMap) window.rhythmLevelsMap = { levels: {} };
+                    window.rhythmLevelsMap.levels[song.id] = song.levels;
+                  }
                   song.rg_favorite = 1;
                   if (container) container.appendChild(this.createSongElement(song));
                 });
@@ -42221,10 +43330,12 @@ SOFTWARE.</div>
                 <img src="?action=get_image&id=${sampleSong.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-lg border border-secondary" style="width: 72px; height: 72px; object-fit: cover; flex-shrink: 0;">
                 <div class="d-flex flex-column justify-content-center flex-grow-1" style="min-width: 0; text-align: left;">
                   <h4 class="text-white fw-bold mb-1 text-truncate" style="font-size: 1.4rem;">${escapeHTML(artistName)}</h4>
-                  <div class="d-flex align-items-center gap-3 text-secondary small flex-wrap" style="font-weight: 500;">
-                    <span>Played: <b class="text-white">${artistScores.length}</b> times</span>
-                    <span>Score: <b class="text-white">${totalScore.toLocaleString()}</b></span>
-                    <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold border-secondary text-secondary" id="rg-btn-share-artist" style="font-size: 0.7rem; height: 24px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s;"><i class="bi bi-share-fill"></i> Share</button>
+                  <div class="d-flex flex-column align-items-start text-secondary small gap-1" style="font-weight: 500;">
+                    <div class="d-flex align-items-center gap-3 flex-wrap">
+                      <span>Played: <b class="text-white">${artistScores.length}</b> times</span>
+                      <span>Score: <b class="text-white">${totalScore.toLocaleString()}</b></span>
+                    </div>
+                    <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold border-secondary text-secondary mt-1" id="rg-btn-share-artist" style="font-size: 0.7rem; height: 24px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s;"><i class="bi bi-share-fill"></i> Share</button>
                   </div>
                 </div>
                 <div class="d-flex flex-column align-items-end flex-shrink-0">
@@ -42241,9 +43352,9 @@ SOFTWARE.</div>
                 <img src="?action=get_image&id=${sampleSong.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-lg border border-secondary" style="width: 72px; height: 72px; object-fit: cover; flex-shrink: 0;">
                 <div class="d-flex flex-column justify-content-center flex-grow-1" style="min-width: 0; text-align: left;">
                   <h4 class="text-white fw-bold mb-1 text-truncate" style="font-size: 1.4rem;">${escapeHTML(artistName)}</h4>
-                  <div class="d-flex align-items-center gap-3 text-secondary small flex-wrap" style="font-weight: 500;">
+                  <div class="d-flex flex-column align-items-start text-secondary small gap-1" style="font-weight: 500;">
                     <span class="badge bg-dark border border-secondary text-secondary">Guest Artist</span>
-                    <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold border-secondary text-secondary" id="rg-btn-share-artist" style="font-size: 0.7rem; height: 24px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s;"><i class="bi bi-share-fill"></i> Share</button>
+                    <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold border-secondary text-secondary mt-1" id="rg-btn-share-artist" style="font-size: 0.7rem; height: 24px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s;"><i class="bi bi-share-fill"></i> Share</button>
                   </div>
                 </div>
               `;
@@ -42333,6 +43444,32 @@ SOFTWARE.</div>
             }
 
             this.activeArtistDetailId = artistUserId;
+
+            // Render Playlists list for this artist
+            const playContainer = document.getElementById("rg-list-artist-playlists");
+            if (playContainer) {
+              if (uStmt && uStmt.details && uStmt.details.playlists && uStmt.details.playlists.length > 0) {
+                playContainer.innerHTML = uStmt.details.playlists.slice(0, 25).map(p => `
+                  <div class="rg-list-item rg-artist-playlist-item" data-id="${p.public_id}" data-name="${escapeHTML(p.name).replace(/"/g, '&quot;')}" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid var(--rg-primary); border-radius: 12px; padding: 12px 16px; display: flex; align-items: center; gap: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
+                    <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}&size=small" style="width: 50px; height: 50px; border-radius: 8px; object-fit: cover; box-shadow: 0 4px 8px rgba(0,0,0,0.4); flex-shrink: 0;">
+                    <div class="text-truncate flex-grow-1" style="min-width: 0;">
+                      <div class="text-white fw-bold text-truncate" style="font-size: 1rem;">${p.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1"></i>' : ''}${escapeHTML(p.name)}</div>
+                      <div class="text-secondary small mt-1" style="font-size: 0.75rem;"><i class="bi bi-music-note-list text-danger"></i> ${p.song_count} Tracks</div>
+                    </div>
+                    <i class="bi bi-chevron-right text-secondary fs-5" style="flex-shrink: 0;"></i>
+                  </div>
+                `).join("");
+
+                // Securely bind click events natively
+                playContainer.querySelectorAll('.rg-artist-playlist-item').forEach(item => {
+                  item.addEventListener('click', () => {
+                    this.loadRgPlaylistSongs(item.dataset.id, item.dataset.name);
+                  });
+                });
+              } else {
+                playContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-music-note-list d-block fs-1 mb-2"></i>No playlists found.</div>`;
+              }
+            }
 
             // Render Favorites list for this artist
             if (isUser && artistUserId) {
