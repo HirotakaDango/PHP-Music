@@ -409,8 +409,8 @@ function get_db() {
     
     $db->sqliteCreateFunction('match_artist', function($artist_field, $search_name) {
       if ($artist_field === null || $search_name === null) return 0;
-      $db_parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $artist_field);
-      $search_parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $search_name);
+      $db_parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i', $artist_field);
+      $search_parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i', $search_name);
       if (!is_array($db_parts)) $db_parts = [$artist_field];
       if (!is_array($search_parts)) $search_parts = [$search_name];
       foreach ($db_parts as $db_part) {
@@ -7323,6 +7323,23 @@ HTML;
       }
       break;
 
+    case 'force_rescan':
+      $is_active_admin = false;
+      if (isset($_SESSION['user_id'])) {
+        $db_check = get_db();
+        $stmt_chk = $db_check->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+        $stmt_chk->execute([$_SESSION['user_id']]);
+        $u_chk = $stmt_chk->fetch();
+        if ($u_chk && ($u_chk['is_admin'] == 1 || strtolower(trim($u_chk['email'])) === 'musiclibrary@mail.com')) {
+          $is_active_admin = true;
+        }
+      }
+      if (!$is_active_admin) {
+        die("Security violation: Admin session required.");
+      }
+      perform_force_rescan($db, $_GET['mode'] ?? 'all');
+      exit;
+
     case 'full_scan':
       // Lock down backend scanner endpoint to prevent unauthorized CPU exhaustion
       $is_active_admin = false;
@@ -7447,10 +7464,11 @@ HTML;
         $posted_collabs = trim($_POST['artist'] ?? '');
         $is_collaborative = intval($_POST['is_collaborative'] ?? 0);
         
-        $artist = trim($info['comments']['artist'][0] ?? $uploader_name);
+        $artist_arr = $info['comments']['artist'] ?? [];
+        $artist = !empty($artist_arr) ? implode('/', $artist_arr) : $uploader_name;
         if (empty($artist) || $artist === 'Unknown Artist') $artist = $uploader_name;
         
-        $main_artist = trim(preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $artist)[0]);
+        $main_artist = trim(preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $artist)[0]);
         if (empty($main_artist)) $main_artist = $uploader_name;
         
         $collab_user_ids = [];
@@ -7482,12 +7500,12 @@ HTML;
         $filename = uniqid('m_') . '.' . $ext;
         $filePath = $upload_dir . '/' . $filename;
         if (move_uploaded_file($file['tmp_name'], $filePath)) {
-          $title = trim($info['comments']['title'][0] ?? pathinfo($file['name'], PATHINFO_FILENAME));
-          $album = trim($info['comments']['album'][0] ?? 'Unknown Album');
+          $title = isset($info['comments']['title']) ? implode('/', $info['comments']['title']) : pathinfo($file['name'], PATHINFO_FILENAME);
+          $album = isset($info['comments']['album']) ? implode('/', $info['comments']['album']) : 'Unknown Album';
           $year = (int)($info['comments']['year'][0] ?? 0);
           $duration = (int)($info['playtime_seconds'] ?? 0);
           $bitrate = (int)($info['audio']['bitrate'] ?? 0);
-          $genre = trim($info['comments']['genre'][0] ?? '') ?: trim($_POST['genre'] ?? '') ?: 'Uploaded';
+          $genre = isset($info['comments']['genre']) ? implode('/', $info['comments']['genre']) : (trim($_POST['genre'] ?? '') ?: 'Uploaded');
           
           $replaygain = 0;
           if (!empty($info['tags']['id3v2']['TXXX'])) {
@@ -7782,7 +7800,7 @@ HTML;
       $disc_rows = $discovery_stmt->fetchAll();
       $discovery_albums = [];
       foreach ($disc_rows as $row) {
-        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        $parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i', $row['artist']);
         if (!is_array($parts)) $parts = [$row['artist']];
         foreach ($parts as $part) {
           $p = trim($part);
@@ -7822,7 +7840,7 @@ HTML;
       $stmt_is_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
       
       foreach ($rec_artists_rows as $row) {
-        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['name']);
+        $parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $row['name']);
         if (!is_array($parts)) $parts = [$row['name']];
         foreach ($parts as $part) {
           $p = trim($part);
@@ -7880,7 +7898,7 @@ HTML;
         $fol_rows = $rec_followed_albums_stmt->fetchAll();
         $rec_followed_albums = [];
         foreach ($fol_rows as $row) {
-          $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+          $parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
           if (!is_array($parts)) $parts = [$row['artist']];
           foreach ($parts as $part) {
             $p = trim($part);
@@ -10369,7 +10387,7 @@ HTML;
       $rows = $stmt->fetchAll();
       $artists = [];
       foreach ($rows as $row) {
-        $parts = preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        $parts = preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i', $row['artist']);
         foreach ($parts as $part) {
           $p = trim($part);
           if ($p !== '') {
@@ -10403,7 +10421,7 @@ HTML;
       
       $albums = [];
       foreach ($rows as $row) {
-        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        $parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i', $row['artist']);
         if (!is_array($parts)) $parts = [$row['artist']];
         foreach ($parts as $part) {
           $p = trim($part);
@@ -10867,7 +10885,7 @@ HTML;
       $stmt = $db->prepare("SELECT DISTINCT artist, MAX(id) as id FROM music WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY artist LIMIT 15");
       $stmt->execute([$query, $user_id]);
       foreach ($stmt->fetchAll() as $ma) {
-        $parts = preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $ma['artist']);
+        $parts = preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $ma['artist']);
         foreach ($parts as $p) {
           $p = trim($p);
           if ($p !== '' && stripos($p, $q) !== false && !isset($added_artists[strtolower($p)])) {
@@ -10886,7 +10904,7 @@ HTML;
       $stmt->execute([$query, $user_id, $user_id]);
       $search_albums = [];
       foreach ($stmt->fetchAll() as $row) {
-        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        $parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
         if (!is_array($parts)) $parts = [$row['artist']];
         foreach ($parts as $part) {
           $p = trim($part);
@@ -13049,7 +13067,7 @@ HTML;
         $artist_rows = $more_from_artist_stmt->fetchAll();
         $artist_albums = [];
         foreach ($artist_rows as $row) {
-          $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+          $parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i', $row['artist']);
           if (!is_array($parts)) $parts = [$row['artist']];
           foreach ($parts as $part) {
             $p = trim($part);
@@ -13142,7 +13160,7 @@ HTML;
       $disc_rec_rows = $discovery_stmt->fetchAll();
       $discovery_albums = [];
       foreach ($disc_rec_rows as $row) {
-        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        $parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
         if (!is_array($parts)) $parts = [$row['artist']];
         foreach ($parts as $part) {
           $p = trim($part);
@@ -13178,7 +13196,7 @@ HTML;
       $stmt_is_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
       
       foreach ($rec_artists_rows as $row) {
-        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['name']);
+        $parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $row['name']);
         if (!is_array($parts)) $parts = [$row['name']];
         foreach ($parts as $part) {
           $p = trim($part);
@@ -13290,7 +13308,7 @@ HTML;
       $lf_rows = $latest_followed_albums_stmt->fetchAll();
       $latest_followed_albums = [];
       foreach ($lf_rows as $row) {
-        $parts = @preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
+        $parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $row['artist']);
         if (!is_array($parts)) $parts = [$row['artist']];
         foreach ($parts as $part) {
           $p = trim($part);
@@ -13687,6 +13705,187 @@ HTML;
   exit;
 }
 
+function perform_force_rescan($db, $mode) {
+  $start_time = microtime(true);
+  ini_set('memory_limit', '512M');
+  error_reporting(E_ALL & ~E_DEPRECATED);
+  ini_set('display_errors', 1);
+
+  header('Content-Type: text/html; charset=utf-8');
+  ob_implicit_flush();
+
+  echo "<style>
+    body { color: #e0e0e0; background-color: #030303; font-family: Consolas, 'Courier New', monospace; padding: 10px; margin: 0; }
+    pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; margin-top: 75px; }
+    #header-wrap { position: fixed; top: 0; left: 0; right: 0; background: #121212; border-bottom: 1px solid #333; z-index: 10; }
+    #prog-wrap { padding: 12px 15px 5px 15px; display: flex; align-items: center; }
+    #prog-track { flex-grow: 1; background: #000; height: 12px; border-radius: 6px; overflow: hidden; margin-right: 15px; }
+    #prog-bar { width: 0%; height: 100%; background: #ff0000; transition: width 0.1s; }
+    #prog-txt { font-weight: bold; min-width: 45px; text-align: right; font-size: 14px;}
+    #warning-txt { padding: 0 15px 12px 15px; color: #ffc107; font-size: 12px; font-weight: bold; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
+  </style>";
+
+  echo "<div id='header-wrap'>
+          <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
+          <div id='warning-txt'>⚠️ Forced Rescan (" . strtoupper($mode) . "). Do not close this window!</div>
+        </div>";
+  echo "<pre>";
+  echo "PHP Music Library - Forced Metadata Rescan\n";
+  echo "===========================================\n\n";
+
+  if (!class_exists('getID3')) die("FATAL ERROR: getID3 library not found\n");
+  
+  $getID3 = new getID3;
+  $getID3->option_md5_data = true;
+  $getID3->option_md5_data_source = true;
+  $getID3->option_sha1_data = true;
+  $getID3->option_tags_html = false;
+
+  $stmt_lib = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
+  $library_user_id = $stmt_lib->fetchColumn() ?: 1;
+
+  $offset = isset($_GET['offset']) ? (int)$_GET['offset'] : 0;
+
+  $stmt = $db->query("SELECT id, file FROM music ORDER BY id ASC");
+  $all_songs = $stmt->fetchAll();
+  $total = count($all_songs);
+
+  if ($offset === 0) {
+    echo "Found {$total} tracks currently in the database to re-scan.\n\n";
+  } else {
+    echo "Resuming scan from track " . ($offset + 1) . " of {$total}...\n\n";
+  }
+
+  if ($total === 0) die("Database is empty. Please run a Standard Scan first.\n</pre>");
+
+  $songs = array_slice($all_songs, $offset);
+
+  $user_cache = [];
+  $stmt_all_users = $db->query("SELECT id, artist FROM users");
+  while ($row = $stmt_all_users->fetch()) {
+    $user_cache[strtolower($row['artist'])] = $row['id'];
+  }
+  
+  $check_email_stmt = $db->prepare("SELECT id FROM users WHERE email = ?");
+  $insert_user_stmt = $db->prepare("INSERT INTO users (email, artist, password_hash, verified, profile_picture, profile_picture_type) VALUES (?, ?, ?, 'no', ?, 'image/svg+xml')");
+
+  $update_artist_stmt = $db->prepare("UPDATE music SET artist = ?, user_id = ? WHERE id = ?");
+  $update_song_stmt = $db->prepare("UPDATE music SET title = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, replaygain = ? WHERE id = ?");
+  $update_all_stmt = $db->prepare("UPDATE music SET artist = ?, user_id = ?, title = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, replaygain = ? WHERE id = ?");
+
+  $processed = $offset;
+  $db->beginTransaction();
+  try {
+    foreach ($songs as $song) {
+      if ((microtime(true) - $start_time) > 40) {
+        $db->commit();
+        echo "\nApproaching script execution limit. Re-indexing page to resume safely...\n";
+        echo "<script>setTimeout(() => window.location.href = '?action=force_rescan&mode=" . urlencode($mode) . "&offset={$processed}', 1000);</script></pre>";
+        exit;
+      }
+
+      $processed++;
+      $percent = floor(($processed / $total) * 100);
+      
+      $filePath = $song['file'];
+      if (!file_exists($filePath)) {
+        $fallback = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($filePath))) . '/' . basename(dirname($filePath)) . '/' . basename($filePath);
+        if (file_exists($fallback)) {
+          $filePath = $fallback;
+        }
+      }
+
+      echo sprintf("[%3d%%] [%d/%d] Scanning: %s\n", $percent, $processed, $total, basename($filePath));
+      echo "<script>document.getElementById('prog-bar').style.width = '{$percent}%'; document.getElementById('prog-txt').innerText = '{$percent}%'; window.scrollTo(0, document.body.scrollHeight);</script>";
+
+      if (file_exists($filePath)) {
+        $info = $getID3->analyze($filePath);
+        getid3_lib::CopyTagsToComments($info);
+
+        $artist_tag = isset($info['comments']['artist']) ? implode('/', $info['comments']['artist']) : 'Unknown Artist';
+        $file_user_id = $library_user_id;
+
+        if ($mode === 'artists' || $mode === 'all') {
+          $main_artist = trim(preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $artist_tag)[0]);
+          if ($main_artist !== 'Unknown Artist' && !empty($main_artist)) {
+            $artist_lower = strtolower($main_artist);
+            if (isset($user_cache[$artist_lower])) {
+              $file_user_id = $user_cache[$artist_lower];
+            } else {
+              echo " -> New artist generated: '{$main_artist}'. Creating account.\n";
+              $sanitized_artist_base = sanitize_for_path($main_artist);
+              $password = $sanitized_artist_base;
+              $hash = password_hash($password, PASSWORD_DEFAULT);
+              
+              $email = $sanitized_artist_base . '@mail.com';
+              $counter = 1;
+              while (true) {
+                $check_email_stmt->execute([$email]);
+                if (!$check_email_stmt->fetch()) break;
+                $counter++;
+                $email = $sanitized_artist_base . $counter . '@mail.com';
+              }
+              
+              $initial = mb_strtoupper(mb_substr($main_artist, 0, 1, 'UTF-8'));
+              $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
+              $bg_color = $colors[array_rand($colors)];
+              $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="'.$bg_color.'"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#ffffff">' . htmlspecialchars($initial) . '</text></svg>';
+              
+              $insert_user_stmt->execute([$email, $main_artist, $hash, $svg]);
+              $file_user_id = $db->lastInsertId();
+              $user_cache[$artist_lower] = $file_user_id; 
+            }
+          }
+        }
+
+        if ($mode === 'songs' || $mode === 'all') {
+          $title = isset($info['comments']['title']) ? implode('/', $info['comments']['title']) : pathinfo($filePath, PATHINFO_FILENAME);
+          $album = isset($info['comments']['album']) ? implode('/', $info['comments']['album']) : 'Unknown Album';
+          $genre = isset($info['comments']['genre']) ? implode('/', $info['comments']['genre']) : 'Unknown Genre';
+          $year = (int)($info['comments']['year'][0] ?? 0);
+          $duration = (int)($info['playtime_seconds'] ?? 0);
+          $bitrate = (int)($info['audio']['bitrate'] ?? 0);
+          
+          $replaygain = 0;
+          if (!empty($info['tags']['id3v2']['TXXX'])) {
+            foreach($info['tags']['id3v2']['TXXX'] as $txxx) {
+              if (strtoupper($txxx['description'] ?? '') === 'REPLAYGAIN_TRACK_GAIN') {
+                $replaygain = (float)str_replace(' dB', '', $txxx['data']);
+              }
+            }
+          } elseif (!empty($info['comments']['replaygain_track_gain'][0])) {
+            $replaygain = (float)str_replace(' dB', '', $info['comments']['replaygain_track_gain'][0]);
+          }
+        }
+
+        if ($mode === 'artists') {
+          $update_artist_stmt->execute([$artist_tag, $file_user_id, $song['id']]);
+        } elseif ($mode === 'songs') {
+          $update_song_stmt->execute([$title, $album, $genre, $year, $duration, $bitrate, $replaygain, $song['id']]);
+        } else {
+          $update_all_stmt->execute([$artist_tag, $file_user_id, $title, $album, $genre, $year, $duration, $bitrate, $replaygain, $song['id']]);
+        }
+
+      } else {
+        echo " -> File warning: Track path could not be found physically on disk.\n";
+      }
+
+      if ($processed % 100 === 0) {
+        $db->commit();
+        gc_collect_cycles();
+        $db->beginTransaction();
+      }
+    }
+    $db->commit();
+  } catch (Exception $e) {
+    if ($db->inTransaction()) $db->rollBack();
+    die("\nFATAL TRANSACTION ERROR: " . $e->getMessage() . "\n</pre>");
+  }
+
+  echo "\n=======================\n";
+  echo "Forced Rescan ($mode) complete! Processed items: $processed\n</pre>";
+}
+
 function perform_full_scan($db) {
   $start_time = microtime(true);
   ini_set('memory_limit', '512M');
@@ -13907,10 +14106,10 @@ function perform_full_scan($db) {
         $info = $getID3->analyze($filePath);
         getid3_lib::CopyTagsToComments($info);
         
-        $title = trim($info['comments']['title'][0] ?? pathinfo($filePath, PATHINFO_FILENAME));
-        $artist_tag = trim($info['comments']['artist'][0] ?? 'Unknown Artist');
-        $album = trim($info['comments']['album'][0] ?? 'Unknown Album');
-        $genre = trim($info['comments']['genre'][0] ?? 'Unknown Genre');
+        $title = isset($info['comments']['title']) ? implode('/', $info['comments']['title']) : pathinfo($filePath, PATHINFO_FILENAME);
+        $artist_tag = isset($info['comments']['artist']) ? implode('/', $info['comments']['artist']) : 'Unknown Artist';
+        $album = isset($info['comments']['album']) ? implode('/', $info['comments']['album']) : 'Unknown Album';
+        $genre = isset($info['comments']['genre']) ? implode('/', $info['comments']['genre']) : 'Unknown Genre';
         $year = (int)($info['comments']['year'][0] ?? 0);
         $duration = (int)($info['playtime_seconds'] ?? 0);
         $bitrate = (int)($info['audio']['bitrate'] ?? 0);
@@ -13947,13 +14146,13 @@ function perform_full_scan($db) {
 
         if ($is_update) {
             if ($webp_image_data !== null) {
-                $update_stmt_with_image->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime, $filePath]);
+              $update_stmt_with_image->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime, $filePath]);
             } else {
-                $update_stmt_no_image->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $mtime, $filePath]);
+              $update_stmt_no_image->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $mtime, $filePath]);
             }
         } else {
             $file_user_id = $library_user_id;
-            $main_artist = trim(preg_split('/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i', $artist_tag)[0]);
+            $main_artist = trim(preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $artist_tag)[0]);
 
             if ($main_artist !== 'Unknown Artist' && !empty($main_artist)) {
               $artist_lower = strtolower($main_artist);
@@ -16131,9 +16330,9 @@ function perform_cover_scan($db) {
               <i class="bi bi-cloud-upload-fill"></i>
               <span>Upload Song</span>
             </a>
-            <a href="#" class="nav-link" id="nav-scan-all" data-bs-toggle="modal" data-bs-target="#full-scan-modal" style="display: none !important;">
+            <a href="#" class="nav-link" id="nav-scan-all" data-bs-toggle="modal" data-bs-target="#rescan-options-modal" style="display: none !important;">
               <i class="bi bi-hdd-stack-fill"></i>
-              <span>Scan All</span>
+              <span>Re-scan Library</span>
             </a>
             <a href="#" class="nav-link logged-in-only" id="nav-chart-scan" style="display: none !important;">
               <i class="bi bi-controller"></i>
@@ -19663,6 +19862,27 @@ function perform_cover_scan($db) {
       </div>
     </div>
 
+    <div class="modal fade" id="rescan-options-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title text-white"><i class="bi bi-arrow-repeat text-info me-2"></i> Re-scan Options</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4 text-center">
+            <p class="text-secondary small mb-4">Choose how you want to re-scan your library. Forced rescans will ignore file modification times and update the database directly from the ID3 tags. Useful for fixing corrupted metadata or missing artists.</p>
+            <div class="d-flex flex-column gap-3">
+              <button class="btn btn-outline-light fw-bold py-2" id="btn-rescan-artists" data-bs-dismiss="modal"><i class="bi bi-people-fill me-2"></i> Re-scan Artists Only</button>
+              <button class="btn btn-outline-light fw-bold py-2" id="btn-rescan-songs" data-bs-dismiss="modal"><i class="bi bi-music-note-list me-2"></i> Re-scan Songs Metadata</button>
+              <button class="btn btn-danger fw-bold py-2" id="btn-rescan-all" data-bs-dismiss="modal"><i class="bi bi-hdd-stack-fill me-2"></i> Full Forced Re-scan (Everything)</button>
+              <hr class="border-secondary opacity-50 my-1">
+              <button class="btn btn-outline-warning fw-bold py-2" id="btn-rescan-standard" data-bs-dismiss="modal"><i class="bi bi-search me-2"></i> Standard Scan (New files only)</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="emergency-scan-modal" tabindex="-1" data-bs-backdrop="static">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #ff0000; box-shadow: 0 0 20px rgba(255, 0, 0, 0.4);">
@@ -21394,7 +21614,7 @@ curl_close($ch);
                     totalTracksCount.textContent = `0 tracks listed`;
                     
                     // Trigger emergency modal if totally empty on first load
-                    if (currentView.type === 'get_songs' && currentPage === 1 && !window.emergencyScanPrompted) {
+                    if (sourceTypeSelect.value === 'all' && currentPage === 1 && !window.emergencyScanPrompted) {
                       window.emergencyScanPrompted = true;
                       const emergencyModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('emergency-scan-modal'));
                       emergencyModal.show();
@@ -21941,7 +22161,7 @@ curl_close($ch);
                 if (idName) hashParts.push(`id/name=${encodeURIComponent(idName)}`);
                 if (backendUrl) hashParts.push(`backendurl=${encodeURIComponent(backendUrl)}`);
 
-                const shareUrl = `${baseUrl}#${hashParts.join('&')}`;
+                const shareUrl = `${baseUrl}#playground&${hashParts.join('&')}`;
 
                 navigator.clipboard.writeText(shareUrl).then(() => {
                   const originalText = btnShare.innerHTML;
@@ -22162,6 +22382,8 @@ SOFTWARE.</div>
         }
 
         'use strict';
+
+        const escapeAttr = (str) => str ? String(str).replace(/'/g, "&apos;").replace(/"/g, "&quot;") : '';
 
         const getSvgPlaceholder = (title) => {
           let hash = 0;
@@ -24279,7 +24501,7 @@ SOFTWARE.</div>
                 const artistRaw = songItem ? songItem.getAttribute('data-song-artist') : (songArtistEl.dataset.artist ? decodeURIComponent(songArtistEl.dataset.artist) : songArtistEl.textContent.trim());
                 const userId = songArtistEl.dataset.userid || (songItem ? songItem.getAttribute('data-song-user-id') : '') || '';
                  
-                const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+                const artistsList = artistRaw.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
                 if (artistsList.length > 1) {
                   // Keep the player modal open, simply display the choices popup on top
                   if (artistsModalBody) {
@@ -24312,7 +24534,7 @@ SOFTWARE.</div>
                 
                 let albumRaw = decodeURIComponent(songAlbumEl.getAttribute('data-album') || '');
                 let songArtistRaw = songItem ? (songItem.getAttribute('data-song-artist') || '') : '';
-                const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+                const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
 
                 if (songArtistsList.length > 1) {
                   if (artistsModalBody) {
@@ -25335,7 +25557,7 @@ SOFTWARE.</div>
                 added++;
                 if (globalSongCache[songId]) globalSongCache[songId].is_favorite = 1;
                 
-                const songItemsInView = document.querySelectorAll(`.song-item[data-song-id="${songId}"]`);
+                const songItemsInView = document.querySelectorAll(`.song-item[data-song-id="${songId}"], .shelf-item[data-song-id="${songId}"]`);
                 songItemsInView.forEach(item => {
                   item.dataset.isFavorite = "1";
                 });
@@ -25815,7 +26037,7 @@ SOFTWARE.</div>
         const formatArtistsHTML = (artistString, userId, isCollaborative = 1) => {
           if (!artistString) return escapeHTML('Unknown Artist');
           if (isCollaborative == 1) {
-            const artistsList = artistString.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+            const artistsList = artistString.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i).filter(a => a && a.trim() !== '');
             return artistsList.map(a => `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(a)}" data-userid="${userId || ''}">${escapeHTML(a)}</span>`).join(', ') + ' <i class="bi bi-people-fill text-secondary ms-1" title="Official Collaboration" style="font-size: 0.75rem;"></i>';
           } else {
             return `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(artistString)}" data-userid="${userId || ''}">${escapeHTML(artistString)}</span>`;
@@ -25879,7 +26101,7 @@ SOFTWARE.</div>
             const playedAtHTML = isHistory ? `<div class="played-at-text text-truncate" title="${timeAgo(song.played_at)}">${timeAgo(song.played_at)}</div>` : '';
             const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
             return `
-            <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''}" 
+            <div class="song-item py-md-3 ${isNowPlaying ? 'now-playing' : ''} ${isHistory ? 'history-item' : ''}" 
               data-song-id="${song.id}" 
               data-is-favorite="${song.is_favorite == 1 ? '1' : '0'}"
               data-is-collaborative="${song.is_collaborative == 1 ? '1' : '0'}"
@@ -25997,7 +26219,7 @@ SOFTWARE.</div>
               <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
                   <div class="d-flex align-items-center gap-3">
-                    <div class="rounded-circle d-flex align-items-center justify-content-center bg-danger bg-opacity-10" style="width: 50px; height: 50px; min-width: 50px;">
+                    <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
                       <i class="bi bi-music-note-list text-danger fs-3"></i>
                     </div>
                     <div>
@@ -26041,7 +26263,7 @@ SOFTWARE.</div>
             contentArea.innerHTML = `
               <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex align-items-center gap-3">
-                  <div class="rounded-circle d-flex align-items-center justify-content-center bg-info bg-opacity-10" style="width: 50px; height: 50px; min-width: 50px;">
+                  <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
                     <i class="bi bi-people-fill text-info fs-3"></i>
                   </div>
                   <div>
@@ -26422,7 +26644,16 @@ SOFTWARE.</div>
               itemsHTML = shelf.items.map(song => {
                 const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
                 return `
-                <div class="shelf-item" data-song-id="${song.id}">
+                <div class="shelf-item position-relative" 
+                  data-song-id="${song.id}" 
+                  data-is-favorite="${song.is_favorite == 1 ? '1' : '0'}"
+                  data-is-collaborative="${song.is_collaborative == 1 ? '1' : '0'}"
+                  data-song-title="${escapeAttr(song.title)}"
+                  data-song-artist="${escapeAttr(song.artist)}"
+                  data-song-album="${escapeAttr(song.album)}"
+                  data-song-genre="${escapeAttr(song.genre)}"
+                  data-song-user-id="${song.user_id}">
+                  <button class="playlist-more-btn more-btn" data-song-id="${song.id}"><i class="bi bi-three-dots-vertical"></i></button>
                   <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" alt="${escapeHTML(song.title)}">
                   <div class="item-title">${escapeHTML(song.title)}</div>
                   <div class="item-subtitle" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${escapeHTML(song.artist)}</div>
@@ -26430,7 +26661,8 @@ SOFTWARE.</div>
               `}).join('');
             } else if (shelf.type === 'albums') {
               itemsHTML = shelf.items.map(album => `
-                <div class="shelf-item" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}">
+                <div class="shelf-item position-relative" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}" data-artistname="${encodeURIComponent(album.artist || '')}">
+                  <button class="playlist-more-btn album-more-btn" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ''}" data-artistname="${encodeURIComponent(album.artist || '')}" data-id="${album.id || 0}"><i class="bi bi-three-dots-vertical"></i></button>
                   <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
                     <img src="?action=get_image&id=${album.id || 0}&v=${album.image_v || 0}&size=small" alt="${escapeHTML(album.album)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
                     ${album.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(album.song_count)}</div>` : ''}
@@ -26442,7 +26674,8 @@ SOFTWARE.</div>
               `).join('');
             } else if (shelf.type === 'playlists' || shelf.type === 'mixes') {
               itemsHTML = shelf.items.map(playlist => `
-                <div class="shelf-item" data-${shelf.type === 'mixes' ? 'mix' : 'playlist'}="${encodeURIComponent(playlist.public_id)}">
+                <div class="shelf-item position-relative" data-${shelf.type === 'mixes' ? 'mix' : 'playlist'}="${encodeURIComponent(playlist.public_id)}">
+                  <button class="playlist-more-btn mix-more-btn" data-type="${shelf.type}" data-public-id="${playlist.public_id}" data-name="${escapeHTML(playlist.name)}" data-creator="${escapeHTML(playlist.creator)}" data-image-id="${playlist.image_id || 0}"><i class="bi bi-three-dots-vertical"></i></button>
                   <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
                     <img src="?action=get_image&id=${playlist.image_id || 0}&v=${playlist.image_v || 0}&size=small" alt="${escapeHTML(playlist.name)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
                     ${playlist.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(playlist.song_count)}</div>` : ''}
@@ -27151,6 +27384,10 @@ SOFTWARE.</div>
           if (currentView.filter) pageParams.append('filter', currentView.filter);
           
           if (!navigator.onLine && currentView.type !== 'get_offline_songs' && currentView.type !== 'rhythm_game') {
+            if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+              loadView({ type: 'get_offline_songs', param: '', sort: 'manual_order', filter_user_id: '' });
+              return;
+            }
             updateContentTitle('Offline', false);
             contentArea.innerHTML = `
               <div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100" style="height: 60vh;">
@@ -28597,7 +28834,7 @@ SOFTWARE.</div>
                   <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(145deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
                     <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
                       <div class="d-flex align-items-center gap-3">
-                        <div class="rounded-circle d-flex align-items-center justify-content-center bg-info bg-opacity-10" style="width: 50px; height: 50px; min-width: 50px;">
+                        <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
                           <i class="bi bi-cloud-arrow-down-fill text-info fs-3"></i>
                         </div>
                         <div>
@@ -28667,7 +28904,7 @@ SOFTWARE.</div>
                   <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
                     <div class="d-flex align-items-center justify-content-between gap-3 flex-wrap">
                       <div class="d-flex align-items-center gap-3">
-                        <div class="rounded-circle d-flex align-items-center justify-content-center bg-danger bg-opacity-10" style="width: 50px; height: 50px; min-width: 50px;">
+                        <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
                           <i class="bi bi-heart-fill text-danger fs-3"></i>
                         </div>
                         <div>
@@ -28692,7 +28929,7 @@ SOFTWARE.</div>
                 contentArea.innerHTML = `
                   <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(145deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
                     <div class="d-flex align-items-center gap-3">
-                      <div class="rounded-circle d-flex align-items-center justify-content-center bg-warning bg-opacity-10" style="width: 50px; height: 50px; min-width: 50px;">
+                      <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
                         <i class="bi bi-clock-fill text-warning fs-3"></i>
                       </div>
                       <div>
@@ -28731,7 +28968,7 @@ SOFTWARE.</div>
                   <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(145deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
                     <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
                       <div class="d-flex align-items-center gap-3">
-                        <div class="rounded-circle d-flex align-items-center justify-content-center bg-secondary bg-opacity-10" style="width: 50px; height: 50px; min-width: 50px;">
+                        <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
                           <i class="bi bi-clock-history text-secondary fs-3"></i>
                         </div>
                         <div>
@@ -28758,7 +28995,7 @@ SOFTWARE.</div>
               contentArea.innerHTML = `
                 <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(145deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
                   <div class="d-flex align-items-center gap-3">
-                    <div class="rounded-circle d-flex align-items-center justify-content-center bg-success bg-opacity-10" style="width: 50px; height: 50px; min-width: 50px;">
+                    <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
                       <i class="bi bi-graph-up-arrow text-success fs-3"></i>
                     </div>
                     <div>
@@ -29857,7 +30094,9 @@ SOFTWARE.</div>
           if (isPlaying && audio.currentTime > 0 && !audio.paused) {
             audioB.src = audio.src;
             audioB.currentTime = audio.currentTime;
-            audioB.play().catch(e => console.error(e));
+            audioB.play().catch(e => {
+              if (e.name !== 'AbortError') console.error("AudioB play failed:", e);
+            });
             
             gainB.gain.setValueAtTime(1, audioCtx.currentTime);
             gainB.gain.linearRampToValueAtTime(0, audioCtx.currentTime + crossfadeDuration);
@@ -29873,7 +30112,11 @@ SOFTWARE.</div>
 
           audio.src = currentSong.stream_url;
           audio.load();
-          audio.play().catch(e => console.error("Audio play failed:", e));
+          audio.play().catch(e => {
+            if (e.name !== 'AbortError') {
+              console.error("Audio play failed:", e);
+            }
+          });
           isPlaying = true;
           updatePlayerUI();
           if (!visAnimId) drawVisualizer();
@@ -30078,7 +30321,7 @@ SOFTWARE.</div>
               updateFavoriteIcons(result.is_favorite);
             }
         
-            const songItemsInView = document.querySelectorAll(`.song-item[data-song-id="${songId}"]`);
+            const songItemsInView = document.querySelectorAll(`.song-item[data-song-id="${songId}"], .shelf-item[data-song-id="${songId}"]`);
         
             if (currentView.type === 'get_favorites' && !result.is_favorite) {
               songItemsInView.forEach(item => {
@@ -30407,10 +30650,12 @@ SOFTWARE.</div>
               }
             }
             menuItems += `<li class="context-menu-item" data-action="edit_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-description="${escapeHTML(description)}" data-is-private="${isPrivate}"><i class="bi bi-pencil-fill"></i> Edit Playlist</li>`;
+            menuItems += `<li class="context-menu-item" data-action="share_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}"><i class="bi bi-share-fill"></i> Share Playlist</li>`;
             menuItems += `<li class="context-menu-item" data-action="export_playlist" data-public-id="${publicId}"><i class="bi bi-box-arrow-up"></i> Export Playlist</li>`;
             menuItems += `<li class="context-menu-item text-danger" data-action="delete_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}"><i class="bi bi-trash-fill"></i> Delete Playlist</li>`;
           } else {
             // User is just a collaborator
+            menuItems += `<li class="context-menu-item" data-action="share_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}"><i class="bi bi-share-fill"></i> Share Playlist</li>`;
             menuItems += `<li class="context-menu-item" data-action="export_playlist" data-public-id="${publicId}"><i class="bi bi-box-arrow-up"></i> Export Playlist</li>`;
             menuItems += `<li class="context-menu-item text-warning" data-action="leave_collab" data-public-id="${publicId}"><i class="bi bi-box-arrow-left"></i> Leave Collab</li>`;
           }
@@ -30419,6 +30664,42 @@ SOFTWARE.</div>
             <hr class="dropdown-divider bg-secondary mx-2 my-1">
             <li class="context-menu-item" data-action="close_menu"><i class="bi bi-x-lg"></i> Close Menu</li>`;
             
+          contextMenu.innerHTML = menuItems;
+          contextMenu.style.display = 'block';
+          positionContextMenu(buttonEl);
+        };
+
+        const buildAndShowAlbumOrMixContextMenu = (buttonEl, cardData) => {
+          if (contextMenu.style.display === 'block' && contextMenuItemEl === buttonEl) {
+            contextMenu.style.display = 'none';
+            return;
+          }
+          contextMenuItemEl = buttonEl;
+          const { type, album, userid, artistname, publicId, name, creator, imageId } = cardData;
+
+          let menuItems = '';
+          if (type === 'album') {
+            menuItems += `
+              <li class="context-menu-item" data-action="play_album" data-album="${encodeURIComponent(album)}" data-userid="${userid || ''}" data-artistname="${encodeURIComponent(artistname || '')}"><i class="bi bi-play-circle-fill"></i> Play Album</li>
+              <li class="context-menu-item" data-action="go_album_view" data-album="${encodeURIComponent(album)}" data-userid="${userid || ''}" data-artistname="${encodeURIComponent(artistname || '')}"><i class="bi bi-disc-fill"></i> Go to Album</li>
+              <li class="context-menu-item" data-action="go_artist" data-name="${encodeURIComponent(artistname)}" data-userid="${userid || ''}"><i class="bi bi-person-fill"></i> Go to Artist</li>
+              <li class="context-menu-item" data-action="add_album_to_playlist" data-album="${encodeURIComponent(album)}" data-userid="${userid || ''}" data-artistname="${encodeURIComponent(artistname || '')}"><i class="bi bi-plus-circle"></i> Add to Playlist</li>
+              <li class="context-menu-item" data-action="share_album" data-album="${encodeURIComponent(album)}" data-userid="${userid || ''}" data-artistname="${encodeURIComponent(artistname || '')}" data-id="${imageId || ''}"><i class="bi bi-share-fill"></i> Share Album</li>
+            `;
+          } else {
+            const actionType = type === 'mixes' ? 'mix' : 'playlist';
+            menuItems += `
+              <li class="context-menu-item" data-action="play_mix" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-type="${type}"><i class="bi bi-play-circle-fill"></i> Play ${actionType === 'mix' ? 'Mix' : 'Playlist'}</li>
+              <li class="context-menu-item" data-action="go_mix_view" data-public-id="${publicId}" data-type="${type}"><i class="bi bi-disc-fill"></i> Go to ${actionType === 'mix' ? 'Mix' : 'Playlist'}</li>
+              <li class="context-menu-item" data-action="add_mix_to_playlist_opt" data-public-id="${publicId}" data-type="${type}"><i class="bi bi-plus-circle"></i> Add to Playlist</li>
+              <li class="context-menu-item" data-action="share_mix" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-type="${type}"><i class="bi bi-share-fill"></i> Share</li>
+            `;
+          }
+
+          menuItems += `
+            <hr class="dropdown-divider bg-secondary mx-2 my-1">
+            <li class="context-menu-item" data-action="close_menu"><i class="bi bi-x-lg"></i> Close Menu</li>`;
+
           contextMenu.innerHTML = menuItems;
           contextMenu.style.display = 'block';
           positionContextMenu(buttonEl);
@@ -30500,7 +30781,7 @@ SOFTWARE.</div>
         };
         
         const showSongItemContextMenu = (buttonEl) => {
-          const songItem = buttonEl.closest('.song-item');
+          const songItem = buttonEl.closest('.song-item, .shelf-item');
           if (!songItem) return;
 
           const songData = {
@@ -31244,14 +31525,48 @@ SOFTWARE.</div>
         });
 
         if (fullScanModalEl && fullScanIframe) {
-          fullScanModalEl.addEventListener('show.bs.modal', () => {
-            fullScanIframe.src = '?action=full_scan';
-          });
           fullScanModalEl.addEventListener('hidden.bs.modal', () => {
             fullScanIframe.src = 'about:blank';
             if (currentView.type === 'get_songs') {
               loadView(currentView);
             }
+          });
+        }
+
+        const btnRescanArtists = document.getElementById('btn-rescan-artists');
+        const btnRescanSongs = document.getElementById('btn-rescan-songs');
+        const btnRescanAll = document.getElementById('btn-rescan-all');
+        const btnRescanStandard = document.getElementById('btn-rescan-standard');
+        
+        if (btnRescanArtists && fullScanModalEl && fullScanIframe) {
+          btnRescanArtists.addEventListener('click', () => {
+            fullScanIframe.src = '?action=force_rescan&mode=artists';
+            bootstrap.Modal.getOrCreateInstance(fullScanModalEl).show();
+          });
+        }
+        if (btnRescanSongs && fullScanModalEl && fullScanIframe) {
+          btnRescanSongs.addEventListener('click', () => {
+            fullScanIframe.src = '?action=force_rescan&mode=songs';
+            bootstrap.Modal.getOrCreateInstance(fullScanModalEl).show();
+          });
+        }
+        if (btnRescanAll && fullScanModalEl && fullScanIframe) {
+          btnRescanAll.addEventListener('click', () => {
+            fullScanIframe.src = '?action=force_rescan&mode=all';
+            bootstrap.Modal.getOrCreateInstance(fullScanModalEl).show();
+          });
+        }
+        if (btnRescanStandard && fullScanModalEl && fullScanIframe) {
+          btnRescanStandard.addEventListener('click', () => {
+            fullScanIframe.src = '?action=full_scan';
+            bootstrap.Modal.getOrCreateInstance(fullScanModalEl).show();
+          });
+        }
+        
+        const emergencyTrigger = document.getElementById('trigger-emergency-scan-btn');
+        if (emergencyTrigger && fullScanIframe) {
+          emergencyTrigger.addEventListener('click', () => {
+             fullScanIframe.src = '?action=full_scan';
           });
         }
 
@@ -31421,7 +31736,7 @@ SOFTWARE.</div>
             if (!currentSong) return;
             const artistRaw = currentSong.artist;
             const userId = currentSong.user_id || '';
-            const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+            const artistsList = artistRaw.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i).filter(a => a && a.trim() !== '');
             if (artistsList.length > 1) {
               if (artistsModalBody) {
                 const modalTitle = artistsModalEl.querySelector('.modal-title');
@@ -32245,11 +32560,41 @@ SOFTWARE.</div>
             showSongItemContextMenu(moreBtn);
             return;
           }
+          const albumMoreBtn = target.closest('.album-more-btn');
+          if (albumMoreBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            const cardData = {
+              type: 'album',
+              album: decodeURIComponent(albumMoreBtn.dataset.album),
+              userid: albumMoreBtn.dataset.userid,
+              artistname: decodeURIComponent(albumMoreBtn.dataset.artistname),
+              imageId: albumMoreBtn.dataset.id
+            };
+            buildAndShowAlbumOrMixContextMenu(albumMoreBtn, cardData);
+            return;
+          }
+
+          const mixMoreBtn = target.closest('.mix-more-btn');
+          if (mixMoreBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            const cardData = {
+              type: mixMoreBtn.dataset.type,
+              publicId: mixMoreBtn.dataset.publicId,
+              name: mixMoreBtn.dataset.name,
+              creator: mixMoreBtn.dataset.creator,
+              imageId: mixMoreBtn.dataset.imageId
+            };
+            buildAndShowAlbumOrMixContextMenu(mixMoreBtn, cardData);
+            return;
+          }
+
           const playlistMoreBtn = target.closest('.playlist-more-btn');
           if (playlistMoreBtn) {
             e.preventDefault();
             e.stopPropagation();
-            const playlistData = { 
+            const playlistData = {
               publicId: playlistMoreBtn.dataset.publicId, 
               name: playlistMoreBtn.dataset.name,
               description: playlistMoreBtn.dataset.description || '',
@@ -32379,7 +32724,7 @@ SOFTWARE.</div>
             const artistRaw = songItem ? songItem.getAttribute('data-song-artist') : (songArtistEl.dataset.artist ? decodeURIComponent(songArtistEl.dataset.artist) : songArtistEl.textContent.trim());
             const userId = ''; // Force empty to prevent breaking queries by looking up uploader IDs
             
-            const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+            const artistsList = artistRaw.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
             if (artistsList.length > 1) {
               // Keep the player modal open, simply display the choices popup on top
               if (artistsModalBody) {
@@ -32410,7 +32755,7 @@ SOFTWARE.</div>
             
             let albumRaw = decodeURIComponent(songAlbumEl.getAttribute('data-album') || '');
             let songArtistRaw = songItem ? (songItem.getAttribute('data-song-artist') || songItem.querySelector('.item-subtitle')?.textContent || '') : '';
-            const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+            const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
 
             if (songArtistsList.length > 1) {
               if (artistsModalBody) {
@@ -32900,7 +33245,7 @@ SOFTWARE.</div>
               break;
             case 'go_artist':
               const  artistRaw = decodeURIComponent(name);
-              const artistsList = artistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+              const artistsList = artistRaw.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i).filter(a => a && a.trim() !== '');
               if (artistsList.length > 1) {
                 // Keep the player modal open, simply display the choices popup on top
                 if (artistsModalBody) {
@@ -32924,7 +33269,7 @@ SOFTWARE.</div>
               closeOpenModals();
               const albumRaw = decodeURIComponent(name);
               const songArtistRaw = decodeURIComponent(item.dataset.artistname || '');
-              const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+              const songArtistsList = songArtistRaw.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
               
               let validMenuUserId = parseInt(userid, 10);
               let safeMenuUserId = (isNaN(validMenuUserId) || validMenuUserId <= 0) ? '' : validMenuUserId;
@@ -33327,6 +33672,115 @@ SOFTWARE.</div>
               document.getElementById('edit-playlist-is-private').checked = item.dataset.isPrivate === '1';
               if (editPlaylistModal) editPlaylistModal.show();
               break;
+            case 'share_playlist':
+              showShareModal('playlist', publicId, name);
+              break;
+            case 'play_album': {
+              const albumName = decodeURIComponent(item.dataset.album);
+              const artistName = decodeURIComponent(item.dataset.artistname);
+              const userId = item.dataset.userid;
+              await loadView({ type: 'album_songs', param: albumName, sort: 'title_asc', filter_user_id: userId, artist_name: artistName });
+              const firstSong = document.querySelector('.song-list .song-item');
+              if (firstSong) {
+                firstSong.click();
+              }
+              break;
+            }
+            case 'go_album_view': {
+              const albumName = decodeURIComponent(item.dataset.album);
+              const artistName = decodeURIComponent(item.dataset.artistname);
+              const userId = item.dataset.userid;
+              loadView({ type: 'album_songs', param: albumName, sort: 'title_asc', filter_user_id: userId, artist_name: artistName });
+              break;
+            }
+            case 'add_album_to_playlist': {
+              if (!currentUser) {
+                showToast('Please log in', 'error');
+                break;
+              }
+              const albumName = decodeURIComponent(item.dataset.album);
+              const artistName = decodeURIComponent(item.dataset.artistname);
+              const userId = item.dataset.userid;
+              showLoader(false);
+              const ids = await fetchData('?action=get_view_ids', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ view_type: 'album_songs', param: albumName, filter_user_id: userId, artist_name: artistName })
+              });
+              hideLoader();
+              if (ids && ids.length > 0) {
+                songIdForPlaylist = ids.map(id => parseInt(id));
+                mixIdForPlaylist = null;
+                await reRenderPlaylistModal();
+                addToPlaylistModal.show();
+              } else {
+                showToast('No songs found in this album.', 'error');
+              }
+              break;
+            }
+            case 'share_album': {
+              const albumName = decodeURIComponent(item.dataset.album);
+              const artistName = decodeURIComponent(item.dataset.artistname);
+              const userId = item.dataset.userid;
+              const imgId = item.dataset.id;
+              const coverUrl = imgId ? `?action=get_image&id=${imgId}` : '';
+              showShareModal('album', albumName, albumName, userId, artistName, coverUrl);
+              break;
+            }
+            case 'play_mix': {
+              const publicId = item.dataset.publicId;
+              const viewType = item.dataset.type === 'mixes' ? 'mix_songs' : 'playlist_songs';
+              await loadView({ type: viewType, param: publicId, sort: 'manual_order' });
+              const firstSong = document.querySelector('.song-list .song-item');
+              if (firstSong) {
+                firstSong.click();
+              }
+              break;
+            }
+            case 'go_mix_view': {
+              const publicId = item.dataset.publicId;
+              const viewType = item.dataset.type === 'mixes' ? 'mix_songs' : 'playlist_songs';
+              loadView({ type: viewType, param: publicId, sort: 'manual_order' });
+              break;
+            }
+            case 'add_mix_to_playlist_opt': {
+              if (!currentUser) {
+                showToast('Please log in', 'error');
+                break;
+              }
+              const publicId = item.dataset.publicId;
+              const viewType = item.dataset.type;
+              if (viewType === 'mixes') {
+                mixIdForPlaylist = publicId;
+                songIdForPlaylist = null;
+                await reRenderPlaylistModal();
+                addToPlaylistModal.show();
+              } else {
+                showLoader(false);
+                const ids = await fetchData('?action=get_view_ids', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ view_type: 'playlist_songs', param: publicId })
+                });
+                hideLoader();
+                if (ids && ids.length > 0) {
+                  songIdForPlaylist = ids.map(id => parseInt(id));
+                  mixIdForPlaylist = null;
+                  await reRenderPlaylistModal();
+                  addToPlaylistModal.show();
+                } else {
+                  showToast('No songs found in this playlist.', 'error');
+                }
+              }
+              break;
+            }
+            case 'share_mix': {
+              const publicId = item.dataset.publicId;
+              const name = item.dataset.name;
+              const viewType = item.dataset.type === 'mixes' ? 'mix' : 'playlist';
+              showShareModal(viewType, publicId, name);
+              break;
+            }
             case 'export_playlist':
               window.exportData(`?action=export_playlist&id=${publicId}`, `playlist_${publicId}.json`);
               break;
@@ -34070,7 +34524,7 @@ SOFTWARE.</div>
                   
                   const artistRaw = currentSong.artist;
                   const userId = currentSong.user_id || '';
-                  const artistsList = artistRaw.split(/\s*(?:,|&|\/)\s*/).filter(a => a.trim() !== '');
+                  const artistsList = artistRaw.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
                   
                   if (artistsList.length > 1) {
                     if (artistsModalBody) {
@@ -39625,7 +40079,7 @@ SOFTWARE.</div>
         const showArtistTooltip = async (target, artistRaw, userId) => {
           if (window.innerWidth < 992) return;
           
-          const artistsList = decodeURIComponent(artistRaw).split(/\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
+          const artistsList = decodeURIComponent(artistRaw).split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i).filter(a => a && a.trim() !== '');
           if (artistsList.length === 0) return;
           
           const rect = target.getBoundingClientRect();
@@ -41933,7 +42387,7 @@ SOFTWARE.</div>
                 const rawArtist = song.artist || "Unknown";
                 const parts = rawArtist
                   .split(
-                    /\s*(?:;|\||\s\/\s|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*|,\s+(?!(?:the|a|an|jr|sr)\b)/i
+                    /\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i
                   )
                   .map((p) => p.trim())
                   .filter((p) => p !== "");
