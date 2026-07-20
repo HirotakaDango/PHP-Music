@@ -380,7 +380,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '6.6');
+define('APP_VERSION', '6.7');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -5138,6 +5138,113 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 <?php
   exit;
 }
+
+function ensure_getid3() {
+  $target_file = __DIR__ . '/getid3/getid3.php';
+  if (file_exists($target_file)) {
+    return true;
+  }
+
+  if (!class_exists('ZipArchive')) {
+    return false;
+  }
+
+  $urls = [
+    'james' => 'https://github.com/JamesHeinrich/getID3/archive/refs/heads/master.zip',
+    'dango' => 'https://github.com/HirotakaDango/PHP-Music/archive/refs/heads/main.zip'
+  ];
+
+  $temp_zip = __DIR__ . '/getid3_temp.zip';
+
+  // Helper function to recursively delete temporary directories
+  $delete_folder = function ($dir) use (&$delete_folder) {
+    if (!is_dir($dir)) return;
+    $files = array_diff(scandir($dir), ['.', '..']);
+    foreach ($files as $file) {
+      (is_dir("$dir/$file")) ? $delete_folder("$dir/$file") : @unlink("$dir/$file");
+    }
+    return @rmdir($dir);
+  };
+
+  foreach ($urls as $source => $url) {
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+    $data = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($http_code !== 200 || !$data) {
+      $context = stream_context_create([
+        'http' => ['timeout' => 60, 'follow_location' => true],
+        'ssl'  => ['verify_peer' => false, 'verify_peer_name' => false]
+      ]);
+      $data = @file_get_contents($url, false, $context);
+    }
+
+    if ($data && strlen($data) > 1000) {
+      @file_put_contents($temp_zip, $data);
+      if (file_exists($temp_zip)) {
+        $zip = new ZipArchive;
+        if ($zip->open($temp_zip) === true) {
+          $temp_extract_dir = __DIR__ . '/getid3_temp_extract';
+          if (!is_dir($temp_extract_dir)) {
+            @mkdir($temp_extract_dir, 0755, true);
+          }
+          $zip->extractTo($temp_extract_dir);
+          $zip->close();
+
+          $extracted_getid3_path = '';
+          if ($source === 'james') {
+            $extracted_getid3_path = $temp_extract_dir . '/getID3-master/getid3';
+          } else {
+            $extracted_getid3_path = $temp_extract_dir . '/PHP-Music-main/getid3';
+          }
+
+          if (is_dir($extracted_getid3_path)) {
+            $target_dir = __DIR__ . '/getid3';
+            if (!is_dir($target_dir)) {
+              @mkdir($target_dir, 0755, true);
+            }
+            
+            $copy_folder = function ($src, $dst) use (&$copy_folder) {
+              $dir = opendir($src);
+              @mkdir($dst, 0755, true);
+              while (false !== ($file = readdir($dir))) {
+                if (($file != '.') && ($file != '..')) {
+                  if (is_dir($src . '/' . $file)) {
+                    $copy_folder($src . '/' . $file, $dst . '/' . $file);
+                  } else {
+                    @copy($src . '/' . $file, $dst . '/' . $file);
+                  }
+                }
+              }
+              closedir($dir);
+            };
+
+            $copy_folder($extracted_getid3_path, $target_dir);
+            $delete_folder($temp_extract_dir);
+            @unlink($temp_zip);
+
+            if (file_exists($target_file)) {
+              return true;
+            }
+          }
+          if (is_dir($temp_extract_dir)) {
+            $delete_folder($temp_extract_dir);
+          }
+        }
+        @unlink($temp_zip);
+      }
+    }
+  }
+  return false;
+}
+
+ensure_getid3();
 
 if (file_exists(__DIR__ . '/getid3/getid3.php')) {
   require_once __DIR__ . '/getid3/getid3.php';
@@ -12088,11 +12195,13 @@ HTML;
       $stmt->execute([$song_id, $difficulty]);
       $chart = $stmt->fetch();
       
-      if ($chart) {
+      $notes_arr = $chart ? json_decode($chart['notes_json'], true) : null;
+      
+      if ($chart && is_array($notes_arr) && count($notes_arr) > 0) {
         send_json([
           'status' => 'success', 
           'found' => true, 
-          'notes' => json_decode($chart['notes_json'], true), 
+          'notes' => $notes_arr, 
           'level' => $chart['level']
         ]);
       } else {
@@ -12655,17 +12764,39 @@ HTML;
 
       $db = get_db();
       
+      // Auto-repair broken schemas from previous versions (Single PK bug fix)
+      if ($step === 1) {
+        try {
+          $columns = $db->query("PRAGMA table_info(rhythm_charts)")->fetchAll(PDO::FETCH_ASSOC);
+          $pk_count = 0;
+          foreach ($columns as $col) {
+            if ($col['pk'] > 0) $pk_count++;
+          }
+          if ($pk_count < 2 && count($columns) > 0) {
+            $db->exec("DROP TABLE IF EXISTS rhythm_charts");
+            $db->exec("CREATE TABLE rhythm_charts (
+              song_id INTEGER NOT NULL,
+              difficulty TEXT NOT NULL,
+              notes_json TEXT,
+              level INTEGER DEFAULT 1,
+              PRIMARY KEY (song_id, difficulty),
+              FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+            );");
+          }
+        } catch(Exception $e) {}
+      }
+      
       // Get global totals for progress tracking across page reloads
       $total_songs = (int)$db->query("SELECT COUNT(id) FROM music")->fetchColumn();
       $total_possible_charts = $total_songs * 6;
-      $completed_charts = (int)$db->query("SELECT COUNT(*) FROM rhythm_charts")->fetchColumn();
+      $completed_charts = (int)$db->query("SELECT COUNT(*) FROM rhythm_charts WHERE notes_json IS NOT NULL AND notes_json != '[]' AND notes_json != ''")->fetchColumn();
 
       // Query ONLY the first 25 songs missing the chart for THIS specific difficulty step
       // This ensures only 1 fast SQLite write (~0.5ms) is committed per song, fully eliminating database locks!
       $stmt = $db->prepare("
         SELECT id, title, artist, duration FROM music 
         WHERE id NOT IN (
-          SELECT song_id FROM rhythm_charts WHERE difficulty = ?
+          SELECT song_id FROM rhythm_charts WHERE difficulty = ? AND notes_json IS NOT NULL AND notes_json != '[]' AND notes_json != ''
         )
         LIMIT 25
       ");
@@ -12682,7 +12813,7 @@ HTML;
           echo "<script>log('\\nDivision " . $step . " complete! Progressing to Division " . $next_step . "/6...', 'success');</script>";
           echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=" . $next_step . "&run=1&density=" . $density_multiplier . "'; }, 1000);</script>";
         } else {
-          echo "<script>setProgress(100); log('All songs already have compiled note charts! Scan complete.', 'success');</script>";
+          echo "<script>setProgress(100); log('All songs already have compiled note charts! Scan complete.', 'success'); localStorage.setItem('rhythm_scan_step', '1');</script>";
         }
         echo "</body></html>";
         exit;
@@ -17141,19 +17272,19 @@ function perform_cover_scan($db) {
       </div>
     </div>
 
-    <div id="multi-select-bar" class="d-none shadow-lg dropup">
-      <div class="d-flex align-items-center gap-2">
+    <div id="multi-select-bar" class="d-none shadow-lg">
+      <div class="d-flex align-items-center gap-2 position-relative">
         <span id="multi-select-count" class="badge bg-danger rounded-pill fs-6 px-3 py-2 me-1 shadow-sm">0</span>
         <button class="btn btn-outline-light rounded-circle d-flex align-items-center justify-content-center border-0" id="multi-cancel-btn" title="Cancel" style="width: 44px; height: 44px; background: rgba(255,255,255,0.1);"><i class="bi bi-x-lg fs-5"></i></button>
         <button class="btn btn-outline-light rounded-circle d-flex align-items-center justify-content-center border-0" id="multi-select-all-btn" title="Select All Loaded" style="width: 44px; height: 44px; background: rgba(255,255,255,0.1);"><i class="bi bi-check-all fs-4"></i></button>
         
         <div class="vr bg-secondary opacity-50 mx-1" style="width: 2px; min-height: 30px;"></div>
         
-        <button class="btn btn-outline-light rounded-circle d-flex align-items-center justify-content-center border-0" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Actions" style="width: 44px; height: 44px; background: rgba(255,255,255,0.1);">
+        <button class="btn btn-outline-light rounded-circle d-flex align-items-center justify-content-center border-0" type="button" id="multi-action-dropdown-btn" title="Actions" style="width: 44px; height: 44px; background: rgba(255,255,255,0.1);">
           <i class="bi bi-three-dots-vertical fs-5"></i>
         </button>
         
-        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow-lg mb-2" style="background-color: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 12px; overflow: hidden;">
+        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow-lg mb-2" id="multi-action-dropdown-menu" style="background-color: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 12px; overflow: hidden; position: absolute; bottom: 100%; right: 0;">
           <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="multi-add-playlist-btn"><i class="bi bi-music-note-list fs-5 text-secondary"></i> Add to Playlist</button></li>
           <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="multi-add-favorite-btn"><i class="bi bi-heart-fill fs-5 text-danger"></i> Add to Favorites</button></li>
           <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="multi-offline-btn"><i class="bi bi-cloud-arrow-down-fill fs-5 text-info"></i> Re-cache / Offline</button></li>
@@ -25132,6 +25263,21 @@ SOFTWARE.</div>
           }
         });
 
+        document.getElementById('multi-action-dropdown-btn').addEventListener('click', (e) => {
+          e.stopPropagation();
+          const menu = document.getElementById('multi-action-dropdown-menu');
+          menu.classList.toggle('show');
+          menu.style.display = menu.classList.contains('show') ? 'block' : 'none';
+        });
+
+        document.addEventListener('click', (e) => {
+          const menu = document.getElementById('multi-action-dropdown-menu');
+          if (menu && menu.classList.contains('show') && !e.target.closest('#multi-action-dropdown-btn')) {
+            menu.classList.remove('show');
+            menu.style.display = 'none';
+          }
+        });
+
         document.getElementById('multi-cancel-btn').addEventListener('click', () => {
           selectedSongs.clear();
           updateMultiSelectUI();
@@ -25373,13 +25519,13 @@ SOFTWARE.</div>
             html += `
               <div class="list-group list-group-flush">
                 ${playlists.map(p => `
-                  <button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-3 add-to-playlist-item my-1 p-2 rounded ${p.is_added == 1 ? 'bg-secondary text-white border-0 opacity-75' : 'bg-transparent text-white border border-secondary'}" data-playlist-id="${p.id}" ${p.is_added == 1 ? 'disabled' : ''}>
+                  <button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-3 add-to-playlist-item my-1 p-2 rounded ${p.is_added == 1 ? 'bg-secondary text-white border-0 opacity-75' : 'bg-transparent text-white border border-secondary'}" data-playlist-id="${p.id}" data-public-id="${p.public_id}" data-is-added="${p.is_added || 0}">
                     <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}" class="rounded" style="width: 48px; height: 48px; object-fit: cover; background-color: var(--ytm-surface-2);">
                     <div class="d-flex flex-column flex-grow-1 text-start overflow-hidden">
                       <span class="text-truncate fw-medium">${escapeHTML(p.name)}</span>
                       <span class="small ${p.is_added == 1 ? 'text-white-50' : 'text-secondary'}">${p.song_count} songs</span>
                     </div>
-                    ${p.is_added == 1 ? '<span class="badge bg-success">Already Added</span>' : '<i class="bi bi-plus-circle fs-5"></i>'}
+                    ${p.is_added == 1 ? '<i class="bi bi-check-circle-fill text-success fs-5"></i>' : '<i class="bi bi-plus-circle fs-5"></i>'}
                   </button>
                 `).join('')}
               </div>
@@ -26950,7 +27096,7 @@ SOFTWARE.</div>
 
           const pageHeaderEl = document.querySelector('.page-header');
           const mainContentEl = document.getElementById('main-content');
-          if (currentView.type === 'get_inbox' || currentView.type === 'rhythm_game') {
+          if (currentView.type === 'get_inbox' || currentView.type === 'rhythm_game' || currentView.type === 'photo_editor') {
             if (pageHeaderEl) pageHeaderEl.classList.add('d-none');
             contentArea.style.padding = '0';
             contentArea.style.margin = '0';
@@ -26979,9 +27125,13 @@ SOFTWARE.</div>
             contentArea.style.width = '';
             contentArea.style.maxWidth = '';
             contentArea.style.height = '';
+            contentArea.style.display = '';
+            contentArea.style.flexDirection = '';
             if (mainContentEl) {
               mainContentEl.style.height = '';
               mainContentEl.style.overflow = '';
+              mainContentEl.style.display = '';
+              mainContentEl.style.flexDirection = '';
             }
             if (playerBar && currentSong) {
               playerBar.classList.remove('d-none');
@@ -27027,8 +27177,6 @@ SOFTWARE.</div>
                   allContentloaded = true;
                   break;
                 }
-                contentArea.style.padding = '0';
-                contentArea.style.height = '100%';
                 contentArea.innerHTML = `
                   <div class="rg-app">
                     <div id="rg-screen-hub" class="rg-screen">
@@ -27519,10 +27667,6 @@ SOFTWARE.</div>
             case 'photo_editor':
               updateContentTitle('Image Editor', !!currentUser);
               if (currentUser) {
-                // Remove padding to allow editor to fill the entire content area
-                contentArea.style.padding = '0';
-                contentArea.style.height = '100%';
-                
                 contentArea.innerHTML = `
                   <div class="photo-editor-app">
                     <main class="pe-workspace" id="pe-workspace">
@@ -31178,6 +31322,7 @@ SOFTWARE.</div>
           if (scanBtn) {
             scanBtn.addEventListener('click', (e) => {
               e.preventDefault(); e.stopPropagation();
+              localStorage.setItem('rhythm_scan_step', '1');
               validateAndOpen('chart-scan-modal', true);
             });
           }
@@ -33429,30 +33574,62 @@ SOFTWARE.</div>
             }
 
             const item = e.target.closest('.add-to-playlist-item');
-            if (!item || item.disabled) return;
+            if (!item) return;
+            
             const playlistId = item.dataset.playlistId;
+            const publicId = item.dataset.publicId;
+            const isAdded = item.dataset.isAdded === '1';
             let result;
-            if (mixIdForPlaylist) {
-              result = await fetchData('?action=add_mix_to_playlist', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ playlist_id: playlistId, mix_id: mixIdForPlaylist })
-              });
-            } else if (songIdForPlaylist) {
-              result = await fetchData('?action=add_to_playlist', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ playlist_id: playlistId, song_id: songIdForPlaylist })
-              });
-            }
-            if (result) {
-              showToast(result.message, result.status === 'success' ? 'success' : 'info');
-              addToPlaylistModal.hide();
-              if (currentView.type === 'get_user_playlists') {
-                loadView(currentView);
+            
+            if (isAdded) {
+              if (songIdForPlaylist) {
+                let removedCount = 0;
+                item.innerHTML = `<div class="d-flex align-items-center justify-content-center w-100"><div class="spinner-border spinner-border-sm text-light"></div></div>`;
+                
+                for (let sid of songIdForPlaylist) {
+                  result = await fetchData('?action=remove_from_playlist', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ song_id: parseInt(sid), playlist_public_id: publicId })
+                  });
+                  if (result && result.status === 'success') removedCount++;
+                }
+                
+                if (removedCount > 0) {
+                  showToast('Removed from playlist.', 'success');
+                  addToPlaylistModal.hide();
+                  if (currentView.type === 'get_user_playlists' || currentView.type === 'playlist_songs') {
+                    loadView(currentView);
+                  }
+                  songIdForPlaylist = null;
+                  mixIdForPlaylist = null;
+                }
               }
-              songIdForPlaylist = null;
-              mixIdForPlaylist = null;
+            } else {
+              item.innerHTML = `<div class="d-flex align-items-center justify-content-center w-100"><div class="spinner-border spinner-border-sm text-light"></div></div>`;
+              
+              if (mixIdForPlaylist) {
+                result = await fetchData('?action=add_mix_to_playlist', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ playlist_id: playlistId, mix_id: mixIdForPlaylist })
+                });
+              } else if (songIdForPlaylist) {
+                result = await fetchData('?action=add_to_playlist', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ playlist_id: playlistId, song_id: songIdForPlaylist })
+                });
+              }
+              if (result) {
+                showToast(result.message, result.status === 'success' ? 'success' : 'info');
+                addToPlaylistModal.hide();
+                if (currentView.type === 'get_user_playlists' || currentView.type === 'playlist_songs') {
+                  loadView(currentView);
+                }
+                songIdForPlaylist = null;
+                mixIdForPlaylist = null;
+              }
             }
           });
         }
@@ -41630,6 +41807,12 @@ SOFTWARE.</div>
             el.className = "rg-list-item position-relative overflow-hidden";
             el.dataset.songId = song.id;
 
+            if (song.levels) {
+              if (!window.rhythmLevelsMap) window.rhythmLevelsMap = { levels: {} };
+              if (!window.rhythmLevelsMap.levels) window.rhythmLevelsMap.levels = {};
+              window.rhythmLevelsMap.levels[song.id] = song.levels;
+            }
+
             const levels =
               window.rhythmLevelsMap && window.rhythmLevelsMap.levels && window.rhythmLevelsMap.levels[song.id]
                 ? window.rhythmLevelsMap.levels[song.id]
@@ -41645,18 +41828,18 @@ SOFTWARE.</div>
                 { short: "MS", key: "master", bg: "#A78BFA", text: "#FFFFFF" },
                 { short: "DM", key: "demon", bg: "#4C1D95", text: "#FFFFFF" },
               ];
-              badgesHTML =
-                `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 8px; max-width: 175px;">` +
-                diffs
-                  .map((d) => {
-                    const lvl = levels[d.key];
-                    if (!lvl) return "";
-                    return `<span class="badge d-flex align-items-center justify-content-center px-2 py-1 shadow-sm" style="font-family: 'Arial Black', sans-serif; font-size: 0.7rem; font-weight: 900; background-color: ${d.bg}; color: ${d.text}; border-radius: 6px; letter-spacing: 0.5px; width: 90%; text-align: center;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
-                  })
-                  .join("") +
-                `</div>`;
+              let badgesList = diffs
+                .map((d) => {
+                  const lvl = levels[d.key];
+                  if (!lvl) return "";
+                  return `<span class="badge d-flex align-items-center justify-content-center px-2 py-1 shadow-sm" style="font-family: 'Arial Black', sans-serif; font-size: 0.7rem; font-weight: 900; background-color: ${d.bg}; color: ${d.text}; border-radius: 6px; letter-spacing: 0.5px; width: 90%; text-align: center;" title="${d.key.toUpperCase()} Level">${d.short} ${lvl}</span>`;
+                })
+                .filter(b => b !== "")
+                .join("");
 
-              if (badgesHTML === `<div class="d-flex flex-wrap gap-1 mt-2"></div>`) {
+              if (badgesList !== "") {
+                badgesHTML = `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 8px; max-width: 175px;">${badgesList}</div>`;
+              } else {
                 badgesHTML = `<div class="text-secondary small mt-2 fw-bold" style="font-size: 0.75rem;"><i class="bi bi-cpu-fill me-1"></i>Tap to compile notes</div>`;
               }
             } else {
