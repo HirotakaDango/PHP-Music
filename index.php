@@ -26362,10 +26362,18 @@ SOFTWARE.</div>
               const useridAttr = item.user_id ? `data-userid="${item.user_id}"` : (type === 'get_following' ? `data-userid="${item.id}"` : '');
               const artistNameAttr = (type === 'get_albums' && item.artist) ? `data-artistname="${encodeURIComponent(item.artist)}"` : '';
 
-              const moreButton = (type === 'get_user_playlists' || type === 'get_collab_playlists') ? `
+              let moreButton = '';
+              if (type === 'get_user_playlists' || type === 'get_collab_playlists') {
+                moreButton = `
                 <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-description="${escapeHTML(item.description || '')}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}" data-owner-id="${item.owner_id || ''}">
                   <i class="bi bi-three-dots-vertical"></i>
-                </button>` : '';
+                </button>`;
+              } else if (type === 'get_albums') {
+                moreButton = `
+                <button class="playlist-more-btn album-more-btn" data-album="${encodeURIComponent(item.album)}" data-userid="${item.user_id || ''}" data-artistname="${encodeURIComponent(item.artist || '')}" data-id="${item.id || 0}">
+                  <i class="bi bi-three-dots-vertical"></i>
+                </button>`;
+              }
 
               if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_collab_playlists' || type === 'get_artists' || type === 'get_following' || type === 'get_genres' || type === 'get_years') {
                 let songCountBadge = '';
