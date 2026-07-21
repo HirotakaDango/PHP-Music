@@ -13,7 +13,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'clear_session_emergency') {
 
 // Bypass Gzip compression for heavy files, streaming, and uploads to prevent memory exhaustion and play crashes
 $raw_uri_gzip = $_SERVER['REQUEST_URI'] ?? '';
-$is_gzip_bypass = preg_match('/action=(stream|thumb|get_stream|download_song|upload|batch)/i', $raw_uri_gzip) || isset($_GET['download']) || isset($_GET['batch']);
+// FIXED: Added all scanning endpoints to bypass GZIP to prevent blank white screens from corrupted buffers
+$is_gzip_bypass = preg_match('/action=(stream|thumb|get_stream|download_song|upload|batch|full_scan|force_rescan|rescan_covers|rescan_charts|vacuum_database|reset_rhythm_charts)/i', $raw_uri_gzip) || isset($_GET['download']) || isset($_GET['batch']);
 
 if (!$is_gzip_bypass && isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip')) {
   ob_start('ob_gzhandler');
@@ -380,7 +381,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '6.7');
+define('APP_VERSION', '6.8');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -416,8 +417,20 @@ function get_db() {
       foreach ($db_parts as $db_part) {
         foreach ($search_parts as $search_part) {
           if (strcasecmp(trim($db_part), trim($search_part)) === 0) return 1;
+          if (romanize_string(trim($db_part)) === romanize_string(trim($search_part))) return 1;
         }
       }
+      return 0;
+    }, 2);
+
+    $db->sqliteCreateFunction('match_text', function($db_field, $search_string) {
+      if ($db_field === null || $search_string === null) return 0;
+      if (mb_stripos($db_field, $search_string, 0, 'UTF-8') !== false) return 1;
+      
+      $db_rom = romanize_string($db_field);
+      $search_rom = romanize_string($search_string);
+      
+      if ($search_rom !== 'unknown' && $search_rom !== '' && strpos($db_rom, $search_rom) !== false) return 1;
       return 0;
     }, 2);
 
@@ -2094,6 +2107,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <a href="?access=admin&page=appeals" class="nav-link <?php echo (($_GET['page'] ?? '') === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
             <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Drive Manager</span></a>
             <a href="?access=admin&page=api" class="nav-link <?php echo (($_GET['page'] ?? '') === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
+            <a href="?access=admin&page=manage" class="nav-link <?php echo (($_GET['page'] ?? '') === 'manage') ? 'active' : ''; ?>"><i class="bi bi-collection-fill"></i><span>Manage Content</span></a>
             <a href="./#playground" target="_blank" class="nav-link"><i class="bi bi-window-stack"></i><span>API Playground</span></a>
           </div>
           
@@ -2496,6 +2510,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </ul>
             </nav>
             <?php endif; ?>
+          </div>
+        <?php elseif (($_GET['page'] ?? '') === 'manage'): ?>
+          <style>
+            .main-content { overflow: hidden !important; padding: 0 !important; display: flex; flex-direction: column; }
+            @media (max-width: 991.98px) {
+              .app-container { height: 100dvh !important; max-height: 100dvh; display: flex; flex-direction: column; overflow: hidden !important; }
+              .main-content { flex-grow: 1; min-height: 0; }
+            }
+          </style>
+          <div style="flex: 1; width: 100%; height: 100%; position: relative; overflow: hidden; background: #030303; margin: 0; padding: 0;">
+            <div id="manage-iframe-spinner" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; z-index: 10; background: #030303;">
+              <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.25em;"></div>
+            </div>
+            <iframe src="./" onload="document.getElementById('manage-iframe-spinner').style.display='none';" style="width: 117.647%; height: 117.647%; border: none; transform: scale(0.85); transform-origin: top left; position: absolute; top: 0; left: 0; display: block; z-index: 5;"></iframe>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'drive'): ?>
           <!-- PHPDrive UI -->
@@ -5250,17 +5278,33 @@ if (file_exists(__DIR__ . '/getid3/getid3.php')) {
   require_once __DIR__ . '/getid3/getid3.php';
 }
 
+function extract_safe_tag($comments, $tag, $fallback = '') {
+  if (!empty($comments[$tag]) && is_array($comments[$tag])) {
+    $val = $comments[$tag][0];
+    
+    // FIX 1: Remove double-encoded Mojibake strings appended with a slash
+    // 'Ã' is the classic signature of a UTF-8 string corrupted into Latin-1.
+    $val = preg_replace('/\s*\/\s*[Ããäåæçèé].*/', '', $val);
+    
+    // FIX 2: Remove exact duplicate strings appended with a slash (e.g. "Title / Title")
+    if (strpos($val, '/') !== false) {
+      $parts = explode('/', $val, 2);
+      if (isset($parts[1]) && trim($parts[0]) === trim($parts[1])) {
+        $val = trim($parts[0]);
+      }
+    }
+    
+    if (!mb_check_encoding($val, 'UTF-8')) {
+      $val = mb_convert_encoding($val, 'UTF-8', 'auto');
+    }
+    return trim($val) !== '' ? trim($val) : $fallback;
+  }
+  return $fallback;
+}
+
 function send_json($data) {
-  if (!headers_sent()) {
-    header('Content-Type: application/json; charset=utf-8');
-  }
-  $json = json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE);
-  if ($json === false) {
-    http_response_code(500);
-    echo '{"status":"error", "message":"JSON encoding error"}';
-  } else {
-    echo $json;
-  }
+  header('Content-Type: application/json; charset=utf-8');
+  echo json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE);
   exit;
 }
 
@@ -5843,12 +5887,13 @@ function init_db($db) {
 
 function romanize_string($string) {
   if (class_exists('Transliterator')) {
+    // Uses the external ICU library to flawlessly romanize Kanji, Katakana, and Hiragana to Romaji
     $transliterator = Transliterator::create('Any-Latin; Latin-ASCII; Lower()');
     if ($transliterator) {
       $string = $transliterator->transliterate($string);
     }
   }
-  $string = strtolower($string);
+  $string = mb_strtolower($string, 'UTF-8');
   $string = preg_replace('/[^a-z0-9]/', '', $string);
   return empty($string) ? 'unknown' : $string;
 }
@@ -6299,8 +6344,8 @@ if (isset($_GET['action'])) {
       $is_valid_internal = true;
     } elseif ($referer && parse_url($referer, PHP_URL_HOST) === $host) {
       $is_valid_internal = true;
-    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes'])) {
-      // Media routes are allowed internally without headers, but data JSON routes are strictly blocked!
+    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes', 'full_scan', 'force_rescan', 'rescan_covers', 'vacuum_database', 'reset_rhythm_charts', 'rescan_charts'])) {
+      // Media and Admin Scanner routes are allowed internally without headers, but data JSON routes are strictly blocked!
       $is_valid_internal = true;
     }
     
@@ -7457,6 +7502,7 @@ HTML;
         }
         
         $getID3 = new getID3;
+        $getID3->setOption(['encoding' => 'UTF-8']);
         $info = $getID3->analyze($file['tmp_name']);
         getid3_lib::CopyTagsToComments($info);
 
@@ -7464,12 +7510,8 @@ HTML;
         $posted_collabs = trim($_POST['artist'] ?? '');
         $is_collaborative = intval($_POST['is_collaborative'] ?? 0);
         
-        $artist_arr = $info['comments']['artist'] ?? [];
-        $artist = !empty($artist_arr) ? implode('/', $artist_arr) : $uploader_name;
+        $artist = extract_safe_tag($info['comments'] ?? [], 'artist', $uploader_name);
         if (empty($artist) || $artist === 'Unknown Artist') $artist = $uploader_name;
-        
-        $main_artist = trim(preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $artist)[0]);
-        if (empty($main_artist)) $main_artist = $uploader_name;
         
         $collab_user_ids = [];
         if ($is_collaborative === 1 && !empty($posted_collabs)) {
@@ -7500,12 +7542,12 @@ HTML;
         $filename = uniqid('m_') . '.' . $ext;
         $filePath = $upload_dir . '/' . $filename;
         if (move_uploaded_file($file['tmp_name'], $filePath)) {
-          $title = isset($info['comments']['title']) ? implode('/', $info['comments']['title']) : pathinfo($file['name'], PATHINFO_FILENAME);
-          $album = isset($info['comments']['album']) ? implode('/', $info['comments']['album']) : 'Unknown Album';
+          $title = extract_safe_tag($info['comments'] ?? [], 'title', pathinfo($file['name'], PATHINFO_FILENAME));
+          $album = extract_safe_tag($info['comments'] ?? [], 'album', 'Unknown Album');
           $year = (int)($info['comments']['year'][0] ?? 0);
           $duration = (int)($info['playtime_seconds'] ?? 0);
           $bitrate = (int)($info['audio']['bitrate'] ?? 0);
-          $genre = isset($info['comments']['genre']) ? implode('/', $info['comments']['genre']) : (trim($_POST['genre'] ?? '') ?: 'Uploaded');
+          $genre = extract_safe_tag($info['comments'] ?? [], 'genre', (trim($_POST['genre'] ?? '') ?: 'Uploaded'));
           
           $replaygain = 0;
           if (!empty($info['tags']['id3v2']['TXXX'])) {
@@ -7959,8 +8001,8 @@ HTML;
         $params[] = $_GET['genre'];
       }
       if (!empty($_GET['q'])) {
-        $where_clauses[] = "(m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
-        $q_param = '%' . $_GET['q'] . '%';
+        $where_clauses[] = "(match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1 OR match_text(m.album, ?) = 1)";
+        $q_param = $_GET['q'];
         $params[] = $q_param;
         $params[] = $q_param;
         $params[] = $q_param;
@@ -8044,8 +8086,8 @@ HTML;
       $where_sql = "WHERE os.user_id = ?";
       $params = [$user_id, $user_id];
       if (!empty($_GET['q'])) {
-        $where_sql .= " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
-        $q_param = '%' . $_GET['q'] . '%';
+        $where_sql .= " AND (match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1 OR match_text(m.album, ?) = 1)";
+        $q_param = $_GET['q'];
         $params[] = $q_param;
         $params[] = $q_param;
         $params[] = $q_param;
@@ -10325,8 +10367,8 @@ HTML;
           $default_sort = 'manual_order';
           break;
         case 'search':
-          $conditions = "WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
-          $query_param = '%' . $param . '%';
+          $conditions = "WHERE (match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1 OR match_text(m.album, ?) = 1) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
+          $query_param = $param;
           $params = [$query_param, $query_param, $query_param, $user_id, $user_id];
           break;
         case 'get_recommendations':
@@ -10381,22 +10423,32 @@ HTML;
 
     case 'get_artists':
       $sort_key = $_GET['sort'] ?? 'name_asc';
-      // ADVANCED IMAGE SCANNER: Tracks if the current song actually has an image
-      $stmt = $db->prepare("SELECT artist, id, CASE WHEN image IS NOT NULL THEN 1 ELSE 0 END as has_img FROM music WHERE artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) ORDER BY id DESC");
+      // Select user_id to correctly map primary artists
+      $stmt = $db->prepare("SELECT artist, id, user_id, CASE WHEN image IS NOT NULL THEN 1 ELSE 0 END as has_img FROM music WHERE artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) ORDER BY id DESC");
       $stmt->execute([$user_id, $user_id]);
       $rows = $stmt->fetchAll();
       $artists = [];
+      
+      $stmt_is_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
+      
       foreach ($rows as $row) {
         $parts = preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i', $row['artist']);
-        foreach ($parts as $part) {
+        foreach ($parts as $index => $part) {
           $p = trim($part);
           if ($p !== '') {
             $key = strtolower($p);
             if (!isset($artists[$key])) {
-              // Register artist with initial song ID
-              $artists[$key] = ['name' => $p, 'id' => $row['id'], 'has_img' => $row['has_img']];
-            } elseif (!$artists[$key]['has_img'] && $row['has_img']) {
-              // UPGRADE: If previously blank, replace with a song ID that has a cover image!
+              $stmt_is_user->execute([$p]);
+              $uid = $stmt_is_user->fetchColumn();
+              
+              $artists[$key] = [
+                  'name' => $p, 
+                  'id' => $uid ? $uid : $row['id'], 
+                  'has_img' => $row['has_img'],
+                  'is_user' => (bool)$uid,
+                  'user_id' => $uid ? $uid : ($index === 0 ? $row['user_id'] : null)
+              ];
+            } elseif (!$artists[$key]['has_img'] && $row['has_img'] && empty($artists[$key]['is_user'])) {
               $artists[$key]['id'] = $row['id'];
               $artists[$key]['has_img'] = 1;
             }
@@ -10561,10 +10613,10 @@ HTML;
         $q = $_GET['q'] ?? '';
         $params = [$user_id, $user_id, $user_id, $user_id];
         if ($q !== '') {
-          $search_cond = " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
-          $params[] = "%$q%";
-          $params[] = "%$q%";
-          $params[] = "%$q%";
+          $search_cond = " AND (match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1 OR match_text(m.album, ?) = 1)";
+          $params[] = $q;
+          $params[] = $q;
+          $params[] = $q;
         }
 
         $stmt_songs = $db->prepare("
@@ -10603,10 +10655,10 @@ HTML;
         $search_cond = '';
         $params = [$user_id, $name];
         if ($q !== '') {
-          $search_cond = " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
-          $params[] = "%$q%";
-          $params[] = "%$q%";
-          $params[] = "%$q%";
+          $search_cond = " AND (match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1 OR match_text(m.album, ?) = 1)";
+          $params[] = $q;
+          $params[] = $q;
+          $params[] = $q;
         }
         
         $stmt_songs = $db->prepare("
@@ -10634,10 +10686,10 @@ HTML;
           $search_cond = '';
           $params = [$user_id, $mix_row['id'], $user_id];
           if ($q !== '') {
-            $search_cond = " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE)";
-            $params[] = "%$q%";
-            $params[] = "%$q%";
-            $params[] = "%$q%";
+            $search_cond = " AND (match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1 OR match_text(m.album, ?) = 1)";
+            $params[] = $q;
+            $params[] = $q;
+            $params[] = $q;
           }
 
           $stmt_songs = $db->prepare("
@@ -10775,10 +10827,10 @@ HTML;
         $q = $_GET['q'] ?? '';
         $exec_params = array_merge([$user_id], $user_params);
         if ($q !== '') {
-          $search_cond = " AND (m.title LIKE ? COLLATE NOCASE OR m.album LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE)";
-          $exec_params[] = "%$q%";
-          $exec_params[] = "%$q%";
-          $exec_params[] = "%$q%";
+          $search_cond = " AND (match_text(m.title, ?) = 1 OR match_text(m.album, ?) = 1 OR match_text(m.artist, ?) = 1)";
+          $exec_params[] = $q;
+          $exec_params[] = $q;
+          $exec_params[] = $q;
         }
 
         $stmt_songs = $db->prepare("
@@ -10822,7 +10874,9 @@ HTML;
 
     case 'search':
       $q = $_GET['q'] ?? '';
-      $query = '%' . $q . '%';
+      $query = $q;
+      
+      $q_rom = $_GET['rom'] ?? '';
       
       // Parse Filters
       $f_date = $_GET['f_date'] ?? '';
@@ -10862,27 +10916,34 @@ HTML;
 
       // 1. TOP RESULT (Only if no specific sort is overriding)
       if ($f_sort === 'relevance' || $f_sort === '') {
+        $search_sql = "(match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1 OR match_text(m.album, ?) = 1)";
+        $bind_params = [$query, $query, $query];
+        
+        if ($q_rom) { $search_sql .= " OR (match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1 OR match_text(m.album, ?) = 1)"; array_push($bind_params, $q_rom, $q_rom, $q_rom); }
+
         $stmt_top = $db->prepare("
           SELECT {$song_fields} FROM music m 
           LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? 
-          WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)
+          WHERE ($search_sql) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)
           $date_cond_m $dur_cond_m
-          ORDER BY CASE WHEN m.title LIKE ? THEN 1 WHEN m.artist LIKE ? THEN 2 WHEN m.album LIKE ? THEN 3 ELSE 4 END ASC, m.id DESC LIMIT 1
+          ORDER BY CASE WHEN match_text(m.title, ?) = 1 THEN 1 WHEN match_text(m.artist, ?) = 1 THEN 2 WHEN match_text(m.album, ?) = 1 THEN 3 ELSE 4 END ASC, m.id DESC LIMIT 1
         ");
-        $stmt_top->execute([$user_id, $query, $query, $query, $user_id, $user_id, $q, $q, $q]);
+        
+        $final_params = array_merge([$user_id], $bind_params, [$user_id, $user_id, $query, $query, $query]);
+        $stmt_top->execute($final_params);
         $top_result = $stmt_top->fetch();
         if ($top_result) $shelves[] = ['title' => 'Top Result', 'type' => 'top_result', 'items' => [$top_result]];
       }
 
       // 2. ARTISTS (Bypass date/duration filters since they don't apply to profiles)
       $artists = []; $added_artists = [];
-      $stmt = $db->prepare("SELECT id, artist as name FROM users WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL ORDER BY artist ASC LIMIT 15");
+      $stmt = $db->prepare("SELECT id, artist as name FROM users WHERE match_text(artist, ?) = 1 AND artist != '' AND artist IS NOT NULL ORDER BY artist ASC LIMIT 15");
       $stmt->execute([$query]);
       foreach ($stmt->fetchAll() as $ua) {
         $artists[] = ['name' => $ua['name'], 'id' => $ua['id'], 'is_user' => true];
         $added_artists[strtolower($ua['name'])] = true;
       }
-      $stmt = $db->prepare("SELECT DISTINCT artist, MAX(id) as id FROM music WHERE artist LIKE ? AND artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY artist LIMIT 15");
+      $stmt = $db->prepare("SELECT DISTINCT artist, MAX(id) as id FROM music WHERE match_text(artist, ?) = 1 AND artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1) GROUP BY artist LIMIT 15");
       $stmt->execute([$query, $user_id]);
       foreach ($stmt->fetchAll() as $ma) {
         $parts = preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $ma['artist']);
@@ -10899,7 +10960,7 @@ HTML;
       // 3. ALBUMS (Dynamically aggregated and filtered)
       $stmt = $db->prepare("
         SELECT m.album, m.artist, m.user_id, m.id, m.duration, m.last_modified, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc
-        FROM music m WHERE m.album LIKE ? AND m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) $date_cond_m
+        FROM music m WHERE match_text(m.album, ?) = 1 AND m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) $date_cond_m
       ");
       $stmt->execute([$query, $user_id, $user_id]);
       $search_albums = [];
@@ -10938,7 +10999,7 @@ HTML;
         (SELECT COUNT(*) FROM playlist_songs ps WHERE ps.playlist_id = p.id) as song_count,
         (SELECT SUM(m.duration) FROM playlist_songs ps JOIN music m ON ps.song_id = m.id WHERE ps.playlist_id = p.id) as total_duration
         FROM playlists p JOIN users u ON p.user_id = u.id 
-        WHERE p.name LIKE ? AND (p.is_private = 0 OR p.user_id = ? OR {$is_super_admin} = 1) $date_cond_p
+        WHERE match_text(p.name, ?) = 1 AND (p.is_private = 0 OR p.user_id = ? OR {$is_super_admin} = 1) $date_cond_p
       ");
       $stmt->execute([$query, $user_id]);
       $playlists = $stmt->fetchAll();
@@ -10954,10 +11015,16 @@ HTML;
 
       // 5. SONGS
       $order_m = "ORDER BY m.title ASC";
-      $song_params = [$user_id, $query, $query, $query, $user_id, $user_id];
+      $search_sql_s = "(match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1 OR match_text(m.album, ?) = 1)";
+      $bind_params_s = [$query, $query, $query];
+      
+      if ($q_rom) { $search_sql_s .= " OR (match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1 OR match_text(m.album, ?) = 1)"; array_push($bind_params_s, $q_rom, $q_rom, $q_rom); }
+
+      $song_params = array_merge([$user_id], $bind_params_s, [$user_id, $user_id]);
+
       if ($f_sort === 'relevance' || $f_sort === '') {
-        $order_m = "ORDER BY CASE WHEN m.title LIKE ? THEN 1 WHEN m.artist LIKE ? THEN 2 WHEN m.album LIKE ? THEN 3 ELSE 4 END ASC, m.id DESC";
-        $song_params[] = $q; $song_params[] = $q; $song_params[] = $q;
+        $order_m = "ORDER BY CASE WHEN match_text(m.title, ?) = 1 THEN 1 WHEN match_text(m.artist, ?) = 1 THEN 2 WHEN match_text(m.album, ?) = 1 THEN 3 ELSE 4 END ASC, m.id DESC";
+        $song_params[] = $query; $song_params[] = $query; $song_params[] = $query;
       } elseif ($f_sort === 'date') {
         $order_m = "ORDER BY m.last_modified DESC";
       } elseif ($f_sort === 'views') {
@@ -10967,7 +11034,7 @@ HTML;
       }
       
       $song_fields_search = $song_fields . ", (SELECT COUNT(*) FROM favorites WHERE song_id = m.id) as like_count";
-      $stmt = $db->prepare("SELECT {$song_fields_search} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) $date_cond_m $dur_cond_m $order_m LIMIT 50");
+      $stmt = $db->prepare("SELECT {$song_fields_search} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE ($search_sql_s) AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) $date_cond_m $dur_cond_m $order_m LIMIT 50");
       $stmt->execute($song_params);
       $songs = $stmt->fetchAll();
       if (count($songs) > 0) $shelves[] = ['title' => 'Songs', 'type' => 'songs_list', 'items' => $songs];
@@ -11324,9 +11391,9 @@ HTML;
       $where_sql = "WHERE p.user_id = ?";
       $params = [$user_id];
       if ($q !== '') {
-        $where_sql .= " AND (p.name LIKE ? COLLATE NOCASE OR p.description LIKE ? COLLATE NOCASE)";
-        $params[] = "%$q%";
-        $params[] = "%$q%";
+        $where_sql .= " AND (match_text(p.name, ?) = 1 OR match_text(p.description, ?) = 1)";
+        $params[] = $q;
+        $params[] = $q;
       }
       
       $stmt = $db->prepare("
@@ -11341,6 +11408,92 @@ HTML;
         GROUP BY p.id, p.name, p.description, p.public_id, p.is_collaborative, p.is_private, p.user_id, u.artist, p.play_count
         {$order_by} {$limit_clause}
       ");
+      $stmt->execute($params);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'get_mixes':
+      if (isset($_GET['refresh']) && $_GET['refresh'] == '1') {
+        $db->exec("DELETE FROM mix_songs");
+        $db->exec("DELETE FROM mixes");
+      }
+      
+      $generate_count = 0;
+      if (isset($_GET['refresh']) && $_GET['refresh'] == '1') {
+         $generate_count = 24;
+      } elseif (isset($_GET['generate']) && $_GET['generate'] == '1') {
+         $generate_count = 24;
+      } else {
+         $mix_count = $db->query("SELECT COUNT(*) FROM mixes")->fetchColumn();
+         if ($mix_count == 0) $generate_count = 24;
+      }
+      
+      if ($generate_count > 0) {
+        $mix_seeds_stmt = $db->query("
+          SELECT * FROM (
+            SELECT DISTINCT artist as seed_name, 'artist' as seed_type FROM music WHERE artist != 'Unknown Artist' AND artist != '' AND artist IS NOT NULL
+            UNION
+            SELECT DISTINCT genre as seed_name, 'genre' as seed_type FROM music WHERE genre != 'Unknown Genre' AND genre != '' AND genre IS NOT NULL
+            UNION
+            SELECT DISTINCT CAST(year AS TEXT) as seed_name, 'year' as seed_type FROM music WHERE year IS NOT NULL AND year > 0
+          ) ORDER BY RANDOM() LIMIT $generate_count
+        ");
+        $seeds = $mix_seeds_stmt->fetchAll();
+        foreach ($seeds as $seed) {
+          $song_stmt = $db->prepare("SELECT id FROM music WHERE " . $seed['seed_type'] . " = ? ORDER BY RANDOM() LIMIT 50");
+          $song_stmt->execute([$seed['seed_name']]);
+          $song_ids = $song_stmt->fetchAll(PDO::FETCH_COLUMN);
+          
+          if (count($song_ids) < 50) {
+            $needed = 50 - count($song_ids);
+            $pad_stmt = $db->query("SELECT id FROM music ORDER BY RANDOM() LIMIT 100");
+            $pad_candidates = $pad_stmt->fetchAll(PDO::FETCH_COLUMN);
+            foreach ($pad_candidates as $cid) {
+              if (!in_array($cid, $song_ids)) {
+                $song_ids[] = $cid;
+                $needed--;
+                if ($needed <= 0) break;
+              }
+            }
+          }
+          
+          if (empty($song_ids)) continue; 
+          
+          $img_stmt = $db->prepare("SELECT id FROM music WHERE " . $seed['seed_type'] . " = ? AND image IS NOT NULL ORDER BY RANDOM() LIMIT 1");
+          $img_stmt->execute([$seed['seed_name']]);
+          $img_id = $img_stmt->fetchColumn() ?: $song_ids[0];
+          
+          $public_id = bin2hex(random_bytes(8));
+          $name = 'Mix - ' . $seed['seed_name'];
+          $db->prepare("INSERT INTO mixes (public_id, name, creator, image_id) VALUES (?, ?, ?, ?)")->execute([$public_id, $name, 'PHP-Music', $img_id]);
+          $mix_id = $db->lastInsertId();
+          
+          $order = 0;
+          $insert_ms = $db->prepare("INSERT INTO mix_songs (mix_id, song_id, sort_order) VALUES (?, ?, ?)");
+          foreach ($song_ids as $sid) {
+            $insert_ms->execute([$mix_id, $sid, $order++]);
+          }
+        }
+      }
+      
+      $sort_key = $_GET['sort'] ?? 'newest';
+      $sort_map = [
+        'name_asc' => 'ORDER BY name COLLATE NOCASE ASC',
+        'name_desc' => 'ORDER BY name COLLATE NOCASE DESC',
+        'newest' => 'ORDER BY id DESC',
+        'oldest' => 'ORDER BY id ASC',
+      ];
+      $order_by = $sort_map[$sort_key] ?? $sort_map['newest'];
+      
+      $q = $_GET['q'] ?? '';
+      $where_sql = "";
+      $params = [];
+      if ($q !== '') {
+        $where_sql = "WHERE match_text(name, ?) = 1";
+        $params[] = $q;
+      }
+      
+      $stmt = $db->prepare("SELECT id, public_id, name, creator, image_id as image_id, (SELECT COUNT(*) FROM mix_songs WHERE mix_id = mixes.id) as song_count FROM mixes $where_sql $order_by $limit_clause");
       $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
@@ -11388,9 +11541,9 @@ HTML;
       $action_type = $data['collab_action']; 
       
       if ($action_type === 'search') {
-        $q = '%' . ($data['query'] ?? '') . '%';
-        $stmt = $db->prepare("SELECT id, artist FROM users WHERE artist LIKE ? OR email LIKE ? LIMIT 10");
-        $stmt->execute([$q, $q]);
+        $q = $data['query'] ?? '';
+        $stmt = $db->prepare("SELECT id, artist FROM users WHERE match_text(artist, ?) = 1 OR email LIKE ? LIMIT 10");
+        $stmt->execute([$q, '%' . $q . '%']);
         send_json(['status' => 'success', 'users' => $stmt->fetchAll()]);
       }
       
@@ -11492,9 +11645,9 @@ HTML;
       $action_type = $data['collab_action']; 
       
       if ($action_type === 'search') {
-        $q = '%' . ($data['query'] ?? '') . '%';
-        $stmt = $db->prepare("SELECT id, artist FROM users WHERE artist LIKE ? OR email LIKE ? LIMIT 10");
-        $stmt->execute([$q, $q]);
+        $q = $data['query'] ?? '';
+        $stmt = $db->prepare("SELECT id, artist FROM users WHERE match_text(artist, ?) = 1 OR email LIKE ? LIMIT 10");
+        $stmt->execute([$q, '%' . $q . '%']);
         send_json(['status' => 'success', 'users' => $stmt->fetchAll()]);
       }
       
@@ -12284,8 +12437,8 @@ HTML;
       $params = [$_SESSION['user_id'] ?? 0, $_SESSION['user_id'] ?? 0];
 
       if ($search !== '') {
-        $where .= " AND u.artist LIKE ? COLLATE NOCASE";
-        $params[] = "%$search%";
+        $where .= " AND match_text(u.artist, ?) = 1";
+        $params[] = $search;
       }
       if (!empty($_GET['following_of'])) {
         $where .= " AND u.id IN (SELECT following_id FROM follows WHERE follower_id = ?)";
@@ -12950,8 +13103,8 @@ HTML;
       $where = "WHERE rf.user_id = ?";
       $params = [$target_id];
       if ($search !== '') {
-        $where .= " AND (m.title LIKE ? COLLATE NOCASE OR m.artist LIKE ? COLLATE NOCASE)";
-        $q_param = '%' . $search . '%';
+        $where .= " AND (match_text(m.title, ?) = 1 OR match_text(m.artist, ?) = 1)";
+        $q_param = $search;
         $params[] = $q_param;
         $params[] = $q_param;
       }
@@ -13736,6 +13889,7 @@ function perform_force_rescan($db, $mode) {
   if (!class_exists('getID3')) die("FATAL ERROR: getID3 library not found\n");
   
   $getID3 = new getID3;
+  $getID3->setOption(['encoding' => 'UTF-8']);
   $getID3->option_md5_data = true;
   $getID3->option_md5_data_source = true;
   $getID3->option_sha1_data = true;
@@ -13802,7 +13956,7 @@ function perform_force_rescan($db, $mode) {
         $info = $getID3->analyze($filePath);
         getid3_lib::CopyTagsToComments($info);
 
-        $artist_tag = isset($info['comments']['artist']) ? implode('/', $info['comments']['artist']) : 'Unknown Artist';
+        $artist_tag = extract_safe_tag($info['comments'] ?? [], 'artist', 'Unknown Artist');
         $file_user_id = $library_user_id;
 
         if ($mode === 'artists' || $mode === 'all') {
@@ -13839,9 +13993,9 @@ function perform_force_rescan($db, $mode) {
         }
 
         if ($mode === 'songs' || $mode === 'all') {
-          $title = isset($info['comments']['title']) ? implode('/', $info['comments']['title']) : pathinfo($filePath, PATHINFO_FILENAME);
-          $album = isset($info['comments']['album']) ? implode('/', $info['comments']['album']) : 'Unknown Album';
-          $genre = isset($info['comments']['genre']) ? implode('/', $info['comments']['genre']) : 'Unknown Genre';
+          $title = extract_safe_tag($info['comments'] ?? [], 'title', pathinfo($filePath, PATHINFO_FILENAME));
+          $album = extract_safe_tag($info['comments'] ?? [], 'album', 'Unknown Album');
+          $genre = extract_safe_tag($info['comments'] ?? [], 'genre', 'Unknown Genre');
           $year = (int)($info['comments']['year'][0] ?? 0);
           $duration = (int)($info['playtime_seconds'] ?? 0);
           $bitrate = (int)($info['audio']['bitrate'] ?? 0);
@@ -13887,28 +14041,36 @@ function perform_force_rescan($db, $mode) {
 }
 
 function perform_full_scan($db) {
+  // OPTIMIZATION 1: Release session lock instantly so the iframe and main app don't hang!
+  session_write_close();
+  
   $start_time = microtime(true);
-  ini_set('memory_limit', '512M');
+  ini_set('memory_limit', '1024M'); // Boost memory for large libraries
+  set_time_limit(0); // Prevent PHP timeout limits
   error_reporting(E_ALL & ~E_DEPRECATED);
   ini_set('display_errors', 1);
 
+  // Remove any conflicting gzip headers before we output
+  header_remove('Content-Encoding');
   header('Content-Type: text/html; charset=utf-8');
-  ob_implicit_flush();
+  header('Cache-Control: no-cache');
+  
+  // OPTIMIZATION 2: Clean output buffers instead of flushing to prevent corrupted GZIP rendering (blank white page)
+  while (ob_get_level() > 0) {
+    @ob_end_clean();
+  }
+  ob_implicit_flush(true);
+
+  $step = isset($_GET['step']) ? (int)$_GET['step'] : 1;
+  
+  // OPTIMIZATION 3: Safe local temp file for queue state (Fixes Windows/XAMPP sys_get_temp_dir issues)
+  $tmp_dir = __DIR__ . '/.tmp_db';
+  if (!is_dir($tmp_dir)) @mkdir($tmp_dir, 0755, true);
+  $queue_file = $tmp_dir . '/phpmusic_scan_queue.json';
 
   echo "<style>
-    body { 
-      color: #e0e0e0; 
-      background-color: #030303; 
-      font-family: Consolas, 'Courier New', monospace; 
-      padding: 10px;
-      margin: 0;
-    }
-    pre { 
-      white-space: pre-wrap; 
-      word-wrap: break-word; 
-      font-family: inherit;
-      margin-top: 75px;
-    }
+    body { color: #e0e0e0; background-color: #030303; font-family: Consolas, 'Courier New', monospace; padding: 10px; margin: 0; }
+    pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; margin-top: 75px; }
     #header-wrap { position: fixed; top: 0; left: 0; right: 0; background: #121212; border-bottom: 1px solid #333; z-index: 10; }
     #prog-wrap { padding: 12px 15px 5px 15px; display: flex; align-items: center; }
     #prog-track { flex-grow: 1; background: #000; height: 12px; border-radius: 6px; overflow: hidden; margin-right: 15px; }
@@ -13922,254 +14084,284 @@ function perform_full_scan($db) {
           <div id='warning-txt'>⚠️ Please wait and don't close this modal, the process can take very long!</div>
         </div>";
   echo "<pre>";
-  echo "PHP Music Library - Full Scan\n";
-  echo "===================================\n\n";
+  echo "PHP Music Library - Full Scan (Optimized Queue System)\n";
+  echo "========================================================\n\n";
+
+  echo "<script>
+    const setProgress = (pct) => {
+      document.getElementById('prog-bar').style.width = pct + '%';
+      document.getElementById('prog-txt').innerText = pct + '%';
+      window.scrollTo(0, document.body.scrollHeight);
+    };
+  </script>";
 
   if (!class_exists('getID3')) {
     die("FATAL ERROR: getID3 library not found in " . __DIR__ . "/getid3/\n");
   }
 
-  echo "Step 1: Database ready.\n\n";
-  
+  // Initialize DB schemas safely
   init_db($db);
 
-  echo "Step 2: Verifying 'Music Library' user...\n";
-  $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
-  $library_user_id = $stmt->fetchColumn();
-  if (!$library_user_id) {
-    die("FATAL ERROR: 'Music Library' user could not be found or created.\n");
-  }
-  echo "'Music Library' user ID: {$library_user_id}\n\n";
+  if ($step === 1) {
+    echo "Step 1: Database ready.\n\n";
+    echo "Step 2: Verifying 'Music Library' user...\n";
+    $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
+    $library_user_id = $stmt->fetchColumn() ?: 1;
+    echo "'Music Library' user ID: {$library_user_id}\n\n";
 
-  echo "Step 3: Scanning music directory for files...\n";
-  $files_on_disk = [];
-  
-  $music_folders = [MUSIC_DIR]; 
+    echo "Step 3: Discovering music files on disk...\n";
+    $files_on_disk = [];
+    $music_folders = [MUSIC_DIR]; 
+    $file_count = 0;
 
-  foreach ($music_folders as $folder) {
-    if (!is_dir($folder)) {
-      echo "Warning: Directory not found, skipping: {$folder}\n";
-      continue;
-    }
-    echo "Scanning directory: {$folder}\n";
-    $directory = new RecursiveDirectoryIterator($folder, RecursiveDirectoryIterator::SKIP_DOTS);
-    $iterator = new RecursiveIteratorIterator($directory, RecursiveIteratorIterator::LEAVES_ONLY);
-    foreach ($iterator as $file) {
-      if ($file->isDir()) {
-        continue;
+    foreach ($music_folders as $folder) {
+      if (!is_dir($folder)) continue;
+      echo "Scanning directory: " . str_replace('\\', '/', $folder) . "\n";
+      
+      // OPTIMIZATION 4: Windows Localhost Fix: Force UNIX paths via Iterator to normalize slashes securely
+      $dir = new RecursiveDirectoryIterator($folder, FilesystemIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS);
+      $filter = new RecursiveCallbackFilterIterator($dir, function ($current, $key, $iterator) {
+        if ($current->isDir()) {
+          // Exclude heavy backend folders to speed up traversal exponentially
+          $exclude = ['.git', 'getid3', '.drive_trash_bin', '.drive_thumbnails', '.file_version', '.tmp_db', 'covers'];
+          if (in_array($current->getFilename(), $exclude)) return false;
+        }
+        return true;
+      });
+      
+      $iterator = new RecursiveIteratorIterator($filter, RecursiveIteratorIterator::LEAVES_ONLY);
+      foreach ($iterator as $file) {
+        if ($file->isDir()) continue;
+        
+        // Absolute brute-force replacement to guarantee no backslashes on Windows environments
+        $filePath = str_replace('\\', '/', $file->getPathname());
+        
+        // Fast regex check
+        if (preg_match('/\.(mp3|m4a|flac|ogg|wav)$/i', $filePath)) {
+          $files_on_disk[$filePath] = $file->getMTime();
+          $file_count++;
+          
+          // Dynamic progress feedback for massive libraries so the browser doesn't freeze
+          if ($file_count % 500 === 0) {
+            echo " -> Discovered {$file_count} valid audio files...\n";
+            @ob_flush(); flush();
+          }
+        }
       }
-      $filePath = str_replace('\\', '/', $file->getPathname()); // Use getPathname for very accurate path matching
-      if (preg_match('/\.(mp3|m4a|flac|ogg|wav)$/i', $filePath)) {
-        $files_on_disk[$filePath] = $file->getMTime();
-      }
     }
-  }
-  
-  echo "Found " . count($files_on_disk) . " music files on disk.\n\n";
+    
+    echo "Found a total of {$file_count} music files on disk.\n\n";
 
-  echo "Step 4: Aligning database file paths with current environment...\n";
-  $db->exec("UPDATE music SET file = REPLACE(file, '\\', '/')"); 
-  $sample_file = $db->query("SELECT file FROM music LIMIT 1")->fetchColumn();
-  if ($sample_file) {
-    $sample_file = str_replace('\\', '/', $sample_file);
-    $old_base = null;
-    $new_base = null;
+    echo "Step 4: Aligning database file paths with current environment...\n";
+    // Convert all existing DB slashes to forward slashes to normalize
+    $db->exec("UPDATE music SET file = REPLACE(file, '\\', '/')"); 
+    
+    $sample_file = $db->query("SELECT file FROM music LIMIT 1")->fetchColumn();
+    if ($sample_file) {
+      $old_base = null; $new_base = null;
 
-    if (preg_match('#^(.*?)/(uploads/.*)$#i', $sample_file, $matches)) {
-      $old_base = $matches[1];
-      $new_base = MUSIC_DIR;
-    } else {
-      $basename = basename($sample_file);
-      foreach ($files_on_disk as $disk_path => $mtime) {
-        if (basename($disk_path) === $basename) {
-          $db_parts = explode('/', $sample_file);
-          $disk_parts = explode('/', $disk_path);
-          $match_len = 0;
-          $db_count = count($db_parts);
-          $disk_count = count($disk_parts);
-          for ($i = 1; $i <= min($db_count, $disk_count); $i++) {
-            if ($db_parts[$db_count - $i] === $disk_parts[$disk_count - $i]) {
-              $match_len = $i;
-            } else {
+      if (preg_match('#^(.*?)/(uploads/.*)$#i', $sample_file, $matches)) {
+        $old_base = $matches[1];
+        $new_base = str_replace('\\', '/', MUSIC_DIR);
+      } else {
+        $basename = basename($sample_file);
+        foreach ($files_on_disk as $disk_path => $mtime) {
+          if (basename($disk_path) === $basename) {
+            $db_parts = explode('/', $sample_file);
+            $disk_parts = explode('/', $disk_path);
+            $match_len = 0;
+            for ($i = 1; $i <= min(count($db_parts), count($disk_parts)); $i++) {
+              if ($db_parts[count($db_parts) - $i] === $disk_parts[count($disk_parts) - $i]) $match_len = $i;
+              else break;
+            }
+            if ($match_len > 0) {
+              $suffix = implode('/', array_slice($db_parts, -$match_len));
+              $old_base = substr($sample_file, 0, -strlen($suffix) - 1);
+              $new_base = substr($disk_path, 0, -strlen($suffix) - 1);
               break;
             }
           }
-          if ($match_len > 0) {
-            $suffix = implode('/', array_slice($db_parts, -$match_len));
-            $old_base = substr($sample_file, 0, -strlen($suffix) - 1);
-            $new_base = substr($disk_path, 0, -strlen($suffix) - 1);
-            break;
-          }
         }
       }
-    }
 
-    if ($old_base && $new_base && strcasecmp($old_base, $new_base) !== 0) {
-      echo " -> Mismatch detected: Database base path ('{$old_base}') differs from Current environment ('{$new_base}').\n";
-      echo " -> Automatically correcting all file paths in the database to prevent losing playlists, favorites, and metadata...\n";
-      
-      $update_stmt = $db->prepare("UPDATE music SET file = ? || SUBSTR(file, ?)");
-      $old_base_len = strlen($old_base) + 1;
-      
-      $db->beginTransaction();
-      try {
-        $update_stmt->execute([$new_base, $old_base_len]);
-        $db->commit();
-        echo " -> Successfully corrected all file paths in the database.\n\n";
-      } catch (Exception $e) {
-        $db->rollBack();
-        echo " -> Error correcting database paths: " . $e->getMessage() . "\n\n";
+      if ($old_base && $new_base && strcasecmp($old_base, $new_base) !== 0) {
+        echo " -> Mismatch detected: Database base path differs from Current environment.\n";
+        echo "    Old: {$old_base}\n";
+        echo "    New: {$new_base}\n";
+        echo " -> Automatically correcting all file paths in the database...\n";
+        $db->beginTransaction();
+        try {
+          // Replace the old prefix with the new prefix natively in SQLite, heavily bound to LIKE parameters
+          $db->prepare("UPDATE music SET file = ? || SUBSTR(file, ?) WHERE file LIKE ?")->execute([$new_base, strlen($old_base) + 1, $old_base . '/%']);
+          $db->commit();
+          echo " -> Successfully corrected all file paths.\n\n";
+        } catch (Exception $e) {
+          $db->rollBack();
+          echo " -> Error correcting database paths: " . $e->getMessage() . "\n\n";
+        }
+      } else {
+        echo " -> Database base path is aligned perfectly.\n\n";
       }
-    } else {
-      echo " -> Database base path is already aligned with current server environment.\n\n";
     }
-  }
 
-  echo "Step 5: Fetching existing music records from database...\n";
-  $stmt = $db->query("SELECT file, last_modified FROM music");
-  $db_files = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-  echo "Found " . count($db_files) . " records in the database.\n\n";
+    echo "Step 5: Fetching existing music records from database...\n";
+    $db_files = $db->query("SELECT file, last_modified FROM music")->fetchAll(PDO::FETCH_KEY_PAIR);
+    echo "Found " . count($db_files) . " records in the database.\n\n";
 
-  echo "Step 6: Comparing disk files with database records...\n";
-  $files_to_add = array_diff_key($files_on_disk, $db_files);
-  $files_to_delete = array_diff_key($db_files, $files_on_disk);
-  $files_to_update = [];
+    echo "Step 6: Building differential processing queue...\n";
+    // Calculate the diffs
+    $files_to_add = array_diff_key($files_on_disk, $db_files);
+    $files_to_delete = array_diff_key($db_files, $files_on_disk);
+    $files_to_update = [];
 
-  foreach (array_intersect_key($files_on_disk, $db_files) as $filePath => $mtime) {
-    // SMART DIFF: Only update if the timestamp doesn't match perfectly.
-    // This is blazing fast, but still catches files moved between servers/drives!
-    if ($mtime != $db_files[$filePath]) {
-      $files_to_update[$filePath] = $mtime;
+    foreach (array_intersect_key($files_on_disk, $db_files) as $filePath => $mtime) {
+      if ($mtime != $db_files[$filePath]) {
+        $files_to_update[$filePath] = $mtime;
+      }
     }
+
+    $unchanged_count = count(array_intersect_key($files_on_disk, $db_files)) - count($files_to_update);
+    echo " - Existing (Unchanged): " . $unchanged_count . "\n";
+    echo " - To add: " . count($files_to_add) . "\n";
+    echo " - To update: " . count($files_to_update) . "\n";
+    echo " - To delete: " . count($files_to_delete) . "\n\n";
+
+    // Construct the sequential task queue
+    $process_queue = array_merge(
+      array_map(function($f, $m) { return ['type' => 'process', 'file' => $f, 'mtime' => $m]; }, array_keys($files_to_add), array_values($files_to_add)),
+      array_map(function($f, $m) { return ['type' => 'process', 'file' => $f, 'mtime' => $m]; }, array_keys($files_to_update), array_values($files_to_update)),
+      array_map(function($f) { return ['type' => 'delete', 'file' => $f]; }, array_keys($files_to_delete))
+    );
+
+    $total_tasks = count($process_queue);
+
+    if ($total_tasks === 0) {
+      if (file_exists($queue_file)) @unlink($queue_file);
+      echo "<script>setProgress(100);</script>";
+      die("Scan complete. No changes detected.\n</pre>");
+    }
+
+    file_put_contents($queue_file, json_encode(['total' => $total_tasks, 'completed' => 0, 'tasks' => $process_queue]));
+    
+    echo "Queue built successfully! Redirecting to processing engine...\n";
+    echo "<script>setTimeout(() => window.location.href = '?action=full_scan&step=2', 1000);</script></pre>";
+    exit;
   }
 
-  $unchanged_count = count(array_intersect_key($files_on_disk, $db_files)) - count($files_to_update);
+  if ($step === 2) {
+    if (!file_exists($queue_file)) {
+      die("Queue file lost or scan completed. You can close this window.\n</pre>");
+    }
 
-  echo " - Existing (Unchanged): " . $unchanged_count . "\n";
-  echo " - To add: " . count($files_to_add) . "\n";
-  echo " - To update: " . count($files_to_update) . "\n";
-  echo " - To delete: " . count($files_to_delete) . "\n\n";
+    $queue_data = json_decode(file_get_contents($queue_file), true);
+    $tasks = $queue_data['tasks'];
+    $completed = $queue_data['completed'];
+    $total = $queue_data['total'];
 
-  $files_to_process = $files_to_add + $files_to_update;
-  if (empty($files_to_process) && empty($files_to_delete)) {
-    die("Scan complete. No changes detected.\n</pre>");
-  }
+    if (empty($tasks)) {
+      @unlink($queue_file);
+      echo "<script>setProgress(100);</script>";
+      die("\n=======================\nScan completed successfully!\nTotal processed: {$total}\n</pre>");
+    }
 
-  echo "Step 6: Processing changes...\n";
-  
-  $getID3 = new getID3;
-  // ACCURATE SCAN: Enable data hashing for exact playtime and bitrate calculations
-  $getID3->option_md5_data = true;
-  $getID3->option_md5_data_source = true;
-  $getID3->option_sha1_data = true;
-  $getID3->option_tags_html = false;
+    // OPTIMIZATION 5: Batch processing (25 items at a time) to prevent PHP max_execution_time limits!
+    $batch_size = 25;
+    $current_batch = array_slice($tasks, 0, $batch_size);
+    $remaining_tasks = array_slice($tasks, $batch_size);
 
-  $insert_stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-  $update_stmt_with_image = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, image = ?, last_modified = ? WHERE file = ?");
-  $update_stmt_no_image = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, last_modified = ? WHERE file = ?");
-  $delete_stmt = $db->prepare("DELETE FROM music WHERE file = ?");
-  
-  // EXTREME OPTIMIZATION: Cache Users in RAM to skip 1000s of SELECT queries
-  $user_cache = [];
-  $stmt_all_users = $db->query("SELECT id, artist FROM users");
-  while ($row = $stmt_all_users->fetch()) {
+    $getID3 = new getID3;
+    $getID3->setOption(['encoding' => 'UTF-8']);
+    $getID3->option_md5_data = true;
+    $getID3->option_md5_data_source = true;
+    $getID3->option_sha1_data = true;
+    $getID3->option_tags_html = false;
+
+    $library_user_id = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'")->fetchColumn() ?: 1;
+
+    $insert_stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    $update_img = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, image = ?, last_modified = ? WHERE file = ?");
+    $update_no_img = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, last_modified = ? WHERE file = ?");
+    $delete_stmt = $db->prepare("DELETE FROM music WHERE file = ?");
+    $check_file = $db->prepare("SELECT id FROM music WHERE file = ?");
+    
+    $user_cache = [];
+    $stmt_all_users = $db->query("SELECT id, artist FROM users");
+    while ($row = $stmt_all_users->fetch()) {
       $user_cache[strtolower($row['artist'])] = $row['id'];
-  }
-  
-  $check_email_stmt = $db->prepare("SELECT id FROM users WHERE email = ?");
-  $insert_user_stmt = $db->prepare("INSERT INTO users (email, artist, password_hash, verified, profile_picture, profile_picture_type) VALUES (?, ?, ?, 'no', ?, 'image/svg+xml')");
+    }
+    
+    $check_email = $db->prepare("SELECT id FROM users WHERE email = ?");
+    $insert_user = $db->prepare("INSERT INTO users (email, artist, password_hash, verified, profile_picture, profile_picture_type) VALUES (?, ?, ?, 'no', ?, 'image/svg+xml')");
 
-  $processed_count = 0;
-  $total_to_process = count($files_to_process) + count($files_to_delete);
+    $db->beginTransaction();
 
-  $db->beginTransaction();
-  try {
-    foreach ($files_to_process as $filePath => $mtime) {
-      if ((microtime(true) - $start_time) > 45) {
-        $db->commit();
-        echo "\nTime limit approaching. Pausing to prevent timeout...\n";
-        echo "Auto-resuming in 1 second...\n";
-        echo "<script>setTimeout(() => window.location.reload(), 1000);</script></pre>";
-        exit;
-      }
+    foreach ($current_batch as $task) {
+      $completed++;
+      $percent = floor(($completed / $total) * 100);
 
-      $processed_count++;
-      $percent = floor(($processed_count / $total_to_process) * 100);
-      echo sprintf("[%3d%%] [%d/%d] Processing: %s\n", $percent, $processed_count, $total_to_process, basename($filePath));
-      
-      if (!isset($last_percent) || $percent > $last_percent) {
-        echo "<script>document.getElementById('prog-bar').style.width = '{$percent}%'; document.getElementById('prog-txt').innerText = '{$percent}%'; window.scrollTo(0, document.body.scrollHeight);</script>";
-        $last_percent = $percent;
-      }
-      
-      try {
-        $info = $getID3->analyze($filePath);
-        getid3_lib::CopyTagsToComments($info);
+      if ($task['type'] === 'delete') {
+        echo sprintf("[%3d%%] [%d/%d] Deleting: %s\n", $percent, $completed, $total, basename($task['file']));
+        $delete_stmt->execute([$task['file']]);
+      } else {
+        echo sprintf("[%3d%%] [%d/%d] Processing: %s\n", $percent, $completed, $total, basename($task['file']));
         
-        $title = isset($info['comments']['title']) ? implode('/', $info['comments']['title']) : pathinfo($filePath, PATHINFO_FILENAME);
-        $artist_tag = isset($info['comments']['artist']) ? implode('/', $info['comments']['artist']) : 'Unknown Artist';
-        $album = isset($info['comments']['album']) ? implode('/', $info['comments']['album']) : 'Unknown Album';
-        $genre = isset($info['comments']['genre']) ? implode('/', $info['comments']['genre']) : 'Unknown Genre';
-        $year = (int)($info['comments']['year'][0] ?? 0);
-        $duration = (int)($info['playtime_seconds'] ?? 0);
-        $bitrate = (int)($info['audio']['bitrate'] ?? 0);
-        $raw_image_data = $info['comments']['picture'][0]['data'] ?? null;
-        
-        // Advanced Fallback: Check local directory for cover image files if ID3 tag is missing
-        if (!$raw_image_data) {
-          $file_info = pathinfo($filePath);
-          $dir = $file_info['dirname'];
-          $filename = $file_info['filename'];
-            
-          $possible_covers = [
-            $filename . '.jpg',
-            $filename . '.png',
-            'cover.jpg',
-            'cover.png',
-            'folder.jpg',
-            'folder.png',
-            'artwork.jpg'
-          ];
-            
-          foreach ($possible_covers as $cfile) {
-            $cpath = $dir . '/' . $cfile;
+        $filePath = $task['file'];
+        $mtime = $task['mtime'];
+
+        try {
+          $info = $getID3->analyze($filePath);
+          getid3_lib::CopyTagsToComments($info);
+          
+          $title = extract_safe_tag($info['comments'] ?? [], 'title', pathinfo($filePath, PATHINFO_FILENAME));
+          $artist_tag = extract_safe_tag($info['comments'] ?? [], 'artist', 'Unknown Artist');
+          $album = extract_safe_tag($info['comments'] ?? [], 'album', 'Unknown Album');
+          $genre = extract_safe_tag($info['comments'] ?? [], 'genre', 'Unknown Genre');
+          $year = (int)($info['comments']['year'][0] ?? 0);
+          $duration = (int)($info['playtime_seconds'] ?? 0);
+          $bitrate = (int)($info['audio']['bitrate'] ?? 0);
+          
+          $raw_image_data = $info['comments']['picture'][0]['data'] ?? null;
+          if (!$raw_image_data) {
+            $dir = pathinfo($filePath, PATHINFO_DIRNAME);
+            $filename = pathinfo($filePath, PATHINFO_FILENAME);
+            $possible_covers = [$filename . '.jpg', $filename . '.png', 'cover.jpg', 'cover.png', 'folder.jpg', 'folder.png', 'artwork.jpg'];
+            foreach ($possible_covers as $cfile) {
+              $cpath = $dir . '/' . $cfile;
               if (file_exists($cpath)) {
                 $raw_image_data = @file_get_contents($cpath);
-              if ($raw_image_data) break;
+                if ($raw_image_data) break;
+              }
             }
           }
-        }
-        
-        $webp_image_data = process_image_to_webp($raw_image_data);
-        
-        $is_update = isset($db_files[$filePath]);
+          $webp_image_data = process_image_to_webp($raw_image_data);
+          
+          $check_file->execute([$filePath]);
+          $is_update = $check_file->fetchColumn();
 
-        if ($is_update) {
+          if ($is_update) {
             if ($webp_image_data !== null) {
-              $update_stmt_with_image->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime, $filePath]);
+              $update_img->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime, $filePath]);
             } else {
-              $update_stmt_no_image->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $mtime, $filePath]);
+              $update_no_img->execute([$title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $mtime, $filePath]);
             }
-        } else {
+          } else {
             $file_user_id = $library_user_id;
             $main_artist = trim(preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $artist_tag)[0]);
 
             if ($main_artist !== 'Unknown Artist' && !empty($main_artist)) {
               $artist_lower = strtolower($main_artist);
-              // Read from RAM cache instead of hitting the database!
               if (isset($user_cache[$artist_lower])) {
                 $file_user_id = $user_cache[$artist_lower];
               } else {
-                echo " -> New artist found: '{$main_artist}'. Creating account.\n";
+                echo " -> New artist: '{$main_artist}'. Creating account.\n";
                 $sanitized_artist_base = sanitize_for_path($main_artist);
-                $password = $sanitized_artist_base;
-                $hash = password_hash($password, PASSWORD_DEFAULT);
+                $hash = password_hash($sanitized_artist_base, PASSWORD_DEFAULT);
                 
                 $email = $sanitized_artist_base . '@mail.com';
                 $counter = 1;
                 while (true) {
-                  $check_email_stmt->execute([$email]);
-                  if (!$check_email_stmt->fetch()) break;
+                  $check_email->execute([$email]);
+                  if (!$check_email->fetch()) break;
                   $counter++;
                   $email = $sanitized_artist_base . $counter . '@mail.com';
                 }
@@ -14177,63 +14369,37 @@ function perform_full_scan($db) {
                 $initial = mb_strtoupper(mb_substr($main_artist, 0, 1, 'UTF-8'));
                 $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#121212">' . htmlspecialchars($initial) . '</text></svg>';
                 
-                $insert_user_stmt->execute([$email, $main_artist, $hash, $svg]);
+                $insert_user->execute([$email, $main_artist, $hash, $svg]);
                 $file_user_id = $db->lastInsertId();
-                // Add the new user to RAM Cache
                 $user_cache[$artist_lower] = $file_user_id; 
-                echo " -> Account created with ID: {$file_user_id}, Email: {$email}\n";
               }
             }
             $insert_stmt->execute([$file_user_id, $filePath, $title, $artist_tag, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $mtime]);
+          }
+        } catch (Exception $e) {
+          echo " -> Error processing " . basename($filePath) . ": " . $e->getMessage() . "\n";
         }
-
-      } catch (Exception $file_exception) {
-        echo " -> Error processing " . basename($filePath) . ": " . $file_exception->getMessage() . "\n";
       }
 
-      unset($info);
-      unset($webp_image_data);
-      unset($raw_image_data);
-      
-      // OPTIMIZATION: Periodically dump SQLite WAL memory to disk to prevent RAM exhaustion
-      if ($processed_count % 200 === 0) {
-          $db->commit();
-          gc_collect_cycles();
-          $db->beginTransaction();
-      }
+      echo "<script>setProgress({$percent});</script>";
+      @ob_flush(); flush();
     }
 
-    foreach ($files_to_delete as $filePath => $mtime) {
-      if ((microtime(true) - $start_time) > 45) {
-        $db->commit();
-        echo "\nTime limit approaching. Pausing to prevent timeout...\n";
-        echo "Auto-resuming in 1 second...\n";
-        echo "<script>setTimeout(() => window.location.reload(), 1000);</script></pre>";
-        exit;
-      }
-
-      $processed_count++;
-      $percent = floor(($processed_count / $total_to_process) * 100);
-      echo sprintf("[%3d%%] [%d/%d] Deleting: %s\n", $percent, $processed_count, $total_to_process, basename($filePath));
-      
-      if (!isset($last_percent) || $percent > $last_percent) {
-        echo "<script>document.getElementById('prog-bar').style.width = '{$percent}%'; document.getElementById('prog-txt').innerText = '{$percent}%'; window.scrollTo(0, document.body.scrollHeight);</script>";
-        $last_percent = $percent;
-      }
-      $delete_stmt->execute([$filePath]);
-    }
-    
     $db->commit();
-  } catch (Exception $e) {
-    if ($db->inTransaction()) {
-      $db->rollBack();
-    }
-    die("\nERROR: An exception occurred during database operations: " . $e->getMessage() . "\nProcess aborted.\n</pre>");
-  }
 
-  echo "\n=======================\n";
-  echo "Scan completed successfully!\n";
-  echo "Total files processed: $processed_count\n</pre>";
+    $queue_data['tasks'] = $remaining_tasks;
+    $queue_data['completed'] = $completed;
+    file_put_contents($queue_file, json_encode($queue_data));
+
+    if (empty($remaining_tasks)) {
+      @unlink($queue_file);
+      echo "<script>setProgress(100);</script>";
+      echo "\n=======================\nScan completed successfully!\nTotal processed: {$total}\n</pre>";
+    } else {
+      echo "\nBatch complete. Loading next {$batch_size}...\n";
+      echo "<script>setTimeout(() => window.location.href = '?action=full_scan&step=2', 100);</script></pre>";
+    }
+  }
 }
 
 function perform_cover_scan($db) {
@@ -14269,6 +14435,7 @@ function perform_cover_scan($db) {
   }
 
   $getID3 = new getID3;
+  $getID3->setOption(['encoding' => 'UTF-8']);
   $getID3->option_tags_html = false;
 
   $stmt = $db->query("SELECT id, file, title FROM music WHERE image IS NULL");
@@ -14583,6 +14750,8 @@ function perform_cover_scan($db) {
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@multiavatar/multiavatar/multiavatar.min.js"></script>
+    <!-- External Language Support Library for multi-language transliteration -->
+    <script src="https://cdn.jsdelivr.net/npm/transliteration@2.3.5/dist/browser/bundle.umd.min.js"></script>
     <?php echo $initialViewJS; ?>
     <style>
       :root {
@@ -15709,11 +15878,13 @@ function perform_cover_scan($db) {
         line-height: 1.5;
       }
 
+      body.rg-session-active { padding: 0 !important; margin: 0 !important; overflow: hidden !important; }
+      body.rg-session-active .app-container { min-height: 100dvh !important; height: 100dvh !important; }
       body.rg-session-active .sidebar { display: none !important; }
       body.rg-session-active .mobile-header { display: none !important; }
       body.rg-session-active .page-header { display: none !important; }
-      body.rg-session-active .content-wrapper { margin-left: 0 !important; padding: 0 !important; }
-      body.rg-session-active .main-content { padding-top: 0 !important; }
+      body.rg-session-active .content-area-wrapper { margin: 0 !important; padding: 0 !important; max-width: 100% !important; flex: 1; }
+      body.rg-session-active .main-content { padding: 0 !important; margin: 0 !important; height: 100dvh !important; overflow: hidden !important; }
       body.rg-session-active #player-bar { display: none !important; }
       
       /* Responsive Artist Rhythm Page Layout */
@@ -15799,6 +15970,35 @@ function perform_cover_scan($db) {
         position: relative; width: 100%; height: 100% !important; flex: 1;
         background-color: var(--rg-bg); overflow: hidden; display: flex; flex-direction: column;
       }
+      
+      /* Global Custom Scrollbar for all Rhythm Game Panes */
+      .rg-app ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      .rg-app ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .rg-app ::-webkit-scrollbar-thumb {
+        background-color: rgba(255, 255, 255, 0.2);
+        border-radius: 10px;
+      }
+      .rg-app ::-webkit-scrollbar-thumb:hover {
+        background-color: rgba(255, 255, 255, 0.4);
+      }
+      @media (max-width: 767.98px) {
+        .rg-app {
+          width: 117.647% !important;
+          min-width: 117.647% !important;
+          max-width: 117.647% !important;
+          height: 117.647% !important;
+          min-height: 117.647% !important;
+          max-height: 117.647% !important;
+          flex: none !important;
+          transform: scale(0.85);
+          transform-origin: top left;
+        }
+      }
       @media (min-width: 768px) {
         .rg-app { border-radius: 0; }
         .rg-list-container { display: flex !important; flex-direction: column; align-items: stretch; }
@@ -15852,7 +16052,7 @@ function perform_cover_scan($db) {
       .rg-screen-center { justify-content: center; align-items: center; padding: 24px; }
       .rg-hidden { opacity: 0; visibility: hidden; pointer-events: none; z-index: 0; }
       .rg-app h1 { font-size: 3rem; font-weight: 900; letter-spacing: -1px; margin-bottom: 32px; color: var(--rg-primary); text-transform: uppercase; }
-      .rg-top-app-bar { height: 64px; display: flex; align-items: center; padding: 0 16px; background-color: var(--rg-surface); border-bottom: 1px solid #333; font-size: 1.25rem; font-weight: 700; color: var(--rg-primary); flex-shrink: 0; }
+      .rg-top-app-bar { height: 56px; display: flex; align-items: center; padding: 0 16px; background-color: var(--rg-surface); border-bottom: 1px solid #333; font-size: 1.1rem; font-weight: 700; color: var(--rg-primary); flex-shrink: 0; }
       .rg-tab-container { flex: 1; position: relative; overflow: hidden; }
       .rg-tab-content { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden; transition: opacity 0.2s ease, visibility 0.2s ease; }
       .rg-search-bar { padding: 12px 16px; background-color: var(--rg-bg); flex-shrink: 0; }
@@ -15869,8 +16069,7 @@ function perform_cover_scan($db) {
       .rg-fav-btn { background: transparent; border: none; color: #aaa; cursor: pointer; display: flex; justify-content: center; align-items: center; padding: 8px; border-radius: 50%; transition: all 0.2s; }
       .rg-fav-btn.active { color: var(--rg-primary); }
       .rg-play-btn { background-color: #4a0000; color: var(--rg-primary); border: none; padding: 8px 16px; border-radius: 100px; font-weight: 700; cursor: pointer; text-transform: uppercase; }
-      .rg-bottom-nav { height: 80px; background-color: var(--rg-surface); border-top: 1px solid #333; display: flex; justify-content: space-around; align-items: center; flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom, 0); }
-      .rg-bottom-nav { height: 80px; background-color: var(--rg-surface); border-top: 1px solid #333; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; padding: 0 8px; padding-bottom: env(safe-area-inset-bottom, 0); }
+      .rg-bottom-nav { height: 64px; background-color: var(--rg-surface); border-top: 1px solid #333; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; padding: 0 8px; padding-bottom: env(safe-area-inset-bottom, 0); }
       .rg-nav-item { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #fff; opacity: 0.5; cursor: pointer; padding: 6px 2px; border-radius: 12px; transition: all 0.2s; flex: 1 1 0%; min-width: 0; text-align: center; }
       .rg-nav-label { font-size: 0.7rem; font-weight: 700; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .rg-nav-item.active { opacity: 1; color: var(--rg-primary); }
@@ -15896,14 +16095,15 @@ function perform_cover_scan($db) {
       .rg-dialog-surface { background-color: var(--rg-surface); border: 1px solid #333; border-radius: 28px; padding: 24px; width: 90%; max-width: 400px; display: flex; flex-direction: column; gap: 24px; }
       .rg-dialog-title { font-size: 1.2rem; font-weight: 700; color: var(--rg-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .rg-play-menu-container { width: 100%; max-width: 1000px; padding: 2rem 1rem; margin: 0 auto; height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 2rem; }
+      .rg-play-menu-container { position: relative; z-index: 1; }
       @media (min-width: 992px) {
         .rg-play-menu-container { max-width: 100%; padding: 0; flex-direction: row; overflow-y: hidden; align-items: stretch; gap: 0; }
-        .rg-play-menu-left { flex-grow: 1; overflow-y: auto; padding: 4rem 2rem; max-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-        .rg-play-menu-right { width: 450px; flex-shrink: 0; height: 100%; max-height: 100%; display: flex; flex-direction: column; border-left: 1px solid #333; background-color: #0a0a0a; }
+        .rg-play-menu-left { flex-grow: 1; overflow-y: auto; padding: 2rem; max-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
+        .rg-play-menu-right { width: 450px; flex-shrink: 0; height: 100%; max-height: 100%; display: flex; flex-direction: column; border-left: 1px solid rgba(255,255,255,0.1); background-color: rgba(10, 10, 10, 0.4); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
         .rg-play-menu-right-inner { background-color: transparent !important; border: none !important; box-shadow: none !important; border-radius: 0 !important; }
       }
       @media (max-width: 991.98px) {
-        .rg-play-menu-right-inner { background-color: var(--ytm-surface-2); border-radius: 12px; border: 1px solid #444; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        .rg-play-menu-right-inner { background-color: rgba(40, 40, 40, 0.45); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
       }
 
       .rg-diff-btn { 
@@ -16155,6 +16355,7 @@ function perform_cover_scan($db) {
         <div class="offcanvas-body d-flex flex-column">
           <div class="logo d-none d-md-block">PHP<span>Music</span></div>
           
+          <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-3 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Discovers</h6>
           <a href="#" class="nav-link active" data-view="get_songs">
             <i class="bi bi-music-note-list"></i>
             <span>All Songs</span>
@@ -16166,6 +16367,14 @@ function perform_cover_scan($db) {
           <a href="#" class="nav-link" data-view="get_artists">
             <i class="bi bi-people-fill"></i>
             <span>Artists</span>
+          </a>
+          <a href="#" class="nav-link" data-view="get_mixes">
+            <i class="bi bi-collection-play-fill"></i>
+            <span>Mixes</span>
+          </a>
+          <a href="#" class="nav-link" id="nav-random-play">
+            <i class="bi bi-shuffle"></i>
+            <span>Play Random</span>
           </a>
           <a href="#" class="nav-link" data-view="get_genres">
             <i class="bi bi-tags-fill"></i>
@@ -16183,6 +16392,7 @@ function perform_cover_scan($db) {
           <hr class="text-secondary">
           
           <div class="logged-in-only">
+            <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-2 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Library</h6>
             <a href="#" class="nav-link" data-view="get_recommendations">
               <i class="bi bi-magic"></i>
               <span>For You</span>
@@ -16298,6 +16508,7 @@ function perform_cover_scan($db) {
           </div>
           
           <div class="logged-out-only">
+            <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-2 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Account</h6>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#login-modal">
               <i class="bi bi-box-arrow-in-right"></i>
               <span>Login</span>
@@ -16314,6 +16525,7 @@ function perform_cover_scan($db) {
           
           <div class="mt-auto">
             <hr class="text-secondary">
+            <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-2 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Utility & Tools</h6>
             <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#how-to-use-modal">
               <i class="bi bi-question-circle-fill"></i>
               <span>How To Use</span>
@@ -16374,8 +16586,8 @@ function perform_cover_scan($db) {
               <i class="bi bi-arrow-clockwise"></i>
               <span>Check Update</span>
             </a>
-            <a href="https://github.com/HirotakaDango/PHP-Music/archive/refs/heads/main.zip" target="_blank" class="dl-independent" style="color:var(--ytm-secondary-text);display:flex;align-items:center;font-weight:500;border-left:3px solid transparent;gap:1rem;text-decoration:none;padding:0.75rem 1.5rem;transition:background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface)';this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.backgroundColor='transparent';this.style.color='var(--ytm-secondary-text)'">
-              <i class="bi bi-file-earmark-zip-fill" style="font-size:1.25rem;width:24px;text-align:center;"></i>
+            <a href="https://github.com/HirotakaDango/PHP-Music/archive/refs/heads/main.zip" target="_blank" class="nav-link">
+              <i class="bi bi-file-earmark-zip-fill"></i>
               <span>Download Source Code</span>
             </a>
             <a href="#" class="nav-link" id="clear-cache-btn">
@@ -21545,10 +21757,19 @@ curl_close($ch);
                 const val = encodeURIComponent(albumNameInput.value.trim());
                 url += `get_songs&album=${val}&sort=${sortVal}&page=${page}${apiKeyStr}`;
               } else if (sourceTypeSelect.value === 'search') {
-                const val = encodeURIComponent(searchQueryInput.value.trim());
+                const rawVal = searchQueryInput.value.trim();
+                const val = encodeURIComponent(rawVal);
                 let searchSort = 'relevance';
                 if (sortVal === 'id_desc' || sortVal === 'year_desc') searchSort = 'date';
                 url += `search&q=${val}&f_sort=${searchSort}${apiKeyStr}`;
+              
+                // Utilize external transliteration library to support multi-language variations dynamically
+                if (typeof transliterate !== 'undefined') {
+                  const transliteratedVal = transliterate(rawVal);
+                  if (transliteratedVal && transliteratedVal !== rawVal) {
+                    url += `&rom=${encodeURIComponent(transliteratedVal)}`;
+                  }
+                }
               } else {
                 url += `get_songs&sort=${sortVal}&page=${page}${apiKeyStr}`;
               }
@@ -24509,7 +24730,7 @@ SOFTWARE.</div>
                     if (modalTitle) modalTitle.textContent = 'Artists';
                     artistsModalBody.innerHTML = `
                       <div class="list-group list-group-flush rounded">
-                        ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}">${a}</button>`).join('')}
+                        ${artistsList.map((a, idx) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${idx === 0 ? (userId || '') : ''}">${a}</button>`).join('')}
                       </div>
                     `;
                     if (artistsModal) artistsModal.show();
@@ -25774,9 +25995,30 @@ SOFTWARE.</div>
         });
         
         const renderViewDetailsHeader = (details, type, songsList = []) => {
+          // FIXED: Added local formatter to convert total durations into Days, Hours, and Minutes (Spotify convention)
+          const formatTotalDuration = (seconds) => {
+            if (isNaN(seconds) || seconds <= 0) return '0 min';
+            const secs = Math.round(seconds);
+            const days = Math.floor(secs / 86400);
+            const hours = Math.floor((secs % 86400) / 3600);
+            const minutes = Math.floor((secs % 3600) / 60);
+            
+            let parts = [];
+            if (days > 0) {
+              parts.push(`${days} day${days > 1 ? 's' : ''}`);
+            }
+            if (hours > 0) {
+              parts.push(`${hours} hr${hours > 1 ? 's' : ''}`);
+            }
+            if (minutes > 0 || parts.length === 0) {
+              parts.push(`${minutes} min${minutes > 1 ? 's' : ''}`);
+            }
+            return parts.join(' ');
+          };
+        
           currentViewOwnerId = details ? details.user_id : null;
           let typeText = type.charAt(0).toUpperCase() + type.slice(1);
-          let statsText = `${formatSongCount(details.song_count || 0)} songs &bull; ${formatTime(details.total_duration || 0)}`;
+          let statsText = `${formatSongCount(details.song_count || 0)} songs &bull; ${formatTotalDuration(details.total_duration || 0)}`;
           if (details.play_count !== undefined && details.play_count !== null) {
             statsText += ` &bull; ${formatSongCount(details.play_count)} plays`;
           }
@@ -25784,6 +26026,15 @@ SOFTWARE.</div>
             statsText += ` &bull; ${formatSongCount(details.followers_count)} followers`;
           }
           let shareButtonHTML = '', copyButtonHTML = '', downloadButtonHTML = '', downloadExportPlaylistZipButtonHTML = '';
+          
+          let playButtonHTML = '';
+          if (songsList && songsList.length > 0) {
+            playButtonHTML = `
+              <button class="btn btn-danger d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-4 py-2 fw-bold me-2 shadow-lg border border-danger" onclick="const f=document.querySelector('.song-list .song-item'); if(f){f.click();}" style="font-size: 0.85rem; height: 38px;">
+                <i class="bi bi-play-fill fs-5"></i> Play
+              </button>
+            `;
+          }
           
           let shareId = '';
           let shareName = encodeURIComponent(details.name);
@@ -25802,16 +26053,16 @@ SOFTWARE.</div>
             typeText = `Playlist by ${escapeHTML(details.creator)}`;
             shareId = details.public_id;
             document.title = `${details.name} - ${details.creator} - PHP Music`;
-            downloadButtonHTML = `<button class="btn btn-outline-light border-0 open-pd-btn" data-public-id="${details.public_id}" title="Download Playlist"><i class="bi bi-download"></i> <span class="d-none d-md-inline">Download</span></button>`;
-            downloadExportPlaylistZipButtonHTML = `<button class="btn btn-outline-light border-0 export-playlist-btn" data-public-id="${details.public_id}" title="Export Playlist"><i class="bi bi-box-arrow-up"></i> <span class="d-none d-md-inline">Export</span></button>`;
+            downloadButtonHTML = `<button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary open-pd-btn" data-public-id="${details.public_id}" title="Download Playlist" style="font-size: 0.85rem; height: 38px;"><i class="bi bi-download"></i> <span class="d-none d-md-inline">Download</span></button>`;
+            downloadExportPlaylistZipButtonHTML = `<button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary export-playlist-btn" data-public-id="${details.public_id}" title="Export Playlist" style="font-size: 0.85rem; height: 38px;"><i class="bi bi-box-arrow-up"></i> <span class="d-none d-md-inline">Export</span></button>`;
             if (currentUser && currentUser.id !== details.user_id) {
-              copyButtonHTML = `<button class="btn btn-outline-light border-0 copy-playlist-btn" data-public-id="${details.public_id}"><i class="bi bi-copy"></i> <span class="d-none d-md-inline">Copy Playlist</span></button>`;
+              copyButtonHTML = `<button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary copy-playlist-btn" data-public-id="${details.public_id}" style="font-size: 0.85rem; height: 38px;"><i class="bi bi-copy"></i> <span class="d-none d-md-inline">Copy Playlist</span></button>`;
             }
           } else if (type === 'mix') {
             typeText = `My Mix`;
             shareId = details.public_id;
             document.title = `${details.name} - PHP Music`;
-            downloadButtonHTML = `<button class="btn btn-outline-light border-0 add-mix-to-playlist-btn" data-mix-id="${details.public_id}" title="Add to Playlist"><i class="bi bi-plus-lg"></i> <span class="d-none d-md-inline">Add to Playlist</span></button>`;
+            downloadButtonHTML = `<button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary add-mix-to-playlist-btn" data-mix-id="${details.public_id}" title="Add to Playlist" style="font-size: 0.85rem; height: 38px;"><i class="bi bi-plus-lg"></i> <span class="d-none d-md-inline">Add to Playlist</span></button>`;
           } else if (type === 'artist') {
             shareId = artistIdForShare ? artistIdForShare : shareName; 
             document.title = `${details.name} - Artist - PHP Music`;
@@ -25832,7 +26083,7 @@ SOFTWARE.</div>
               shareArtistName = songsList[0].artist;
             }
             shareButtonHTML = `
-              <button class="btn btn-outline-light border-0 share-view-btn" title="Share ${type}" data-share-type="${type}" data-share-id="${shareId}" data-share-name="${shareName}" data-artist-id="${artistIdForShare}" data-artist-name="${encodeURIComponent(shareArtistName)}" data-image-url="${details.image_url}">
+              <button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold share-view-btn border-secondary" title="Share ${type}" data-share-type="${type}" data-share-id="${shareId}" data-share-name="${shareName}" data-artist-id="${artistIdForShare}" data-artist-name="${encodeURIComponent(shareArtistName)}" data-image-url="${details.image_url}" style="font-size: 0.85rem; height: 38px;">
                 <i class="bi bi-share-fill"></i> <span class="d-none d-md-inline">Share</span>
               </button>`;
           }
@@ -25844,17 +26095,17 @@ SOFTWARE.</div>
 
           if (type === 'artist' && details.is_user && currentUser && currentUser.id !== details.user_id) {
             const followText = details.is_following ? 'Unfollow' : 'Follow';
-            const followClass = details.is_following ? 'btn-outline-light' : 'btn-danger';
-            followButtonHTML = `<button class="btn ${followClass} border-0 follow-btn" data-user-id="${details.user_id}">${followText}</button>`;
+            const followClass = details.is_following ? 'btn-outline-light border-secondary text-white' : 'btn-light text-dark';
+            followButtonHTML = `<button class="btn ${followClass} d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-4 py-1 fw-bold follow-btn" data-user-id="${details.user_id}" style="font-size: 0.85rem; height: 38px;">${followText}</button>`;
              
-            messageButtonHTML = `<button class="btn btn-outline-light border-0 message-btn" data-user-id="${details.user_id}" data-artist="${encodeURIComponent(details.name)}" title="Message User"><i class="bi bi-chat-dots-fill"></i> <span class="d-none d-md-inline">Message</span></button>`;
+            messageButtonHTML = `<button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary message-btn" data-user-id="${details.user_id}" data-artist="${encodeURIComponent(details.name)}" title="Message User" style="font-size: 0.85rem; height: 38px;"><i class="bi bi-chat-dots-fill"></i> <span class="d-none d-md-inline">Message</span></button>`;
              
             const blockText = details.is_blocked ? 'Unblock' : 'Block';
             const blockClass = details.is_blocked ? 'text-danger' : 'text-secondary';
-            blockButtonHTML = `<button class="btn btn-outline-light border-0 block-btn" data-user-id="${details.user_id}" title="${blockText} User"><i class="bi bi-slash-circle-fill ${blockClass}"></i> <span class="d-none d-md-inline">${blockText}</span></button>`;
+            blockButtonHTML = `<button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary block-btn" data-user-id="${details.user_id}" title="${blockText} User" style="font-size: 0.85rem; height: 38px;"><i class="bi bi-slash-circle-fill ${blockClass}"></i> <span class="d-none d-md-inline">${blockText}</span></button>`;
 
             if (details.reported_id !== 1 && details.name !== 'Music Library') {
-              reportButtonHTML = `<button class="btn btn-outline-warning border-0 report-user-btn" data-user-id="${details.user_id}" title="Report Profile"><i class="bi bi-flag-fill"></i> <span class="d-none d-md-inline">Report</span></button>`;
+              reportButtonHTML = `<button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary report-user-btn" data-user-id="${details.user_id}" title="Report Profile" style="font-size: 0.85rem; height: 38px;"><i class="bi bi-flag-fill text-warning"></i> <span class="d-none d-md-inline">Report</span></button>`;
             }
           }
 
@@ -25867,33 +26118,35 @@ SOFTWARE.</div>
           }
 
           const bioHTML = (details.bio && (type === 'artist' || type === 'profile')) ? 
-            `<div class="mt-2 text-white" style="font-size: 0.95rem; white-space: pre-wrap; max-width: 800px;">${parseUserText(details.bio)}</div>` : 
+            `<div class="mt-2 text-secondary" style="font-size: 0.85rem; font-weight: 500; white-space: pre-wrap; max-width: 800px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;" title="${escapeHTML(details.bio)}">${parseUserText(details.bio)}</div>` : 
             (details.description && type === 'playlist') ? 
-            `<div class="mt-2 text-white" style="font-size: 0.95rem; white-space: pre-wrap; max-width: 800px;">${parseUserText(details.description)}</div>` : '';
+            `<div class="mt-2 text-secondary" style="font-size: 0.85rem; font-weight: 500; white-space: pre-wrap; max-width: 800px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;" title="${escapeHTML(details.description)}">${parseUserText(details.description)}</div>` : '';
 
           const headerHTML = `
-            <div class="view-details-header position-relative overflow-hidden" style="min-height: 250px; background-color: var(--ytm-surface);">
-              ${(type === 'profile' || type === 'artist') && details.background_url ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.background_url}'); background-size: cover; background-position: center; filter: brightness(0.4) blur(2px); z-index: 0;"></div>` : ''}
+            <div id="dynamic-view-header" class="view-details-header position-relative overflow-hidden" style="min-height: 250px; background-color: var(--ytm-surface); padding: 2.5rem 2rem;">
+              ${(type === 'profile' || type === 'artist') && details.background_url ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.background_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(8px); transform: scale(1.1); z-index: 0;"></div>` : ''}
+              ${(type !== 'profile' && type !== 'artist') ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.image_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(40px); transform: scale(1.2); z-index: 0; opacity: 0.5;"></div>` : ''}
               <div class="d-flex flex-column flex-md-row align-items-center align-items-md-end gap-4 position-relative w-100" style="z-index: 1;">
-                <img src="${(type === 'profile' || type === 'artist') ? details.image_url + (details.image_url.includes('?') ? '&' : '?') + 't=' + new Date().getTime() : details.image_url}" alt="${escapeHTML(details.name)}" class="${(type === 'profile' || type === 'artist') ? 'profile-picture-lg' : 'rounded'}" style="width: 220px; height: 220px; box-shadow: 0 8px 30px rgba(0,0,0,0.7); aspect-ratio: 1/1; object-fit: cover; object-position: center;">
-                <div class="view-details-header-info text-center text-md-start">
-                  <div class="type text-uppercase fw-bold mb-2" style="letter-spacing: 2px; color: rgba(255,255,255,0.8); text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${typeText}</div>
-                  <h2 class="name text-white fw-bold mb-3" style="font-size: clamp(2rem, 6vw, 4.5rem); line-height: 1.1; white-space: normal !important; word-break: break-word; text-shadow: 0 4px 12px rgba(0,0,0,0.6);">${escapeHTML(details.name)}</h2>
-                  <div class="stats mb-2" style="color: rgba(255,255,255,0.9); font-size: 1rem; text-shadow: 0 1px 3px rgba(0,0,0,0.5);">${finalStatsText}</div>
+                <img src="${(type === 'profile' || type === 'artist') ? details.image_url + (details.image_url.includes('?') ? '&' : '?') + 't=' + new Date().getTime() : details.image_url}" alt="${escapeHTML(details.name)}" class="${(type === 'profile' || type === 'artist') ? 'rounded-circle' : 'rounded shadow-lg'}" style="width: 180px; height: 180px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); aspect-ratio: 1/1; object-fit: cover; object-position: center; flex-shrink: 0;">
+                <div class="d-flex flex-column align-items-center align-items-md-start text-center text-md-start flex-grow-1" style="min-width: 0;">
+                  <div class="text-uppercase fw-bold mb-1" style="letter-spacing: 1px; font-size: 0.8rem; color: rgba(255,255,255,0.9); text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${typeText}</div>
+                  <h1 class="fw-bolder text-white mb-2" style="font-size: clamp(1.8rem, 4vw, 3rem); line-height: 1.1; letter-spacing: -1px; word-break: break-word; text-shadow: 0 4px 12px rgba(0,0,0,0.6);">${escapeHTML(details.name)}</h1>
+                  <div class="stats mb-2" style="color: rgba(255,255,255,0.7); font-size: 0.85rem; font-weight: 500; text-shadow: 0 1px 3px rgba(0,0,0,0.5);">${finalStatsText}</div>
                   ${bioHTML}
-                </div>
-                <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-md-start gap-2 mt-4 mt-md-0 ms-md-auto align-self-md-end">
-                  ${followButtonHTML}
-                  ${messageButtonHTML}
-                  ${blockButtonHTML}
-                  ${reportButtonHTML}
-                  ${copyButtonHTML}
-                  ${shareButtonHTML}
-                  ${downloadButtonHTML}
-                  ${downloadExportPlaylistZipButtonHTML}
+                  <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-md-start gap-2 mt-3 w-100">
+                    ${playButtonHTML}
+                    ${followButtonHTML}
+                    ${messageButtonHTML}
+                    ${blockButtonHTML}
+                    ${reportButtonHTML}
+                    ${copyButtonHTML}
+                    ${shareButtonHTML}
+                    ${downloadButtonHTML}
+                    ${downloadExportPlaylistZipButtonHTML}
+                  </div>
                 </div>
               </div>
-              <div style="position: absolute; bottom: 0; left: 0; right: 0; height: 100px; background: linear-gradient(to top, var(--ytm-bg), transparent); z-index: 0;"></div>
+              <div style="position: absolute; bottom: 0; left: 0; right: 0; height: 120px; background: linear-gradient(to top, var(--ytm-bg), transparent); z-index: 0;"></div>
             </div>
             <div id="recommendation-alert-container"></div>
           `;
@@ -26038,7 +26291,8 @@ SOFTWARE.</div>
           if (!artistString) return escapeHTML('Unknown Artist');
           if (isCollaborative == 1) {
             const artistsList = artistString.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i).filter(a => a && a.trim() !== '');
-            return artistsList.map(a => `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(a)}" data-userid="${userId || ''}">${escapeHTML(a)}</span>`).join(', ') + ' <i class="bi bi-people-fill text-secondary ms-1" title="Official Collaboration" style="font-size: 0.75rem;"></i>';
+            // Move icon to the front, and ONLY pass the User ID to the primary (first) artist in the split!
+            return '<i class="bi bi-people-fill text-secondary me-1" title="Official Collaboration" style="font-size: 0.75rem;"></i> ' + artistsList.map((a, index) => `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(a)}" data-userid="${index === 0 ? (userId || '') : ''}">${escapeHTML(a)}</span>`).join(', ');
           } else {
             return `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(artistString)}" data-userid="${userId || ''}">${escapeHTML(artistString)}</span>`;
           }
@@ -26086,7 +26340,7 @@ SOFTWARE.</div>
             songList.className = 'song-list';
             const isHistory = currentView.type === 'get_history';
             const header = `<div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) ${isHistory ? 'minmax(0, 2fr)' : ''} 80px 40px;">
-              <div></div><div>Title</div><div>Artist</div><div>Album</div><div>Views</div>${isHistory ? '<div>Played</div>' : ''}<div>Time</div><div></div>
+              <div>&nbsp;</div><div>Title</div><div>Artist</div><div>Album</div><div>Views</div>${isHistory ? '<div>Played</div>' : ''}<div>Time</div><div>&nbsp;</div>
             </div>`;
             targetContainer.insertAdjacentHTML('beforeend', header);
             targetContainer.appendChild(songList);
@@ -26214,7 +26468,43 @@ SOFTWARE.</div>
 
         const renderGrid = (items, type, append = false) => {
           if (!append) contentArea.innerHTML = '';
-          if (type === 'get_user_playlists' && !append && currentUser) {
+          if (type === 'get_mixes' && !append) {
+            contentArea.innerHTML = `
+              <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+                  <div class="d-flex align-items-center gap-3">
+                    <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
+                      <i class="bi bi-collection-play-fill text-danger fs-3"></i>
+                    </div>
+                    <div>
+                      <h2 class="text-white fw-bold mb-1 fs-4">Auto Mixes</h2>
+                      <p class="text-secondary small mb-0">Dynamically generated playlists based on your library's artists and genres.</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="w-100 position-relative">
+                  <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                  <input type="text" id="mixes-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search mixes..." value="${escapeHTML(currentView.searchQuery || '')}" style="height: 42px;">
+                </div>
+              </div>
+            `;
+            setTimeout(() => {
+              const mSearch = document.getElementById('mixes-search-input');
+              if (mSearch) {
+                mSearch.addEventListener('input', (e) => {
+                  clearTimeout(window.mixesSearchTimeout);
+                  window.mixesSearchTimeout = setTimeout(() => {
+                    currentView.searchQuery = e.target.value;
+                    loadView(currentView);
+                  }, 400);
+                });
+                if (currentView.searchQuery) {
+                  mSearch.focus();
+                  mSearch.setSelectionRange(mSearch.value.length, mSearch.value.length);
+                }
+              }
+            }, 0);
+          } else if (type === 'get_user_playlists' && !append && currentUser) {
             contentArea.innerHTML = `
               <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
@@ -26317,6 +26607,10 @@ SOFTWARE.</div>
                 imgClass = 'rounded-circle';
                 titleClass = 'text-center';
                 subtextClass = 'text-center';
+                if (item.is_user) {
+                  item.user_id = item.id;
+                  imgSrc = `?action=get_profile_picture&id=`;
+                }
               } else if (type === 'get_following') {
                 name = item.name;
                 subtext = 'Artist';
@@ -26328,11 +26622,11 @@ SOFTWARE.</div>
                 titleClass = 'text-center';
                 subtextClass = 'text-center';
                 imgSrc = `?action=get_profile_picture&id=`;
-              } else if (type === 'get_user_playlists' || type === 'get_collab_playlists') {
+              } else if (type === 'get_user_playlists' || type === 'get_collab_playlists' || type === 'get_mixes') {
                 name = item.name;
-                subtext = type === 'get_collab_playlists' ? `by ${item.creator} • ${formatSongCount(item.song_count)} songs` : `${formatSongCount(item.song_count)} songs`;
+                subtext = type === 'get_collab_playlists' ? `by ${item.creator} • ${formatSongCount(item.song_count)} songs` : (type === 'get_mixes' ? `Auto Mix • ${formatSongCount(item.song_count)} songs` : `${formatSongCount(item.song_count)} songs`);
                 imageId = item.image_id;
-                dataType = 'playlist';
+                dataType = type === 'get_mixes' ? 'mix' : 'playlist';
                 dataValue = item.public_id;
                 publicId = item.public_id;
               } else if (type === 'get_categories') {
@@ -26363,9 +26657,9 @@ SOFTWARE.</div>
               const artistNameAttr = (type === 'get_albums' && item.artist) ? `data-artistname="${encodeURIComponent(item.artist)}"` : '';
 
               let moreButton = '';
-              if (type === 'get_user_playlists' || type === 'get_collab_playlists') {
+              if (type === 'get_user_playlists' || type === 'get_collab_playlists' || type === 'get_mixes') {
                 moreButton = `
-                <button class="playlist-more-btn" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-description="${escapeHTML(item.description || '')}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}" data-owner-id="${item.owner_id || ''}">
+                <button class="playlist-more-btn ${type === 'get_mixes' ? 'mix-more-btn' : ''}" data-type="${type === 'get_mixes' ? 'mixes' : 'playlists'}" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-description="${escapeHTML(item.description || '')}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}" data-owner-id="${item.owner_id || ''}" data-creator="${escapeHTML(item.creator || '')}" data-image-id="${imageId || 0}">
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>`;
               } else if (type === 'get_albums') {
@@ -26375,16 +26669,16 @@ SOFTWARE.</div>
                 </button>`;
               }
 
-              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_collab_playlists' || type === 'get_artists' || type === 'get_following' || type === 'get_genres' || type === 'get_years') {
+              if (type === 'get_albums' || type === 'get_user_playlists' || type === 'get_collab_playlists' || type === 'get_mixes' || type === 'get_artists' || type === 'get_following' || type === 'get_genres' || type === 'get_years') {
                 let songCountBadge = '';
-                if ((type === 'get_albums' || type === 'get_user_playlists' || type === 'get_collab_playlists') && item.song_count !== undefined) {
+                if ((type === 'get_albums' || type === 'get_user_playlists' || type === 'get_collab_playlists' || type === 'get_mixes') && item.song_count !== undefined) {
                   songCountBadge = `<div class="position-absolute bottom-0 start-0 ms-2 mb-2 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(item.song_count)}</div>`;
                 }
                 
                 let viewCountHtml = '';
                 if (type === 'get_albums' && item.total_plays !== undefined) {
                   viewCountHtml = `<div class="card-text small text-secondary text-truncate mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(item.total_plays)} views</div>`;
-                } else if ((type === 'get_user_playlists' || type === 'get_collab_playlists') && item.play_count !== undefined) {
+                } else if ((type === 'get_user_playlists' || type === 'get_collab_playlists' || type === 'get_mixes') && item.play_count !== undefined) {
                   viewCountHtml = `<div class="card-text small text-secondary text-truncate mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(item.play_count)} views</div>`;
                 }
 
@@ -26419,9 +26713,45 @@ SOFTWARE.</div>
                   </div>
                 </div>`;
               }
-            }).join('');
+          }).join('');
           
           grid.insertAdjacentHTML('beforeend', itemsHTML);
+
+          // Render footer actions for Mixes
+          if (type === 'get_mixes') {
+            const oldFooter = document.getElementById('mixes-footer-actions');
+            if (oldFooter) oldFooter.remove();
+            
+            if (items && items.length > 0) {
+              contentArea.insertAdjacentHTML('beforeend', `
+                <div id="mixes-footer-actions" class="d-flex flex-wrap justify-content-center gap-3 mt-5 mb-5 w-100">
+                  <button class="btn btn-outline-light rounded-pill px-4 py-2 fw-bold" id="mixes-load-more-btn"><i class="bi bi-chevron-down me-2"></i> Load More Mixes</button>
+                  <button class="btn btn-danger rounded-pill px-4 py-2 fw-bold shadow-lg" id="mixes-refresh-btn"><i class="bi bi-arrow-clockwise me-2"></i> Refresh All Mixes</button>
+                </div>
+              `);
+              
+              const loadMoreBtn = document.getElementById('mixes-load-more-btn');
+              if (loadMoreBtn) {
+                loadMoreBtn.innerHTML = '<i class="bi bi-plus-lg me-2"></i> Generate More Mixes';
+                loadMoreBtn.addEventListener('click', (e) => {
+                  e.preventDefault();
+                  loadMoreBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Generating...';
+                  currentView.generate = '1';
+                  loadView(currentView);
+                });
+              }
+              
+              const refreshBtn = document.getElementById('mixes-refresh-btn');
+              if (refreshBtn) {
+                refreshBtn.addEventListener('click', (e) => {
+                  e.preventDefault();
+                  refreshBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Generating...';
+                  currentView.refresh = '1';
+                  loadView(currentView);
+                });
+              }
+            }
+          }
         };
         
         const renderRecommendations = (data) => {
@@ -26834,6 +27164,12 @@ SOFTWARE.</div>
               case 'get_artists':
                 options = { 'name_asc': 'Name (A-Z)', 'name_desc': 'Name (Z-A)' };
                 break;
+              case 'get_mixes':
+                options = {
+                  'newest': 'Newest', 'oldest': 'Oldest',
+                  'name_asc': 'Name (A-Z)', 'name_desc': 'Name (Z-A)'
+                };
+                break;
               case 'get_user_playlists':
               case 'get_collab_playlists':
                 options = {
@@ -26947,6 +27283,7 @@ SOFTWARE.</div>
             case 'get_artists':
             case 'get_genres':
             case 'get_years':
+            case 'get_mixes':
             case 'get_user_playlists':
             case 'get_collab_playlists':
             case 'get_following':
@@ -27137,6 +27474,7 @@ SOFTWARE.</div>
             case 'album_songs': activeLink = document.querySelector('.nav-link[data-view="get_albums"]'); break;
             case 'genre_songs': activeLink = document.querySelector('.nav-link[data-view="get_genres"]'); break;
             case 'year_songs': activeLink = document.querySelector('.nav-link[data-view="get_years"]'); break;
+            case 'mix_songs': activeLink = document.querySelector('.nav-link[data-view="get_mixes"]'); break;
             case 'playlist_songs': activeLink = document.querySelector('.nav-link[data-view="get_user_playlists"]'); break;
             case 'view_blog':
             case 'get_blogs': 
@@ -27278,7 +27616,7 @@ SOFTWARE.</div>
                                currentView.filter_user_id === viewConfig.filter_user_id &&
                                currentView.artist_name === viewConfig.artist_name;
             if (!isSameView) {
-              history.pushState({ viewConfig }, "");
+              history.pushState({ viewConfig }, "", window.location.pathname);
             }
           }
 
@@ -27390,6 +27728,14 @@ SOFTWARE.</div>
           if (currentView.f_start_date) pageParams.append('f_start_date', currentView.f_start_date);
           if (currentView.f_end_date) pageParams.append('f_end_date', currentView.f_end_date);
           if (currentView.filter) pageParams.append('filter', currentView.filter);
+          if (currentView.refresh) {
+            pageParams.append('refresh', currentView.refresh);
+            delete currentView.refresh;
+          }
+          if (currentView.generate) {
+            pageParams.append('generate', currentView.generate);
+            delete currentView.generate;
+          }
           
           if (!navigator.onLine && currentView.type !== 'get_offline_songs' && currentView.type !== 'rhythm_game') {
             if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
@@ -27686,13 +28032,24 @@ SOFTWARE.</div>
                         <!-- LEFT COLUMN: Track Details & Controls -->
                         <div class="rg-play-menu-left d-flex flex-column align-items-center text-center modern-custom-scroll">
                           
-                          <img id="rg-dialog-cover" src="" style="width: 200px; height: 200px; object-fit: cover; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 8px 24px rgba(0,0,0,0.8); margin-bottom: 24px; flex-shrink: 0;">
+                          <img id="rg-dialog-cover" src="" style="width: 240px; height: 240px; object-fit: cover; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 12px 32px rgba(0,0,0,0.6); margin-bottom: 24px; flex-shrink: 0; margin-top: auto;">
                           
-                          <div class="rg-dialog-title w-100 text-truncate" id="rg-dialog-song-name" style="margin-bottom: 32px; font-size: 2rem; font-weight: 800; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">Song Name</div>
+                          <div class="rg-dialog-title w-100 text-truncate" id="rg-dialog-song-name" style="margin-bottom: 4px; font-size: 2.2rem; font-weight: 800; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,0.6);">Song Name</div>
+                          <div class="w-100 text-truncate fw-bold" id="rg-dialog-song-artist" style="margin-bottom: 24px; font-size: 1.1rem; color: #a1a1aa; text-shadow: 0 1px 4px rgba(0,0,0,0.5);">Artist Name</div>
 
-                          <div style="width: 100%; max-width: 400px; margin: 0 auto;">
-                            <div style="font-size: 0.8rem; font-weight: 700; color: #777; margin-bottom: 12px; text-align: left; text-transform: uppercase;">Select Difficulty</div>
-                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+                          <!-- Share and Favorite Controls -->
+                          <div class="d-flex gap-3 mb-4" style="width: 100%; max-width: 400px; margin: 0 auto;">
+                            <button type="button" class="btn btn-outline-light flex-grow-1 fw-bold py-2 rounded-pill d-flex align-items-center justify-content-center gap-2" id="rg-dialog-fav-btn" style="font-size: 0.95rem; border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.05); color: #fff; transition: all 0.2s;">
+                              <i class="bi bi-heart" id="rg-dialog-fav-icon"></i> <span id="rg-dialog-fav-text">Favorite</span>
+                            </button>
+                            <button type="button" class="btn btn-outline-light flex-grow-1 fw-bold py-2 rounded-pill d-flex align-items-center justify-content-center gap-2" id="rg-dialog-share-btn" style="font-size: 0.95rem; border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.05); color: #fff; transition: all 0.2s;">
+                              <i class="bi bi-share-fill"></i> <span>Share</span>
+                            </button>
+                          </div>
+
+                          <div style="width: 100%; max-width: 400px; margin: 0 auto; background: rgba(0,0,0,0.4); padding: 20px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 8px 24px rgba(0,0,0,0.3);">
+                            <div style="font-size: 0.8rem; font-weight: 800; color: #888; margin-bottom: 16px; text-align: left; text-transform: uppercase; letter-spacing: 1px;">Select Difficulty</div>
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">
                               <button class="rg-diff-btn active" data-diff="easy"><div class="rg-diff-btn-inner">EASY <span class="lvl">LV.--</span></div></button>
                               <button class="rg-diff-btn" data-diff="medium"><div class="rg-diff-btn-inner">NORMAL <span class="lvl">LV.--</span></div></button>
                               <button class="rg-diff-btn" data-diff="hard"><div class="rg-diff-btn-inner">HARD <span class="lvl">LV.--</span></div></button>
@@ -27707,30 +28064,30 @@ SOFTWARE.</div>
                             </div>
                           </div>
 
-                          <div style="width: 100%; max-width: 400px; margin: 24px auto 0 auto; display: flex; align-items: center; justify-content: space-between; background: var(--ytm-surface-2); padding: 12px 16px; border-radius: 8px; border: 1px solid #444;">
+                          <div style="width: 100%; max-width: 400px; margin: 16px auto 0 auto; display: flex; align-items: center; justify-content: space-between; background: rgba(0,0,0,0.4); padding: 12px 20px; border-radius: 100px; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
                             <div class="text-start" style="min-width: 0;">
-                              <div style="font-size: 0.95rem; font-weight: 700; color: #fff;">Autoplay (Bot Mode)</div>
-                              <div style="font-size: 0.75rem; color: #aaa;">Watch the bot play perfectly. Scores will not be saved.</div>
+                              <div style="font-size: 0.95rem; font-weight: 800; color: #fff;">Autoplay (Bot Mode)</div>
+                              <div style="font-size: 0.75rem; color: #aaa; font-weight: 500;">Watch the bot play perfectly.</div>
                             </div>
                             <div class="form-check form-switch m-0 fs-4">
-                              <input class="form-check-input" type="checkbox" id="rg-autoplay-toggle" style="cursor: pointer; accent-color: var(--ytm-accent);">
+                              <input class="form-check-input" type="checkbox" id="rg-autoplay-toggle" style="cursor: pointer; accent-color: var(--ytm-accent); border-color: rgba(255,255,255,0.2);">
                             </div>
                           </div>
                           
-                          <div style="width: 100%; max-width: 400px; margin: 12px auto 0 auto;">
-                            <button id="rg-btn-view-chart" class="btn btn-outline-light w-100 fw-bold" style="font-size: 0.9rem; border-radius: 8px;"><i class="bi bi-map me-1"></i> View Chart Map</button>
+                          <div style="width: 100%; max-width: 400px; margin: 16px auto 0 auto;">
+                            <button id="rg-btn-view-chart" class="btn btn-outline-light w-100 fw-bold rounded-pill" style="font-size: 0.9rem; border-color: rgba(255,255,255,0.15);"><i class="bi bi-map me-1"></i> View Chart Map</button>
                           </div>
                         
-                          <div style="display: flex; justify-content: center; align-items: center; gap: 16px; margin-top: 36px; margin-bottom: 2rem; width: 100%; max-width: 400px;">
-                            <button class="btn btn-link text-secondary text-decoration-none fw-bold" id="rg-btn-dialog-cancel" style="font-size: 1.1rem; width: 100px;">Cancel</button>
-                            <button class="btn btn-danger flex-grow-1 fw-bold fs-5 shadow-sm" id="rg-btn-dialog-play" style="padding: 12px; border-radius: 8px;">Play</button>
+                          <div style="display: flex; justify-content: center; align-items: center; gap: 16px; margin-top: 36px; margin-bottom: auto; width: 100%; max-width: 400px;">
+                            <button class="btn btn-outline-secondary fw-bold rounded-pill" id="rg-btn-dialog-cancel" style="font-size: 1.1rem; width: 120px; border-color: rgba(255,255,255,0.1); color: #ccc;">Cancel</button>
+                            <button class="btn btn-danger flex-grow-1 fw-bold fs-5 shadow-lg rounded-pill" id="rg-btn-dialog-play" style="padding: 10px;">Play</button>
                           </div>
                         </div>
 
                         <!-- RIGHT COLUMN: Leaderboard -->
                         <div class="rg-play-menu-right">
                           <div class="d-flex flex-column h-100 overflow-hidden w-100 rg-play-menu-right-inner">
-                            <div class="p-3 border-bottom border-secondary bg-black d-flex align-items-center gap-2 flex-shrink-0">
+                            <div class="p-3 border-bottom border-secondary d-flex align-items-center gap-2 flex-shrink-0" style="background-color: rgba(0, 0, 0, 0.25);">
                               <i class="bi bi-trophy-fill text-warning fs-5"></i>
                               <h5 class="m-0 text-white fw-bold text-uppercase" style="font-size: 1rem; letter-spacing: 1px;">Top Scores</h5>
                             </div>
@@ -27746,7 +28103,8 @@ SOFTWARE.</div>
                     <div id="rg-screen-loading" class="rg-screen rg-screen-center rg-hidden" style="justify-content: center; background-color: #000;">
                       <div class="text-center w-100 px-4" style="max-width: 100%;">
                         <img id="rg-loading-cover" src="" style="width: 250px; height: 250px; object-fit: cover; border-radius: 16px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); margin-bottom: 24px;">
-                        <h2 id="rg-loading-title" class="text-truncate" style="color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); margin: 0 auto 24px auto; font-size: 1.8rem; font-weight: bold; text-align: center; max-width: 100%;">Song Title</h2>
+                        <h2 id="rg-loading-title" class="text-truncate" style="color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); margin: 0 auto 4px auto; font-size: 1.8rem; font-weight: bold; text-align: center; max-width: 100%;">Song Title</h2>
+                        <div id="rg-loading-artist" class="text-truncate text-secondary fw-bold" style="text-shadow: 0 1px 3px rgba(0,0,0,0.8); margin: 0 auto 24px auto; font-size: 1.1rem; text-align: center; max-width: 100%;">Artist Name</div>
                         <div class="d-flex align-items-center justify-content-center gap-3">
                           <div class="spinner-border text-danger" style="width: 1.5rem; height: 1.5rem; border-width: 0.2em;"></div>
                           <div style="font-size: 1.2rem; font-weight: 700; color: var(--rg-primary);" id="rg-loading-text">Downloading 0%</div>
@@ -27788,6 +28146,7 @@ SOFTWARE.</div>
                             <div id="rg-in-game-hp" style="width: 100%; height: 100%; background-color: #27c93f; transition: width 0.1s, background-color: 0.1s;"></div>
                           </div>
                           <div id="rg-in-game-accuracy" style="font-family: monospace; font-size: 0.8rem; font-weight: bold; color: #aaa; text-shadow: 0 1px 2px rgba(0,0,0,0.8); line-height: 1;">100.00%</div>
+                          <div id="rg-in-game-fps" style="font-family: monospace; font-size: 0.7rem; font-weight: bold; color: #888; text-shadow: 0 1px 2px rgba(0,0,0,0.8); line-height: 1; margin-top: 4px;">-- FPS</div>
                           <div id="rg-in-game-autoplay" style="font-size: 0.65rem; font-weight: 800; color: #00bcd4; text-transform: uppercase; margin-top: 2px; text-shadow: 0 0 6px rgba(0,188,212,0.4); display: none;">Autoplay</div>
                         </div>
                       </div>
@@ -27820,8 +28179,8 @@ SOFTWARE.</div>
                       </div>
                     </div>
 
-                    <div id="rg-screen-result" class="rg-screen rg-hidden" style="background-color: var(--rg-bg); overflow-y: auto; display: block;">
-                      <div style="width: 100%; max-width: 600px; margin: 0 auto; padding: 48px 24px 120px 24px;">
+                    <div id="rg-screen-result" class="rg-screen rg-hidden" style="background-color: transparent; overflow-y: auto; display: block;">
+                      <div style="width: 100%; max-width: 600px; margin: 0 auto; padding: 48px 24px 120px 24px; position: relative; z-index: 1;">
                         <h2 style="text-align: center; color: var(--rg-primary); margin-bottom: 24px; text-transform: uppercase; font-weight: 900; font-size: 2.2rem; letter-spacing: 2px; text-shadow: 0 4px 12px rgba(0,0,0,0.5);">Stage Cleared</h2>
                         
                         <!-- Rank & Accuracy Card -->
@@ -29730,6 +30089,7 @@ SOFTWARE.</div>
             case 'get_artists':
             case 'get_genres':
             case 'get_years':
+            case 'get_mixes':
             case 'get_user_playlists':
             case 'get_collab_playlists':
             case 'get_following':
@@ -31274,7 +31634,7 @@ SOFTWARE.</div>
         };
         
         allNavLinks.forEach(link => {
-          if (!link.hasAttribute('data-view') || link.classList.contains('cat-nav-link') || link.classList.contains('note-filter-link') || link.classList.contains('task-filter-link') || link.classList.contains('blog-filter-link') || link.getAttribute('data-bs-toggle') === 'collapse' || link.getAttribute('data-bs-toggle') === 'modal' || ['logout-btn', 'clear-cache-btn', 'clear-cookies-btn', 'clear-session-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
+          if (!link.hasAttribute('data-view') || link.classList.contains('cat-nav-link') || link.classList.contains('note-filter-link') || link.classList.contains('task-filter-link') || link.classList.contains('blog-filter-link') || link.getAttribute('data-bs-toggle') === 'collapse' || link.getAttribute('data-bs-toggle') === 'modal' || ['nav-random-play', 'logout-btn', 'clear-cache-btn', 'clear-cookies-btn', 'clear-session-btn', 'fullscreen-btn', 'install-pwa-btn', 'check-update-btn', 'nav-upload-btn', 'get-api-btn'].includes(link.id)) return;
           link.addEventListener('click', e => {
             e.preventDefault();
             const navLink = e.currentTarget;
@@ -31283,6 +31643,7 @@ SOFTWARE.</div>
             let sort = 'artist_asc';
             if (['get_favorites', 'playlist_songs', 'get_offline_songs', 'get_listen_later'].includes(viewType)) sort = 'manual_order';
             if (viewType === 'get_user_playlists') sort = 'modified_desc';
+            if (viewType === 'get_mixes') sort = 'newest';
             if (viewType === 'get_albums') sort = 'album_asc';
             if (viewType === 'get_artists') sort = 'name_asc';
             if (viewType === 'user_profile') sort = 'id_desc';
@@ -31294,6 +31655,25 @@ SOFTWARE.</div>
             hideMobileSidebar();
           });
         });
+
+        const navRandomPlayBtn = document.getElementById('nav-random-play');
+        if (navRandomPlayBtn) {
+          navRandomPlayBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            hideMobileSidebar();
+            showToast('Loading random mix...', 'info');
+            const data = await fetchData('?action=get_songs&sort=random&page=1');
+            if (data && data.length > 0) {
+               // Load the view in the background so it looks nice
+               loadView({ type: 'get_songs', param: '', sort: 'random', filter_user_id: '' });
+               // Instantly queue and play
+               globalSongCache[data[0].id] = data[0]; // Ensure it's cached
+               setQueueAndPlay(parseInt(data[0].id), { type: 'get_songs', param: '', sort: 'random' });
+            } else {
+               showToast('No songs found in library.', 'error');
+            }
+          });
+        }
 
         const getSearchHistory = () => {
           try { return JSON.parse(localStorage.getItem('ytm_searchHistory')) || []; } catch(e) { return []; }
@@ -31751,7 +32131,7 @@ SOFTWARE.</div>
                 if (modalTitle) modalTitle.textContent = 'Artists';
                 artistsModalBody.innerHTML = `
                   <div class="list-group list-group-flush rounded">
-                    ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}">${a}</button>`).join('')}
+                    ${artistsList.map((a, idx) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${idx === 0 ? (userId || '') : ''}">${a}</button>`).join('')}
                   </div>
                 `;
                 if (artistsModal) artistsModal.show();
@@ -32434,6 +32814,12 @@ SOFTWARE.</div>
                 followBtn.classList.remove('btn-danger');
                 followBtn.classList.add('btn-outline-light');
                 
+                const countEls = document.querySelectorAll(`.connection-trigger[data-id="${userId}"][data-type="followers"]`);
+                countEls.forEach(countEl => {
+                  let currentCount = parseInt(countEl.textContent.replace(/\D/g, '')) || 0;
+                  countEl.textContent = formatSongCount(currentCount + 1) + ' followers';
+                });
+                
                 // Fetch Recommended Artists and show the dismissible container
                 const recs = await fetchData(`?action=get_recommended_artists&target_id=${userId}`);
                 if (recs && recs.length > 0) {
@@ -32460,6 +32846,12 @@ SOFTWARE.</div>
                 followBtn.textContent = 'Follow';
                 followBtn.classList.remove('btn-outline-light');
                 followBtn.classList.add('btn-danger');
+
+                const countEls = document.querySelectorAll(`.connection-trigger[data-id="${userId}"][data-type="followers"]`);
+                countEls.forEach(countEl => {
+                  let currentCount = parseInt(countEl.textContent.replace(/\D/g, '')) || 0;
+                  countEl.textContent = formatSongCount(Math.max(0, currentCount - 1)) + ' followers';
+                });
               } else {
                 showToast(res.message || 'Error toggling follow', 'error');
               }
@@ -32740,7 +33132,7 @@ SOFTWARE.</div>
                 if (modalTitle) modalTitle.textContent = 'Artists';
                 artistsModalBody.innerHTML = `
                   <div class="list-group list-group-flush rounded">
-                    ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}">${a}</button>`).join('')}
+                    ${artistsList.map((a, idx) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${idx === 0 ? (userId || '') : ''}">${a}</button>`).join('')}
                   </div>
                 `;
                 if (artistsModal) artistsModal.show();
@@ -32771,7 +33163,7 @@ SOFTWARE.</div>
                 if (modalTitle) modalTitle.textContent = 'Select Album Artist';
                 artistsModalBody.innerHTML = `
                   <div class="list-group list-group-flush rounded">
-                    ${songArtistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary album-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${safeUserId}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join('')}
+                    ${songArtistsList.map((a, idx) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary album-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${idx === 0 ? safeUserId : ''}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join('')}
                   </div>
                 `;
                 if (artistsModal) artistsModal.show();
@@ -33261,7 +33653,7 @@ SOFTWARE.</div>
                   if (modalTitle) modalTitle.textContent = 'Artists';
                   artistsModalBody.innerHTML = `
                     <div class="list-group list-group-flush rounded">
-                      ${artistsList.map(a => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}">${a}</button>`).join('')}
+                      ${artistsList.map((a, idx) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${idx === 0 ? (userId || '') : ''}">${a}</button>`).join('')}
                     </div>
                   `;
                   if (artistsModal) artistsModal.show();
@@ -38248,7 +38640,7 @@ SOFTWARE.</div>
           
           // History state implementation for back/forth
           if (!history.state || history.state.overlay !== 'note_' + note.id) {
-            history.pushState({ viewConfig: currentView, overlay: 'note_' + note.id }, '');
+            history.pushState({ viewConfig: currentView, overlay: 'note_' + note.id }, '', window.location.pathname);
           }
 
           isMarkdownPreview = false;
@@ -38500,7 +38892,7 @@ SOFTWARE.</div>
           if (delBtn) delBtn.style.display = isOwner ? 'flex' : 'none';
           
           if (!history.state || history.state.overlay !== 'task_' + task.id) {
-            history.pushState({ viewConfig: currentView, overlay: 'task_' + task.id }, '');
+            history.pushState({ viewConfig: currentView, overlay: 'task_' + task.id }, '', window.location.pathname);
           }
           
           const idEl = document.getElementById('taskEditorId');
@@ -39612,19 +40004,34 @@ SOFTWARE.</div>
           if (chatInviteToken || inviteToken || songInviteToken) return; // Prevent overwriting view when handling invites
 
           if (window.initialView) {
-            history.replaceState({ viewConfig: window.initialView }, "");
+            history.replaceState({ viewConfig: window.initialView }, "", window.location.pathname);
             loadView(window.initialView, false);
           } else {
             let savedViewStr = localStorage.getItem('ytm_lastView');
             let savedView = null;
             try { savedView = savedViewStr ? JSON.parse(savedViewStr) : null; } catch(e) {}
             const defaultView = savedView || { type: 'get_songs', param: '', sort: 'random', filter_user_id: '' };
-            history.replaceState({ viewConfig: defaultView }, "");
+            history.replaceState({ viewConfig: defaultView }, "", window.location.pathname);
             loadView(defaultView, false);
           }
         };
 
         window.addEventListener('popstate', (e) => {
+          if (typeof localRhythmGame !== 'undefined' && localRhythmGame) {
+            if (localRhythmGame.isPlaying) {
+              e.preventDefault();
+              history.pushState({ viewConfig: currentView, inGame: true }, "", window.location.pathname);
+              localRhythmGame.pauseGame();
+              return;
+            }
+            if (localRhythmGame.isProgrammaticExit) {
+              localRhythmGame.isProgrammaticExit = false;
+              localRhythmGame.switchScreen("hub");
+              document.getElementById("rg-dialog-play").classList.remove("rg-hidden");
+              return;
+            }
+          }
+
           const edOver = document.getElementById('editorOverlay');
           const taskOver = document.getElementById('taskEditorOverlay');
           
@@ -41013,6 +41420,50 @@ SOFTWARE.</div>
               });
             });
 
+            // Dialog Favorite Button Click Listener
+            const dialogFavBtn = document.getElementById("rg-dialog-fav-btn");
+            if (dialogFavBtn) {
+              dialogFavBtn.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                if (!this.selectedSong) return;
+                const res = await fetchData("?action=toggle_rhythm_favorite", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ song_id: this.selectedSong.id }),
+                });
+                if (res) {
+                  this.selectedSong.rg_favorite = res.is_favorite;
+                  const isFav = res.is_favorite == 1;
+                  const favIcon = document.getElementById("rg-dialog-fav-icon");
+                  const favText = document.getElementById("rg-dialog-fav-text");
+                  if (favIcon && favText) {
+                    favIcon.className = isFav ? "bi bi-heart-fill text-danger" : "bi bi-heart";
+                    favText.textContent = isFav ? "Unfavorite" : "Favorite";
+                    dialogFavBtn.classList.toggle("text-danger", isFav);
+                  }
+                  // Synchronize state with standard song cards
+                  const mainFavBtn = document.querySelector(`.rg-list-item[data-song-id="${this.selectedSong.id}"] .rg-fav-btn`);
+                  if (mainFavBtn) {
+                    mainFavBtn.classList.toggle("text-danger", isFav);
+                    mainFavBtn.classList.toggle("text-secondary", !isFav);
+                    mainFavBtn.innerHTML = `<i class="bi ${isFav ? "bi-heart-fill" : "bi-heart"} fs-5"></i>`;
+                  }
+                }
+              });
+            }
+
+            // Dialog Share Button Click Listener
+            const dialogShareBtn = document.getElementById("rg-dialog-share-btn");
+            if (dialogShareBtn) {
+              dialogShareBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                if (!this.selectedSong) return;
+                if (typeof showShareModal === "function") {
+                  showShareModal("game", this.selectedSong.id, this.selectedSong.title);
+                }
+              });
+            }
+
             document.getElementById("rg-sort-songs").addEventListener("change", (e) => {
               this.loadSongs();
             });
@@ -41049,17 +41500,48 @@ SOFTWARE.</div>
 
             const pauseDialog = document.getElementById("rg-dialog-pause");
             document.getElementById("rg-btn-quit-game").addEventListener("click", () => {
-              this.isPlaying = false;
-              if (this.audioPlayback) this.audioPlayback.pause();
-              pauseDialog.classList.remove("rg-hidden");
+              this.pauseGame();
             });
             document.getElementById("rg-btn-resume").addEventListener("click", () => {
               pauseDialog.classList.add("rg-hidden");
-              this.isPlaying = true;
-              this.lastReportedTime = 0;
-              this.lastTimeUpdate = performance.now();
-              if (this.audioPlayback) this.audioPlayback.play();
-              requestAnimationFrame(this.boundGameLoop);
+
+              let countdownEl = document.getElementById("rg-resume-countdown");
+              if (!countdownEl) {
+                countdownEl = document.createElement("div");
+                countdownEl.id = "rg-resume-countdown";
+                countdownEl.style.cssText = "position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: sans-serif; font-weight: 900; font-size: 6rem; color: var(--rg-primary); z-index: 100; pointer-events: none; text-shadow: 0 4px 12px rgba(0,0,0,0.8); transition: transform 0.1s ease-out, opacity 0.15s; opacity: 0;";
+                const gameScreen = document.getElementById("rg-screen-game");
+                if (gameScreen) gameScreen.appendChild(countdownEl);
+              }
+
+              const runCountdown = (count) => {
+                if (count > 0) {
+                  countdownEl.textContent = count;
+                  countdownEl.style.transform = "translate(-50%, -50%) scale(1.3)";
+                  countdownEl.style.opacity = "1";
+                  setTimeout(() => {
+                    countdownEl.style.transform = "translate(-50%, -50%) scale(1)";
+                  }, 100);
+                  setTimeout(() => {
+                    runCountdown(count - 1);
+                  }, 1000);
+                } else {
+                  countdownEl.textContent = "GO!";
+                  setTimeout(() => {
+                    countdownEl.style.opacity = "0";
+                    setTimeout(() => { countdownEl.textContent = ""; }, 150);
+                  }, 500);
+
+                  // Resume game
+                  this.isPlaying = true;
+                  this.lastReportedTime = 0;
+                  this.lastTimeUpdate = performance.now();
+                  if (this.audioPlayback) this.audioPlayback.play();
+                  requestAnimationFrame(this.boundGameLoop);
+                }
+              };
+
+              runCountdown(3);
             });
             document.getElementById("rg-btn-retry-pause").addEventListener("click", () => {
               pauseDialog.classList.add("rg-hidden");
@@ -41068,13 +41550,25 @@ SOFTWARE.</div>
             });
             document.getElementById("rg-btn-quit").addEventListener("click", () => {
               pauseDialog.classList.add("rg-hidden");
-              this.switchScreen("hub");
-              document.getElementById("rg-dialog-play").classList.remove("rg-hidden");
+              this.isProgrammaticExit = true;
+              history.back();
             });
 
             document.getElementById("rg-btn-result-back").addEventListener("click", () => {
-              this.switchScreen("hub");
-              document.getElementById("rg-dialog-play").classList.remove("rg-hidden");
+              this.isProgrammaticExit = true;
+              history.back();
+            });
+
+            // Auto-pause game when browser is minimized, tab is switched, or screen turns off
+            document.addEventListener("visibilitychange", () => {
+              if (document.visibilityState !== "visible" && this.isPlaying) {
+                this.pauseGame();
+              }
+            });
+            window.addEventListener("blur", () => {
+              if (this.isPlaying) {
+                this.pauseGame();
+              }
             });
             document.getElementById("rg-btn-result-retry").addEventListener("click", () => {
               this.switchScreen("loading");
@@ -41330,7 +41824,7 @@ SOFTWARE.</div>
                   try {
                     const fetchedData = await fetchData(`?action=get_song_data&id=${targetId}`, {}, true);
                     if (fetchedData && fetchedData.id) {
-                      fetchedData.rg_favorite = favSet.has(targetId) ? 1 : 0;
+                      fetchedData.rg_favorite = window.rhythmFavsSet && window.rhythmFavsSet.has(targetId) ? 1 : 0;
                       this.openPlayDialog(fetchedData);
                       currentView.param = "";
                     }
@@ -41771,7 +42265,36 @@ SOFTWARE.</div>
           async openPlayDialog(song) {
             this.selectedSong = song;
             document.getElementById("rg-dialog-song-name").textContent = song.title;
-            
+            const dialogArtistEl = document.getElementById("rg-dialog-song-artist");
+            if (dialogArtistEl) dialogArtistEl.textContent = song.artist || 'Unknown Artist';
+
+            // Set Favorite UI state
+            const isFav = song.rg_favorite == 1;
+            const favIcon = document.getElementById("rg-dialog-fav-icon");
+            const favText = document.getElementById("rg-dialog-fav-text");
+            const favBtn = document.getElementById("rg-dialog-fav-btn");
+            if (favIcon && favText && favBtn) {
+              favIcon.className = isFav ? "bi bi-heart-fill text-danger" : "bi bi-heart";
+              favText.textContent = isFav ? "Unfavorite" : "Favorite";
+              favBtn.classList.toggle("text-danger", isFav);
+            }
+
+            // Set dynamic blurred background
+            const playDialog = document.getElementById("rg-dialog-play");
+            if (playDialog) {
+              playDialog.style.backgroundColor = "transparent";
+              let playBg = document.getElementById("rg-play-dialog-bg");
+              if (!playBg) {
+                playBg = document.createElement("div");
+                playBg.id = "rg-play-dialog-bg";
+                playBg.style.cssText = "position:absolute; top:-40px; left:-40px; right:-40px; bottom:-40px; background-size:cover; background-position:center; filter:blur(40px) brightness(0.35); z-index:0; pointer-events:none; transition: background-image 0.5s ease;";
+                playDialog.insertBefore(playBg, playDialog.firstChild);
+              }
+              if (song) {
+                playBg.style.backgroundImage = `url('?action=get_image&id=${song.id}&v=${song.last_modified || 0}')`;
+              }
+            }
+              
             const warningId = "rg-offline-play-warning";
             let warningEl = document.getElementById(warningId);
             if (!navigator.onLine) {
@@ -42133,9 +42656,9 @@ SOFTWARE.</div>
 
           resizeCalCanvas() {
             if (!this.calCanvas) return;
-            const rect = this.calCanvas.parentNode.getBoundingClientRect();
-            this.calCanvas.width = rect.width;
-            this.calCanvas.height = rect.height;
+            const parent = this.calCanvas.parentNode;
+            this.calCanvas.width = parent.offsetWidth;
+            this.calCanvas.height = parent.offsetHeight;
           }
 
           runCalibrationLoop() {
@@ -42479,6 +43002,128 @@ SOFTWARE.</div>
             return Math.max(1, Math.min(40, level));
           }
 
+          calcY(p) {
+            return this.vanY + Math.pow(p, 1.35) * this.hwH;
+          }
+          calcW(p) {
+            return (this.topW + Math.pow(p, 1.35) * (this.botW - this.topW)) / this.LANES;
+          }
+          calcX(lane, p) {
+            const cW = this.topW + Math.pow(p, 1.35) * (this.botW - this.topW);
+            return this.wHalf - cW / 2 + lane * (cW / this.LANES);
+          }
+
+          drawPerspectiveNote(lane, pBottom, type) {
+            let pTop = pBottom - 0.022; // Sleek thin note bodies (2.2% of track length)
+            if (pTop < 0) pTop = 0;
+            
+            const yBot = this.calcY(pBottom);
+            const yTop = this.calcY(pTop);
+            
+            const pad = 0.08; // Noticeable gap between lanes
+            const wBot = this.calcW(pBottom);
+            const xBotLeft = this.calcX(lane, pBottom) + (wBot * pad);
+            const xBotRight = this.calcX(lane, pBottom) + wBot - (wBot * pad);
+            
+            const wTop = this.calcW(pTop);
+            const xTopLeft = this.calcX(lane, pTop) + (wTop * pad);
+            const xTopRight = this.calcX(lane, pTop) + wTop - (wTop * pad);
+
+            // 1. Draw Outer Dark Border (Creates high contrast against background lanes)
+            this.ctx.beginPath();
+            this.ctx.moveTo(xBotLeft, yBot);
+            this.ctx.lineTo(xBotRight, yBot);
+            this.ctx.lineTo(xTopRight, yTop);
+            this.ctx.lineTo(xTopLeft, yTop);
+            this.ctx.closePath();
+            
+            this.ctx.lineJoin = "round";
+            this.ctx.lineWidth = Math.max(5, 14 * pBottom);
+            this.ctx.strokeStyle = "rgba(0, 0, 0, 0.6)";
+            this.ctx.stroke();
+
+            // Base Colors (Vibrant Project Sekai Palette)
+            let mainColor, lightColor, shadowColor;
+            if (type === 'swipe') {
+              mainColor = "#ff4da6";   // Hot Pink
+              lightColor = "#ffb3df";  // Light Pink
+              shadowColor = "#cc0066"; // Deep Magenta
+            } else if (type === 'hold' || type === 'holdEnd') {
+              mainColor = "#2ecc71";   // Emerald Green
+              lightColor = "#a3ebd6";  // Mint Green
+              shadowColor = "#1b8a47"; // Forest Green
+            } else {
+              mainColor = "#00d2ff";   // Cyan/Vibrant Blue
+              lightColor = "#99efff";  // Ice Blue
+              shadowColor = "#008da6"; // Deep Teal
+            }
+
+            // 2. Draw Main Filled Body
+            this.ctx.fillStyle = mainColor;
+            this.ctx.fill();
+            
+            this.ctx.lineWidth = Math.max(3, 10 * pBottom);
+            this.ctx.strokeStyle = mainColor;
+            this.ctx.stroke();
+
+            // 3. Draw Bottom shadow inside the capsule
+            this.ctx.beginPath();
+            this.ctx.moveTo(xBotLeft, yBot);
+            this.ctx.lineTo(xBotRight, yBot);
+            this.ctx.strokeStyle = shadowColor;
+            this.ctx.lineWidth = Math.max(1.5, 4 * pBottom);
+            this.ctx.stroke();
+
+            // 4. Draw Top Highlight
+            this.ctx.beginPath();
+            this.ctx.moveTo(xTopLeft, yTop);
+            this.ctx.lineTo(xTopRight, yTop);
+            this.ctx.strokeStyle = lightColor;
+            this.ctx.lineWidth = Math.max(1.5, 4 * pBottom);
+            this.ctx.stroke();
+
+            // 5. Draw the iconic inner white horizontal bar
+            const midY = (yBot + yTop) / 2;
+            const midXLeft = (xBotLeft + xTopLeft) / 2;
+            const midXRight = (xBotRight + xTopRight) / 2;
+            
+            this.ctx.beginPath();
+            this.ctx.moveTo(midXLeft + 4, midY);
+            this.ctx.lineTo(midXRight - 4, midY);
+            this.ctx.strokeStyle = "#ffffff";
+            this.ctx.lineWidth = Math.max(1.5, 4 * pBottom);
+            this.ctx.lineCap = "round";
+            this.ctx.stroke();
+
+            if (type === 'swipe') {
+              // Beautiful sleek Chevron arrow inside the pink note
+              const cX = (xBotLeft + xBotRight) / 2;
+              const arrowH = (yBot - yTop) * 1.6;
+              const arrowW = (xBotRight - xBotLeft) * 0.18;
+              
+              this.ctx.beginPath();
+              this.ctx.moveTo(cX - arrowW, midY + arrowH/6);
+              this.ctx.lineTo(cX, midY - arrowH/3);
+              this.ctx.lineTo(cX + arrowW, midY + arrowH/6);
+              
+              this.ctx.strokeStyle = "#ffffff";
+              this.ctx.lineWidth = Math.max(2, 5 * pBottom);
+              this.ctx.lineCap = "round";
+              this.ctx.lineJoin = "round";
+              this.ctx.stroke();
+            }
+          }
+
+          pauseGame() {
+            if (!this.isPlaying) return;
+            this.isPlaying = false;
+            if (this.audioPlayback) this.audioPlayback.pause();
+            const pauseDialog = document.getElementById("rg-dialog-pause");
+            if (pauseDialog) {
+              pauseDialog.classList.remove("rg-hidden");
+            }
+          }
+
           getRankFromStats(perfect, great, good, bad, miss) {
             const total =
               parseInt(perfect || 0) +
@@ -42509,6 +43154,8 @@ SOFTWARE.</div>
             this.switchScreen("loading");
             document.getElementById("rg-loading-cover").src = `?action=get_image&id=${song.id}&v=${song.last_modified || 0}`;
             document.getElementById("rg-loading-title").textContent = song.title;
+            const loadingArtistEl = document.getElementById("rg-loading-artist");
+            if (loadingArtistEl) loadingArtistEl.textContent = song.artist || 'Unknown Artist';
             const progressText = document.getElementById("rg-loading-text");
             progressText.textContent = `Preparing audio... 0%`;
 
@@ -42530,8 +43177,29 @@ SOFTWARE.</div>
                 }
               } else {
                 progressText.textContent = `Connecting to stream...`;
-                // Instant load bypass! Let HTML5 Audio handle the buffering directly.
-                playableUrl = `?action=get_stream&id=${song.id}`;
+                const response = await fetch(`?action=get_stream&id=${song.id}`);
+                const contentLength = response.headers.get('content-length');
+                
+                if (contentLength && parseInt(contentLength) > 1000000) { // If > 1MB, show download progress
+                  const total = parseInt(contentLength, 10);
+                  let loaded = 0;
+                  const reader = response.body.getReader();
+                  const chunks = [];
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    loaded += value.length;
+                    const pct = Math.round((loaded / total) * 100);
+                    progressText.textContent = `Loading... ${pct}%`;
+                  }
+                  const blob = new Blob(chunks, { type: response.headers.get('content-type') || 'audio/mpeg' });
+                  playableUrl = URL.createObjectURL(blob);
+                  this.rgSongCache[song.id] = { blobUrl: playableUrl };
+                } else {
+                  // Instant load bypass! Let HTML5 Audio handle the buffering directly.
+                  playableUrl = `?action=get_stream&id=${song.id}`;
+                }
               }
 
               progressText.textContent = `Loading note chart...`;
@@ -42735,6 +43403,9 @@ SOFTWARE.</div>
           }
 
           startGame(title, diff) {
+            // Push active in-game state to intercept accidental back gestures
+            history.pushState({ viewConfig: currentView, inGame: true }, "", window.location.pathname);
+
             this.switchScreen("game");
             document.getElementById("rg-in-game-title").textContent = title;
             const pauseDiffEl = document.getElementById("rg-pause-diff-display");
@@ -42834,21 +43505,21 @@ SOFTWARE.</div>
 
           resizeCanvas() {
             if (!this.canvas) return;
-            const rect = this.canvas.parentNode.getBoundingClientRect();
+            const parent = this.canvas.parentNode;
             const dpr = window.devicePixelRatio || 1;
-            const w = rect.width * dpr;
-            const h = rect.height * dpr;
+            const w = parent.offsetWidth;
+            const h = parent.offsetHeight;
             
-            this.canvas.width = w;
-            this.canvas.height = h;
-            this.canvas.style.width = rect.width + "px";
-            this.canvas.style.height = rect.height + "px";
+            this.canvas.width = w * dpr;
+            this.canvas.height = h * dpr;
+            this.canvas.style.width = w + "px";
+            this.canvas.style.height = h + "px";
             this.ctx.scale(dpr, dpr);
             
-            this.bgCanvas.width = w;
-            this.bgCanvas.height = h;
+            this.bgCanvas.width = w * dpr;
+            this.bgCanvas.height = h * dpr;
             this.bgCtx.scale(dpr, dpr);
-            this.cacheBackground(rect.width, rect.height);
+            this.cacheBackground(w, h);
           }
 
           cacheBackground(w, h) {
@@ -42882,6 +43553,12 @@ SOFTWARE.</div>
             floorGrad.addColorStop(0, "rgba(15, 15, 25, 0.0)");
             floorGrad.addColorStop(0.5, "rgba(25, 25, 40, 0.4)");
             floorGrad.addColorStop(1, "rgba(45, 45, 65, 0.85)");
+
+            // Settle beam gradient once in memory to avoid garbage collection loops
+            this.beamGrad = ctx.createLinearGradient(0, this.vanY, 0, this.judY);
+            this.beamGrad.addColorStop(0, "rgba(255, 255, 255, 0.0)");
+            this.beamGrad.addColorStop(0.6, "rgba(255, 59, 48, 0.15)");
+            this.beamGrad.addColorStop(1, "rgba(255, 59, 48, 0.65)");
 
             ctx.beginPath();
             ctx.moveTo(this.wHalf - this.topW / 2, this.vanY);
@@ -43166,6 +43843,16 @@ SOFTWARE.</div>
             // Ultra-Smooth Time Interpolation (Fixes 250ms HTML5 Audio jumps and terrible timings)
             const rawTime = this.audioPlayback.currentTime;
             const now = performance.now();
+            
+            // Calculate FPS
+            if (!this.lastFpsTime) { this.lastFpsTime = now; this.frames = 0; }
+            this.frames++;
+            if (now - this.lastFpsTime >= 1000) {
+              const fpsEl = document.getElementById("rg-in-game-fps");
+              if (fpsEl) fpsEl.textContent = this.frames + " FPS";
+              this.frames = 0;
+              this.lastFpsTime = now;
+            }
             if (rawTime !== this.lastReportedTime) {
               this.lastReportedTime = rawTime;
               this.lastTimeUpdate = now;
@@ -43368,17 +44055,17 @@ SOFTWARE.</div>
               let pE = 1 - eDel / win;
               if (pE < 0) pE = 0; else if (pE > 1.2) pE = 1.2;
 
-              const sY = calcY(pS), eY = calcY(pE);
+              const sY = this.calcY(pS), eY = this.calcY(pE);
               
               // Pad the width to leave distinct horizontal gaps between lanes
               const pad = 0.08;
-              const sW = calcW(pS);
-              const eW = calcW(pE);
+              const sW = this.calcW(pS);
+              const eW = this.calcW(pE);
               
-              const sXLeft = calcX(n.lane, pS) + (sW * pad);
-              const sXRight = calcX(n.lane, pS) + sW - (sW * pad);
-              const eXLeft = calcX(n.lane, pE) + (eW * pad);
-              const eXRight = calcX(n.lane, pE) + eW - (eW * pad);
+              const sXLeft = this.calcX(n.lane, pS) + (sW * pad);
+              const sXRight = this.calcX(n.lane, pS) + sW - (sW * pad);
+              const eXLeft = this.calcX(n.lane, pE) + (eW * pad);
+              const eXRight = this.calcX(n.lane, pE) + eW - (eW * pad);
 
               // Elegant Green for Hold, Pink for Swipe-Holds (Sekai Style)
               let baseFill = n.holding ? "rgba(46, 204, 113, 0.55)" : "rgba(46, 204, 113, 0.35)";
@@ -43402,113 +44089,12 @@ SOFTWARE.</div>
               if (n.time - time > win) break;
               if (n.completed) continue;
 
-              const drawPerspectiveNote = (lane, pBottom, type) => {
-                let pTop = pBottom - 0.022; // Sleek thin note bodies (2.2% of track length)
-                if (pTop < 0) pTop = 0;
-                
-                const yBot = calcY(pBottom);
-                const yTop = calcY(pTop);
-                
-                const pad = 0.08; // Noticeable gap between lanes
-                const wBot = calcW(pBottom);
-                const xBotLeft = calcX(lane, pBottom) + (wBot * pad);
-                const xBotRight = calcX(lane, pBottom) + wBot - (wBot * pad);
-                
-                const wTop = calcW(pTop);
-                const xTopLeft = calcX(lane, pTop) + (wTop * pad);
-                const xTopRight = calcX(lane, pTop) + wTop - (wTop * pad);
-
-                // 1. Draw Outer Dark Border (Creates high contrast against background lanes) [1]
-                this.ctx.beginPath();
-                this.ctx.moveTo(xBotLeft, yBot);
-                this.ctx.lineTo(xBotRight, yBot);
-                this.ctx.lineTo(xTopRight, yTop);
-                this.ctx.lineTo(xTopLeft, yTop);
-                this.ctx.closePath();
-                
-                this.ctx.lineJoin = "round";
-                this.ctx.lineWidth = Math.max(5, 14 * pBottom);
-                this.ctx.strokeStyle = "rgba(0, 0, 0, 0.6)";
-                this.ctx.stroke();
-
-                // Base Colors (Vibrant Project Sekai Palette)
-                let mainColor, lightColor, shadowColor;
-                if (type === 'swipe') {
-                  mainColor = "#ff4da6";   // Hot Pink
-                  lightColor = "#ffb3df";  // Light Pink
-                  shadowColor = "#cc0066"; // Deep Magenta
-                } else if (type === 'hold' || type === 'holdEnd') {
-                  mainColor = "#2ecc71";   // Emerald Green
-                  lightColor = "#a3ebd6";  // Mint Green
-                  shadowColor = "#1b8a47"; // Forest Green
-                } else {
-                  mainColor = "#00d2ff";   // Cyan/Vibrant Blue
-                  lightColor = "#99efff";  // Ice Blue
-                  shadowColor = "#008da6"; // Deep Teal
-                }
-
-                // 2. Draw Main Filled Body
-                this.ctx.fillStyle = mainColor;
-                this.ctx.fill();
-                
-                this.ctx.lineWidth = Math.max(3, 10 * pBottom);
-                this.ctx.strokeStyle = mainColor;
-                this.ctx.stroke();
-
-                // 3. Draw Bottom shadow inside the capsule
-                this.ctx.beginPath();
-                this.ctx.moveTo(xBotLeft, yBot);
-                this.ctx.lineTo(xBotRight, yBot);
-                this.ctx.strokeStyle = shadowColor;
-                this.ctx.lineWidth = Math.max(1.5, 4 * pBottom);
-                this.ctx.stroke();
-
-                // 4. Draw Top Highlight
-                this.ctx.beginPath();
-                this.ctx.moveTo(xTopLeft, yTop);
-                this.ctx.lineTo(xTopRight, yTop);
-                this.ctx.strokeStyle = lightColor;
-                this.ctx.lineWidth = Math.max(1.5, 4 * pBottom);
-                this.ctx.stroke();
-
-                // 5. Draw the iconic inner white horizontal bar
-                const midY = (yBot + yTop) / 2;
-                const midXLeft = (xBotLeft + xTopLeft) / 2;
-                const midXRight = (xBotRight + xTopRight) / 2;
-                
-                this.ctx.beginPath();
-                this.ctx.moveTo(midXLeft + 4, midY);
-                this.ctx.lineTo(midXRight - 4, midY);
-                this.ctx.strokeStyle = "#ffffff";
-                this.ctx.lineWidth = Math.max(1.5, 4 * pBottom);
-                this.ctx.lineCap = "round";
-                this.ctx.stroke();
-
-                if (type === 'swipe') {
-                  // Beautiful sleek Chevron arrow inside the pink note
-                  const cX = (xBotLeft + xBotRight) / 2;
-                  const arrowH = (yBot - yTop) * 1.6;
-                  const arrowW = (xBotRight - xBotLeft) * 0.18;
-                  
-                  this.ctx.beginPath();
-                  this.ctx.moveTo(cX - arrowW, midY + arrowH/6);
-                  this.ctx.lineTo(cX, midY - arrowH/3);
-                  this.ctx.lineTo(cX + arrowW, midY + arrowH/6);
-                  
-                  this.ctx.strokeStyle = "#ffffff";
-                  this.ctx.lineWidth = Math.max(2, 5 * pBottom);
-                  this.ctx.lineCap = "round";
-                  this.ctx.lineJoin = "round";
-                  this.ctx.stroke();
-                }
-              };
-
               if (!n.isLong && !n.hitStart) {
                 const del = n.time - time;
                 if (del <= win && del >= -this.JUDGMENT.BAD) {
                   const p = 1 - del / win;
                   if (p >= 0 && p <= 1.2) {
-                    drawPerspectiveNote(n.lane, p, n.isSwipe ? 'swipe' : 'normal');
+                    this.drawPerspectiveNote(n.lane, p, n.isSwipe ? 'swipe' : 'normal');
                   }
                 }
               } else if (n.isLong) {
@@ -43516,14 +44102,14 @@ SOFTWARE.</div>
                   const del = n.time - time;
                   if (del <= win && del >= -this.JUDGMENT.BAD) {
                     const p = 1 - del / win;
-                    drawPerspectiveNote(n.lane, p, 'hold');
+                    this.drawPerspectiveNote(n.lane, p, 'hold');
                   }
                 }
                 if (!n.hitEnd) {
                   const del = n.endTime - time;
                   if (del <= win && del >= -this.JUDGMENT.BAD) {
                     const p = 1 - del / win;
-                    drawPerspectiveNote(n.lane, p, n.hitEndSwipe ? 'swipe' : 'holdEnd');
+                    this.drawPerspectiveNote(n.lane, p, n.hitEndSwipe ? 'swipe' : 'holdEnd');
                   }
                 }
               }
@@ -44215,6 +44801,22 @@ SOFTWARE.</div>
             }
 
             this.switchScreen("result");
+
+            // Inject dynamic blurred cover background to results screen
+            const resultScreen = document.getElementById("rg-screen-result");
+            if (resultScreen) {
+              resultScreen.style.backgroundColor = "transparent";
+              let resultBg = document.getElementById("rg-result-bg");
+              if (!resultBg) {
+                resultBg = document.createElement("div");
+                resultBg.id = "rg-result-bg";
+                resultBg.style.cssText = "position:absolute; top:-40px; left:-40px; right:-40px; bottom:-40px; background-size:cover; background-position:center; filter:blur(40px) brightness(0.35); z-index:0; pointer-events:none; transition: background-image 0.5s ease;";
+                resultScreen.insertBefore(resultBg, resultScreen.firstChild);
+              }
+              if (this.selectedSong) {
+                resultBg.style.backgroundImage = `url('?action=get_image&id=${this.selectedSong.id}&v=${this.selectedSong.last_modified || 0}')`;
+              }
+            }
 
             const resultWarningId = "rg-offline-result-warning";
             let resultWarningEl = document.getElementById(resultWarningId);
