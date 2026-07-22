@@ -381,7 +381,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '6.8');
+define('APP_VERSION', '6.9');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -8922,13 +8922,17 @@ HTML;
       $reaction_counts = ['like'=>0, 'dislike'=>0];
       foreach($likes->fetchAll() as $r) { $reaction_counts[$r['reaction']] = $r['c']; }
       
+      $total_count_stmt = $db->prepare("SELECT COUNT(*) FROM blog_comments WHERE blog_id = ?");
+      $total_count_stmt->execute([$blog_id]);
+      $total_comments = $total_count_stmt->fetchColumn();
+      
       $my_reaction = null;
       if ($user_id) {
         $stmt = $db->prepare("SELECT reaction FROM blog_reactions WHERE user_id = ? AND blog_id = ?");
         $stmt->execute([$user_id, $blog_id]);
         $my_reaction = $stmt->fetchColumn();
       }
-      send_json(['comments' => array_merge($roots, $replies_filtered), 'reactions' => $reaction_counts, 'my_reaction' => $my_reaction]);
+      send_json(['comments' => array_merge($roots, $replies_filtered), 'total_comments' => $total_comments, 'reactions' => $reaction_counts, 'my_reaction' => $my_reaction]);
       break;
 
     case 'toggle_blog_reaction':
@@ -9055,13 +9059,17 @@ HTML;
       $reaction_counts = ['like'=>0, 'dislike'=>0];
       foreach($likes->fetchAll() as $r) { $reaction_counts[$r['reaction']] = $r['c']; }
       
+      $total_count_stmt = $db->prepare("SELECT COUNT(*) FROM song_comments WHERE song_id = ?");
+      $total_count_stmt->execute([$song_id]);
+      $total_comments = $total_count_stmt->fetchColumn();
+      
       $my_reaction = null;
       if ($user_id) {
         $stmt = $db->prepare("SELECT reaction FROM song_reactions WHERE user_id = ? AND song_id = ?");
         $stmt->execute([$user_id, $song_id]);
         $my_reaction = $stmt->fetchColumn();
       }
-      send_json(['comments' => array_merge($roots, $replies_filtered), 'reactions' => $reaction_counts, 'my_reaction' => $my_reaction]);
+      send_json(['comments' => array_merge($roots, $replies_filtered), 'total_comments' => $total_comments, 'reactions' => $reaction_counts, 'my_reaction' => $my_reaction]);
       break;
 
     case 'toggle_song_reaction':
@@ -15077,6 +15085,62 @@ function perform_cover_scan($db) {
         margin: 0.5rem 0;
         opacity: 0.7;
       }
+      
+      .custom-opt-toggle {
+        padding: 6px !important;
+        border-radius: 50%;
+        transition: color 0.2s, background-color 0.2s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+      }
+      .custom-opt-toggle:hover {
+        color: var(--ytm-primary-text) !important;
+        background-color: rgba(255, 255, 255, 0.1);
+      }
+      .custom-opt-menu {
+        background-color: rgba(18, 18, 18, 0.85) !important;
+        backdrop-filter: blur(12px) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
+        border: 1px solid var(--ytm-surface-2) !important;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.8) !important;
+        border-radius: 14px !important;
+        padding: 0.5rem 0 !important;
+        min-width: 180px !important;
+      }
+      .custom-opt-menu .dropdown-item {
+        padding: 0.75rem 1.25rem !important;
+        color: var(--ytm-secondary-text) !important;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        transition: all 0.2s ease-in-out;
+        background: transparent !important;
+      }
+      .custom-opt-menu .dropdown-item:hover {
+        background-color: var(--ytm-surface-2) !important;
+        color: var(--ytm-primary-text) !important;
+      }
+      .custom-opt-menu .dropdown-item .bi {
+        font-size: 1.15rem;
+        color: var(--ytm-secondary-text);
+        transition: color 0.2s;
+      }
+      .custom-opt-menu .dropdown-item:hover .bi {
+        color: var(--ytm-primary-text) !important;
+      }
+      .custom-opt-menu .dropdown-item.text-danger,
+      .custom-opt-menu .dropdown-item.text-danger .bi {
+        color: #ff3b30 !important;
+      }
+      .custom-opt-menu .dropdown-item.text-danger:hover,
+      .custom-opt-menu .dropdown-item.text-danger:hover .bi {
+        color: #ff5f56 !important;
+      }
       .player-bar {
         position: fixed; bottom: 0; left: 0; right: 0; height: 90px; background-color: var(--ytm-bg);
         border-top: 1px solid var(--ytm-surface-2); display: grid;
@@ -16355,7 +16419,7 @@ function perform_cover_scan($db) {
         <div class="offcanvas-body d-flex flex-column">
           <div class="logo d-none d-md-block">PHP<span>Music</span></div>
           
-          <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-3 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Discovers</h6>
+          <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-3 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Discover</h6>
           <a href="#" class="nav-link active" data-view="get_songs">
             <i class="bi bi-music-note-list"></i>
             <span>All Songs</span>
@@ -16392,7 +16456,7 @@ function perform_cover_scan($db) {
           <hr class="text-secondary">
           
           <div class="logged-in-only">
-            <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-2 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Library</h6>
+            <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-2 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Library & Contents</h6>
             <a href="#" class="nav-link" data-view="get_recommendations">
               <i class="bi bi-magic"></i>
               <span>For You</span>
@@ -17914,37 +17978,190 @@ function perform_cover_scan($db) {
       </div>
     </div>
 
+    <div class="modal fade" id="reply-comment-modal" tabindex="-1" data-bs-backdrop="static" style="z-index: 1065;">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
+          <div class="modal-header border-0 pb-2 px-4 pt-4">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-reply-fill text-info me-2"></i>Reply</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body px-4 pb-4">
+            <div id="reply-comment-preview" class="mb-3 px-1"></div>
+            <form id="reply-comment-form">
+              <input type="hidden" id="reply-comment-parent-id">
+              <div class="rich-input-container" data-target-id="reply-comment-input">
+                <div class="d-flex flex-column rounded-4 p-2 mb-3" style="border: 1px solid rgba(255,255,255,0.12); background: transparent; transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                  <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-2 py-1 rounded-3" style="background: transparent;">
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                  </div>
+                  <textarea id="reply-comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Type your reply..." maxlength="5000" required rows="4" style="resize: none; min-height: 100px; font-size: 1rem; line-height: 1.5; padding: 10px 14px;"></textarea>
+                </div>
+              </div>
+              <div class="d-flex justify-content-end align-items-center">
+                <button type="submit" class="btn btn-info text-dark fw-bold rounded-pill px-5 py-2 shadow-sm">Post Reply</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="reply-blog-comment-modal" tabindex="-1" data-bs-backdrop="static" style="z-index: 1065;">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
+          <div class="modal-header border-0 pb-2 px-4 pt-4">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-reply-fill text-info me-2"></i>Reply to Comment</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body px-4 pb-4">
+            <div id="reply-blog-comment-preview" class="p-3 mb-3 rounded-4" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.03);"></div>
+            <form id="reply-blog-comment-form">
+              <input type="hidden" id="reply-blog-comment-parent-id">
+              <div class="rich-input-container" data-target-id="reply-blog-comment-input">
+                <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner mb-3" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                  <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                  </div>
+                  <textarea id="reply-blog-comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Type your reply..." maxlength="5000" required rows="4" style="resize: none; min-height: 100px; font-size: 1rem; line-height: 1.5; padding: 10px 14px;"></textarea>
+                </div>
+              </div>
+              <div class="d-flex justify-content-end align-items-center">
+                <button type="submit" class="btn btn-info text-dark fw-bold rounded-pill px-5 py-2 shadow-sm">Post Reply</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="reply-community-post-modal" tabindex="-1" data-bs-backdrop="static" style="z-index: 1065;">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
+          <div class="modal-header border-0 pb-2 px-4 pt-4">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-reply-fill text-info me-2"></i>Reply to Post</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body px-4 pb-4">
+            <div id="reply-community-post-preview" class="p-3 mb-3 rounded-4" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.03);"></div>
+            <form id="reply-community-post-form">
+              <input type="hidden" id="reply-community-post-parent-id">
+              <div class="rich-input-container" data-target-id="reply-community-post-input">
+                <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner mb-3" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                  <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                  </div>
+                  <textarea id="reply-community-post-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Type your reply..." maxlength="5000" required rows="4" style="resize: none; min-height: 100px; font-size: 1rem; line-height: 1.5; padding: 10px 14px;"></textarea>
+                </div>
+              </div>
+              <div class="d-flex justify-content-end align-items-center">
+                <button type="submit" class="btn btn-info text-dark fw-bold rounded-pill px-5 py-2 shadow-sm">Post Reply</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="comments-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
           <div class="modal-header border-secondary">
-            <h5 class="modal-title w-100 text-white">Song Community</h5>
+            <h5 class="modal-title w-100 text-white">Song Comments</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-              <select id="comments-sort-select" class="form-select form-select-sm w-auto bg-dark text-white border-secondary">
+            <div class="d-flex justify-content-between align-items-center mb-4 pb-3 border-bottom border-secondary border-opacity-25">
+              <div class="d-flex align-items-center gap-3">
+                <span class="text-secondary small fw-bold"><span id="total-comments-count">0</span> Comments</span>
+              </div>
+              <div class="d-flex align-items-center gap-3">
+                <button class="btn btn-link text-secondary text-decoration-none p-0 d-flex align-items-center gap-2" id="song-like-btn" style="transition: color 0.2s;">
+                  <i class="bi bi-hand-thumbs-up fs-5"></i> <span id="song-like-count" class="fw-bold">0</span>
+                </button>
+                <button class="btn btn-link text-secondary text-decoration-none p-0 d-flex align-items-center gap-2" id="song-dislike-btn" style="transition: color 0.2s;">
+                  <i class="bi bi-hand-thumbs-down fs-5"></i> <span id="song-dislike-count" class="fw-bold">0</span>
+                </button>
+              </div>
+            </div>
+            <div class="d-flex gap-3 mb-3">
+              <img src="?action=get_profile_picture&id=<?php echo $_SESSION['user_id'] ?? 0; ?>" class="rounded-circle shadow-sm flex-shrink-0 d-none d-sm-block mt-1" style="width: 44px; height: 44px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
+              <div class="flex-grow-1 rich-input-container" data-target-id="comment-input">
+                <form id="comment-form" class="bg-transparent position-relative">
+                  <input type="hidden" id="comment-parent-id" value="">
+                  <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                    <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
+                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
+                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
+                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
+                    </div>
+                    <div class="d-flex align-items-end">
+                      <textarea id="comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Start typing here... (Markdown & Task-lists supported)" maxlength="5000" rows="4" required style="resize: none; min-height: 110px; max-height: 350px; padding: 10px 14px; font-size: 1rem; line-height: 1.5;" oninput="this.style.height = ''; this.style.height = Math.max(110, this.scrollHeight) + 'px'"></textarea>
+                      <button type="submit" class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center m-1 flex-shrink-0 shadow-sm" style="width: 44px; height: 44px; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-send-fill fs-5"></i></button>
+                    </div>
+                  </div>
+                </form>
+              </div>
+            </div>
+            <div class="d-flex justify-content-end align-items-center mb-4 ps-2">
+              <select id="comments-sort-select" class="form-select form-select-sm w-auto bg-dark text-white border-secondary rounded-pill">
                 <option value="newest">Newest</option>
                 <option value="oldest">Oldest</option>
-                <option value="most_liked">Most Liked</option>
                 <option value="most_replied">Most Replied</option>
               </select>
-            </div>
-            <div class="d-flex justify-content-center gap-4 mb-4">
-              <button class="btn btn-outline-light d-flex align-items-center gap-2" id="song-like-btn">
-                <i class="bi bi-hand-thumbs-up"></i> <span id="song-like-count">0</span>
-              </button>
-              <button class="btn btn-outline-light d-flex align-items-center gap-2" id="song-dislike-btn">
-                <i class="bi bi-hand-thumbs-down"></i> <span id="song-dislike-count">0</span>
-              </button>
-            </div>
-            <form id="comment-form" class="mb-2 d-flex gap-2">
-              <input type="hidden" id="comment-parent-id" value="">
-              <input type="text" id="comment-input" class="form-control bg-dark text-white border-secondary" placeholder="Add a comment... (use @ to mention)" maxlength="2000" required>
-              <button type="submit" class="btn btn-danger"><i class="bi bi-send"></i></button>
-            </form>
-            <div class="d-flex justify-content-end mb-4">
-              <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
             </div>
             <div id="comments-list" class="d-flex flex-column gap-3"></div>
             <div class="text-center mt-4 mb-2 d-none" id="load-more-comments-container">
@@ -18279,7 +18496,7 @@ function perform_cover_scan($db) {
     <input type="file" id="fileImportJsonBlogs" accept=".json" style="display: none;" />
 
     <div class="modal fade" id="bbcode-info-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-info-circle text-info me-2"></i> Formatting Help</h5>
@@ -18468,7 +18685,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="calendar-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content shadow-lg" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px;">
           <div class="modal-header border-0 pb-0">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-calendar3 text-danger me-2"></i> Time & Date</h5>
@@ -18512,7 +18729,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="login-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Login</h5>
@@ -18541,7 +18758,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="register-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Register</h5>
@@ -18572,7 +18789,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="appeal-ban-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-shield-exclamation text-warning me-2"></i> Appeal Account Ban</h5>
@@ -18600,7 +18817,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="settings-appeal-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-shield-exclamation text-warning me-2"></i> Appeal Game Suspension</h5>
@@ -18624,7 +18841,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="forgot-password-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-key-fill text-warning me-2"></i> Reset Password</h5>
@@ -18648,7 +18865,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="reset-password-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-shield-lock-fill text-success me-2"></i> Set New Password</h5>
@@ -18668,7 +18885,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="restore-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Restore Account</h5>
@@ -18699,42 +18916,141 @@ function perform_cover_scan($db) {
       </div>
     </div>
 
-    <div class="modal fade" id="edit-comment-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content" style="background-color: var(--ytm-surface);">
-          <div class="modal-header border-0">
-            <h5 class="modal-title text-white">Edit Comment</h5>
+    <div class="modal fade" id="edit-comment-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
+          <div class="modal-header border-0 pb-2 px-4 pt-4">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-danger me-2"></i>Edit Comment</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body">
+          <div class="modal-body px-4 pb-4">
             <form id="edit-comment-form">
               <input type="hidden" id="edit-comment-id">
-              <input type="text" id="edit-comment-input" class="form-control bg-dark text-white border-secondary mb-2" maxlength="2000" required>
-              <div class="d-flex justify-content-end mb-3">
-                <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+              <div class="rich-input-container" data-target-id="edit-comment-input">
+                <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner mb-3" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                  <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
+                  </div>
+                  <textarea id="edit-comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Start typing here... (Markdown & Task-lists supported)" maxlength="5000" required rows="8" style="resize: none; min-height: 180px; font-size: 1rem; line-height: 1.5; padding: 10px 14px;"></textarea>
+                </div>
               </div>
-              <button type="submit" class="btn btn-danger w-100">Save Changes</button>
+              <div class="d-flex justify-content-end align-items-center">
+                <button type="submit" class="btn btn-danger text-white fw-bold rounded-pill px-5 py-2 shadow-sm">Save Changes</button>
+              </div>
             </form>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="modal fade" id="edit-post-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content" style="background-color: var(--ytm-surface);">
-          <div class="modal-header border-0">
-            <h5 class="modal-title text-white">Edit Post</h5>
+    <div class="modal fade" id="edit-post-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
+          <div class="modal-header border-0 pb-2 px-4 pt-4">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info me-2"></i>Edit Post</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body">
+          <div class="modal-body px-4 pb-4">
             <form id="edit-post-form">
               <input type="hidden" id="edit-post-id">
-              <textarea id="edit-post-input" class="form-control bg-dark text-white border-secondary mb-2" rows="4" placeholder="Edit your post..." maxlength="2000" required></textarea>
-              <div class="d-flex justify-content-end mb-3">
-                <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+              <div class="rich-input-container" data-target-id="edit-post-input">
+                <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner mb-3" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='#3ea6ff'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                  <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
+                  </div>
+                  <textarea id="edit-post-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Start typing here... (Markdown & Task-lists supported)" maxlength="5000" required rows="8" style="resize: none; min-height: 180px; font-size: 1rem; line-height: 1.5; padding: 10px 14px;"></textarea>
+                </div>
               </div>
-              <button type="submit" class="btn btn-info text-dark fw-bold w-100">Save Changes</button>
+              <div class="d-flex justify-content-end align-items-center">
+                <button type="submit" class="btn btn-info text-dark fw-bold rounded-pill px-5 py-2 shadow-sm">Save Changes</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="edit-blog-comment-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
+          <div class="modal-header border-0 pb-2 px-4 pt-4">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info me-2"></i>Edit Blog Comment</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body px-4 pb-4">
+            <form id="edit-blog-comment-form-modal">
+              <input type="hidden" id="edit-blog-comment-id">
+              <div class="rich-input-container" data-target-id="edit-blog-comment-input">
+                <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner mb-3" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='#3ea6ff'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                  <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
+                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
+                  </div>
+                  <textarea id="edit-blog-comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Start typing here... (Markdown & Task-lists supported)" maxlength="5000" required rows="8" style="resize: none; min-height: 180px; font-size: 1rem; line-height: 1.5; padding: 10px 14px;"></textarea>
+                </div>
+              </div>
+              <div class="d-flex justify-content-end align-items-center">
+                <button type="submit" class="btn btn-info text-dark fw-bold rounded-pill px-5 py-2 shadow-sm">Save Changes</button>
+              </div>
             </form>
           </div>
         </div>
@@ -18743,7 +19059,7 @@ function perform_cover_scan($db) {
     
     <!-- Dynamic Modals for Editing and Deleting Direct Messages -->
     <div class="modal fade" id="edit-chat-msg-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-danger me-2"></i>Edit Message</h5>
@@ -19326,7 +19642,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="group-manage-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 15px 35px rgba(0,0,0,0.5);">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white fw-bold" id="group-manage-title"><i class="bi bi-people-fill text-info me-2"></i>Create Group</h5>
@@ -19441,7 +19757,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="request-verification-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-patch-check-fill text-info me-2"></i>Account Verification</h5>
@@ -19516,7 +19832,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="song-collab-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Manage Song Collaborators</h5>
@@ -19551,7 +19867,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="song-collab-invite-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-secondary">
             <h5 class="modal-title text-white">Song Collaboration Invite</h5>
@@ -19571,7 +19887,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="collab-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Manage Collaborators</h5>
@@ -19605,7 +19921,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="collab-invite-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-secondary">
             <h5 class="modal-title text-white">Collaboration Invite</h5>
@@ -19624,7 +19940,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="create-playlist-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Create New Playlist</h5>
@@ -19654,7 +19970,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="edit-playlist-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Edit Playlist</h5>
@@ -19685,7 +20001,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="import-playlist-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Import Playlist</h5>
@@ -19704,7 +20020,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="import-offline-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Import Offline Library</h5>
@@ -19723,7 +20039,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="import-favorites-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Import Favorites</h5>
@@ -19742,7 +20058,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="import-notes-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface);">
           <div class="modal-header border-0">
             <h5 class="modal-title text-white">Import Notes</h5>
@@ -19773,7 +20089,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="metadata-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
           <div class="modal-header border-0 pb-0">
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
@@ -19796,7 +20112,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="edit-metadata-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Edit Metadata</h5>
@@ -19870,7 +20186,7 @@ function perform_cover_scan($db) {
       .share-platform-btn:hover .icon-box { transform: scale(1.15) translateY(-2px); box-shadow: 0 8px 16px rgba(0,0,0,0.6) !important; }
     </style>
     <div class="modal fade" id="share-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(20, 20, 20, 0.95); backdrop-filter: blur(15px); border: 1px solid #444; border-radius: 24px;">
           <div class="modal-header border-0 pb-1">
             <h5 class="modal-title fw-bold text-white" id="share-modal-title">Share</h5>
@@ -20056,7 +20372,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="embed-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-code-slash text-info me-2"></i>Embed Song</h5>
@@ -20075,7 +20391,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="rescan-options-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-arrow-repeat text-info me-2"></i> Re-scan Options</h5>
@@ -20096,7 +20412,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="emergency-scan-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #ff0000; box-shadow: 0 0 20px rgba(255, 0, 0, 0.4);">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-exclamation-triangle-fill text-warning me-2"></i> Database Empty</h5>
@@ -20363,7 +20679,7 @@ function perform_cover_scan($db) {
     </div>
     
     <div class="modal fade" id="update-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface);">
           <div class="modal-header border-0">
             <h5 class="modal-title"><i class="bi bi-arrow-clockwise"></i> Check for Updates</h5>
@@ -21211,7 +21527,7 @@ curl_close($ch);
 
     <!-- PROJECT MANAGEMENT MODALS -->
     <div class="modal fade" id="project-manage-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-secondary">
             <h5 class="modal-title text-white">Manage Project</h5>
@@ -21238,7 +21554,7 @@ curl_close($ch);
       </div>
     </div>
     <div class="modal fade" id="project-move-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-briefcase-fill text-danger me-2"></i> Move Item</h5>
@@ -21256,7 +21572,7 @@ curl_close($ch);
       </div>
     </div>
     <div class="modal fade" id="project-invite-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-secondary">
             <h5 class="modal-title text-white">Project Invitation</h5>
@@ -22517,7 +22833,7 @@ SOFTWARE.</div>
     </div>
     
     <div class="modal fade" id="song-audio-settings-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
           <div class="modal-header border-0 pb-0">
             <h5 class="modal-title w-100 text-center text-white">Audio Settings for <br><small id="sas-song-title" class="text-secondary"></small></h5>
@@ -23328,50 +23644,54 @@ SOFTWARE.</div>
           window.handleManualDropdownClick = (e) => {
             const activeDoc = e.target.ownerDocument;
             const toggle = e.target.closest('[data-bs-toggle="dropdown"]');
-          
+
             if (toggle && (toggle.id === 'profile-picture-header-desktop' || toggle.id === 'profile-picture-header-mobile')) {
               return;
             }
-          
+
             if (toggle) {
               e.preventDefault();
               e.stopPropagation();
+              e.stopImmediatePropagation(); // Prevents Bootstrap event listener collision
+              
               const menu = toggle.closest('.dropdown, .dropup')?.querySelector('.dropdown-menu');
               if (!menu) return;
               const isOpen = menu.classList.contains('show');
-              
+
               activeDoc.querySelectorAll('.dropdown-menu.show').forEach(m => {
                 m.classList.remove('show');
                 m.style.display = 'none';
               });
-              
+
               if (!isOpen) {
                 menu.classList.add('show');
                 menu.style.display = 'block';
-                
+
                 const rect = toggle.getBoundingClientRect();
                 const winHeight = activeDoc.defaultView.innerHeight;
-                const winWidth = activeDoc.defaultView.innerWidth;
-                
-                // Show temporarily to grab actual dimensions
-                const menuHeight = menu.offsetHeight || 250;
+
+                const menuHeight = menu.offsetHeight || 200;
                 const menuWidth = menu.offsetWidth || 180;
-                
-                menu.style.position = 'fixed';
-                
-                // Dynamic Dropup Logic to prevent bottom cutoff
+
+                const offsetParent = menu.offsetParent || activeDoc.body;
+                const parentRect = offsetParent.getBoundingClientRect();
+
+                let topPos;
                 if (rect.bottom + menuHeight > winHeight && rect.top - menuHeight > 0) {
-                  menu.style.top = (rect.top - menuHeight - 4) + 'px';
+                  topPos = rect.top - parentRect.top - menuHeight - 4;
                 } else {
-                  menu.style.top = (rect.bottom + 4) + 'px';
+                  topPos = rect.bottom - parentRect.top + 4;
                 }
-                
-                // Prevent right cutoff
-                if (rect.right - menuWidth < 0) {
-                  menu.style.left = Math.max(8, rect.left) + 'px';
-                } else {
-                  menu.style.left = Math.max(8, rect.right - menuWidth) + 'px';
+
+                let leftPos = rect.right - parentRect.left - menuWidth;
+                if (leftPos < 8) {
+                  leftPos = Math.max(8, rect.left - parentRect.left);
                 }
+
+                menu.style.position = 'absolute';
+                menu.style.top = topPos + 'px';
+                menu.style.left = leftPos + 'px';
+                menu.style.zIndex = '99999';
               }
             } else if (!e.target.closest('.dropdown-menu')) {
               const activeDoc = e.target.ownerDocument;
@@ -23381,7 +23701,31 @@ SOFTWARE.</div>
               });
             }
           };
-          document.addEventListener('click', window.handleManualDropdownClick);
+          document.addEventListener('click', window.handleManualDropdownClick, true);
+          
+          // Custom dropdown logic for comments & community posts to bypass Bootstrap conflicts
+          document.addEventListener('click', e => {
+            const toggle = e.target.closest('.custom-opt-toggle');
+            if (toggle) {
+              e.preventDefault();
+              e.stopPropagation();
+              const menu = toggle.nextElementSibling;
+              const isVisible = menu.style.display === 'block';
+              
+              // Hide all other custom menus
+              document.querySelectorAll('.custom-opt-menu').forEach(m => m.style.display = 'none');
+              
+              if (!isVisible) {
+                menu.style.display = 'block';
+              }
+              return;
+            }
+            
+            // If clicking anywhere else, hide the menus
+            if (!e.target.closest('.custom-opt-menu')) {
+              document.querySelectorAll('.custom-opt-menu').forEach(m => m.style.display = 'none');
+            }
+          });
           
           // Back button logic bridging PiP and normal window
           document.addEventListener('click', (e) => {
@@ -24083,15 +24427,18 @@ SOFTWARE.</div>
               bootstrap.Modal.getInstance(activityModalEl).hide();
               loadView({ type: 'get_community', param: '', sort: 'newest', filter_user_id: '', artist_name: '' });
               setTimeout(() => {
-                const input = document.getElementById('community-post-input');
-                const parentId = document.getElementById('community-parent-id');
+                const input = document.getElementById('reply-community-post-input');
+                const parentId = document.getElementById('reply-community-post-parent-id');
                 if (input && parentId) {
                   parentId.value = commReplyBtn.dataset.postId;
-                  input.placeholder = "Replying to post...";
                   const username = commReplyBtn.dataset.username.replace(/\s+/g, '');
                   input.value = `@${username} `;
-                  input.focus();
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                  const preview = document.getElementById('reply-community-post-preview');
+                  if (preview) {
+                    preview.innerHTML = `<strong class="text-white">Replying to ${escapeHTML(commReplyBtn.dataset.username)}</strong>`;
+                  }
+                  bootstrap.Modal.getOrCreateInstance(document.getElementById('reply-community-post-modal')).show();
+                  setTimeout(() => input.focus(), 500);
                 }
               }, 800);
             }
@@ -25165,6 +25512,57 @@ SOFTWARE.</div>
         document.addEventListener('MSFullscreenChange', updateFullscreenIcon);
         document.addEventListener('mozfullscreenchange', updateFullscreenIcon);
 
+        window.lastPostTime = 0;
+        window.checkPostCooldown = (btnEl = null) => {
+          const now = Date.now();
+          const diff = now - window.lastPostTime;
+          if (diff < 10000) {
+            const left = Math.ceil((10000 - diff) / 1000);
+            showToast(`Please wait ${left} seconds before posting again.`, 'warning');
+            if (btnEl) {
+              const origHtml = btnEl.dataset.origHtml || btnEl.innerHTML;
+              btnEl.dataset.origHtml = origHtml;
+              btnEl.disabled = true;
+              btnEl.innerHTML = `Wait ${left}s`;
+              let counter = left;
+              const intv = setInterval(() => {
+                counter--;
+                if (counter <= 0) {
+                  clearInterval(intv);
+                  btnEl.disabled = false;
+                  btnEl.innerHTML = origHtml;
+                } else {
+                  btnEl.innerHTML = `Wait ${counter}s`;
+                }
+              }, 1000);
+            }
+            return false;
+          }
+          return true;
+        };
+
+        const preserveReplyState = (htmlString, containerId) => {
+          const openReplies = [];
+          document.querySelectorAll('[id^="comment-reply-container-"]:not(.d-none), [id^="comm-reply-container-"]:not(.d-none), [id^="blog-comment-reply-container-"]:not(.d-none)').forEach(el => {
+            openReplies.push(el.id);
+          });
+          
+          const container = document.getElementById(containerId);
+          if (container) container.innerHTML = htmlString;
+          
+          openReplies.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+              el.classList.remove('d-none');
+              const btn = document.querySelector(`[data-target="${id}"]`);
+              if (btn) {
+                const icon = btn.querySelector('i');
+                if(icon) icon.classList.replace('bi-chevron-down', 'bi-chevron-up');
+              }
+            }
+          });
+        };
+
         const formatTime = (seconds) => {
           if (isNaN(seconds) || seconds < 0) return '0:00';
           const min = Math.floor(seconds / 60);
@@ -26182,8 +26580,8 @@ SOFTWARE.</div>
                         <span class="badge bg-primary text-white">Public Blog</span>
                         <span class="small text-secondary">${new Date(b.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()}</span>
                       </div>
-                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
-                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML((b.title && b.title.trim() !== '') ? decodeHTML(b.title) : 'Untitled')}</div>
+                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, '').replace(/[^a-zA-Z0-9\s.,!?]/g, ''))}</div>
                       <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
                         ${b.category && b.category !== 'all' ? `<span class="note-chip">${escapeHTML(b.category_name || 'Uncategorized')}</span>` : '<span></span>'}
                       </div>
@@ -27398,8 +27796,8 @@ SOFTWARE.</div>
                         <span class="badge ${b.status === 'public' ? 'bg-success' : 'bg-secondary'}">${b.status === 'public' ? 'Published' : 'Draft/Private'}</span>
                         <span class="small text-secondary">${new Date(b.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()}</span>
                       </div>
-                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
-                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML((b.title && b.title.trim() !== '') ? decodeHTML(b.title) : 'Untitled')}</div>
+                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, '').replace(/[^a-zA-Z0-9\s.,!?]/g, ''))}</div>
                       <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
                         ${b.category && b.category !== 'all' ? `<span class="note-chip">${escapeHTML(window.getCategoryName(b.category, 'blog'))}</span>` : '<span></span>'}
                       </div>
@@ -28179,8 +28577,8 @@ SOFTWARE.</div>
                       </div>
                     </div>
 
-                    <div id="rg-screen-result" class="rg-screen rg-hidden" style="background-color: transparent; overflow-y: auto; display: block;">
-                      <div style="width: 100%; max-width: 600px; margin: 0 auto; padding: 48px 24px 120px 24px; position: relative; z-index: 1;">
+                    <div id="rg-screen-result" class="rg-screen rg-hidden" style="background-color: transparent; overflow-y: auto; overflow-x: hidden; display: block; width: 100%; max-width: 100%; box-sizing: border-box;">
+                      <div style="width: 100%; max-width: 600px; margin: 0 auto; padding: 48px 16px 120px 16px; position: relative; z-index: 1; box-sizing: border-box; overflow-x: hidden;">
                         <h2 style="text-align: center; color: var(--rg-primary); margin-bottom: 24px; text-transform: uppercase; font-weight: 900; font-size: 2.2rem; letter-spacing: 2px; text-shadow: 0 4px 12px rgba(0,0,0,0.5);">Stage Cleared</h2>
                         
                         <!-- Rank & Accuracy Card -->
@@ -28682,7 +29080,7 @@ SOFTWARE.</div>
                 if (!document.getElementById('status-manage-modal')) {
                   const modalHtml = `
                     <div class="modal fade" id="status-manage-modal" tabindex="-1">
-                      <div class="modal-dialog modal-dialog-centered">
+                      <div class="modal-dialog modal-dialog-centered modal-lg">
                         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
                           <div class="modal-header border-0 pb-2">
                             <h5 class="modal-title text-white fw-bold"><i class="bi bi-camera-fill text-danger me-2"></i>Create Status</h5>
@@ -29060,8 +29458,8 @@ SOFTWARE.</div>
                         <span class="badge bg-primary text-white">Public Blog</span>
                         <span class="small text-secondary">${new Date(b.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()}</span>
                       </div>
-                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
-                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML((b.title && b.title.trim() !== '') ? decodeHTML(b.title) : 'Untitled')}</div>
+                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, '').replace(/[^a-zA-Z0-9\s.,!?]/g, ''))}</div>
                       <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
                         ${b.category && b.category !== 'all' ? `<span class="note-chip">${escapeHTML(b.category_name || 'Uncategorized')}</span>` : '<span></span>'}
                       </div>
@@ -29476,27 +29874,67 @@ SOFTWARE.</div>
                     </div>
 
                     <div class="mt-5 pt-4 border-top border-secondary">
-                      ${currentUser ? `
-                      <div class="d-flex justify-content-center gap-4 mb-4">
-                        <button class="btn btn-outline-light d-flex align-items-center gap-2" id="blog-like-btn">
-                          <i class="bi bi-hand-thumbs-up"></i> <span id="blog-like-count">0</span>
-                        </button>
-                        <button class="btn btn-outline-light d-flex align-items-center gap-2" id="blog-dislike-btn">
-                          <i class="bi bi-hand-thumbs-down"></i> <span id="blog-dislike-count">0</span>
-                        </button>
+                      <div class="d-flex justify-content-between align-items-center mb-4 pb-3">
+                        ${currentUser ? `
+                        <span class="text-secondary small fw-bold"><span id="total-blog-comments-count">0</span> Comments</span>
+                        <div class="d-flex align-items-center gap-3">
+                          <button class="btn btn-link text-secondary text-decoration-none p-0 d-flex align-items-center gap-2" id="blog-like-btn" style="transition: color 0.2s;">
+                            <i class="bi bi-hand-thumbs-up fs-5"></i> <span id="blog-like-count" class="fw-bold">0</span>
+                          </button>
+                          <button class="btn btn-link text-secondary text-decoration-none p-0 d-flex align-items-center gap-2" id="blog-dislike-btn" style="transition: color 0.2s;">
+                            <i class="bi bi-hand-thumbs-down fs-5"></i> <span id="blog-dislike-count" class="fw-bold">0</span>
+                          </button>
+                        </div>
+                        ` : ''}
                       </div>
-                      ` : ''}
-                      <h4 class="text-white fw-bold mb-3"><i class="bi bi-chat-left-text-fill text-info me-2"></i> Comments</h4>
                       ${currentUser ? `
-                      <form id="blog-comment-form" class="mb-2 d-flex gap-2">
-                        <input type="hidden" id="blog-comment-parent-id" value="">
-                        <input type="text" id="blog-comment-input" class="form-control bg-dark text-white border-secondary" placeholder="Add a comment... (use @ to mention)" maxlength="2000" required>
-                        <button type="submit" class="btn btn-info text-dark fw-bold px-4">Post</button>
-                      </form>
-                      <div class="d-flex justify-content-end mb-4">
-                        <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
+                      <div class="d-flex gap-3 mb-3">
+                        <img src="?action=get_profile_picture&id=${currentUser.id}" class="rounded-circle shadow-sm flex-shrink-0 d-none d-sm-block mt-1 border border-secondary border-opacity-25" style="width: 44px; height: 44px; object-fit: cover;">
+                        <div class="flex-grow-1 rich-input-container" data-target-id="blog-comment-input">
+                          <form id="blog-comment-form" class="bg-transparent position-relative mb-2">
+                            <input type="hidden" id="blog-comment-parent-id" value="">
+                            <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='#3ea6ff'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                              <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
+                                <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                                <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                                <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
+                                <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
+                                <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                                <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
+                              </div>
+                              <div class="d-flex align-items-end">
+                                <textarea id="blog-comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Start typing here... (Markdown & Task-lists supported)" maxlength="5000" rows="4" required style="resize: none; min-height: 110px; max-height: 350px; padding: 10px 14px; font-size: 1rem; line-height: 1.5;" oninput="this.style.height = ''; this.style.height = Math.max(110, this.scrollHeight) + 'px'"></textarea>
+                                <button type="submit" class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center m-1 flex-shrink-0 shadow-sm" style="width: 44px; height: 44px; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-send-fill fs-5"></i></button>
+                              </div>
+                            </div>
+                          </form>
+                        </div>
                       </div>
                       ` : '<p class="text-secondary mb-4 small"><i class="bi bi-lock-fill me-1"></i> Log in to post comments and react to this blog.</p>'}
+                      
+                      <div class="d-flex justify-content-between align-items-center mb-4 ps-2">
+                        <select id="blog-comments-sort-select" class="form-select form-select-sm w-auto bg-dark text-white border-secondary rounded-pill">
+                          <option value="newest">Newest</option>
+                          <option value="oldest">Oldest</option>
+                          <option value="most_replied">Most Replied</option>
+                        </select>
+                      </div>
+                      
                       <div id="blog-comments-list" class="d-flex flex-column gap-3"></div>
                       <div class="text-center mt-4 mb-2 d-none" id="load-more-blog-comments-container">
                         <button class="btn btn-outline-light btn-sm px-4 rounded-pill" id="load-more-blog-comments-btn">Load More Comments</button>
@@ -29566,8 +30004,8 @@ SOFTWARE.</div>
                         <span class="badge ${b.status === 'public' ? 'bg-success' : 'bg-secondary'}">${b.status === 'public' ? 'Published' : 'Draft/Private'}</span>
                         <span class="small text-secondary">${new Date(b.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()}</span>
                       </div>
-                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
-                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                      <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML((b.title && b.title.trim() !== '') ? decodeHTML(b.title) : 'Untitled')}</div>
+                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, '').replace(/[^a-zA-Z0-9\s.,!?]/g, ''))}</div>
                       <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
                         ${b.category && b.category !== 'all' ? `<span class="note-chip">${escapeHTML(window.getCategoryName(b.category, 'blog'))}</span>` : '<span></span>'}
                       </div>
@@ -29807,22 +30245,53 @@ SOFTWARE.</div>
                     <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-people text-info me-3 fs-3"></i> Community</div>
                     <div class="d-flex gap-2 align-items-center w-100 mt-2">
                       <input type="text" id="community-search-input" class="form-control bg-dark text-white border-secondary" placeholder="Search posts..." value="${escapeHTML(currentView.searchQuery || '')}">
-                      <select id="community-sort-select" class="form-select bg-dark text-white border-secondary w-auto">
+                    </div>
+                  </div>
+                  <div class="mx-md-3 mb-5 mt-2">
+                    <div class="d-flex gap-3">
+                      <img src="?action=get_profile_picture&id=${currentUser.id}" class="rounded-circle shadow-sm flex-shrink-0 d-none d-sm-block mt-1 border border-secondary border-opacity-25" style="width: 48px; height: 48px; object-fit: cover;">
+                      <div class="flex-grow-1 rich-input-container" data-target-id="community-post-input">
+                        <form id="community-post-form" class="bg-transparent position-relative mb-2">
+                          <input type="hidden" id="community-parent-id" value="">
+                          <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='#3ea6ff'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                            <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
+                              <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                              <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                              <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
+                              <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
+                              <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                              <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
+                            </div>
+                            <div class="d-flex align-items-end">
+                              <textarea id="community-post-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Start typing here... (Markdown & Task-lists supported)" maxlength="5000" rows="4" required style="resize: none; min-height: 120px; max-height: 400px; padding: 10px 14px; font-size: 1rem; line-height: 1.5;" oninput="this.style.height = ''; this.style.height = Math.max(120, this.scrollHeight) + 'px'"></textarea>
+                              <button type="submit" class="btn btn-info text-dark rounded-circle d-flex align-items-center justify-content-center m-1 flex-shrink-0 shadow-sm" style="width: 44px; height: 44px; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-send-fill fs-5"></i></button>
+                            </div>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+                    <div class="d-flex justify-content-end align-items-center mb-4 mt-3 ps-2">
+                      <select id="community-sort-select" class="form-select form-select-sm w-auto bg-dark text-white border-secondary rounded-pill">
                         <option value="newest" ${currentView.sort === 'newest' ? 'selected' : ''}>Newest</option>
                         <option value="most_liked" ${currentView.sort === 'most_liked' ? 'selected' : ''}>Most Liked</option>
                         <option value="most_replied" ${currentView.sort === 'most_replied' ? 'selected' : ''}>Most Replied</option>
                         <option value="following" ${currentView.sort === 'following' ? 'selected' : ''}>Following</option>
                       </select>
-                    </div>
-                  </div>
-                  <div class="mx-md-3 mb-5">
-                    <form id="community-post-form" class="d-flex gap-2 mb-2">
-                      <input type="hidden" id="community-parent-id" value="">
-                      <input type="text" id="community-post-input" class="form-control bg-dark text-white border-secondary" placeholder="What's on your mind? (use @ to mention)" maxlength="2000" required>
-                      <button type="submit" class="btn btn-info text-dark fw-bold px-4">Post</button>
-                    </form>
-                    <div class="d-flex justify-content-end">
-                      <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
                     </div>
                   </div>
                   <div id="community-feed" class="d-flex flex-column gap-3 mx-md-3 mb-4"></div>`;
@@ -29842,9 +30311,27 @@ SOFTWARE.</div>
 
                 document.getElementById('community-post-form').addEventListener('submit', async e => {
                   e.preventDefault();
+                  const form = e.target;
+                  const submitBtn = form.querySelector('button[type="submit"]');
+                  if (!window.checkPostCooldown(submitBtn)) return;
+                  
                   const input = document.getElementById('community-post-input');
                   const parentId = document.getElementById('community-parent-id').value;
+                  
+                  if (submitBtn) {
+                    submitBtn.dataset.origHtml = submitBtn.innerHTML;
+                    submitBtn.disabled = true;
+                    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+                  }
+                  
                   await fetchData('?action=create_community_post', { method:'POST', body: JSON.stringify({content: input.value, parent_id: parentId || null}) });
+                  
+                  if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = submitBtn.dataset.origHtml;
+                  }
+                  
+                  window.lastPostTime = Date.now();
                   input.value = '';
                   document.getElementById('community-parent-id').value = '';
                   input.placeholder = "What's on your mind? (use @ to mention)";
@@ -29860,75 +30347,175 @@ SOFTWARE.</div>
                     const children = postsList.filter(p => p.parent_id == parent);
                     if (children.length === 0) return '';
                     
+                    const renderContent = (raw) => {
+                      let decoded = decodeHTML(raw || '');
+                      let parsed = parseUserText(decoded);
+                      if (typeof marked !== 'undefined') {
+                        try { parsed = marked.parse(parsed); } catch(e) {}
+                      }
+                      return `<div class="rich-comment-box" style="font-size: 1.05rem; line-height: 1.6; word-break: break-word; color: #f1f1f1;">${parsed}</div>`;
+                    };
+
+                    const styleInjection = parent === null ? `
+                      <style>
+                        .rich-comment-box img, .rich-comment-box video, .rich-comment-box iframe { max-width: 100%; max-height: 500px; border-radius: 12px; margin: 12px 0; box-shadow: 0 8px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); object-fit: contain; background: #000; transition: transform 0.3s ease; display: block; }
+                        .rich-comment-box img:hover { transform: scale(1.02); }
+                        .rich-comment-box a { color: #3ea6ff; text-decoration: none; font-weight: 500; padding: 2px 4px; border-radius: 4px; transition: all 0.2s ease; }
+                        .rich-comment-box a:hover { color: #fff; background: rgba(62,166,255,0.2); }
+                        .rich-comment-box blockquote { border-left: 4px solid #10b981; padding: 12px 20px; margin: 16px 0; background: linear-gradient(90deg, rgba(16,185,129,0.1) 0%, transparent 100%); border-radius: 0 12px 12px 0; color: #ddd; font-style: italic; font-size: 1.05rem; }
+                        .rich-comment-box pre { background: #080808; padding: 16px; border-radius: 12px; border: 1px solid #222; overflow-x: auto; margin: 16px 0; box-shadow: inset 0 4px 10px rgba(0,0,0,0.5); }
+                        .rich-comment-box code { font-family: 'Consolas', 'Courier New', monospace; background: rgba(255,255,255,0.08); padding: 3px 6px; border-radius: 6px; font-size: 0.85em; color: #ff8888; }
+                        .rich-comment-box ul, .rich-comment-box ol { padding-left: 24px; margin-bottom: 12px; }
+                        .rich-comment-box li { margin-bottom: 6px; }
+                        .rich-comment-box p { margin-bottom: 12px; }
+                        .rich-comment-box p:last-child { margin-bottom: 0; }
+                        .rich-comment-box .mention-link { color: #ff4da6; background: rgba(255,77,166,0.15); padding: 2px 8px; border-radius: 12px; transition: 0.2s; border: 1px solid rgba(255,77,166,0.3); display: inline-block; font-weight: bold; }
+                        .rich-comment-box .mention-link:hover { background: rgba(255,77,166,0.3); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,77,166,0.3); }
+                        .phpmusic-comments-action-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 50px; padding: 6px 16px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255,255,255,0.05); color: #aaa; border: 1px solid rgba(255,255,255,0.02); cursor: pointer; backdrop-filter: blur(4px); }
+                        .phpmusic-comments-action-btn:hover { background: rgba(255,255,255,0.15); color: #fff; transform: scale(1.05); border-color: rgba(255,255,255,0.1); }
+                        .phpmusic-comments-action-btn:active { transform: scale(0.95); }
+                        .phpmusic-comments-action-btn.active-like { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
+                        .phpmusic-comments-action-btn.active-dislike { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); } }
+                        @keyframes slideFadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+                        .comm-card { background: linear-gradient(145deg, rgba(30,30,30,0.8) 0%, rgba(15,15,15,0.95) 100%); border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 8px 32px rgba(0,0,0,0.4); border-radius: 20px; margin-bottom: 24px; transition: transform 0.2s, box-shadow 0.2s; }
+                        .comm-card:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(0,0,0,0.6); border-color: rgba(255,255,255,0.12); }
+                      </style>
+                    ` : '';
+
                     if (parent === null) {
-                      return children.map(p => `
-                        <div class="card bg-transparent border-secondary text-white mb-2">
-                          <div class="card-body">
-                            <div class="d-flex justify-content-between align-items-start mb-2">
-                              <div class="d-flex align-items-center gap-3 ${p.is_disabled ? '' : 'user-profile-link'}" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="${p.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${p.is_disabled ? '' : 'title="View Profile"'}>
-                                <img src="?action=get_profile_picture&id=${p.user_id}" style="width:32px; height:32px; border-radius:50%; object-fit:cover;">
-                                <div>
-                                  <div class="fw-bold fs-6 hover-underline">${p.artist}</div>
-                                  <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(p.created_at)}</small>
-                                </div>
+                      return styleInjection + children.map(p => `
+                        <div class="comm-card p-4" style="animation: slideFadeIn 0.4s ease forwards;">
+                          <div class="d-flex justify-content-between align-items-start mb-3">
+                            <div class="d-flex align-items-center gap-3 ${p.is_disabled ? '' : 'user-profile-link'}" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="${p.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${p.is_disabled ? '' : 'title="View Profile"'}>
+                              <div class="position-relative">
+                                <img src="?action=get_profile_picture&id=${p.user_id}" class="rounded-circle shadow-lg" style="width:52px; height:52px; object-fit:cover; border: 2px solid rgba(255,255,255,0.1); transition: transform 0.3s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
+                                ${p.user_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ''}
                               </div>
-                              ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
-                              <div>
-                                <button class="btn btn-sm btn-outline-light me-1 edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i></button>
-                                <button class="btn btn-sm btn-outline-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>
-                              </div>` : ''}
+                              <div class="d-flex flex-column justify-content-center">
+                                <div class="fw-bolder text-white hover-underline" style="font-size: 1.1rem; letter-spacing: 0.3px;">${escapeHTML(p.artist)}</div>
+                                <span class="text-secondary fw-medium d-flex align-items-center gap-1" style="font-size: 0.8rem;">
+                                  <i class="bi bi-clock"></i> ${timeAgo(p.created_at)}
+                                </span>
+                              </div>
                             </div>
-                            <div class="mb-2" style="font-size: 1rem; white-space: pre-wrap;">${parseUserText(p.content)}</div>
-                            <div class="d-flex gap-3 align-items-center">
-                              <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'like' ? 'text-info' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="like">
-                                <i class="bi ${p.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'}"></i> <span>${p.like_count}</span>
-                              </button>
-                              <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'dislike' ? 'text-danger' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="dislike">
-                                <i class="bi ${p.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'}"></i> <span>${p.dislike_count}</span>
-                              </button>
-                              <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none community-reply-btn" data-id="${p.id}" data-username="${escapeHTML(p.artist)}">Reply</button>
-                            </div>
-                            <div class="mt-2">${buildCommunityTree(postsList, p.id)}</div>
+                            ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
+                            <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                              <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                                <li><button class="dropdown-item edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                                <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                              </ul>
+                            </div>` : ''}
                           </div>
+                          
+                          <div class="mb-4 text-light" style="font-size: 1.1rem; line-height: 1.6;">
+                            ${renderContent(p.content)}
+                          </div>
+                          
+                          <div class="d-flex gap-2 align-items-center pt-3 border-top border-secondary border-opacity-25 flex-wrap">
+                            <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === 'like' ? 'active-like' : ''}" data-id="${p.id}" data-reaction="like" title="Like">
+                              <i class="bi ${p.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'} fs-5"></i> 
+                              <span style="font-size: 1rem;">${p.like_count}</span>
+                            </button>
+                            
+                            <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === 'dislike' ? 'active-dislike' : ''}" data-id="${p.id}" data-reaction="dislike" title="Dislike">
+                              <i class="bi ${p.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'} fs-5"></i> 
+                              <span style="font-size: 1rem;">${p.dislike_count}</span>
+                            </button>
+                            
+                            <button class="phpmusic-comments-action-btn community-reply-btn" data-id="${p.id}" data-username="${escapeHTML(p.artist)}" data-content="${escapeHTML(p.content)}" title="Reply">
+                              <i class="bi bi-chat-left-text fs-5"></i> 
+                              <span style="font-size: 1rem;">Reply ${children.filter(ch => ch.parent_id == p.id).length > 0 ? `(${children.filter(ch => ch.parent_id == p.id).length})` : ''}</span>
+                            </button>
+                          </div>
+                          
+                          <div class="mt-3">${buildCommunityTree(postsList, p.id)}</div>
                         </div>`).join('');
                     } else {
+                      const renderReplyContent = (raw) => {
+                        let decoded = decodeHTML(raw || '');
+                        let parsed = parseUserText(decoded);
+                        if (typeof marked !== 'undefined') {
+                          try { parsed = marked.parse(parsed); } catch(e) {}
+                        }
+                        return `<div class="rich-comment-box" style="font-size: 0.95rem; line-height: 1.5; word-break: break-word; color: #e1e1e1;">${parsed}</div>`;
+                      };
+
                       const repliesHtml = children.map(p => `
-                        <div class="card bg-transparent border-secondary text-white mb-2 ms-4 border-start border-top-0 border-bottom-0 border-end-0 rounded-0">
-                          <div class="card-body py-2">
-                            <div class="d-flex justify-content-between align-items-start mb-2">
-                              <div class="d-flex align-items-center gap-3 ${p.is_disabled ? '' : 'user-profile-link'}" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="${p.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${p.is_disabled ? '' : 'title="View Profile"'}>
-                                <img src="?action=get_profile_picture&id=${p.user_id}" style="width:32px; height:32px; border-radius:50%; object-fit:cover;">
-                                <div>
-                                  <div class="fw-bold fs-6 hover-underline">${p.artist}</div>
-                                  <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(p.created_at)}</small>
-                                </div>
+                        <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-dark border-2 rounded-4 p-2" style="animation: slideFadeIn 0.3s ease forwards; --bs-border-opacity: .5;">
+                          <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
+                            <img src="?action=get_profile_picture&id=${p.user_id}" 
+                                 class="rounded-circle shadow-sm ${p.is_disabled ? '' : 'user-profile-link'}" 
+                                 data-userid="${p.user_id}" 
+                                 data-artist="${encodeURIComponent(p.artist)}" 
+                                 style="width:36px; height:36px; object-fit:cover; cursor:${p.is_disabled ? 'default' : 'pointer'}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
+                                 onmouseover="this.style.transform='scale(1.15)'"
+                                 onmouseout="this.style.transform='scale(1)'">
+                            ${children.filter(ch => ch.parent_id == p.id).length > 0 ? `<div class="mt-2" style="width: 2px; flex-grow: 1; background: linear-gradient(to bottom, rgba(255,255,255,0.1), transparent); border-radius: 2px;"></div>` : ''}
+                          </div>
+                          
+                          <div class="flex-grow-1" style="min-width: 0;">
+                            <div class="d-flex justify-content-between align-items-start mb-1">
+                              <div class="d-flex align-items-center flex-wrap gap-2">
+                                <span class="fw-bold text-white ${p.is_disabled ? '' : 'user-profile-link'}" 
+                                      data-userid="${p.user_id}" 
+                                      data-artist="${encodeURIComponent(p.artist)}" 
+                                      style="font-size: 0.9rem; cursor:${p.is_disabled ? 'default' : 'pointer'}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
+                                      onmouseover="this.style.textDecoration='underline'"
+                                      onmouseout="this.style.textDecoration='none'">
+                                  ${escapeHTML(p.artist)}
+                                </span>
+                                <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.8;">
+                                  <i class="bi bi-clock"></i> ${timeAgo(p.created_at)}
+                                </span>
                               </div>
                               ${(currentUser && (currentUser.id == p.user_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
-                              <div>
-                                <button class="btn btn-sm btn-outline-light me-1 edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i></button>
-                                <button class="btn btn-sm btn-outline-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>
-                              </div>` : ''}
+                                <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                                  <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                                  <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                                    <li><button class="dropdown-item edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                                    <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                                  </ul>
+                                </div>
+                              ` : ''}
                             </div>
-                            <div class="mb-2" style="font-size: 1rem; white-space: pre-wrap;">${parseUserText(p.content)}</div>
-                            <div class="d-flex gap-3 align-items-center">
-                              <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'like' ? 'text-info' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="like">
-                                <i class="bi ${p.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'}"></i> <span>${p.like_count}</span>
-                              </button>
-                              <button class="btn btn-sm border-0 px-0 d-flex align-items-center gap-2 ${p.my_reaction === 'dislike' ? 'text-danger' : 'text-secondary'} community-react-btn" data-id="${p.id}" data-reaction="dislike">
-                                <i class="bi ${p.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'}"></i> <span>${p.dislike_count}</span>
-                              </button>
-                              <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none community-reply-btn" data-id="${p.id}" data-username="${escapeHTML(p.artist)}">Reply</button>
+                            
+                            <div class="p-2 mb-2">
+                              ${renderReplyContent(p.content)}
                             </div>
-                            <div class="mt-2">${buildCommunityTree(postsList, p.id)}</div>
+                            
+                            <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                              <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === 'like' ? 'active-like' : ''}" data-id="${p.id}" data-reaction="like" style="padding: 4px 12px; font-size: 0.85rem;">
+                                <i class="bi ${p.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'} fs-6"></i>
+                                <span>${p.like_count || 0}</span>
+                              </button>
+                              
+                              <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === 'dislike' ? 'active-dislike' : ''}" data-id="${p.id}" data-reaction="dislike" style="padding: 4px 12px; font-size: 0.85rem;">
+                                <i class="bi ${p.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'} fs-6"></i>
+                                <span>${p.dislike_count || 0}</span>
+                              </button>
+                              
+                              <button class="phpmusic-comments-action-btn community-reply-btn" data-id="${p.id}" data-username="${escapeHTML(p.artist)}" data-content="${escapeHTML(p.content)}" style="padding: 4px 12px; font-size: 0.85rem;">
+                                <i class="bi bi-chat-left-text fs-6"></i> Reply
+                              </button>
+                            </div>
+                            
+                            <div class="mt-3">${buildCommunityTree(postsList, p.id)}</div>
                           </div>
-                        </div>`).join('');
+                        </div>
+                      `).join('');
                       
                       return `
-                        <button class="btn btn-link btn-sm text-info p-0 text-decoration-none toggle-replies-btn ms-4 mb-2" data-target="comm-reply-container-${parent}">
-                          <i class="bi bi-chevron-down"></i> View ${children.length} replies
-                        </button>
-                        <div id="comm-reply-container-${parent}" class="d-none">
-                          ${repliesHtml}
+                        <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
+                          <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="comm-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
+                            <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
+                              <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
+                            </div>
+                            View ${children.length} ${children.length === 1 ? 'reply' : 'replies'}
+                          </button>
+                          <div id="comm-reply-container-${parent}" class="d-none mt-2 pt-2">
+                            ${repliesHtml}
+                          </div>
                         </div>
                       `;
                     }
@@ -30211,8 +30798,8 @@ SOFTWARE.</div>
                           <span class="badge bg-primary text-white">Public Blog</span>
                           <span class="small text-secondary">${new Date(b.updated_at.replace(' ', 'T')+'Z').toLocaleDateString()}</span>
                         </div>
-                        <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(decodeHTML(b.title) || 'Untitled')}</div>
-                        <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ''))}</div>
+                        <<div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML((b.title && b.title.trim() !== '') ? decodeHTML(b.title) : 'Untitled')}</div>
+                      <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, '').replace(/[^a-zA-Z0-9\s.,!?]/g, ''))}</div>
                         <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
                           ${b.category && b.category !== 'all' ? `<span class="note-chip">${escapeHTML(b.category_name || 'Uncategorized')}</span>` : '<span></span>'}
                         </div>
@@ -31664,9 +32251,7 @@ SOFTWARE.</div>
             showToast('Loading random mix...', 'info');
             const data = await fetchData('?action=get_songs&sort=random&page=1');
             if (data && data.length > 0) {
-               // Load the view in the background so it looks nice
-               loadView({ type: 'get_songs', param: '', sort: 'random', filter_user_id: '' });
-               // Instantly queue and play
+               // Instantly queue and play without changing the current page view
                globalSongCache[data[0].id] = data[0]; // Ensure it's cached
                setQueueAndPlay(parseInt(data[0].id), { type: 'get_songs', param: '', sort: 'random' });
             } else {
@@ -32183,12 +32768,17 @@ SOFTWARE.</div>
 
           if (replyCommentId && replyUsername) {
             setTimeout(() => {
-              document.getElementById('comment-parent-id').value = replyCommentId;
-              const input = document.getElementById('comment-input');
-              input.placeholder = "Replying to comment...";
+              document.getElementById('reply-comment-parent-id').value = replyCommentId;
+              const preview = document.getElementById('reply-comment-preview');
+              if (preview) {
+                preview.innerHTML = `<strong class="text-white">Replying to ${escapeHTML(replyUsername)}:</strong>`;
+              }
+              const input = document.getElementById('reply-comment-input');
               const cleanedUsername = replyUsername.replace(/\s+/g, '');
               input.value = `@${cleanedUsername} `;
-              input.focus();
+              
+              bootstrap.Modal.getOrCreateInstance(document.getElementById('reply-comment-modal')).show();
+              setTimeout(() => input.focus(), 500);
             }, 500);
           }
         };
@@ -32202,85 +32792,216 @@ SOFTWARE.</div>
           if (loadMoreBtn && !reset) loadMoreBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
 
           const data = await fetchData(`?action=get_song_comments&song_id=${activeCommentSongId}&sort=${sortVal}&page=${currentCommentsPage}`);
+          const totalCountEl = document.getElementById('total-comments-count');
+          if (totalCountEl) totalCountEl.textContent = data.total_comments || 0;
           document.getElementById('song-like-count').textContent = data.reactions.like || 0;
           document.getElementById('song-dislike-count').textContent = data.reactions.dislike || 0;
 
           const lBtn = document.getElementById('song-like-btn');
           const dBtn = document.getElementById('song-dislike-btn');
           if (lBtn) {
+            const lIcon = lBtn.querySelector('i');
+            if (lIcon) lIcon.className = `bi bi-hand-thumbs-up${data.my_reaction === 'like' ? '-fill' : ''} fs-5`;
             lBtn.classList.toggle('active', data.my_reaction === 'like');
-            lBtn.classList.toggle('text-info', data.my_reaction === 'like');
+            lBtn.classList.toggle('text-white', data.my_reaction === 'like');
           }
           if (dBtn) {
+            const dIcon = dBtn.querySelector('i');
+            if (dIcon) dIcon.className = `bi bi-hand-thumbs-down${data.my_reaction === 'dislike' ? '-fill' : ''} fs-5`;
             dBtn.classList.toggle('active', data.my_reaction === 'dislike');
-            dBtn.classList.toggle('text-danger', data.my_reaction === 'dislike');
+            dBtn.classList.toggle('text-white', data.my_reaction === 'dislike');
           }
 
           const buildTree = (comments, parent = null) => {
             const children = comments.filter(c => c.parent_id == parent);
             if (children.length === 0) return '';
             
+            const renderContent = (raw) => {
+              let decoded = decodeHTML(raw || '');
+              let parsed = parseUserText(decoded);
+              if (typeof marked !== 'undefined') {
+                try { parsed = marked.parse(parsed); } catch(e) {}
+              }
+              return `<div class="rich-comment-box" style="font-size: 0.95rem; line-height: 1.6; word-break: break-word; color: #f1f1f1;">${parsed}</div>`;
+            };
+
+            const styleInjection = parent === null ? `
+              <style>
+                .rich-comment-box img, .rich-comment-box video, .rich-comment-box iframe { max-width: 100%; max-height: 400px; border-radius: 12px; margin: 10px 0; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); object-fit: contain; background: #000; transition: transform 0.3s ease; }
+                .rich-comment-box img:hover { transform: scale(1.02); }
+                .rich-comment-box a { color: #3ea6ff; text-decoration: none; font-weight: 500; padding: 2px 4px; border-radius: 4px; transition: all 0.2s ease; }
+                .rich-comment-box a:hover { color: #fff; background: rgba(62,166,255,0.2); }
+                .rich-comment-box blockquote { border-left: 4px solid #ff0055; padding: 12px 20px; margin: 16px 0; background: linear-gradient(90deg, rgba(255,0,85,0.1) 0%, transparent 100%); border-radius: 0 12px 12px 0; color: #ddd; font-style: italic; font-size: 1.05rem; }
+                .rich-comment-box pre { background: #080808; padding: 16px; border-radius: 12px; border: 1px solid #222; overflow-x: auto; margin: 16px 0; box-shadow: inset 0 4px 10px rgba(0,0,0,0.5); }
+                .rich-comment-box code { font-family: 'Consolas', 'Courier New', monospace; background: rgba(255,255,255,0.08); padding: 3px 6px; border-radius: 6px; font-size: 0.85em; color: #ff8888; }
+                .rich-comment-box ul, .rich-comment-box ol { padding-left: 24px; margin-bottom: 12px; }
+                .rich-comment-box li { margin-bottom: 6px; }
+                .rich-comment-box p { margin-bottom: 12px; }
+                .rich-comment-box p:last-child { margin-bottom: 0; }
+                .rich-comment-box .mention-link { color: #ff4da6; background: rgba(255,77,166,0.15); padding: 2px 8px; border-radius: 12px; transition: 0.2s; border: 1px solid rgba(255,77,166,0.3); display: inline-block; font-weight: bold; }
+                .rich-comment-box .mention-link:hover { background: rgba(255,77,166,0.3); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,77,166,0.3); }
+                .phpmusic-comments-action-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 50px; padding: 6px 16px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255,255,255,0.05); color: #aaa; border: 1px solid rgba(255,255,255,0.02); cursor: pointer; backdrop-filter: blur(4px); }
+                .phpmusic-comments-action-btn:hover { background: rgba(255,255,255,0.15); color: #fff; transform: scale(1.05); border-color: rgba(255,255,255,0.1); }
+                .phpmusic-comments-action-btn:active { transform: scale(0.95); }
+                .phpmusic-comments-action-btn.active-like { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
+                        .phpmusic-comments-action-btn.active-dislike { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); } }
+                @keyframes slideFadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+              </style>
+            ` : '';
+
             if (parent === null) {
-              return children.map(c => `
-                <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: 0;">
-                  <div class="d-flex align-items-center gap-2 mb-1">
-                    <div class="d-flex align-items-center gap-2 ${c.is_disabled ? '' : 'user-profile-link'}" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="${c.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${c.is_disabled ? '' : 'title="View Profile"'}>
-                      <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
-                      <strong class="hover-underline">${c.artist}</strong>
+              return styleInjection + children.map(c => `
+                <div class="d-flex gap-3 mb-4 position-relative" style="animation: slideFadeIn 0.4s ease forwards;">
+                  <div class="d-flex flex-column align-items-center" style="width: 50px; flex-shrink: 0;">
+                    <div class="position-relative">
+                      <img src="?action=get_profile_picture&id=${c.u_id}" 
+                           class="rounded-circle shadow-lg ${c.is_disabled ? '' : 'user-profile-link'}" 
+                           data-userid="${c.u_id}" 
+                           data-artist="${encodeURIComponent(c.artist)}" 
+                           style="width:50px; height:50px; object-fit:cover; cursor:${c.is_disabled ? 'default' : 'pointer'}; border: 2px solid rgba(255,255,255,0.08); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s;"
+                           onmouseover="this.style.transform='scale(1.15) rotate(5deg)'; this.style.borderColor='var(--ytm-accent)';"
+                           onmouseout="this.style.transform='scale(1) rotate(0deg)'; this.style.borderColor='rgba(255,255,255,0.08)';">
+                      ${c.u_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ''}
                     </div>
-                    <small class="text-secondary">${timeAgo(c.created_at)}</small>
                   </div>
-                  <div style="font-size: 0.9rem; white-space: pre-wrap;" class="mb-1">${parseUserText(c.content)}</div>
-                  <div class="d-flex align-items-center gap-3">
-                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="like">
-                      <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-info' : 'bi-hand-thumbs-up'}"></i> ${c.like_count || 0}
-                    </button>
-                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="dislike">
-                      <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
-                    </button>
-                    <button class="btn btn-link btn-sm text-secondary p-0 reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
-                    ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
-                      <button class="btn btn-link btn-sm text-secondary p-0 edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
-                      <button class="btn btn-link btn-sm text-danger p-0 delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
-                    ` : ''}
+                  
+                  <div class="flex-grow-1" style="min-width: 0;">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                      <div class="d-flex align-items-center flex-wrap gap-2">
+                        <span class="fw-bolder text-white ${c.is_disabled ? '' : 'user-profile-link'}" 
+                              data-userid="${c.u_id}" 
+                              data-artist="${encodeURIComponent(c.artist)}" 
+                              style="font-size: 1rem; cursor:${c.is_disabled ? 'default' : 'pointer'}; letter-spacing: 0.3px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"
+                              onmouseover="this.style.textDecoration='underline'"
+                              onmouseout="this.style.textDecoration='none'">
+                          ${escapeHTML(c.artist)}
+                        </span>
+                        <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.75rem; opacity: 0.8; background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 50px;">
+                          <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
+                        </span>
+                      </div>
+                      ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
+                        <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                          <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                          <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                            <li><button class="dropdown-item edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                            <li><button class="dropdown-item text-danger delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                          </ul>
+                        </div>
+                      ` : ''}
+                    </div>
+                    
+                    <div class="p-3 mb-3 rounded-4">
+                      ${renderContent(c.content)}
+                    </div>
+                    
+                    ${currentUser ? `
+                    <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                      <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === 'like' ? 'active-like' : ''}" data-id="${c.id}" data-reaction="like" title="Like">
+                        <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'} fs-5"></i>
+                        <span>${c.like_count || 0}</span>
+                      </button>
+                      
+                      <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === 'dislike' ? 'active-dislike' : ''}" data-id="${c.id}" data-reaction="dislike" title="Dislike">
+                        <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'} fs-5"></i>
+                        <span>${c.dislike_count || 0}</span>
+                      </button>
+                      
+                      <button class="phpmusic-comments-action-btn reply-btn" data-id="${c.id}" data-root-id="${c.id}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" title="Reply to ${escapeHTML(c.artist)}">
+                        <i class="bi bi-chat-left-text fs-5"></i> Reply ${children.filter(ch => ch.parent_id == c.id).length > 0 ? `(${children.filter(ch => ch.parent_id == c.id).length})` : ''}
+                      </button>
+                    </div>
+                    ` : `
+                    <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.9rem;">
+                      <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-white fs-5"></i> ${c.like_count || 0}</span>
+                      <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-white fs-5"></i> ${c.dislike_count || 0}</span>
+                    </div>
+                    `}
+                    <div class="mt-4">${buildTree(comments, c.id)}</div>
                   </div>
-                  <div class="mt-2">${buildTree(comments, c.id)}</div>
                 </div>
               `).join('');
             } else {
               const repliesHtml = children.map(c => `
-                <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: 20px;">
-                  <div class="d-flex align-items-center gap-2 mb-1">
-                    <div class="d-flex align-items-center gap-2 ${c.is_disabled ? '' : 'user-profile-link'}" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="${c.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${c.is_disabled ? '' : 'title="View Profile"'}>
-                      <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
-                      <strong class="hover-underline">${c.artist}</strong>
+                <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-secondary rounded-4 p-2" style="animation: slideFadeIn 0.3s ease forwards;">
+                  <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
+                    <img src="?action=get_profile_picture&id=${c.u_id}" 
+                         class="rounded-circle shadow-sm ${c.is_disabled ? '' : 'user-profile-link'}" 
+                         data-userid="${c.u_id}" 
+                         data-artist="${encodeURIComponent(c.artist)}" 
+                         style="width:36px; height:36px; object-fit:cover; cursor:${c.is_disabled ? 'default' : 'pointer'}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
+                         onmouseover="this.style.transform='scale(1.15)'"
+                         onmouseout="this.style.transform='scale(1)'">
+                  </div>
+                  
+                  <div class="flex-grow-1" style="min-width: 0;">
+                    <div class="d-flex justify-content-between align-items-start mb-1">
+                      <div class="d-flex align-items-center flex-wrap gap-2">
+                        <span class="fw-bold text-white ${c.is_disabled ? '' : 'user-profile-link'}" 
+                              data-userid="${c.u_id}" 
+                              data-artist="${encodeURIComponent(c.artist)}" 
+                              style="font-size: 0.85rem; cursor:${c.is_disabled ? 'default' : 'pointer'}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
+                              onmouseover="this.style.textDecoration='underline'"
+                              onmouseout="this.style.textDecoration='none'">
+                          ${escapeHTML(c.artist)}
+                        </span>
+                        <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.7;">
+                          <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
+                        </span>
+                      </div>
+                      ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
+                        <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                          <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                          <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                            <li><button class="dropdown-item edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                            <li><button class="dropdown-item text-danger delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                          </ul>
+                        </div>
+                      ` : ''}
                     </div>
-                    <small class="text-secondary">${timeAgo(c.created_at)}</small>
+                    
+                    <div class="p-2 mb-2">
+                      ${renderContent(c.content)}
+                    </div>
+                    
+                    ${currentUser ? `
+                    <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                      <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === 'like' ? 'active-like' : ''}" data-id="${c.id}" data-reaction="like" style="padding: 4px 10px; font-size: 0.8rem;">
+                        <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'}"></i>
+                        <span>${c.like_count || 0}</span>
+                      </button>
+                      
+                      <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === 'dislike' ? 'active-dislike' : ''}" data-id="${c.id}" data-reaction="dislike" style="padding: 4px 10px; font-size: 0.8rem;">
+                        <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'}"></i>
+                        <span>${c.dislike_count || 0}</span>
+                      </button>
+                      
+                      <button class="phpmusic-comments-action-btn reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" style="padding: 4px 10px; font-size: 0.8rem;">
+                        <i class="bi bi-chat-left-text"></i> Reply
+                      </button>
+                    </div>
+                    ` : `
+                    <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.8rem;">
+                      <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-white"></i> ${c.like_count || 0}</span>
+                      <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-white"></i> ${c.dislike_count || 0}</span>
+                    </div>
+                    `}
+                    <div class="mt-2">${buildTree(comments, c.id)}</div>
                   </div>
-                  <div style="font-size: 0.9rem; white-space: pre-wrap;" class="mb-1">${parseUserText(c.content)}</div>
-                  <div class="d-flex align-items-center gap-3">
-                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="like">
-                      <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-info' : 'bi-hand-thumbs-up'}"></i> ${c.like_count || 0}
-                    </button>
-                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none comment-react-btn" data-id="${c.id}" data-reaction="dislike">
-                      <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
-                    </button>
-                    <button class="btn btn-link btn-sm text-secondary p-0 reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
-                    ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
-                      <button class="btn btn-link btn-sm text-secondary p-0 edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
-                      <button class="btn btn-link btn-sm text-danger p-0 delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
-                    ` : ''}
-                  </div>
-                  <div class="mt-2">${buildTree(comments, c.id)}</div>
                 </div>
               `).join('');
 
               return `
-                <button class="btn btn-link btn-sm text-info p-0 text-decoration-none toggle-replies-btn mb-2" data-target="comment-reply-container-${parent}">
-                  <i class="bi bi-chevron-down"></i> View ${children.length} replies
-                </button>
-                <div id="comment-reply-container-${parent}" class="d-none">
-                  ${repliesHtml}
+                <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
+                  <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="comment-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
+                    <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
+                      <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
+                    </div>
+                    View ${children.length} ${children.length === 1 ? 'reply' : 'replies'}
+                  </button>
+                  <div id="comment-reply-container-${parent}" class="d-none mt-2 pt-2">
+                    ${repliesHtml}
+                  </div>
                 </div>
               `;
             }
@@ -32290,7 +33011,7 @@ SOFTWARE.</div>
           if (commentsList) {
             const newHtml = buildTree(data.comments) || (reset ? '<p class="text-secondary text-center mt-3">No comments yet.</p>' : '');
             if (reset) {
-              commentsList.innerHTML = newHtml;
+              preserveReplyState(newHtml, 'comments-list');
             } else {
               commentsList.insertAdjacentHTML('beforeend', newHtml);
             }
@@ -32336,22 +33057,56 @@ SOFTWARE.</div>
             }
             const replyBtn = e.target.closest('.reply-btn');
             if (replyBtn) {
-              document.getElementById('comment-parent-id').value = replyBtn.dataset.id;
-              const input = document.getElementById('comment-input');
-              input.placeholder = "Replying to comment...";
+              const rootId = replyBtn.dataset.rootId || replyBtn.dataset.id;
               const username = replyBtn.dataset.username;
-              if (username) {
-                const cleanedUsername = username.replace(/\s+/g, ''); // Removes spaces so @ works properly
-                input.value = `@${cleanedUsername} `;
+              const content = replyBtn.dataset.content || '';
+              
+              document.getElementById('reply-comment-parent-id').value = rootId;
+              const preview = document.getElementById('reply-comment-preview');
+              if (preview) {
+                preview.innerHTML = `<strong class="text-white">Replying to ${escapeHTML(username)}:</strong><br><span class="text-secondary text-truncate d-block">${escapeHTML(content).replace(/<[^>]*>?/gm, '')}</span>`;
               }
-              input.focus();
+              
+              const input = document.getElementById('reply-comment-input');
+              if (username) {
+                const cleanedUsername = username.replace(/\s+/g, '');
+                input.value = `@${cleanedUsername} `;
+              } else {
+                input.value = '';
+              }
+              
+              bootstrap.Modal.getOrCreateInstance(document.getElementById('reply-comment-modal')).show();
+              setTimeout(() => input.focus(), 500);
               return;
             }
             const reactBtn = e.target.closest('.comment-react-btn');
             if (reactBtn) {
+              e.stopPropagation();
               if (!currentUser) return showToast('Please login', 'error');
-              await fetchData('?action=toggle_comment_reaction', { method: 'POST', body: JSON.stringify({ comment_id: reactBtn.dataset.id, reaction: reactBtn.dataset.reaction }) });
-              window.refreshComments(true);
+              const reaction = reactBtn.dataset.reaction;
+              const iconEl = reactBtn.querySelector('i');
+              const spanEl = reactBtn.querySelector('span');
+              let count = parseInt(spanEl.textContent) || 0;
+              const isFilled = iconEl.classList.contains('bi-hand-thumbs-up-fill') || iconEl.classList.contains('bi-hand-thumbs-down-fill');
+              
+              if (isFilled) {
+                iconEl.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'up' : 'down'} fs-5`;
+                spanEl.textContent = Math.max(0, count - 1);
+              } else {
+                const sibling = reactBtn.parentElement.querySelector(`[data-reaction="${reaction === 'like' ? 'dislike' : 'like'}"]`);
+                if (sibling) {
+                  const sibIcon = sibling.querySelector('i');
+                  if (sibIcon.classList.contains('bi-hand-thumbs-up-fill') || sibIcon.classList.contains('bi-hand-thumbs-down-fill')) {
+                    sibIcon.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'down' : 'up'} fs-5`;
+                    const sibSpan = sibling.querySelector('span');
+                    sibSpan.textContent = Math.max(0, (parseInt(sibSpan.textContent) || 0) - 1);
+                  }
+                }
+                iconEl.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'up' : 'down'}-fill fs-5`;
+                spanEl.textContent = count + 1;
+              }
+              
+              fetchData('?action=toggle_comment_reaction', { method: 'POST', body: JSON.stringify({ comment_id: reactBtn.dataset.id, reaction: reaction }) });
               return;
             }
             const editBtn = e.target.closest('.edit-comment-btn');
@@ -32377,10 +33132,33 @@ SOFTWARE.</div>
           });
         }
 
-        window.handleReaction = async (reaction) => {
+        window.handleReaction = async (reaction, btnEl) => {
           if (!currentUser) return showToast('Please login', 'error');
-          await fetchData('?action=toggle_song_reaction', { method: 'POST', body: JSON.stringify({ song_id: activeCommentSongId, reaction: reaction }) });
-          window.refreshComments(true);
+          
+          const iconEl = btnEl.querySelector('i');
+          const countEl = btnEl.querySelector('span');
+          let count = parseInt(countEl.textContent) || 0;
+          const isLiked = iconEl.classList.contains('bi-hand-thumbs-up-fill') || iconEl.classList.contains('bi-hand-thumbs-down-fill');
+          
+          if (isLiked) {
+             iconEl.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'up' : 'down'} fs-5`;
+             countEl.textContent = Math.max(0, count - 1);
+          } else {
+             const siblingId = reaction === 'like' ? 'song-dislike-btn' : 'song-like-btn';
+             const sibling = document.getElementById(siblingId);
+             if (sibling) {
+                const sibIcon = sibling.querySelector('i');
+                if (sibIcon.classList.contains('bi-hand-thumbs-up-fill') || sibIcon.classList.contains('bi-hand-thumbs-down-fill')) {
+                   sibIcon.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'down' : 'up'} fs-5`;
+                   const sibCountEl = sibling.querySelector('span');
+                   sibCountEl.textContent = Math.max(0, (parseInt(sibCountEl.textContent) || 0) - 1);
+                }
+             }
+             iconEl.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'up' : 'down'}-fill fs-5`;
+             countEl.textContent = count + 1;
+          }
+          
+          fetchData('?action=toggle_song_reaction', { method: 'POST', body: JSON.stringify({ song_id: activeCommentSongId, reaction: reaction }) });
         };
 
         const songLikeBtn = document.getElementById('song-like-btn');
@@ -32390,21 +33168,83 @@ SOFTWARE.</div>
         const editPostForm = document.getElementById('edit-post-form');
 
         if (songLikeBtn) {
-          songLikeBtn.addEventListener('click', () => window.handleReaction('like'));
+          songLikeBtn.addEventListener('click', () => window.handleReaction('like', songLikeBtn));
         }
         if (songDislikeBtn) {
-          songDislikeBtn.addEventListener('click', () => window.handleReaction('dislike'));
+          songDislikeBtn.addEventListener('click', () => window.handleReaction('dislike', songDislikeBtn));
         }
 
         if (commentForm) {
           commentForm.addEventListener('submit', async e => {
             e.preventDefault();
             if (!currentUser) return showToast('Please login', 'error');
+            
+            const submitBtn = commentForm.querySelector('button[type="submit"]');
+            if (!window.checkPostCooldown(submitBtn)) return;
+            
             const input = document.getElementById('comment-input');
+            
+            if (submitBtn) {
+              submitBtn.dataset.origHtml = submitBtn.innerHTML;
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+            }
+            
             await fetchData('?action=add_song_comment', { method: 'POST', body: JSON.stringify({ song_id: activeCommentSongId, parent_id: document.getElementById('comment-parent-id').value || null, content: input.value }) });
+            
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = submitBtn.dataset.origHtml;
+            }
+            
+            window.lastPostTime = Date.now();
             input.value = '';
             document.getElementById('comment-parent-id').value = '';
             input.placeholder = "Add a comment... (use @ to mention)";
+            window.refreshComments(true);
+          });
+        }
+
+        const replyCommentForm = document.getElementById('reply-comment-form');
+        if (replyCommentForm) {
+          replyCommentForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            if (!currentUser) return showToast('Please login', 'error');
+            
+            const submitBtn = replyCommentForm.querySelector('button[type="submit"]');
+            if (!window.checkPostCooldown(submitBtn)) return;
+            
+            const input = document.getElementById('reply-comment-input');
+            const parentId = document.getElementById('reply-comment-parent-id').value;
+            
+            if (!input.value.trim()) return;
+
+            if (submitBtn) {
+              submitBtn.dataset.origHtml = submitBtn.innerHTML;
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+            }
+
+            const res = await fetchData('?action=add_song_comment', { 
+              method: 'POST', 
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ 
+                song_id: parseInt(activeCommentSongId), 
+                parent_id: parentId ? parseInt(parentId) : null, 
+                content: input.value 
+              }) 
+            });
+
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = submitBtn.dataset.origHtml;
+            }
+            
+            window.lastPostTime = Date.now();
+            input.value = '';
+            document.getElementById('reply-comment-parent-id').value = '';
+            
+            bootstrap.Modal.getInstance(document.getElementById('reply-comment-modal'))?.hide();
             window.refreshComments(true);
           });
         }
@@ -32419,6 +33259,130 @@ SOFTWARE.</div>
             window.refreshComments(true);
           });
         }
+
+        const editBlogCommentForm = document.getElementById('edit-blog-comment-form-modal');
+        if (editBlogCommentForm) {
+          editBlogCommentForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            const id = document.getElementById('edit-blog-comment-id').value;
+            const content = document.getElementById('edit-blog-comment-input').value;
+            await fetchData('?action=edit_blog_comment', { method: 'POST', body: JSON.stringify({ comment_id: id, content: content }) });
+            bootstrap.Modal.getInstance(document.getElementById('edit-blog-comment-modal')).hide();
+            if (typeof window.refreshBlogComments === 'function') window.refreshBlogComments(true);
+          });
+        }
+
+        const replyBlogCommentForm = document.getElementById('reply-blog-comment-form');
+        if (replyBlogCommentForm) {
+          replyBlogCommentForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            if (!currentUser) return showToast('Please login', 'error');
+            
+            const submitBtn = replyBlogCommentForm.querySelector('button[type="submit"]');
+            if (!window.checkPostCooldown(submitBtn)) return;
+            
+            const input = document.getElementById('reply-blog-comment-input');
+            const parentId = document.getElementById('reply-blog-comment-parent-id').value;
+            
+            if (submitBtn) {
+              submitBtn.dataset.origHtml = submitBtn.innerHTML;
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+            }
+            
+            await fetchData('?action=add_blog_comment', { 
+              method: 'POST', 
+              body: JSON.stringify({ 
+                blog_id: window.activeBlogPublicId, 
+                parent_id: parentId || null, 
+                content: input.value 
+              }) 
+            });
+            
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = submitBtn.dataset.origHtml;
+            }
+            
+            window.lastPostTime = Date.now();
+            input.value = '';
+            document.getElementById('reply-blog-comment-parent-id').value = '';
+            bootstrap.Modal.getInstance(document.getElementById('reply-blog-comment-modal'))?.hide();
+            window.refreshBlogComments(true);
+          });
+        }
+
+        const replyCommunityPostForm = document.getElementById('reply-community-post-form');
+        if (replyCommunityPostForm) {
+          replyCommunityPostForm.addEventListener('submit', async e => {
+            e.preventDefault();
+            if (!currentUser) return showToast('Please login', 'error');
+            
+            const submitBtn = replyCommunityPostForm.querySelector('button[type="submit"]');
+            if (!window.checkPostCooldown(submitBtn)) return;
+            
+            const input = document.getElementById('reply-community-post-input');
+            const parentId = document.getElementById('reply-community-post-parent-id').value;
+            
+            if (submitBtn) {
+              submitBtn.dataset.origHtml = submitBtn.innerHTML;
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+            }
+            
+            await fetchData('?action=create_community_post', { 
+              method: 'POST', 
+              body: JSON.stringify({ 
+                content: input.value,
+                parent_id: parentId || null 
+              }) 
+            });
+            
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = submitBtn.dataset.origHtml;
+            }
+            
+            window.lastPostTime = Date.now();
+            input.value = '';
+            document.getElementById('reply-community-post-parent-id').value = '';
+            bootstrap.Modal.getInstance(document.getElementById('reply-community-post-modal'))?.hide();
+            loadView(currentView);
+          });
+        }
+
+        document.addEventListener('submit', async (e) => {
+          if (e.target.id === 'blog-comment-form') {
+            e.preventDefault();
+            if (!currentUser) return showToast('Please login', 'error');
+            
+            const form = e.target;
+            const submitBtn = form.querySelector('button[type="submit"]');
+            if (!window.checkPostCooldown(submitBtn)) return;
+            
+            const input = document.getElementById('blog-comment-input');
+            const parentId = document.getElementById('blog-comment-parent-id').value;
+            
+            if (submitBtn) {
+              submitBtn.dataset.origHtml = submitBtn.innerHTML;
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+            }
+            
+            await fetchData('?action=add_blog_comment', { method: 'POST', body: JSON.stringify({ blog_id: window.activeBlogPublicId, parent_id: parentId || null, content: input.value }) });
+            
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = submitBtn.dataset.origHtml;
+            }
+            
+            window.lastPostTime = Date.now();
+            input.value = '';
+            document.getElementById('blog-comment-parent-id').value = '';
+            input.placeholder = "Add a comment... (use @ to mention)";
+            window.refreshBlogComments(true);
+          }
+        });
 
         if (editPostForm) {
           editPostForm.addEventListener('submit', async e => {
@@ -32435,6 +33399,12 @@ SOFTWARE.</div>
         if (commentsSortSelect) {
           commentsSortSelect.addEventListener('change', () => window.refreshComments(true));
         }
+
+        document.addEventListener('change', (e) => {
+          if (e.target.id === 'blog-comments-sort-select') {
+            window.refreshBlogComments(true);
+          }
+        });
 
         window.openNoteModal = (id = '', title = '', content = '') => {
           document.getElementById('note-id').value = id;
@@ -33353,7 +34323,30 @@ SOFTWARE.</div>
           const communityReactBtn = target.closest('.community-react-btn');
           if (communityReactBtn) {
             e.stopPropagation();
-            window.togglePostReaction(communityReactBtn.dataset.id, communityReactBtn.dataset.reaction);
+            if (!currentUser) return showToast('Please login', 'error');
+            const reaction = communityReactBtn.dataset.reaction;
+            const iconEl = communityReactBtn.querySelector('i');
+            const countEl = communityReactBtn.querySelector('span');
+            let count = parseInt(countEl.textContent) || 0;
+            const isLiked = iconEl.classList.contains('bi-hand-thumbs-up-fill') || iconEl.classList.contains('bi-hand-thumbs-down-fill');
+            
+            if (isLiked) {
+               iconEl.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'up' : 'down'} fs-5`;
+               countEl.textContent = Math.max(0, count - 1);
+            } else {
+               const sibling = communityReactBtn.parentElement.querySelector(`[data-reaction="${reaction === 'like' ? 'dislike' : 'like'}"]`);
+               if (sibling) {
+                  const sibIcon = sibling.querySelector('i');
+                  if (sibIcon.classList.contains('bi-hand-thumbs-up-fill') || sibIcon.classList.contains('bi-hand-thumbs-down-fill')) {
+                     sibIcon.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'down' : 'up'} fs-5`;
+                     const sibCountEl = sibling.querySelector('span');
+                     sibCountEl.textContent = Math.max(0, (parseInt(sibCountEl.textContent) || 0) - 1);
+                  }
+               }
+               iconEl.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'up' : 'down'}-fill fs-5`;
+               countEl.textContent = count + 1;
+            }
+            fetchData('?action=toggle_post_reaction', { method:'POST', body: JSON.stringify({post_id: communityReactBtn.dataset.id, reaction: reaction}) });
             return;
           }
           const editPostBtn = target.closest('.edit-post-btn');
@@ -33370,18 +34363,6 @@ SOFTWARE.</div>
             if (confirm('Delete this post?')) {
               fetchData('?action=delete_community_post', { method:'POST', body: JSON.stringify({id: deletePostBtn.dataset.id}) }).then(() => loadView(currentView));
             }
-            return;
-          }
-          const communityReplyBtn = target.closest('.community-reply-btn');
-          if (communityReplyBtn) {
-            e.stopPropagation();
-            document.getElementById('community-parent-id').value = communityReplyBtn.dataset.id;
-            const input = document.getElementById('community-post-input');
-            input.placeholder = "Replying to post...";
-            const username = communityReplyBtn.dataset.username.replace(/\s+/g, '');
-            input.value = `@${username} `;
-            input.focus();
-            window.scrollTo({ top: 0, behavior: 'smooth' });
             return;
           }
           const editCatBtnGlobal = target.closest('.edit-cat-btn-global');
@@ -38323,9 +39304,13 @@ SOFTWARE.</div>
         window.refreshBlogComments = async (reset = false) => {
           if (!window.activeBlogPublicId) return;
           if (reset === true || typeof reset !== 'boolean') currentBlogCommentsPage = 1;
+          const sortVal = document.getElementById('blog-comments-sort-select') ? document.getElementById('blog-comments-sort-select').value : 'newest';
 
-          const data = await fetchData(`?action=get_blog_comments&blog_id=${window.activeBlogPublicId}&page=${currentBlogCommentsPage}`);
+          const data = await fetchData(`?action=get_blog_comments&blog_id=${window.activeBlogPublicId}&page=${currentBlogCommentsPage}&sort=${sortVal}`);
           if (!data) return;
+          
+          const totalCountEl = document.getElementById('total-blog-comments-count');
+          if (totalCountEl) totalCountEl.textContent = data.total_comments || 0;
 
           const lCount = document.getElementById('blog-like-count');
           const dCount = document.getElementById('blog-dislike-count');
@@ -38335,10 +39320,14 @@ SOFTWARE.</div>
           const lBtn = document.getElementById('blog-like-btn');
           const dBtn = document.getElementById('blog-dislike-btn');
           if (lBtn) {
+            const lIcon = lBtn.querySelector('i');
+            if (lIcon) lIcon.className = `bi bi-hand-thumbs-up${data.my_reaction === 'like' ? '-fill' : ''} fs-5`;
             lBtn.classList.toggle('active', data.my_reaction === 'like');
             lBtn.classList.toggle('text-info', data.my_reaction === 'like');
           }
           if (dBtn) {
+            const dIcon = dBtn.querySelector('i');
+            if (dIcon) dIcon.className = `bi bi-hand-thumbs-down${data.my_reaction === 'dislike' ? '-fill' : ''} fs-5`;
             dBtn.classList.toggle('active', data.my_reaction === 'dislike');
             dBtn.classList.toggle('text-danger', data.my_reaction === 'dislike');
           }
@@ -38347,81 +39336,192 @@ SOFTWARE.</div>
             const children = comments.filter(c => c.parent_id == parent);
             if (children.length === 0) return '';
             
+            const renderContent = (raw) => {
+              let decoded = decodeHTML(raw || '');
+              let parsed = parseUserText(decoded);
+              if (typeof marked !== 'undefined') {
+                try { parsed = marked.parse(parsed); } catch(e) {}
+              }
+              return `<div class="rich-comment-box" style="font-size: 0.95rem; line-height: 1.6; word-break: break-word; color: #f1f1f1;">${parsed}</div>`;
+            };
+
+            const styleInjection = parent === null ? `
+              <style>
+                .rich-comment-box img, .rich-comment-box video, .rich-comment-box iframe { max-width: 100%; max-height: 400px; border-radius: 12px; margin: 10px 0; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); object-fit: contain; background: #000; transition: transform 0.3s ease; }
+                .rich-comment-box img:hover { transform: scale(1.02); }
+                .rich-comment-box a { color: #3ea6ff; text-decoration: none; font-weight: 500; padding: 2px 4px; border-radius: 4px; transition: all 0.2s ease; }
+                .rich-comment-box a:hover { color: #fff; background: rgba(62,166,255,0.2); }
+                .rich-comment-box blockquote { border-left: 4px solid #ff0055; padding: 12px 20px; margin: 16px 0; background: linear-gradient(90deg, rgba(255,0,85,0.1) 0%, transparent 100%); border-radius: 0 12px 12px 0; color: #ddd; font-style: italic; font-size: 1.05rem; }
+                .rich-comment-box pre { background: #080808; padding: 16px; border-radius: 12px; border: 1px solid #222; overflow-x: auto; margin: 16px 0; box-shadow: inset 0 4px 10px rgba(0,0,0,0.5); }
+                .rich-comment-box code { font-family: 'Consolas', 'Courier New', monospace; background: rgba(255,255,255,0.08); padding: 3px 6px; border-radius: 6px; font-size: 0.85em; color: #ff8888; }
+                .rich-comment-box ul, .rich-comment-box ol { padding-left: 24px; margin-bottom: 12px; }
+                .rich-comment-box li { margin-bottom: 6px; }
+                .rich-comment-box p { margin-bottom: 12px; }
+                .rich-comment-box p:last-child { margin-bottom: 0; }
+                .rich-comment-box .mention-link { color: #ff4da6; background: rgba(255,77,166,0.15); padding: 2px 8px; border-radius: 12px; transition: 0.2s; border: 1px solid rgba(255,77,166,0.3); display: inline-block; font-weight: bold; }
+                .rich-comment-box .mention-link:hover { background: rgba(255,77,166,0.3); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,77,166,0.3); }
+                .phpmusic-comments-action-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 50px; padding: 6px 16px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255,255,255,0.05); color: #aaa; border: 1px solid rgba(255,255,255,0.02); cursor: pointer; backdrop-filter: blur(4px); }
+                .phpmusic-comments-action-btn:hover { background: rgba(255,255,255,0.15); color: #fff; transform: scale(1.05); border-color: rgba(255,255,255,0.1); }
+                .phpmusic-comments-action-btn:active { transform: scale(0.95); }
+                .phpmusic-comments-action-btn.active-like { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
+                        .phpmusic-comments-action-btn.active-dislike { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }                @keyframes slideFadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+              </style>
+            ` : '';
+
             if (parent === null) {
-              return children.map(c => `
-                <div class="text-white p-2 border-start border-secondary mb-2">
-                  <div class="d-flex align-items-center gap-2 mb-1">
-                    <div class="d-flex align-items-center gap-2 ${c.is_disabled ? '' : 'user-profile-link'}" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="${c.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${c.is_disabled ? '' : 'title="View Profile"'}>
-                      <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
-                      <strong class="hover-underline">${escapeHTML(c.artist)}</strong>
+              return styleInjection + children.map(c => `
+                <div class="d-flex gap-3 mb-4 position-relative" style="animation: slideFadeIn 0.4s ease forwards;">
+                  <div class="d-flex flex-column align-items-center" style="width: 50px; flex-shrink: 0;">
+                    <div class="position-relative">
+                      <img src="?action=get_profile_picture&id=${c.u_id}" 
+                           class="rounded-circle shadow-lg ${c.is_disabled ? '' : 'user-profile-link'}" 
+                           data-userid="${c.u_id}" 
+                           data-artist="${encodeURIComponent(c.artist)}" 
+                           style="width:50px; height:50px; object-fit:cover; cursor:${c.is_disabled ? 'default' : 'pointer'}; border: 2px solid rgba(255,255,255,0.08); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s;"
+                           onmouseover="this.style.transform='scale(1.15) rotate(5deg)'; this.style.borderColor='var(--ytm-accent)';"
+                           onmouseout="this.style.transform='scale(1) rotate(0deg)'; this.style.borderColor='rgba(255,255,255,0.08)';">
+                      ${c.u_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ''}
                     </div>
-                    <small class="text-secondary">${timeAgo(c.created_at)}</small>
                   </div>
-                  <div style="font-size: 0.95rem; white-space: pre-wrap;" class="mb-1">${parseUserText(c.content)}</div>
-                  ${currentUser ? `
-                  <div class="d-flex align-items-center gap-3">
-                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none blog-comment-react-btn" data-id="${c.id}" data-reaction="like">
-                      <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-info' : 'bi-hand-thumbs-up'}"></i> ${c.like_count || 0}
-                    </button>
-                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none blog-comment-react-btn" data-id="${c.id}" data-reaction="dislike">
-                      <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
-                    </button>
-                    <button class="btn btn-link btn-sm text-secondary p-0 blog-reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
-                    ${(currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1) ? `
-                      <button class="btn btn-link btn-sm text-secondary p-0 edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
-                      <button class="btn btn-link btn-sm text-danger p-0 delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
-                    ` : ''}
+                  
+                  <div class="flex-grow-1" style="min-width: 0;">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                      <div class="d-flex align-items-center flex-wrap gap-2">
+                        <span class="fw-bolder text-white ${c.is_disabled ? '' : 'user-profile-link'}" 
+                              data-userid="${c.u_id}" 
+                              data-artist="${encodeURIComponent(c.artist)}" 
+                              style="font-size: 1rem; cursor:${c.is_disabled ? 'default' : 'pointer'}; letter-spacing: 0.3px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"
+                              onmouseover="this.style.textDecoration='underline'"
+                              onmouseout="this.style.textDecoration='none'">
+                          ${escapeHTML(c.artist)}
+                        </span>
+                        <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.75rem; opacity: 0.8; background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 50px;">
+                          <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
+                        </span>
+                      </div>
+                      ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
+                        <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                          <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                          <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                            <li><button class="dropdown-item edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                            <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                          </ul>
+                        </div>
+                      ` : ''}
+                    </div>
+                    
+                    <div class="p-3 mb-3 rounded-4">
+                      ${renderContent(c.content)}
+                    </div>
+                    
+                    ${currentUser ? `
+                    <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                      <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === 'like' ? 'active-like' : ''}" data-id="${c.id}" data-reaction="like" title="Like">
+                        <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'} fs-5"></i>
+                        <span>${c.like_count || 0}</span>
+                      </button>
+                      
+                      <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === 'dislike' ? 'active-dislike' : ''}" data-id="${c.id}" data-reaction="dislike" title="Dislike">
+                        <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'} fs-5"></i>
+                        <span>${c.dislike_count || 0}</span>
+                      </button>
+                      
+                      <button class="phpmusic-comments-action-btn blog-reply-btn" data-id="${c.id}" data-root-id="${c.id}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" title="Reply to ${escapeHTML(c.artist)}">
+                        <i class="bi bi-chat-left-text fs-5"></i> Reply ${children.filter(ch => ch.parent_id == c.id).length > 0 ? `(${children.filter(ch => ch.parent_id == c.id).length})` : ''}
+                      </button>
+                    </div>
+                    ` : `
+                    <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.9rem;">
+                      <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-info fs-5"></i> ${c.like_count || 0}</span>
+                      <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-danger fs-5"></i> ${c.dislike_count || 0}</span>
+                    </div>
+                    `}
+                    <div class="mt-4">${buildTree(comments, c.id)}</div>
                   </div>
-                  ` : `
-                  <div class="d-flex align-items-center gap-3 text-secondary small">
-                    <span><i class="bi bi-hand-thumbs-up"></i> ${c.like_count || 0}</span>
-                    <span><i class="bi bi-hand-thumbs-down"></i> ${c.dislike_count || 0}</span>
-                  </div>
-                  `}
-                  <div class="mt-2">${buildTree(comments, c.id)}</div>
                 </div>
               `).join('');
             } else {
               const repliesHtml = children.map(c => `
-                <div class="text-white p-2 border-start border-secondary mb-2" style="margin-left: 20px;">
-                  <div class="d-flex align-items-center gap-2 mb-1">
-                    <div class="d-flex align-items-center gap-2 ${c.is_disabled ? '' : 'user-profile-link'}" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="${c.is_disabled ? 'cursor: default;' : 'cursor: pointer;'}" ${c.is_disabled ? '' : 'title="View Profile"'}>
-                      <img src="?action=get_profile_picture&id=${c.u_id}" style="width:24px; height:24px; border-radius:50%; object-fit:cover;">
-                      <strong class="hover-underline">${escapeHTML(c.artist)}</strong>
+                <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-dark border-2 rounded-4 p-2" style="animation: slideFadeIn 0.3s ease forwards; --bs-border-opacity: .5;">
+                  <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
+                    <img src="?action=get_profile_picture&id=${c.u_id}" 
+                         class="rounded-circle shadow-sm ${c.is_disabled ? '' : 'user-profile-link'}" 
+                         data-userid="${c.u_id}" 
+                         data-artist="${encodeURIComponent(c.artist)}" 
+                         style="width:36px; height:36px; object-fit:cover; cursor:${c.is_disabled ? 'default' : 'pointer'}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
+                         onmouseover="this.style.transform='scale(1.15)'"
+                         onmouseout="this.style.transform='scale(1)'">
+                    ${children.filter(ch => ch.parent_id == c.id).length > 0 ? `<div class="mt-2" style="width: 2px; flex-grow: 1; background: linear-gradient(to bottom, rgba(255,255,255,0.1), transparent); border-radius: 2px;"></div>` : ''}
+                  </div>
+                  
+                  <div class="flex-grow-1" style="min-width: 0;">
+                    <div class="d-flex justify-content-between align-items-start mb-1">
+                      <div class="d-flex align-items-center flex-wrap gap-2">
+                        <span class="fw-bold text-white ${c.is_disabled ? '' : 'user-profile-link'}" 
+                              data-userid="${c.u_id}" 
+                              data-artist="${encodeURIComponent(c.artist)}" 
+                              style="font-size: 0.85rem; cursor:${c.is_disabled ? 'default' : 'pointer'}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
+                              onmouseover="this.style.textDecoration='underline'"
+                              onmouseout="this.style.textDecoration='none'">
+                          ${escapeHTML(c.artist)}
+                        </span>
+                        <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.7;">
+                          <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
+                        </span>
+                      </div>
+                      ${(currentUser && (currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1)) ? `
+                        <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                          <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                          <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                            <li><button class="dropdown-item edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                            <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                          </ul>
+                        </div>
+                      ` : ''}
                     </div>
-                    <small class="text-secondary">${timeAgo(c.created_at)}</small>
+                    
+                    <div class="p-2 mb-2">
+                      ${renderContent(c.content)}
+                    </div>
+                    
+                    ${currentUser ? `
+                    <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                      <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === 'like' ? 'active-like' : ''}" data-id="${c.id}" data-reaction="like" style="padding: 4px 12px; font-size: 0.85rem;">
+                        <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'}"></i>
+                        <span>${c.like_count || 0}</span>
+                      </button>
+                      
+                      <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === 'dislike' ? 'active-dislike' : ''}" data-id="${c.id}" data-reaction="dislike" style="padding: 4px 12px; font-size: 0.85rem;">
+                        <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'}"></i>
+                        <span>${c.dislike_count || 0}</span>
+                      </button>
+                      
+                      <button class="phpmusic-comments-action-btn blog-reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" style="padding: 4px 12px; font-size: 0.85rem;">
+                        <i class="bi bi-chat-left-text"></i> Reply ${children.filter(ch => ch.parent_id == c.id).length > 0 ? `(${children.filter(ch => ch.parent_id == c.id).length})` : ''}
+                      </button>
+                    </div>
+                    ` : `
+                    <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.8rem;">
+                      <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-info"></i> ${c.like_count || 0}</span>
+                      <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-danger"></i> ${c.dislike_count || 0}</span>
+                    </div>
+                    `}
+                    <div class="mt-2">${buildTree(comments, c.id)}</div>
                   </div>
-                  <div style="font-size: 0.95rem; white-space: pre-wrap;" class="mb-1">${parseUserText(c.content)}</div>
-                  ${currentUser ? `
-                  <div class="d-flex align-items-center gap-3">
-                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none blog-comment-react-btn" data-id="${c.id}" data-reaction="like">
-                      <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-info' : 'bi-hand-thumbs-up'}"></i> ${c.like_count || 0}
-                    </button>
-                    <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none blog-comment-react-btn" data-id="${c.id}" data-reaction="dislike">
-                      <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i> ${c.dislike_count || 0}
-                    </button>
-                    <button class="btn btn-link btn-sm text-secondary p-0 blog-reply-btn" data-id="${c.id}" data-username="${escapeHTML(c.artist)}">Reply</button>
-                    ${(currentUser.id == c.u_id || currentUser.email === 'musiclibrary@mail.com' || currentUser.is_admin == 1) ? `
-                      <button class="btn btn-link btn-sm text-secondary p-0 edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i></button>
-                      <button class="btn btn-link btn-sm text-danger p-0 delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i></button>
-                    ` : ''}
-                  </div>
-                  ` : `
-                  <div class="d-flex align-items-center gap-3 text-secondary small">
-                    <span><i class="bi bi-hand-thumbs-up"></i> ${c.like_count || 0}</span>
-                    <span><i class="bi bi-hand-thumbs-down"></i> ${c.dislike_count || 0}</span>
-                  </div>
-                  `}
-                  <div class="mt-2">${buildTree(comments, c.id)}</div>
                 </div>
               `).join('');
 
               return `
-                <button class="btn btn-link btn-sm text-info p-0 text-decoration-none toggle-replies-btn mb-2" data-target="blog-comment-reply-container-${parent}">
-                  <i class="bi bi-chevron-down"></i> View ${children.length} replies
-                </button>
-                <div id="blog-comment-reply-container-${parent}" class="d-none">
-                  ${repliesHtml}
+                <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
+                  <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="blog-comment-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
+                    <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
+                      <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
+                    </div>
+                    View ${children.length} ${children.length === 1 ? 'reply' : 'replies'}
+                  </button>
+                  <div id="blog-comment-reply-container-${parent}" class="d-none mt-2 pt-2">
+                    ${repliesHtml}
+                  </div>
                 </div>
               `;
             }
@@ -38430,7 +39530,7 @@ SOFTWARE.</div>
           const commentsList = document.getElementById('blog-comments-list');
           if (commentsList) {
             const newHtml = buildTree(data.comments) || (reset ? '<p class="text-secondary text-center mt-3">No comments yet. Be the first to comment!</p>' : '');
-            if (reset) commentsList.innerHTML = newHtml;
+            if (reset) preserveReplyState(newHtml, 'blog-comments-list');
             else commentsList.insertAdjacentHTML('beforeend', newHtml);
 
             const btnContainer = document.getElementById('load-more-blog-comments-container');
@@ -38448,43 +39548,119 @@ SOFTWARE.</div>
           const blogLikeBtn = e.target.closest('#blog-like-btn');
           if (blogLikeBtn) {
             if (!currentUser) return showToast('Please login', 'error');
-            await fetchData('?action=toggle_blog_reaction', { method: 'POST', body: JSON.stringify({ blog_id: window.activeBlogPublicId, reaction: 'like' }) });
-            window.refreshBlogComments(true);
+            const iconEl = blogLikeBtn.querySelector('i');
+            const countEl = blogLikeBtn.querySelector('span');
+            let count = parseInt(countEl.textContent) || 0;
+            if (iconEl.classList.contains('bi-hand-thumbs-up-fill')) {
+               iconEl.className = 'bi bi-hand-thumbs-up fs-5';
+               countEl.textContent = Math.max(0, count - 1);
+            } else {
+               const sib = document.getElementById('blog-dislike-btn');
+               if (sib && sib.querySelector('i').classList.contains('bi-hand-thumbs-down-fill')) {
+                 sib.querySelector('i').className = 'bi bi-hand-thumbs-down fs-5';
+                 sib.querySelector('span').textContent = Math.max(0, (parseInt(sib.querySelector('span').textContent) || 0) - 1);
+               }
+               iconEl.className = 'bi bi-hand-thumbs-up-fill fs-5';
+               countEl.textContent = count + 1;
+            }
+            fetchData('?action=toggle_blog_reaction', { method: 'POST', body: JSON.stringify({ blog_id: window.activeBlogPublicId, reaction: 'like' }) });
             return;
           }
           const blogDislikeBtn = e.target.closest('#blog-dislike-btn');
           if (blogDislikeBtn) {
             if (!currentUser) return showToast('Please login', 'error');
-            await fetchData('?action=toggle_blog_reaction', { method: 'POST', body: JSON.stringify({ blog_id: window.activeBlogPublicId, reaction: 'dislike' }) });
-            window.refreshBlogComments(true);
+            const iconEl = blogDislikeBtn.querySelector('i');
+            const countEl = blogDislikeBtn.querySelector('span');
+            let count = parseInt(countEl.textContent) || 0;
+            if (iconEl.classList.contains('bi-hand-thumbs-down-fill')) {
+               iconEl.className = 'bi bi-hand-thumbs-down fs-5';
+               countEl.textContent = Math.max(0, count - 1);
+            } else {
+               const sib = document.getElementById('blog-like-btn');
+               if (sib && sib.querySelector('i').classList.contains('bi-hand-thumbs-up-fill')) {
+                 sib.querySelector('i').className = 'bi bi-hand-thumbs-up fs-5';
+                 sib.querySelector('span').textContent = Math.max(0, (parseInt(sib.querySelector('span').textContent) || 0) - 1);
+               }
+               iconEl.className = 'bi bi-hand-thumbs-down-fill fs-5';
+               countEl.textContent = count + 1;
+            }
+            fetchData('?action=toggle_blog_reaction', { method: 'POST', body: JSON.stringify({ blog_id: window.activeBlogPublicId, reaction: 'dislike' }) });
             return;
           }
           const blogReplyBtn = e.target.closest('.blog-reply-btn');
           if (blogReplyBtn) {
-            document.getElementById('blog-comment-parent-id').value = blogReplyBtn.dataset.id;
-            const input = document.getElementById('blog-comment-input');
-            input.placeholder = "Replying to comment...";
+            document.getElementById('reply-blog-comment-parent-id').value = blogReplyBtn.dataset.rootId || blogReplyBtn.dataset.id;
+            const input = document.getElementById('reply-blog-comment-input');
+            const preview = document.getElementById('reply-blog-comment-preview');
             const username = blogReplyBtn.dataset.username;
+            const content = blogReplyBtn.dataset.content || '';
+            if (preview) {
+              preview.innerHTML = `<strong class="text-white">Replying to ${escapeHTML(username)}:</strong><br><span class="text-secondary text-truncate d-block">${escapeHTML(content).replace(/<[^>]*>?/gm, '')}</span>`;
+            }
             if (username) {
               input.value = `@${username.replace(/\s+/g, '')} `;
+            } else {
+              input.value = '';
             }
-            input.focus();
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('reply-blog-comment-modal')).show();
+            setTimeout(() => input.focus(), 500);
+            return;
+          }
+          const communityReplyBtn = e.target.closest('.community-reply-btn');
+          if (communityReplyBtn) {
+            e.stopPropagation();
+            document.getElementById('reply-community-post-parent-id').value = communityReplyBtn.dataset.id;
+            const input = document.getElementById('reply-community-post-input');
+            const preview = document.getElementById('reply-community-post-preview');
+            const username = communityReplyBtn.dataset.username;
+            const content = communityReplyBtn.dataset.content || '';
+            if (preview) {
+              preview.innerHTML = `<strong class="text-white">Replying to ${escapeHTML(username)}:</strong><br><span class="text-secondary text-truncate d-block">${escapeHTML(content).replace(/<[^>]*>?/gm, '')}</span>`;
+            }
+            if (username) {
+              input.value = `@${username.replace(/\s+/g, '')} `;
+            } else {
+              input.value = '';
+            }
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('reply-community-post-modal')).show();
+            setTimeout(() => input.focus(), 500);
             return;
           }
           const blogCommentReactBtn = e.target.closest('.blog-comment-react-btn');
           if (blogCommentReactBtn) {
+            e.stopPropagation();
             if (!currentUser) return showToast('Please login', 'error');
-            await fetchData('?action=toggle_blog_comment_reaction', { method: 'POST', body: JSON.stringify({ comment_id: blogCommentReactBtn.dataset.id, reaction: blogCommentReactBtn.dataset.reaction }) });
-            window.refreshBlogComments(true);
+            const reaction = blogCommentReactBtn.dataset.reaction;
+            const iconEl = blogCommentReactBtn.querySelector('i');
+            const spanEl = blogCommentReactBtn.querySelector('span');
+            let count = parseInt(spanEl.textContent) || 0;
+            const isFilled = iconEl.classList.contains('bi-hand-thumbs-up-fill') || iconEl.classList.contains('bi-hand-thumbs-down-fill');
+            
+            if (isFilled) {
+              iconEl.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'up' : 'down'} fs-5`;
+              spanEl.textContent = Math.max(0, count - 1);
+            } else {
+              const sibling = blogCommentReactBtn.parentElement.querySelector(`[data-reaction="${reaction === 'like' ? 'dislike' : 'like'}"]`);
+              if (sibling) {
+                const sibIcon = sibling.querySelector('i');
+                if (sibIcon.classList.contains('bi-hand-thumbs-up-fill') || sibIcon.classList.contains('bi-hand-thumbs-down-fill')) {
+                  sibIcon.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'down' : 'up'} fs-5`;
+                  const sibSpan = sibling.querySelector('span');
+                  sibSpan.textContent = Math.max(0, (parseInt(sibSpan.textContent) || 0) - 1);
+                }
+              }
+              iconEl.className = `bi bi-hand-thumbs-${reaction === 'like' ? 'up' : 'down'}-fill fs-5`;
+              spanEl.textContent = count + 1;
+            }
+            
+            fetchData('?action=toggle_blog_comment_reaction', { method: 'POST', body: JSON.stringify({ comment_id: blogCommentReactBtn.dataset.id, reaction: reaction }) });
             return;
           }
           const editBlogCommentBtn = e.target.closest('.edit-blog-comment-btn');
           if (editBlogCommentBtn) {
-            const newContent = prompt('Edit your comment:', decodeHTML(editBlogCommentBtn.dataset.content));
-            if (newContent !== null && newContent.trim() !== '') {
-              await fetchData('?action=edit_blog_comment', { method: 'POST', body: JSON.stringify({ comment_id: editBlogCommentBtn.dataset.id, content: newContent }) });
-              window.refreshBlogComments(true);
-            }
+            document.getElementById('edit-blog-comment-id').value = editBlogCommentBtn.dataset.id;
+            document.getElementById('edit-blog-comment-input').value = decodeHTML(editBlogCommentBtn.dataset.content);
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('edit-blog-comment-modal')).show();
             return;
           }
           const deleteBlogCommentBtn = e.target.closest('.delete-blog-comment-btn');
@@ -38800,76 +39976,88 @@ SOFTWARE.</div>
           }
         });
 
-        document.querySelectorAll('.editor-toolbar button').forEach(btn => {
-          btn.addEventListener('click', (e) => {
-            e.preventDefault();
-            const md = btn.dataset.md;
-            const ta = document.getElementById('editorContent');
-            const start = ta.selectionStart;
-            const end = ta.selectionEnd;
-            const selectedText = ta.value.substring(start, end);
-            let pre = '', suf = '', def = '';
+        document.addEventListener('click', (e) => {
+          const btn = e.target.closest('button[data-md]');
+          if (!btn) return;
+          e.preventDefault();
+          const md = btn.dataset.md;
+          let ta;
+          const container = btn.closest('.rich-input-container');
+          
+          if (container) {
+            ta = document.getElementById(container.dataset.targetId);
+          } else if (btn.closest('#blogEditorToolbar')) {
+            ta = document.getElementById('blogEditorContent');
+          } else if (btn.closest('.editor-toolbar')) {
+            ta = document.getElementById('editorContent');
+          }
+          if (!ta) return;
 
-            switch(md) {
-              case 'bold': pre = '**'; suf = '**'; def = 'bold text'; break;
-              case 'italic': pre = '*'; suf = '*'; def = 'italic text'; break;
-              case 'heading': pre = '### '; def = 'Heading'; break;
-              case 'strikethrough': pre = '~~'; suf = '~~'; def = 'strikethrough'; break;
-              case 'ul': pre = '- '; def = 'List item'; break;
-              case 'ol': pre = '1. '; def = 'List item'; break;
-              case 'task': pre = '- [ ] '; def = 'Task'; break;
-              case 'quote': pre = '> '; def = 'Quote'; break;
-              case 'code': pre = '```\n'; suf = '\n```'; def = 'code block'; break;
-              case 'table': pre = '| Header | Header |\n| --- | --- |\n| Cell | Cell |'; break;
-              case 'align-left': pre = '<div style="text-align: left;">\n'; suf = '\n</div>'; def = 'Left aligned text'; break;
-              case 'align-center': pre = '<div style="text-align: center;">\n'; suf = '\n</div>'; def = 'Center aligned text'; break;
-              case 'align-right': pre = '<div style="text-align: right;">\n'; suf = '\n</div>'; def = 'Right aligned text'; break;
-              case 'link': pre = '['; suf = '](url)'; def = 'link text'; break;
-              case 'image': 
-                const imgUrl = prompt("Enter image URL:", "https://example.com/image.jpg");
-                if (imgUrl) {
-                  const imgWidth = prompt("Enter width (e.g. 100%, 300px, auto):", "100%");
-                  const imgHeight = prompt("Enter height (e.g. auto, 300px):", "auto");
-                  pre = `<img src="${imgUrl}" width="${imgWidth || '100%'}" height="${imgHeight || 'auto'}" alt="`;
-                  suf = '">';
-                  def = 'image description';
-                } else {
-                  return; // Cancelled
-                }
-                break;
-              case 'video':
-                const vidUrl = prompt("Enter Video or YouTube URL:", "https://www.youtube.com/watch?v=...");
-                if (vidUrl) {
-                  const ytMatch = vidUrl.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
-                  if (ytMatch && ytMatch[1]) {
-                    pre = `\n<iframe src="https://www.youtube.com/embed/${ytMatch[1]}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>\n`;
-                  } else {
-                    pre = `\n<video src="${vidUrl}" controls style="background: #000;"></video>\n`;
-                  }
-                  suf = '';
-                  def = '';
-                } else {
-                  return; // Cancelled
-                }
-                break;
-            }
+          const start = ta.selectionStart;
+          const end = ta.selectionEnd;
+          const selectedText = ta.value.substring(start, end);
+          let pre = '', suf = '', def = '';
 
-            const insertText = selectedText || def;
-            const finalInsert = md === 'table' ? pre : pre + insertText + suf;
-            
-            ta.value = ta.value.substring(0, start) + finalInsert + ta.value.substring(end);
-            ta.focus();
-            
-            if (md === 'table') {
-              ta.setSelectionRange(start + 2, start + 8);
-            } else if (selectedText) {
-               ta.setSelectionRange(start, start + finalInsert.length);
-            } else {
-               ta.setSelectionRange(start + pre.length, start + pre.length + def.length);
-            }
-            
-            ta.dispatchEvent(new Event('input'));
-          });
+          switch(md) {
+            case 'bold': pre = '**'; suf = '**'; def = 'bold text'; break;
+            case 'italic': pre = '*'; suf = '*'; def = 'italic text'; break;
+            case 'heading': pre = '### '; def = 'Heading'; break;
+            case 'strikethrough': pre = '~~'; suf = '~~'; def = 'strikethrough'; break;
+            case 'ul': pre = '- '; def = 'List item'; break;
+            case 'ol': pre = '1. '; def = 'List item'; break;
+            case 'task': pre = '- [ ] '; def = 'Task'; break;
+            case 'quote': pre = '> '; def = 'Quote'; break;
+            case 'code': pre = '```\n'; suf = '\n```'; def = 'code block'; break;
+            case 'table': pre = '| Header | Header |\n| --- | --- |\n| Cell | Cell |'; break;
+            case 'align-left': pre = '<div style="text-align: left;">\n'; suf = '\n</div>'; def = 'Left aligned text'; break;
+            case 'align-center': pre = '<div style="text-align: center;">\n'; suf = '\n</div>'; def = 'Center aligned text'; break;
+            case 'align-right': pre = '<div style="text-align: right;">\n'; suf = '\n</div>'; def = 'Right aligned text'; break;
+            case 'link': pre = '['; suf = '](url)'; def = 'link text'; break;
+            case 'image': 
+              const imgUrl = prompt("Enter image URL:", "https://example.com/image.jpg");
+              if (imgUrl) {
+                const imgWidth = prompt("Enter width (e.g. 100%, 300px, auto):", "100%");
+                const imgHeight = prompt("Enter height (e.g. auto, 300px):", "auto");
+                pre = `<img src="${imgUrl}" width="${imgWidth || '100%'}" height="${imgHeight || 'auto'}" alt="`;
+                suf = '">';
+                def = 'image description';
+              } else {
+                return; // Cancelled
+              }
+              break;
+            case 'video':
+              const vidUrl = prompt("Enter Video or YouTube URL:", "https://www.youtube.com/watch?v=...");
+              if (vidUrl) {
+                const ytMatch = vidUrl.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+                if (ytMatch && ytMatch[1]) {
+                  pre = `\n<iframe src="https://www.youtube.com/embed/${ytMatch[1]}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>\n`;
+                } else {
+                  pre = `\n<video src="${vidUrl}" controls style="background: #000;"></video>\n`;
+                }
+                suf = '';
+                def = '';
+              } else {
+                return; // Cancelled
+              }
+              break;
+          }
+
+          const insertText = selectedText || def;
+          const finalInsert = md === 'table' ? pre : pre + insertText + suf;
+          
+          ta.value = ta.value.substring(0, start) + finalInsert + ta.value.substring(end);
+          ta.focus();
+          
+          if (md === 'table') {
+            ta.setSelectionRange(start + 2, start + 8);
+          } else if (selectedText) {
+             ta.setSelectionRange(start, start + finalInsert.length);
+          } else {
+             ta.setSelectionRange(start + pre.length, start + pre.length + def.length);
+          }
+          
+          ta.dispatchEvent(new Event('input'));
+          ta.style.height = ''; ta.style.height = ta.scrollHeight + 'px';
         });
 
         let taskSaveTimeout = null;
@@ -39319,77 +40507,6 @@ SOFTWARE.</div>
             contentArea.classList.remove('d-none');
             contentArea.focus();
           }
-        });
-
-        document.querySelectorAll('#blogEditorToolbar button').forEach(btn => {
-          btn.addEventListener('click', (e) => {
-            e.preventDefault();
-            const md = btn.dataset.md;
-            const ta = document.getElementById('blogEditorContent');
-            const start = ta.selectionStart;
-            const end = ta.selectionEnd;
-            const selectedText = ta.value.substring(start, end);
-            let pre = '', suf = '', def = '';
-
-            switch(md) {
-              case 'bold': pre = '**'; suf = '**'; def = 'bold text'; break;
-              case 'italic': pre = '*'; suf = '*'; def = 'italic text'; break;
-              case 'heading': pre = '### '; def = 'Heading'; break;
-              case 'strikethrough': pre = '~~'; suf = '~~'; def = 'strikethrough'; break;
-              case 'ul': pre = '- '; def = 'List item'; break;
-              case 'ol': pre = '1. '; def = 'List item'; break;
-              case 'task': pre = '- [ ] '; def = 'Task'; break;
-              case 'quote': pre = '> '; def = 'Quote'; break;
-              case 'code': pre = '```\n'; suf = '\n```'; def = 'code block'; break;
-              case 'table': pre = '| Header | Header |\n| --- | --- |\n| Cell | Cell |'; break;
-              case 'align-left': pre = '<div style="text-align: left;">\n'; suf = '\n</div>'; def = 'Left aligned text'; break;
-              case 'align-center': pre = '<div style="text-align: center;">\n'; suf = '\n</div>'; def = 'Center aligned text'; break;
-              case 'align-right': pre = '<div style="text-align: right;">\n'; suf = '\n</div>'; def = 'Right aligned text'; break;
-              case 'link': pre = '['; suf = '](url)'; def = 'link text'; break;
-              case 'image': 
-                const imgUrl = prompt("Enter image URL:", "https://example.com/image.jpg");
-                if (imgUrl) {
-                  const imgWidth = prompt("Enter width (e.g. 100%, 300px, auto):", "100%");
-                  const imgHeight = prompt("Enter height (e.g. auto, 300px):", "auto");
-                  pre = `<img src="${imgUrl}" width="${imgWidth || '100%'}" height="${imgHeight || 'auto'}" alt="`;
-                  suf = '">';
-                  def = 'image description';
-                } else {
-                  return;
-                }
-                break;
-              case 'video':
-                const vidUrl = prompt("Enter Video or YouTube URL:", "https://www.youtube.com/watch?v=...");
-                if (vidUrl) {
-                  const ytMatch = vidUrl.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
-                  if (ytMatch && ytMatch[1]) {
-                    pre = `\n<iframe src="https://www.youtube.com/embed/${ytMatch[1]}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>\n`;
-                  } else {
-                    pre = `\n<video src="${vidUrl}" controls style="background: #000;"></video>\n`;
-                  }
-                  suf = '';
-                  def = '';
-                } else {
-                  return;
-                }
-                break;
-            }
-
-            const insertText = selectedText || def;
-            const finalInsert = md === 'table' ? pre : pre + insertText + suf;
-            ta.value = ta.value.substring(0, start) + finalInsert + ta.value.substring(end);
-            ta.focus();
-            
-            if (md === 'table') {
-              ta.setSelectionRange(start + 2, start + 8);
-            } else if (selectedText) {
-               ta.setSelectionRange(start, start + finalInsert.length);
-            } else {
-               ta.setSelectionRange(start + pre.length, start + pre.length + def.length);
-            }
-            
-            ta.dispatchEvent(new Event('input'));
-          });
         });
 
         document.getElementById('editorForceSaveBtn').addEventListener('click', async () => {
@@ -41598,13 +42715,15 @@ SOFTWARE.</div>
               const w = rect.width;
               const isPortrait = rect.height > rect.width;
               
-              let botW;
-              if (this.LANES === 10) {
-                botW = isPortrait ? w * 1.15 : w * 0.96;
-              } else if (this.LANES === 6) {
-                botW = isPortrait ? w * 1.15 : w * 0.85;
-              } else {
-                botW = isPortrait ? w * 0.85 : w * 0.60;
+              let botW = this.botW;
+              if (!botW) {
+                if (this.LANES === 10) {
+                  botW = isPortrait ? w * 0.73 : w * 0.75;
+                } else if (this.LANES === 6) {
+                  botW = isPortrait ? w * 0.72 : w * 0.68;
+                } else {
+                  botW = isPortrait ? w * 0.68 : w * 0.55;
+                }
               }
               
               const sBotW = botW / this.LANES;
@@ -41612,8 +42731,10 @@ SOFTWARE.</div>
               
               const x = clientX - rect.left;
               if (x >= startX && x <= startX + botW) {
-                 return Math.floor((x - startX) / sBotW);
+                return Math.floor((x - startX) / sBotW);
               }
+              if (x < startX) return 0;
+              if (x > startX + botW) return this.LANES - 1;
               return -1;
             };
 
@@ -43527,21 +44648,26 @@ SOFTWARE.</div>
             this.ch = h;
             this.wHalf = w / 2;
             this.vanY = h * 0.15;
-            this.hwH = h * 0.72;
+            this.hwH = h * 0.64;
             this.judY = this.vanY + this.hwH;
             const isPortrait = h > w;
             
-            // Dynamically constrain maximum track width so Demon (10 lanes) doesn't bleed off-screen
+            // Dynamically scale width in portrait mode to ensure extended track bottom fits 100% on screen
             if (this.LANES === 10) {
-              this.botW = isPortrait ? w * 1.15 : w * 0.96; // Max 96% of screen width
-              this.topW = isPortrait ? w * 0.20 : w * 0.12;
+              this.botW = isPortrait ? w * 0.73 : w * 0.75;
+              this.topW = isPortrait ? w * 0.12 : w * 0.10;
             } else if (this.LANES === 6) {
-              this.botW = isPortrait ? w * 1.15 : w * 0.85;
-              this.topW = isPortrait ? w * 0.15 : w * 0.08;
+              this.botW = isPortrait ? w * 0.72 : w * 0.68;
+              this.topW = isPortrait ? w * 0.10 : w * 0.08;
             } else {
-              this.botW = isPortrait ? w * 0.85 : w * 0.60;
-              this.topW = isPortrait ? w * 0.10 : w * 0.05;
+              this.botW = isPortrait ? w * 0.68 : w * 0.55;
+              this.topW = isPortrait ? w * 0.08 : w * 0.05;
             }
+
+            // Calculate bottom track extension (p = 1.22) to stretch lanes to bottom of canvas
+            const maxP = 1.22;
+            const trackBotY = this.vanY + Math.pow(maxP, 1.35) * this.hwH;
+            const trackBotW = this.topW + Math.pow(maxP, 1.35) * (this.botW - this.topW);
 
             const ctx = this.bgCtx;
             ctx.clearRect(0, 0, w, h);
@@ -43549,13 +44675,13 @@ SOFTWARE.</div>
             ctx.fillRect(0, 0, w, h);
 
             // Stage Floor Glass Gradient
-            const floorGrad = ctx.createLinearGradient(0, this.vanY, 0, this.judY);
+            const floorGrad = ctx.createLinearGradient(0, this.vanY, 0, trackBotY);
             floorGrad.addColorStop(0, "rgba(15, 15, 25, 0.0)");
             floorGrad.addColorStop(0.5, "rgba(25, 25, 40, 0.4)");
             floorGrad.addColorStop(1, "rgba(45, 45, 65, 0.85)");
 
             // Settle beam gradient once in memory to avoid garbage collection loops
-            this.beamGrad = ctx.createLinearGradient(0, this.vanY, 0, this.judY);
+            this.beamGrad = ctx.createLinearGradient(0, this.vanY, 0, trackBotY);
             this.beamGrad.addColorStop(0, "rgba(255, 255, 255, 0.0)");
             this.beamGrad.addColorStop(0.6, "rgba(255, 59, 48, 0.15)");
             this.beamGrad.addColorStop(1, "rgba(255, 59, 48, 0.65)");
@@ -43563,14 +44689,14 @@ SOFTWARE.</div>
             ctx.beginPath();
             ctx.moveTo(this.wHalf - this.topW / 2, this.vanY);
             ctx.lineTo(this.wHalf + this.topW / 2, this.vanY);
-            ctx.lineTo(this.wHalf + this.botW / 2, this.judY);
-            ctx.lineTo(this.wHalf - this.botW / 2, this.judY);
+            ctx.lineTo(this.wHalf + trackBotW / 2, trackBotY);
+            ctx.lineTo(this.wHalf - trackBotW / 2, trackBotY);
             ctx.fillStyle = floorGrad;
             ctx.fill();
 
             // Lane Divider Lines (Fading gradient for depth)
             for (let i = 1; i < this.LANES; i++) {
-              const lineGrad = ctx.createLinearGradient(0, this.vanY, 0, this.judY);
+              const lineGrad = ctx.createLinearGradient(0, this.vanY, 0, trackBotY);
               lineGrad.addColorStop(0, "rgba(255, 255, 255, 0.0)");
               lineGrad.addColorStop(0.2, "rgba(255, 255, 255, 0.05)");
               lineGrad.addColorStop(1, "rgba(255, 255, 255, 0.4)");
@@ -43579,12 +44705,12 @@ SOFTWARE.</div>
               ctx.lineWidth = 1.5;
               ctx.beginPath();
               ctx.moveTo(this.wHalf - this.topW / 2 + i * (this.topW / this.LANES), this.vanY);
-              ctx.lineTo(this.wHalf - this.botW / 2 + i * (this.botW / this.LANES), this.judY);
+              ctx.lineTo(this.wHalf - trackBotW / 2 + i * (trackBotW / this.LANES), trackBotY);
               ctx.stroke();
             }
 
             // Outer Edge Glows
-            const edgeGrad = ctx.createLinearGradient(0, this.vanY, 0, this.judY);
+            const edgeGrad = ctx.createLinearGradient(0, this.vanY, 0, trackBotY);
             edgeGrad.addColorStop(0, "rgba(255, 59, 48, 0.0)");
             edgeGrad.addColorStop(0.5, "rgba(255, 59, 48, 0.6)");
             edgeGrad.addColorStop(1, "rgba(255, 59, 48, 1.0)");
@@ -43593,14 +44719,14 @@ SOFTWARE.</div>
             ctx.lineWidth = 3;
             ctx.beginPath();
             ctx.moveTo(this.wHalf - this.topW / 2, this.vanY);
-            ctx.lineTo(this.wHalf - this.botW / 2, this.judY);
+            ctx.lineTo(this.wHalf - trackBotW / 2, trackBotY);
             ctx.stroke();
             ctx.beginPath();
             ctx.moveTo(this.wHalf + this.topW / 2, this.vanY);
-            ctx.lineTo(this.wHalf + this.botW / 2, this.judY);
+            ctx.lineTo(this.wHalf + trackBotW / 2, trackBotY);
             ctx.stroke();
 
-            // Judgment Line (Thick, bright, neon glow)
+            // Judgment Line (Thick, bright, neon glow overlapping across the lanes at p = 1.0)
             ctx.shadowColor = "#ff3b30";
             ctx.shadowBlur = 15;
             ctx.strokeStyle = "#ffffff";
@@ -43961,9 +45087,9 @@ SOFTWARE.</div>
 
             for (let i = 0; i < this.LANES; i++) {
               if (this.activeKeysHeld[i]) {
-                const pyTop = calcY(0), pyBot = calcY(1);
-                const pwTop = calcW(0), pwBot = calcW(1);
-                const pxTop = calcX(i, 0), pxBot = calcX(i, 1);
+                const pyTop = calcY(0), pyBot = calcY(1.22);
+                const pwTop = calcW(0), pwBot = calcW(1.22);
+                const pxTop = calcX(i, 0), pxBot = calcX(i, 1.22);
                 
                 const beamGrad = this.ctx.createLinearGradient(0, pyTop, 0, pyBot);
                 beamGrad.addColorStop(0, "rgba(255, 255, 255, 0.0)");
@@ -44149,18 +45275,20 @@ SOFTWARE.</div>
             const h = this.canvas.height / dpr;
             const isPortrait = h > w;
 
-            let botW;
-            if (this.LANES === 10) {
-              botW = isPortrait ? w * 1.15 : w * 0.96;
-            } else if (this.LANES === 6) {
-              botW = isPortrait ? w * 1.15 : w * 0.85;
-            } else {
-              botW = isPortrait ? w * 0.85 : w * 0.60;
+            let botW = this.botW;
+            if (!botW) {
+              if (this.LANES === 10) {
+                botW = isPortrait ? w * 0.73 : w * 0.75;
+              } else if (this.LANES === 6) {
+                botW = isPortrait ? w * 0.72 : w * 0.68;
+              } else {
+                botW = isPortrait ? w * 0.68 : w * 0.55;
+              }
             }
             
             const sW = botW / this.LANES;
             const cX = w / 2 - botW / 2 + lane * sW + sW / 2;
-            const cY = h * 0.15 + h * 0.72;
+            const cY = h * 0.15 + h * 0.64;
             const colorStr = white ? "#ffffff" : "#ff3b30";
             
             for (let i = 0; i < 12; i++) {
