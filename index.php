@@ -11826,7 +11826,7 @@ HTML;
 
         if (!$user_details) { http_response_code(404); exit; }
 
-        $stmt_stats = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, SUM((SELECT COALESCE(SUM(play_count), 0) FROM play_counts WHERE song_id = music.id)) as play_count FROM music WHERE user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1");
+        $stmt_stats = $db->prepare("SELECT COUNT(*) as song_count, SUM(duration) as total_duration, MIN(last_modified) as uploaded_at, SUM((SELECT COALESCE(SUM(play_count), 0) FROM play_counts WHERE song_id = music.id)) as play_count FROM music WHERE user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1");
         $stmt_stats->execute([$user_id]);
         $details = $stmt_stats->fetch();
         
@@ -16085,6 +16085,8 @@ function perform_cover_scan($db) {
     <script src="https://cdn.jsdelivr.net/npm/@multiavatar/multiavatar/multiavatar.min.js"></script>
     <!-- External Language Support Library for multi-language transliteration -->
     <script src="https://cdn.jsdelivr.net/npm/transliteration@2.3.5/dist/browser/bundle.umd.min.js"></script>
+    <!-- Confetti Library -->
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
     <?php echo $initialViewJS; ?>
     <style>
       :root {
@@ -16576,15 +16578,17 @@ function perform_cover_scan($db) {
         -webkit-backdrop-filter: blur(10px);
         border: 1px solid rgba(255, 255, 255, 0.15);
         border-radius: 50px;
-        transition: background-color 0.2s ease-in-out, border-color 0.2s ease-in-out;
+        transition: background-color 0.2s ease-in-out, border-color 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
         flex-wrap: nowrap;
         box-sizing: border-box;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
       }
 
       .search-bar.input-group.is-focused,
       .search-bar.input-group:focus-within {
         background-color: rgba(255, 255, 255, 0.15);
         border-color: rgba(255, 255, 255, 0.8);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
       }
 
       .search-bar.input-group > .form-control,
@@ -16913,14 +16917,46 @@ function perform_cover_scan($db) {
         left: 0;
         right: 0;
         height: 90px;
-        background-color: var(--ytm-bg);
-        border-top: 1px solid var(--ytm-surface-2);
+        background-color: #030303;
+        border: none !important;
+        border-top: none !important;
+        box-shadow: none !important;
         display: grid;
         grid-template-columns: minmax(200px, 1fr) 2fr minmax(200px, 1fr);
         align-items: center;
         gap: 1.5rem;
         padding: 0 1.5rem;
         z-index: 1048;
+        overflow: hidden;
+      }
+
+      .player-bar::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: linear-gradient(180deg, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.85) 100%) !important;
+        z-index: 0;
+        pointer-events: none;
+      }
+
+      .player-bar > *:not(.dynamic-blur-bg) {
+        position: relative;
+        z-index: 1;
+      }
+
+      .player-bar .dynamic-blur-bg {
+        position: absolute !important;
+        top: -200px !important;
+        bottom: -200px !important;
+        left: -100px !important;
+        right: -100px !important;
+        filter: blur(40px) brightness(0.9) saturate(1.3) !important;
+        transform: translateZ(0) !important;
+        opacity: 0.85 !important;
+        z-index: -1 !important;
       }
 
       .player-bar .track-info {
@@ -16954,9 +16990,16 @@ function perform_cover_scan($db) {
         font-weight: 500;
       }
 
-      .player-bar .track-info-text .artist {
+      .player-bar .track-info-text .artist,
+      .player-bar .track-info-text .artist * {
         color: var(--ytm-secondary-text);
         font-size: 0.875rem;
+        transition: color 0.3s ease;
+      }
+
+      .player-bar.theme-light-bg .track-info-text .artist,
+      .player-bar.theme-light-bg .track-info-text .artist * {
+        color: rgba(0, 0, 0, 0.7) !important;
       }
 
       .player-bar .track-info-text .artist:hover {
@@ -17015,6 +17058,10 @@ function perform_cover_scan($db) {
 
       .player-btn.play-btn .bi {
         font-size: 1.75rem;
+      }
+
+      .player-btn.play-btn .bi-play-fill {
+        margin-left: 4px;
       }
 
       .player-btn.active {
@@ -17247,6 +17294,16 @@ function perform_cover_scan($db) {
         border-radius: 50%;
         object-fit: cover;
         background-color: var(--ytm-surface-2);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+      }
+
+      .profile-picture:hover,
+      .profile-picture-sm:hover {
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+        transform: scale(1.05);
+        border-color: rgba(255, 255, 255, 0.3);
       }
 
       .profile-picture-lg {
@@ -17655,64 +17712,114 @@ function perform_cover_scan($db) {
         bottom: -60px;
         background-size: cover;
         background-position: center;
-        filter: blur(45px) brightness(0.4);
-        opacity: 0.85;
+        filter: blur(45px) brightness(0.6);
+        opacity: 0.95;
         z-index: 0;
         transition: background-image 0.8s ease, filter 0.4s ease;
         pointer-events: none;
+        transform: scale(1.3);
+        transform-origin: center;
       }
 
-      /* Dynamic Light Theme Overrides for Player Modals */
-      .player-modal-content.theme-light-bg {
-        background-color: #ffffff !important;
+      /* Dynamic Light Theme Overrides for Player Modals and Player Bar */
+      .player-modal-content.theme-light-bg,
+      .player-bar.theme-light-bg {
+        background-color: rgba(255, 255, 255, 0.85) !important;
         color: #000000 !important;
       }
 
-      .player-modal-content.theme-light-bg .dynamic-blur-bg {
+      .player-bar.theme-light-bg::before {
+        background: linear-gradient(0deg, rgba(255, 255, 255, 0.6) 0%, rgba(255, 255, 255, 0.1) 100%);
+      }
+
+      .player-modal-content.theme-light-bg .dynamic-blur-bg,
+      .player-bar.theme-light-bg .dynamic-blur-bg {
         filter: blur(50px) brightness(1.05);
-        opacity: 0.85;
+        opacity: 0.95;
       }
 
-      .player-modal-content.theme-light-bg .text-white {
+      .player-modal-content.theme-light-bg .text-white,
+      .player-bar.theme-light-bg .text-white,
+      .player-bar.theme-light-bg .title {
         color: #000000 !important;
+        text-shadow: none !important;
       }
 
-      .player-modal-content.theme-light-bg .text-secondary {
+      .player-modal-content.theme-light-bg .text-secondary,
+      .player-modal-content.theme-light-bg .text-info,
+      .player-bar.theme-light-bg .artist,
+      .player-bar.theme-light-bg .time,
+      .player-bar.theme-light-bg .text-secondary,
+      .player-bar.theme-light-bg .text-info {
         color: #444444 !important;
-        font-weight: 500;
+        font-weight: 600;
+        text-shadow: none !important;
       }
 
-      .player-modal-content.theme-light-bg .player-btn {
+      .player-modal-content.theme-light-bg .player-btn,
+      .player-bar.theme-light-bg .player-btn {
         color: #333333 !important;
+        text-shadow: none !important;
       }
 
       .player-modal-content.theme-light-bg .player-btn:hover,
-      .player-modal-content.theme-light-bg .player-btn.active {
+      .player-modal-content.theme-light-bg .player-btn.active,
+      .player-bar.theme-light-bg .player-btn:hover,
+      .player-bar.theme-light-bg .player-btn.active {
         color: #000000 !important;
       }
 
-      .player-modal-content.theme-light-bg .play-btn {
+      .player-modal-content.theme-light-bg .play-btn,
+      .player-bar.theme-light-bg .play-btn {
         background-color: #000000 !important;
         color: #ffffff !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
       }
 
-      .player-modal-content.theme-light-bg .play-btn .bi {
+      .player-modal-content.theme-light-bg .play-btn .bi,
+      .player-bar.theme-light-bg .play-btn .bi {
         color: #ffffff !important;
       }
 
-      .player-modal-content.theme-light-bg .progress-bar-bg {
+      /* Dark Theme Default Shadows for better contrast against vibrant backgrounds */
+      .player-bar .title, .player-bar .time {
+        text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+      }
+      .player-bar .artist, .player-bar .player-btn, .player-bar .text-secondary {
+        text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+      }
+
+      /* Fix Play Icon Centering Optical Illusion */
+      .player-btn.play-btn .bi-play-fill {
+        margin-left: 4px;
+      }
+
+      .player-modal-content.theme-light-bg .progress-bar-bg,
+      .player-bar.theme-light-bg .progress-bar-bg,
+      .player-bar.theme-light-bg #volume-slider.form-range {
         background-color: rgba(0, 0, 0, 0.2) !important;
       }
 
-      .player-modal-content.theme-light-bg .progress-bar-fg {
+      .player-modal-content.theme-light-bg .progress-bar-fg,
+      .player-bar.theme-light-bg .progress-bar-fg {
         background-color: #000000 !important;
       }
 
-      .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg {
+      .player-bar.theme-light-bg #volume-slider.form-range::-webkit-slider-thumb {
+        background-color: #000000 !important;
+      }
+
+      .player-bar.theme-light-bg #volume-slider.form-range::-moz-range-thumb {
+        background-color: #000000 !important;
+      }
+
+      .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg,
+      .player-bar.theme-light-bg .progress-bar-container:hover .progress-bar-fg {
         background-color: var(--ytm-accent) !important;
       }
 
-      .player-modal-content.theme-light-bg .progress-bar-fg::after {
+      .player-modal-content.theme-light-bg .progress-bar-fg::after,
+      .player-bar.theme-light-bg .progress-bar-fg::after {
         background-color: #000000 !important;
       }
 
@@ -17733,17 +17840,13 @@ function perform_cover_scan($db) {
       .player-modal-content.theme-light-bg .nav-tabs .nav-link.active:hover,
       .player-modal-content.theme-light-bg .nav-tabs .nav-link.active:focus {
         background: rgba(255, 255, 255, 0.5) !important;
-        /* Elegant translucent white for light themes */
         color: #000000 !important;
         border-radius: 50rem !important;
-        /* Perfect pill shape on all sides */
         box-shadow: none !important;
-        /* Removed 3D box-shadow */
         border: none !important;
         font-weight: 800 !important;
         text-shadow: none !important;
         transform: none !important;
-        /* Prevents active tab hover transforms */
       }
 
       .player-modal-content.theme-light-bg .song-item .song-title,
@@ -17907,6 +18010,17 @@ function perform_cover_scan($db) {
         background-color: var(--ytm-surface-2);
       }
 
+      .artist-link,
+      .song-album,
+      .user-profile-link,
+      .hover-underline,
+      .mention-link {
+        cursor: pointer !important;
+      }
+
+      .artist-link:hover,
+      .song-album:hover,
+      .user-profile-link:hover,
       .song-artist:hover,
       .song-artist-name:hover,
       .hover-underline:hover {
@@ -21336,7 +21450,7 @@ function perform_cover_scan($db) {
           </div>
         </div>
         <div class="page-header">
-          <h1 id="content-title" class="content-title">Home</h1>
+          <h1 id="content-title" class="content-title text-truncate">Home</h1>
           <div class="header-controls">
             <div id="sort-controls" class="d-none">
               <label for="sort-select" class="text-secondary small">Sort by</label>
@@ -22402,6 +22516,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="player-bar d-none" id="player-bar">
+      <div class="dynamic-blur-bg" id="player-bar-bg"></div>
       <div class="track-info d-none d-md-flex">
         <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art" class="track-info-art" id="player-art-desktop">
         <div class="track-info-text" style="min-width: 0; flex-grow: 1;">
@@ -22622,13 +22737,13 @@ function perform_cover_scan($db) {
 
     <div class="modal fade" id="connections-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
-        <div class="modal-content" style="background-color: var(--ytm-surface);">
-          <div class="modal-header border-secondary">
-            <h5 class="modal-title text-white" id="connections-modal-title">Connections</h5>
+        <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
+          <div class="modal-header border-0 pb-2 px-4 pt-4">
+            <h5 class="modal-title text-white fw-bold" id="connections-modal-title"><i class="bi bi-people-fill text-info me-2"></i>Connections</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body p-0">
-            <div class="list-group list-group-flush bg-transparent" id="connections-list"></div>
+          <div class="modal-body px-3 pb-4">
+            <div class="d-flex flex-column gap-2" id="connections-list"></div>
           </div>
         </div>
       </div>
@@ -24841,9 +24956,9 @@ function perform_cover_scan($db) {
     <div class="modal fade" id="lyrics-modal" tabindex="-1">
       <div class="modal-dialog modal-fullscreen">
         <div class="modal-content" style="background: rgba(10, 10, 10, 0.85); backdrop-filter: blur(25px); -webkit-backdrop-filter: blur(25px); border: none;">
-          <div class="modal-header border-0 pb-0 pt-4 position-absolute w-100 z-3">
-            <h5 class="modal-title w-100 text-center fw-bold text-white opacity-75" id="lyrics-modal-title" style="letter-spacing: 1px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">Lyrics</h5>
-            <button type="button" class="btn-close btn-close-white position-absolute end-0 me-4" data-bs-dismiss="modal"></button>
+          <div class="modal-header border-0 pb-0 pt-4 position-absolute w-100 z-3 align-items-center pe-5">
+            <h5 class="modal-title text-start fw-bold text-white opacity-75 text-truncate ps-1" id="lyrics-modal-title" style="letter-spacing: 1px; text-shadow: 0 2px 4px rgba(0,0,0,0.5); max-width: 90%;">Lyrics</h5>
+            <button type="button" class="btn-close btn-close-white position-absolute end-0 me-4" data-bs-dismiss="modal" style="top: 1.8rem;"></button>
           </div>
           <div class="modal-body p-0 position-relative" id="lyrics-modal-body" style="overflow-y: auto;">
           </div>
@@ -25160,7 +25275,7 @@ function perform_cover_scan($db) {
             <i class="bi bi-hdd-stack text-secondary mb-3" style="font-size: 3.5rem; display: block;"></i>
             <h5 class="text-white mb-3">Scan Library First!</h5>
             <p class="text-secondary mb-4">Your music database is completely empty. Please run the Full Library Scan to analyze your files and build the database so the site can function.</p>
-            <button class="btn btn-danger w-100 fw-bold py-2" id="trigger-emergency-scan-btn" data-bs-dismiss="modal" data-bs-toggle="modal" data-bs-target="#full-scan-modal">
+            <button class="btn btn-danger w-100 fw-bold py-2" id="trigger-emergency-scan-btn" data-bs-dismiss="modal">
               <i class="bi bi-search me-1"></i> Scan Library Now
             </button>
           </div>
@@ -26383,6 +26498,23 @@ curl_close($ch);
             ::-webkit-scrollbar-thumb:hover {
               background: #5e5e5e;
             }
+
+            .dynamic-blur-bg {
+              position: absolute;
+              top: -60px;
+              left: -60px;
+              right: -60px;
+              bottom: -60px;
+              background-size: cover;
+              background-position: center;
+              filter: blur(45px) brightness(0.6);
+              opacity: 0.95;
+              z-index: 0;
+              transition: background-image 0.8s ease, filter 0.4s ease;
+              pointer-events: none;
+              transform: scale(1.3);
+              transform-origin: center;
+            }
         
             .ytm-header {
               position: fixed;
@@ -26563,8 +26695,10 @@ curl_close($ch);
               left: 0;
               right: 0;
               height: 96px;
-              background-color: var(--ytm-surface);
-              border-top: 1px solid var(--ytm-border);
+              background-color: #030303;
+              border: none !important;
+              border-top: none !important;
+              box-shadow: none !important;
               display: grid;
               grid-template-columns: 1fr 2fr 1fr;
               align-items: center;
@@ -26572,6 +26706,36 @@ curl_close($ch);
               z-index: 1050;
               transform: translateY(100%);
               transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+              overflow: hidden;
+            }
+
+            .player-bar::before {
+              content: '';
+              position: absolute;
+              top: 0;
+              left: 0;
+              right: 0;
+              bottom: 0;
+              background: linear-gradient(180deg, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.85) 100%) !important;
+              z-index: 0;
+              pointer-events: none;
+            }
+        
+            .player-bar > *:not(.dynamic-blur-bg) {
+              position: relative;
+              z-index: 1;
+            }
+
+            .player-bar .dynamic-blur-bg {
+              position: absolute !important;
+              top: -200px !important;
+              bottom: -200px !important;
+              left: -100px !important;
+              right: -100px !important;
+              filter: blur(40px) brightness(0.9) saturate(1.3) !important;
+              transform: translateZ(0) !important;
+              opacity: 0.85 !important;
+              z-index: -1 !important;
             }
         
             .player-bar.visible {
@@ -26629,9 +26793,16 @@ curl_close($ch);
               margin-bottom: 2px;
             }
         
-            .pb-artist {
+            .pb-artist,
+            .pb-artist * {
               font-size: 0.85rem;
               color: var(--ytm-secondary-text);
+              transition: color 0.3s ease;
+            }
+
+            .player-bar.theme-light-bg .pb-artist,
+            .player-bar.theme-light-bg .pb-artist * {
+              color: rgba(0, 0, 0, 0.7) !important;
             }
         
             .pb-center {
@@ -26693,6 +26864,10 @@ curl_close($ch);
         
             .pb-play-circle .bi {
               font-size: 1.8rem;
+            }
+
+            .pb-play-circle .bi-play-fill {
+              margin-left: 4px;
             }
         
             .pb-timeline {
@@ -27070,6 +27245,7 @@ curl_close($ch);
           </div>
 
           <div class="player-bar" id="player-bar">
+            <div class="dynamic-blur-bg" id="player-bar-bg"></div>
             <div class="pb-left">
               <div class="pb-art-container" id="pb-art-trigger">
                 <img id="pb-art" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjMjIyIi8+PC9zdmc+" class="pb-art" alt="Art">
@@ -27543,10 +27719,12 @@ curl_close($ch);
                 this.src = coverSvg;
               };
               // Apply dynamic blurred background to modals
-              const mobileBg = document.getElementById('mobile-player-bg');
-              const desktopBg = document.getElementById('desktop-player-bg');
+              const mobileBg = document.getElementById("mobile-player-bg");
+              const desktopBg = document.getElementById("desktop-player-bg");
+              const playerBarBg = document.getElementById("player-bar-bg");
               if (mobileBg) mobileBg.style.backgroundImage = `url('${fullCoverImg}')`;
               if (desktopBg) desktopBg.style.backgroundImage = `url('${fullCoverImg}')`;
+              if (playerBarBg) playerBarBg.style.backgroundImage = `url('${fullCoverImg}')`;
               lastSavedTime = 0;
               isRestoringTime = false;
               audioPlayer.src = `${currentBaseUrl}${joiner}action=get_stream&id=${song.id}&api_key=${encodeURIComponent(apiKey)}`;
@@ -28584,6 +28762,7 @@ SOFTWARE.</div>
                   (res.status === "followed" || res.status === "unfollowed")
                 ) {
                   const isFollowing = res.status === "followed";
+                  if (isFollowing) window.triggerFollowEffect(followBtn);
                   followBtn.textContent = isFollowing ? "Unfollow" : "Follow";
                   followBtn.className = `btn btn-sm rounded-pill fw-bold follow-btn-modal px-3 flex-shrink-0 ${isFollowing ? "btn-outline-light" : "btn-danger"}`;
     
@@ -30728,7 +30907,8 @@ SOFTWARE.</div>
               currentLrcData = lrcData;
               currentLrcSongId = currentSong.id;
               currentLyricIndex = -1;
-    
+              lyricsContainer.style.padding = "35vh 2rem 50vh 2rem";
+              lyricsContainer.style.display = "block";
               lyricsContainer.innerHTML = lrcData
                 .map(
                   (line, idx) =>
@@ -30738,15 +30918,19 @@ SOFTWARE.</div>
             } else {
               currentLrcData = null;
               currentLrcSongId = null;
+              lyricsContainer.style.padding = "2rem";
+              lyricsContainer.style.display = "block";
               lyricsContainer.innerHTML = `<div class="desktop-plain-lyrics">${escapeHTML(currentSong.lyrics)}</div>`;
             }
           } else {
             currentLrcData = null;
             currentLrcSongId = null;
-            if (lyricsParent) lyricsParent.style.height = "100dvh";
-            lyricsContainer.style.height = "100dvh";
+            if (lyricsParent) lyricsParent.style.height = "100%";
+            lyricsContainer.style.height = "100%";
+            lyricsContainer.style.padding = "0";
+            lyricsContainer.style.display = "flex";
             lyricsContainer.innerHTML = `
-                    <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 p-4 text-secondary opacity-50">
+                    <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 w-100 p-4 text-secondary opacity-50">
                       <i class="bi bi-music-note-list mb-3" style="font-size: 3.5rem;"></i>
                       <h5 class="fw-bold text-white mb-1">No Lyrics Available</h5>
                       <p class="small mb-0">Lyrics haven't been added for this track yet.</p>
@@ -32781,10 +32965,33 @@ SOFTWARE.</div>
     
           currentViewOwnerId = details ? details.user_id : null;
           let typeText = type.charAt(0).toUpperCase() + type.slice(1);
-          let statsText = `${formatSongCount(details.song_count || 0)} songs &bull; ${formatTotalDuration(details.total_duration || 0)}`;
-          if (details.play_count !== undefined && details.play_count !== null) {
-            statsText += ` &bull; ${formatSongCount(details.play_count)} plays`;
+          let totalPlays = parseInt(details.play_count, 10) || 0;
+          let monthlyPlays = 0;
+          let startDate = 0;
+
+          if (type === "playlist" && details.created_at) {
+            startDate = new Date(details.created_at.replace(" ", "T") + "Z").getTime();
+          } else if ((type === "artist" || type === "album" || type === "profile") && details.uploaded_at) {
+            startDate = parseInt(details.uploaded_at, 10) * 1000;
           }
+
+          if (startDate > 0 && totalPlays > 0) {
+            const months = Math.max(1, (Date.now() - startDate) / (1000 * 60 * 60 * 24 * 30.44));
+            monthlyPlays = Math.round(totalPlays / months);
+          } else if (totalPlays > 0) {
+            monthlyPlays = totalPlays;
+          }
+
+          let avgMonthlyHTML = "";
+          if (monthlyPlays > 0) {
+            avgMonthlyHTML = `<div class="text-white fw-bold mb-2" style="font-size: 0.95rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);"><i class="bi bi-graph-up-arrow text-danger me-2"></i>${formatSongCount(monthlyPlays)} avg. monthly plays</div>`;
+          }
+
+          let statsText = `${formatSongCount(details.song_count || 0)} songs &bull; ${formatTotalDuration(details.total_duration || 0)}`;
+          if (totalPlays > 0) {
+            statsText += ` &bull; ${formatSongCount(totalPlays)} plays`;
+          }
+
           if (type === "playlist" && details.created_at) {
             const createdDate = new Date(
               details.created_at.replace(" ", "T") + "Z",
@@ -32806,17 +33013,19 @@ SOFTWARE.</div>
               statsText += `<br><span class="mt-1 d-block text-secondary" style="font-size: 0.8rem;">Uploaded: ${uploadedDate}</span>`;
             }
           }
-          if (
-            details.followers_count !== undefined &&
-            details.followers_count !== null
-          ) {
-            statsText += ` &bull; ${formatSongCount(details.followers_count)} followers`;
+
+          let finalStatsText = statsText;
+          if (type === "artist" || type === "profile") {
+            finalStatsText = `${statsText}
+                    &bull; <a href="#" class="text-info text-decoration-none connection-trigger" data-id="${details.user_id}" data-type="followers">${formatSongCount(details.followers_count || 0)} followers</a>
+                    &bull; <a href="#" class="text-info text-decoration-none connection-trigger" data-id="${details.user_id}" data-type="following">${formatSongCount(details.following_count || 0)} following</a>`;
           }
+
           let shareButtonHTML = "",
             copyButtonHTML = "",
             downloadButtonHTML = "",
             downloadExportPlaylistZipButtonHTML = "";
-    
+
           let playButtonHTML = "";
           if (songsList && songsList.length > 0) {
             playButtonHTML = `
@@ -32825,10 +33034,10 @@ SOFTWARE.</div>
                     </button>
                   `;
           }
-    
+
           let shareId = "";
           let shareName = encodeURIComponent(details.name);
-    
+
           // ADVANCED ALBUM ARTIST MATCHER
           let rawArtistId = currentView.filter_user_id || details.user_id;
           if (!rawArtistId && songsList && songsList.length > 0) {
@@ -32838,7 +33047,7 @@ SOFTWARE.</div>
           if (isNaN(artistIdForShare) || artistIdForShare <= 0) {
             artistIdForShare = "";
           }
-    
+
           if (type === "playlist") {
             typeText = `Playlist by ${escapeHTML(details.creator)}`;
             shareId = details.public_id;
@@ -32867,7 +33076,7 @@ SOFTWARE.</div>
           } else {
             document.title = `${details.name} - PHP Music`;
           }
-    
+
           if (type !== "profile") {
             let shareArtistName = currentView.artist_name || "";
             if (!shareArtistName && songsList && songsList.length > 0) {
@@ -32878,12 +33087,12 @@ SOFTWARE.</div>
                       <i class="bi bi-share-fill"></i> <span class="d-none d-md-inline">Share</span>
                     </button>`;
           }
-    
+
           let followButtonHTML = "";
           let messageButtonHTML = "";
           let blockButtonHTML = "";
           let reportButtonHTML = "";
-    
+
           if (
             type === "artist" &&
             details.is_user &&
@@ -32895,42 +33104,38 @@ SOFTWARE.</div>
               ? "btn-outline-light border-secondary text-white"
               : "btn-light text-dark";
             followButtonHTML = `<button class="btn ${followClass} d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-4 py-1 fw-bold follow-btn" data-user-id="${details.user_id}" style="font-size: 0.85rem; height: 38px;">${followText}</button>`;
-    
+
             messageButtonHTML = `<button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary message-btn" data-user-id="${details.user_id}" data-artist="${encodeURIComponent(details.name)}" title="Message User" style="font-size: 0.85rem; height: 38px;"><i class="bi bi-chat-dots-fill"></i> <span class="d-none d-md-inline">Message</span></button>`;
-    
+
             const blockText = details.is_blocked ? "Unblock" : "Block";
-            const blockClass = details.is_blocked ? "text-danger" : "text-secondary";
-            blockButtonHTML = `<button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary block-btn" data-user-id="${details.user_id}" title="${blockText} User" style="font-size: 0.85rem; height: 38px;"><i class="bi bi-slash-circle-fill ${blockClass}"></i> <span class="d-none d-md-inline">${blockText}</span></button>`;
-    
+            const blockBtnClass = details.is_blocked ? "btn-danger text-white border-0" : "btn-outline-light border-secondary text-white";
+            const blockIconClass = details.is_blocked ? "text-white" : "text-danger";
+            blockButtonHTML = `<button class="btn ${blockBtnClass} d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold block-btn shadow-sm" data-user-id="${details.user_id}" title="${blockText} User" style="font-size: 0.85rem; height: 38px; transition: all 0.2s;"><i class="bi bi-slash-circle-fill ${blockIconClass}"></i> <span class="d-none d-md-inline">${blockText}</span></button>`;
+
             if (details.reported_id !== 1 && details.name !== "Music Library") {
               reportButtonHTML = `<button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary report-user-btn" data-user-id="${details.user_id}" title="Report Profile" style="font-size: 0.85rem; height: 38px;"><i class="bi bi-flag-fill text-warning"></i> <span class="d-none d-md-inline">Report</span></button>`;
             }
           }
-    
-          // Make Connections Clickable if it's an artist/profile
-          let finalStatsText = statsText;
-          if (type === "artist" || type === "profile") {
-            finalStatsText = `${formatSongCount(details.song_count || 0)} songs &bull; ${formatTime(details.total_duration || 0)}
-                    &bull; <a href="#" class="text-info text-decoration-none connection-trigger" data-id="${details.user_id}" data-type="followers">${formatSongCount(details.followers_count || 0)} followers</a>
-                    &bull; <a href="#" class="text-info text-decoration-none connection-trigger" data-id="${details.user_id}" data-type="following">${formatSongCount(details.following_count || 0)} following</a>`;
-          }
-    
+
           const bioHTML =
             details.bio && (type === "artist" || type === "profile")
               ? `<div class="mt-2 text-secondary" style="font-size: 0.85rem; font-weight: 500; white-space: pre-wrap; max-width: 800px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;" title="${escapeHTML(details.bio)}">${parseUserText(details.bio)}</div>`
               : details.description && type === "playlist"
                 ? `<div class="mt-2 text-secondary" style="font-size: 0.85rem; font-weight: 500; white-space: pre-wrap; max-width: 800px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;" title="${escapeHTML(details.description)}">${parseUserText(details.description)}</div>`
                 : "";
-    
+
           const headerHTML = `
                   <div id="dynamic-view-header" class="view-details-header position-relative overflow-hidden" style="min-height: 250px; background-color: var(--ytm-surface);">
                     ${(type === "profile" || type === "artist") && details.background_url ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.background_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(8px); transform: scale(1.1); z-index: 0;"></div>` : ""}
                     ${type !== "profile" && type !== "artist" ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.image_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(40px); transform: scale(1.2); z-index: 0; opacity: 0.5;"></div>` : ""}
                     <div class="d-flex flex-column flex-md-row align-items-center align-items-md-end gap-4 position-relative w-100" style="z-index: 1;">
                       <img src="${type === "profile" || type === "artist" ? details.image_url + (details.image_url.includes("?") ? "&" : "?") + "t=" + new Date().getTime() : details.image_url}" alt="${escapeHTML(details.name)}" class="${type === "profile" || type === "artist" ? "rounded-circle" : "rounded shadow-lg"}" style="width: 180px; height: 180px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); aspect-ratio: 1/1; object-fit: cover; object-position: center; flex-shrink: 0;">
-                      <div class="d-flex flex-column align-items-center align-items-md-start text-center text-md-start flex-grow-1" style="min-width: 0;">
+                      <div class="d-flex flex-column align-items-center align-items-md-start text-center text-md-start flex-grow-1" style="min-width: 0; width: 100%;">
                         <div class="text-uppercase fw-bold mb-1" style="letter-spacing: 1px; font-size: 0.8rem; color: rgba(255,255,255,0.9); text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${typeText}</div>
-                        <h1 class="fw-bolder text-white mb-2" style="font-size: clamp(1.8rem, 4vw, 3rem); line-height: 1.1; letter-spacing: -1px; word-break: break-word; text-shadow: 0 4px 12px rgba(0,0,0,0.6);">${escapeHTML(details.name)}</h1>
+                        <div class="marquee-container w-100 mb-2">
+                          <h1 class="fw-bolder text-white m-0 marquee-content header-title-marquee" style="font-size: clamp(1.8rem, 4vw, 3rem); line-height: 1.1; letter-spacing: -1px; text-shadow: 0 4px 12px rgba(0,0,0,0.6);">${escapeHTML(details.name)}</h1>
+                        </div>
+                        ${avgMonthlyHTML}
                         <div class="stats mb-2" style="color: rgba(255,255,255,0.7); font-size: 0.85rem; font-weight: 500; text-shadow: 0 1px 3px rgba(0,0,0,0.5);">${finalStatsText}</div>
                         ${bioHTML}
                         <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-md-start gap-2 mt-3 w-100">
@@ -32951,6 +33156,11 @@ SOFTWARE.</div>
                   <div id="recommendation-alert-container"></div>
                 `;
           contentArea.insertAdjacentHTML("afterbegin", headerHTML);
+
+          const headerMarqueeEl = contentArea.querySelector(".header-title-marquee");
+          if (headerMarqueeEl && typeof window.applyMarquee === "function") {
+            window.applyMarquee(headerMarqueeEl, escapeHTML(details.name));
+          }
     
           // Extract color and apply beautiful gradient background
           const headerImg = new Image();
@@ -39721,24 +39931,26 @@ SOFTWARE.</div>
           // Apply dynamic blurred background to modals
           const mobileBg = document.getElementById("mobile-player-bg");
           const desktopBg = document.getElementById("desktop-player-bg");
+          const playerBarBg = document.getElementById("player-bar-bg");
           if (mobileBg) mobileBg.style.backgroundImage = `url('${imageUrl}')`;
           if (desktopBg) desktopBg.style.backgroundImage = `url('${imageUrl}')`;
+          if (playerBarBg) playerBarBg.style.backgroundImage = `url('${imageUrl}')`;
           if (docPipWindow) {
             const pipBg = docPipWindow.document.getElementById("pip-bg");
             if (pipBg) pipBg.style.backgroundImage = `url('${imageUrl}')`;
           }
-    
+
           playerElements.art.forEach((el) => (el.src = imageUrl));
           updateAppFavicon(imageUrl);
-    
+
           // Clear previous theme instantly on track change to prevent getting stuck
-          document.querySelectorAll(".player-modal-content").forEach((modal) => {
+          document.querySelectorAll(".player-modal-content, .player-bar").forEach((modal) => {
             modal.classList.remove("theme-light-bg");
           });
           if (docPipWindow && docPipWindow.document.body) {
             docPipWindow.document.body.classList.remove("theme-light-bg");
           }
-    
+
           // Dynamically adjust modal text theme based on cover brightness
           const themeImg = new Image();
           themeImg.crossOrigin = "anonymous";
@@ -39750,10 +39962,10 @@ SOFTWARE.</div>
                 parseInt(rgb.b) * 114) /
                 1000,
             );
-    
+
             // If brightness is high (light cover art), trigger light mode
-            if (brightness > 130) {
-              document.querySelectorAll(".player-modal-content").forEach((modal) => {
+            if (brightness > 115) {
+              document.querySelectorAll(".player-modal-content, .player-bar").forEach((modal) => {
                 modal.classList.add("theme-light-bg");
               });
               if (docPipWindow && docPipWindow.document.body) {
@@ -39764,7 +39976,7 @@ SOFTWARE.</div>
           // Append timestamp to bypass stubborn browser caches that prevent onload triggering
           themeImg.src = imageUrl + "&t=" + new Date().getTime();
 
-          const applyMarquee = (el, contentHTML) => {
+          window.applyMarquee = (el, contentHTML) => {
             el.innerHTML = contentHTML;
             el.classList.remove('marquee-anim');
             el.style.animationDuration = '';
@@ -39778,7 +39990,6 @@ SOFTWARE.</div>
                   
                   const firstSpan = el.querySelector('span');
                   const textWidth = firstSpan ? firstSpan.offsetWidth : (el.textContent.length * 9);
-                  // Calculate dynamic duration based on 30px per second constant speed
                   const duration = Math.max(8, Math.round(textWidth / 30));
                   
                   el.style.animationDuration = `${duration}s`;
@@ -39788,6 +39999,7 @@ SOFTWARE.</div>
               });
             }
           };
+          const applyMarquee = window.applyMarquee;
 
           playerElements.title.forEach((el) => applyMarquee(el, escapeHTML(currentSong.title)));
           playerElements.artist.forEach((el) => applyMarquee(el, formatArtistsHTML(currentSong.artist, currentSong.user_id, currentSong.is_collaborative)));
@@ -41600,7 +41812,45 @@ SOFTWARE.</div>
             updateContentTitle(`Search: "${query.trim()}"`);
             renderRecommendations(data);
             allContentloaded = true;
+
+            if (history.state && history.state.viewConfig && history.state.viewConfig.type === 'search') {
+                history.replaceState({ viewConfig: currentView }, "", window.location.pathname);
+            } else {
+                history.pushState({ viewConfig: currentView }, "", window.location.pathname);
+            }
           }, 350);
+        };
+
+        window.triggerFollowEffect = (btnEl) => {
+          // 1. YouTube-style button pop animation
+          if (btnEl) {
+            btnEl.style.transition = 'transform 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
+            btnEl.style.transform = 'scale(1.15)';
+            setTimeout(() => {
+              btnEl.style.transform = 'scale(1)';
+            }, 150);
+          }
+
+          // 2. Direct button origin confetti burst
+          if (typeof confetti !== 'undefined' && btnEl) {
+            const rect = btnEl.getBoundingClientRect();
+            const x = (rect.left + rect.width / 2) / window.innerWidth;
+            const y = (rect.top + rect.height / 2) / window.innerHeight;
+
+            // YouTube-style circular burst effect
+            confetti({
+              particleCount: 50,
+              spread: 360,
+              startVelocity: 20,
+              origin: { x, y },
+              colors: ['#ff0000', '#ffffff', '#cccccc', '#555555'],
+              ticks: 80,
+              gravity: 0.9,
+              scalar: 0.7,
+              disableForReducedMotion: true,
+              zIndex: 99999
+            });
+          }
         };
     
         searchInputDesktop.addEventListener("input", liveSearchHandler);
@@ -41781,9 +42031,10 @@ SOFTWARE.</div>
         const emergencyTrigger = document.getElementById(
           "trigger-emergency-scan-btn",
         );
-        if (emergencyTrigger && fullScanIframe) {
+        if (emergencyTrigger && fullScanModalEl && fullScanIframe) {
           emergencyTrigger.addEventListener("click", () => {
             fullScanIframe.src = "?action=full_scan";
+            bootstrap.Modal.getOrCreateInstance(fullScanModalEl).show();
           });
         }
     
@@ -41966,6 +42217,7 @@ SOFTWARE.</div>
             genresModalEl,
             artistsModalEl,
             document.getElementById("desktop-player-modal"),
+            document.getElementById("metadata-modal"),
           ].forEach((el) => {
             if (!el) return;
             const instance = bootstrap.Modal.getInstance(el);
@@ -43585,6 +43837,7 @@ SOFTWARE.</div>
               }),
             }).then(async (res) => {
               if (res && res.status === "followed") {
+                window.triggerFollowEffect(followBtn);
                 followBtn.textContent = "Unfollow";
                 followBtn.classList.remove("btn-danger");
                 followBtn.classList.add("btn-outline-light");
@@ -43696,25 +43949,23 @@ SOFTWARE.</div>
                   const html = data
                     .map(
                       (u) => `
-                          <div class="list-group-item bg-transparent text-white border-secondary px-3 py-3 d-flex align-items-center gap-3 hover-bg-dark">
-                            <div class="user-profile-link flex-shrink-0" data-userid="${u.id}" data-artist="${encodeURIComponent(u.artist)}" style="cursor: pointer;" title="View Profile">
-                              <img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle shadow-sm" style="width: 50px; height: 50px; object-fit: cover;">
+                          <div class="d-flex align-items-center justify-content-between gap-3 p-3 rounded-4" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); transition: transform 0.2s, background 0.2s;" onmouseover="this.style.transform='scale(1.02)'; this.style.background='rgba(255,255,255,0.08)';" onmouseout="this.style.transform='scale(1)'; this.style.background='rgba(255,255,255,0.03)';">
+                            <div class="d-flex align-items-center gap-3 user-profile-link flex-grow-1" data-userid="${u.id}" data-artist="${encodeURIComponent(u.artist)}" style="cursor: pointer; min-width: 0;" title="View Profile">
+                              <div class="position-relative flex-shrink-0">
+                                <img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle shadow-sm" style="width: 52px; height: 52px; object-fit: cover; border: 2px solid rgba(255,255,255,0.1);">
+                              </div>
+                              <div class="d-flex flex-column text-truncate" style="min-width: 0;">
+                                <span class="fw-bold text-white fs-6 text-truncate" style="letter-spacing: 0.3px;">${escapeHTML(u.artist)}</span>
+                                <span class="text-secondary fw-medium" style="font-size: 0.8rem;">ID: ${u.id}</span>
+                              </div>
                             </div>
-                            <div class="d-flex flex-column flex-grow-1" style="min-width: 0;">
-                               <div class="d-flex justify-content-between align-items-center w-100 gap-2">
-                                 <div class="d-flex flex-column text-truncate user-profile-link" data-userid="${u.id}" data-artist="${encodeURIComponent(u.artist)}" style="cursor: pointer; min-width: 0;" title="View Profile">
-                                   <span class="fw-bold hover-underline text-truncate fs-6">${escapeHTML(u.artist)}</span>
-                                   <span class="text-secondary" style="font-size: 0.8rem;">ID: ${u.id}</span>
-                                 </div>
-                                 ${
-                                   currentUser && currentUser.id != u.id
-                                     ? `<button class="btn btn-sm ${u.is_followed ? "btn-outline-light" : "btn-danger"} rounded-pill fw-bold follow-btn-modal px-3 flex-shrink-0" data-user-id="${u.id}">
-                                      ${u.is_followed ? "Unfollow" : "Follow"}
-                                    </button>`
-                                     : ""
-                                 }
-                               </div>
-                            </div>
+                            ${
+                              currentUser && currentUser.id != u.id
+                                ? `<button class="btn btn-sm ${u.is_followed ? "btn-outline-light" : "btn-danger"} rounded-pill fw-bold follow-btn-modal px-4 py-2 flex-shrink-0 shadow-sm" data-user-id="${u.id}" style="font-size: 0.85rem; transition: transform 0.1s;">
+                                     ${u.is_followed ? "Unfollow" : "Follow"}
+                                   </button>`
+                                : ""
+                            }
                           </div>
                         `,
                     )
@@ -45743,17 +45994,23 @@ SOFTWARE.</div>
     
                           <div class="mb-3">
                             <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Artist</div>
-                            <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.artist) || "N/A"}</div>
+                            <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">
+                              ${formatArtistsHTML(metaSongData.artist, metaSongData.user_id, metaSongData.is_collaborative)}
+                            </div>
                           </div>
     
                           <div class="mb-3">
                             <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Album</div>
-                            <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.album) || "N/A"}</div>
+                            <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm song-album" style="cursor: pointer;" data-album="${encodeURIComponent(metaSongData.album || "")}" data-userid="${metaSongData.user_id || ""}" data-artistname="${encodeURIComponent(metaSongData.artist || "")}">
+                              <span class="hover-underline">${escapeHTML(metaSongData.album) || "N/A"}</span>
+                            </div>
                           </div>
     
                           <div class="mb-4">
                             <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Genre</div>
-                            <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.genre) || "N/A"}</div>
+                            <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm" style="cursor: pointer;" onclick="bootstrap.Modal.getInstance(document.getElementById('metadata-modal'))?.hide(); loadView({type: 'genre_songs', param: '${(escapeHTML(metaSongData.genre) || '').replace(/'/g, "\\'")}', sort: 'artist_asc', filter_user_id: ''});">
+                              <span class="hover-underline">${escapeHTML(metaSongData.genre) || "N/A"}</span>
+                            </div>
                           </div>
     
                           <div class="row g-3 p-3 mt-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
@@ -45796,11 +46053,11 @@ SOFTWARE.</div>
                     const lrcData = parseLRC(lyricsSongData.lyrics);
                     if (lrcData.length > 0) {
                       currentLrcData = lrcData;
-                      currentLrcSongId = parseInt(id);
+                      currentLrcSongId = parseInt(lyricsSongData.id);
                       currentLyricIndex = -1;
     
                       lyricsBodyEl.innerHTML =
-                        `<div id="synced-lyrics-container">` +
+                        `<div id="synced-lyrics-container" style="padding: 50vh 1.5rem;">` +
                         lrcData
                           .map(
                             (line, idx) =>
@@ -45811,14 +46068,14 @@ SOFTWARE.</div>
                     } else {
                       currentLrcData = null;
                       currentLrcSongId = null;
-                      lyricsBodyEl.innerHTML = `<div class="desktop-plain-lyrics">${escapeHTML(lyricsSongData.lyrics)}</div>`;
+                      lyricsBodyEl.innerHTML = `<div class="desktop-plain-lyrics" style="padding: 2rem 1.5rem;">${escapeHTML(lyricsSongData.lyrics)}</div>`;
                     }
                   } else {
                     currentLrcData = null;
                     currentLrcSongId = null;
-                    lyricsBodyEl.style.height = "100dvh";
+                    lyricsBodyEl.style.height = "100%";
                     lyricsBodyEl.innerHTML = `
-                            <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 p-5 text-secondary opacity-50">
+                            <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 w-100 p-5 text-secondary opacity-50">
                               <i class="bi bi-music-note-list mb-3" style="font-size: 3.5rem;"></i>
                               <h5 class="fw-bold text-white mb-1">No Lyrics Available</h5>
                               <p class="small mb-0">Lyrics haven't been added for this track yet.</p>
@@ -46452,17 +46709,20 @@ SOFTWARE.</div>
                         body.theme-light-bg .pip-lyric-line { color: rgba(0,0,0,0.6) !important; }
                         body.theme-light-bg .pip-lyric-line:hover { color: #000000 !important; }
                         body.theme-light-bg .pip-lyric-line.active { color: var(--ytm-accent) !important; font-weight: 800; text-shadow: none; }
-                        body.theme-light-bg .title, body.theme-light-bg .artist { color: #000000 !important; }
-                        body.theme-light-bg .time-stamps span { color: rgba(0,0,0,0.6) !important; }
-                        body.theme-light-bg .player-btn { color: #333333 !important; }
-                        body.theme-light-bg .player-btn:hover, body.theme-light-bg .player-btn.active { color: #000000 !important; }
-                        body.theme-light-bg .play-btn { background-color: #000000 !important; color: #ffffff !important; }
-                        body.theme-light-bg .progress-bar-bg { background-color: rgba(0, 0, 0, 0.2) !important; }
-                        body.theme-light-bg .progress-bar-fg { background-color: #000000 !important; }
-                        body.pip-active #chat-pip-btn,
-                        body.pip-active #chat-back-btn,
-                        body.pip-active .chat-formatting-help { display: none !important; }
-    
+                        body.theme-light-bg .title, body.theme-light-bg .artist, .player-bar.theme-light-bg .pb-title { color: #000000 !important; font-weight: 700; text-shadow: none !important; }
+                        body.theme-light-bg .time-stamps span, .player-bar.theme-light-bg .pb-artist, .player-bar.theme-light-bg .pb-time, .player-bar.theme-light-bg .text-secondary { color: rgba(0,0,0,0.6) !important; font-weight: 600; text-shadow: none !important; }
+                        body.theme-light-bg .player-btn, .player-bar.theme-light-bg .pb-btn { color: #333333 !important; text-shadow: none !important; }
+                        body.theme-light-bg .player-btn:hover, body.theme-light-bg .player-btn.active, .player-bar.theme-light-bg .pb-btn:hover, .player-bar.theme-light-bg .pb-btn.active { color: #000000 !important; }
+                        body.theme-light-bg .play-btn, .player-bar.theme-light-bg .pb-play-circle { background-color: #000000 !important; color: #ffffff !important; box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important; }
+                        body.theme-light-bg .progress-bar-bg, .player-bar.theme-light-bg .timeline-bg, .player-bar.theme-light-bg .volume-bg { background-color: rgba(0, 0, 0, 0.2) !important; }
+                        body.theme-light-bg .progress-bar-fg, .player-bar.theme-light-bg .timeline-filled, .player-bar.theme-light-bg .volume-filled { background-color: #000000 !important; }
+                        .player-bar.theme-light-bg .timeline-container:hover .timeline-filled, .player-bar.theme-light-bg .volume-bar:hover .volume-filled { background-color: var(--ytm-accent) !important; }
+                        .player-bar.theme-light-bg { background-color: rgba(255, 255, 255, 0.85) !important; color: #000000 !important; border-top: 1px solid rgba(0,0,0,0.1); }
+                        .player-bar.theme-light-bg::before { background: linear-gradient(0deg, rgba(255, 255, 255, 0.6) 0%, rgba(255, 255, 255, 0.1) 100%); }
+                        .player-bar.theme-light-bg .dynamic-blur-bg { filter: blur(50px) brightness(1.1); opacity: 0.95; }
+                        .player-bar .pb-title, .player-bar .pb-time { text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+                        .player-bar .pb-artist, .player-bar .pb-btn, .player-bar .text-secondary { text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
+                        .pb-play-circle .bi-play-fill, .play-btn .bi-play-fill { margin-left: 4px; }
                         /* Force bootstrap icon tags inside control buttons to inherit their parent's inline font-sizes */
                         .player-modal-controls .player-btn .bi { font-size: inherit !important; }
                         .player-modal-controls .play-btn .bi { font-size: inherit !important; }
@@ -54890,10 +55150,10 @@ SOFTWARE.</div>
                     const lrcData = parseLRC(lyricsSongData.lyrics);
                     if (lrcData.length > 0) {
                       currentLrcData = lrcData;
-                      currentLrcSongId = parseInt(currentSong.id);
+                      currentLrcSongId = parseInt(lyricsSongData.id);
                       currentLyricIndex = -1;
                       lyricsBodyEl.innerHTML =
-                        `<div id="synced-lyrics-container">` +
+                        `<div id="synced-lyrics-container" style="padding: 50vh 1.5rem;">` +
                         lrcData
                           .map(
                             (line, idx) =>
@@ -54904,14 +55164,14 @@ SOFTWARE.</div>
                     } else {
                       currentLrcData = null;
                       currentLrcSongId = null;
-                      lyricsBodyEl.innerHTML = `<div class="desktop-plain-lyrics">${escapeHTML(lyricsSongData.lyrics)}</div>`;
+                      lyricsBodyEl.innerHTML = `<div class="desktop-plain-lyrics" style="padding: 2rem 1.5rem;">${escapeHTML(lyricsSongData.lyrics)}</div>`;
                     }
                   } else {
                     currentLrcData = null;
                     currentLrcSongId = null;
-                    lyricsBodyEl.style.height = "100dvh";
+                    lyricsBodyEl.style.height = "100%";
                     lyricsBodyEl.innerHTML = `
-                            <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 p-5 text-secondary opacity-50">
+                            <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 w-100 p-5 text-secondary opacity-50">
                               <i class="bi bi-music-note-list mb-3" style="font-size: 3.5rem;"></i>
                               <h5 class="fw-bold text-white mb-1">No Lyrics Available</h5>
                               <p class="small mb-0">Lyrics haven't been added for this track yet.</p>
@@ -55035,17 +55295,23 @@ SOFTWARE.</div>
     
                             <div class="mb-3">
                               <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Artist</div>
-                              <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.artist) || "N/A"}</div>
+                              <div class="text-white fs-5 fw-medium text-wrap text-break lh-sm">
+                                ${formatArtistsHTML(metaSongData.artist, metaSongData.user_id, metaSongData.is_collaborative)}
+                              </div>
                             </div>
     
                             <div class="mb-3">
                               <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Album</div>
-                              <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.album) || "N/A"}</div>
+                              <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm song-album" style="cursor: pointer;" data-album="${encodeURIComponent(metaSongData.album || "")}" data-userid="${metaSongData.user_id || ""}" data-artistname="${encodeURIComponent(metaSongData.artist || "")}">
+                                <span class="hover-underline">${escapeHTML(metaSongData.album) || "N/A"}</span>
+                              </div>
                             </div>
     
                             <div class="mb-4">
                               <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Genre</div>
-                              <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">${escapeHTML(metaSongData.genre) || "N/A"}</div>
+                              <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm" style="cursor: pointer;" onclick="bootstrap.Modal.getInstance(document.getElementById('metadata-modal'))?.hide(); loadView({type: 'genre_songs', param: '${(escapeHTML(metaSongData.genre) || '').replace(/'/g, "\\'")}', sort: 'artist_asc', filter_user_id: ''});">
+                                <span class="hover-underline">${escapeHTML(metaSongData.genre) || "N/A"}</span>
+                              </div>
                             </div>
     
                             <div class="row g-3 p-3 mt-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
@@ -55157,8 +55423,13 @@ SOFTWARE.</div>
           }
         };
 
-        document.addEventListener("click", hideArtistTooltip, true);
-        document.addEventListener("touchstart", hideArtistTooltip, { passive: true });
+        const handleOutsideTooltip = (e) => {
+          if (!e.target.closest("#artist-hover-tooltip")) {
+            hideArtistTooltip();
+          }
+        };
+        document.addEventListener("click", handleOutsideTooltip, true);
+        document.addEventListener("touchstart", handleOutsideTooltip, { passive: true, capture: true });
 
         const showArtistTooltip = async (target, artistRaw, userId) => {
           if (window.innerWidth < 992) return;
@@ -55224,10 +55495,12 @@ SOFTWARE.</div>
 
               html += `
                       <div class="artist-tooltip-card ${i < artistsList.length - 1 ? "border-bottom border-secondary pb-3 mb-3" : ""}">
-                        <div class="d-flex align-items-center gap-3 artist-tt-click" data-artist="${encodeURIComponent(data.name)}" style="cursor: pointer;">
-                          <img src="${data.image_url}" style="width: 60px; height: 60px; object-fit: cover; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
-                          <div style="min-width: 0;">
-                             <h6 class="text-white text-truncate mb-1 fw-bold artist-tt-name" style="font-size: 1.05rem;">${escapeHTML(data.name)}</h6>
+                        <div class="d-flex align-items-center gap-3 artist-tt-click" data-artist="${encodeURIComponent(data.name)}" style="cursor: pointer; overflow: hidden;">
+                          <img src="${data.image_url}" style="width: 60px; height: 60px; object-fit: cover; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.5); flex-shrink: 0;">
+                          <div style="min-width: 0; flex-grow: 1; overflow: hidden;">
+                             <div class="marquee-container w-100 mb-1">
+                               <h6 class="text-white fw-bold m-0 marquee-content tooltip-marquee" style="font-size: 1.05rem;">${escapeHTML(data.name)}</h6>
+                             </div>
                              <div class="text-secondary" style="font-size: 0.8rem;">${formatSongCount(data.song_count || 0)} tracks • ${formatTime(data.total_duration || 0)}</div>
                              ${data.followers_count !== undefined ? `<div class="text-info mt-1" style="font-size: 0.75rem;"><i class="bi bi-people-fill"></i> ${formatSongCount(data.followers_count)} followers</div>` : `<div class="text-secondary mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(data.play_count || 0)} plays</div>`}
                           </div>
@@ -55242,6 +55515,13 @@ SOFTWARE.</div>
 
           if (sessionId !== activeTooltipSession) return;
           artistTooltip.innerHTML = html;
+
+          // Apply marquee effect to all tooltip titles
+          artistTooltip.querySelectorAll('.tooltip-marquee').forEach(el => {
+            if (typeof window.applyMarquee === "function") {
+              window.applyMarquee(el, el.innerHTML);
+            }
+          });
         };
     
         document.addEventListener("mouseover", (e) => {
@@ -55282,6 +55562,7 @@ SOFTWARE.</div>
         artistTooltip.addEventListener("click", async (e) => {
           const followBtn = e.target.closest(".tooltip-follow-btn");
           if (followBtn) {
+            e.stopPropagation();
             if (!currentUser) return showToast("Please log in", "error");
             const userId = followBtn.dataset.userId;
             const res = await fetchData("?action=toggle_follow", {
@@ -55291,6 +55572,7 @@ SOFTWARE.</div>
               }),
             });
             if (res && (res.status === "followed" || res.status === "unfollowed")) {
+              if (res.status === "followed") window.triggerFollowEffect(followBtn);
               const isFollowing = res.status === "followed";
               followBtn.textContent = isFollowing ? "Unfollow" : "Follow";
               followBtn.className = `btn btn-sm w-100 mt-2 tooltip-follow-btn fw-bold ${isFollowing ? "btn-outline-light" : "btn-danger"}`;
@@ -55310,17 +55592,21 @@ SOFTWARE.</div>
                   }
                 }
               }
-              if (
-                currentView.type === "artist_songs" ||
-                currentView.type === "get_following" ||
-                currentView.type === "get_recommendations"
-              ) {
-                loadView(currentView);
-              }
+              
+              // Sync main page buttons without reloading the view
+              document.querySelectorAll(`.follow-btn[data-user-id="${userId}"], .follow-btn-modal[data-user-id="${userId}"]`).forEach(btn => {
+                btn.textContent = isFollowing ? "Unfollow" : "Follow";
+                if (btn.classList.contains("follow-btn-modal")) {
+                  btn.className = `btn btn-sm rounded-pill fw-bold follow-btn-modal px-3 flex-shrink-0 ${isFollowing ? "btn-outline-light" : "btn-danger"}`;
+                } else {
+                  btn.className = `btn ${isFollowing ? "btn-outline-light border-secondary text-white" : "btn-light text-dark"} d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-4 py-1 fw-bold follow-btn`;
+                }
+              });
             }
           } else {
             const clickArea = e.target.closest(".artist-tt-click");
             if (clickArea) {
+              e.stopPropagation();
               artistTooltip.style.opacity = "0";
               artistTooltip.style.display = "none";
               loadView({
