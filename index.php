@@ -386,10 +386,11 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '7.2');
+define('APP_VERSION', '7.3');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
+$auto_scan = true; // Auto scan songs during empty or new files
 
 // PHPBoard Configuration
 define('PHPBOARD_ALLOWED_CHANNELS', ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'gif', 'h', 'hr', 'k', 'm', 'o', 'p', 'r', 's', 't', 'u', 'v', 'vg', 'vm', 'vmg', 'vr', 'vrpg', 'vst', 'w', 'wg', 'i', 'ic', 'r9k', 's4s', 'vip', 'qa', 'cm', 'hm', 'lgbt', 'mlp', 'news', 'out', 'po', 'pw', 'qst', 'sp', 'trv', 'tv', 'vp', 'wsg', 'wsr', 'x', 'y', '3', 'aco', 'adv', 'an', 'bant', 'biz', 'cgl', 'ck', 'co', 'diy', 'fa', 'fit', 'gd', 'hc', 'his', 'int', 'jp', 'lit', 'mu', 'n', 'pol', 'sci', 'soc', 'tg', 'toy', 'vt', 'xs', 'art', 'tech', 'food', 'movies', 'music', 'books', 'news2', 'dev', 'meta', 'diy2', 'crypto', 'learn', 'lang', 'travel2', 'health', 'cars', 'bikes', 'space', 'scifi', 'fantasy', 'hist2', 'phil', 'eco', 'game', 'mobi', 'prog', 'web', 'desk', 'serv', 'net', 'sec', 'ai', 'ml', 'data', 'vr2', 'ar', 'robot', 'drone', '3dp', 'hobby']);
@@ -6401,7 +6402,9 @@ function init_db($db) {
     );
   ");
 
-  $db->exec("DELETE FROM mixes WHERE created_at <= datetime('now', '-3 days')");
+  try {
+    $db->exec("DELETE FROM mixes WHERE created_at <= datetime('now', '-3 days')");
+  } catch (Exception $e) {}
 
   $db->exec("
     CREATE TABLE IF NOT EXISTS history (
@@ -8352,6 +8355,7 @@ HTML;
 
     case 'full_scan':
       // Lock down backend scanner endpoint to prevent unauthorized CPU exhaustion
+      global $auto_scan;
       $is_active_admin = false;
       if (isset($_SESSION['user_id'])) {
         $db_check = get_db();
@@ -8362,7 +8366,7 @@ HTML;
           $is_active_admin = true;
         }
       }
-      if (!$is_active_admin) {
+      if (!$is_active_admin && !(isset($auto_scan) && $auto_scan)) {
         die("Security violation: Admin session required.");
       }
       perform_full_scan($db);
@@ -14268,7 +14272,7 @@ HTML;
           echo "<script>log('\\nDivision " . $step . " complete! Progressing to Division " . $next_step . "/6...', 'success');</script>";
           echo "<script>setTimeout(() => { window.location.href = '?action=rescan_charts&step=" . $next_step . "&run=1&density=" . $density_multiplier . "'; }, 1000);</script>";
         } else {
-          echo "<script>setProgress(100); log('All songs already have compiled note charts! Scan complete.', 'success'); localStorage.setItem('rhythm_scan_step', '1');</script>";
+          echo "<script>setProgress(100); log('All songs already have compiled note charts! Scan complete.', 'success'); localStorage.setItem('rhythm_scan_step', '1'); if (window.parent && window.parent.finishScan) window.parent.finishScan('chart-scan-modal');</script>";
         }
         echo "</body></html>";
         exit;
@@ -14299,7 +14303,7 @@ HTML;
 
           $db->commit();
 
-          echo "<script>setProgress({$pct});</script>";
+          echo "<script>setProgress({$pct}); if (window.parent && window.parent.updateScanPill) window.parent.updateScanPill({$completed_charts}, {$total_possible_charts}, 'Compiling Charts');</script>";
           flush();
           
           // Concurrency Win 3: Micro-sleep (10ms) between songs
@@ -15289,7 +15293,7 @@ function perform_force_rescan($db, $mode) {
       }
 
       echo sprintf("[%3d%%] [%d/%d] Scanning: %s\n", $percent, $processed, $total, basename($filePath));
-      echo "<script>document.getElementById('prog-bar').style.width = '{$percent}%'; document.getElementById('prog-txt').innerText = '{$percent}%'; window.scrollTo(0, document.body.scrollHeight);</script>";
+      echo "<script>document.getElementById('prog-bar').style.width = '{$percent}%'; document.getElementById('prog-txt').innerText = '{$percent}%'; window.scrollTo(0, document.body.scrollHeight); if (window.parent && window.parent.updateScanPill) window.parent.updateScanPill({$processed}, {$total}, 'Re-scanning " . ucfirst($mode) . "');</script>";
 
       if (file_exists($filePath)) {
         $info = $getID3->analyze($filePath);
@@ -15307,10 +15311,18 @@ function perform_force_rescan($db, $mode) {
             } else {
               echo " -> New artist generated: '{$main_artist}'. Creating account.\n";
               $sanitized_artist_base = sanitize_for_path($main_artist);
+              
+              // Safely fallback to numbered unknown emails if Transliterator fails on Japanese/Non-English characters
+              if ($sanitized_artist_base === 'unknown' || empty($sanitized_artist_base)) {
+                $sanitized_artist_base = 'unknown';
+                $email = 'unknown1@mail.com';
+              } else {
+                $email = $sanitized_artist_base . '@mail.com';
+              }
+              
               $password = $sanitized_artist_base;
               $hash = password_hash($password, PASSWORD_DEFAULT);
               
-              $email = $sanitized_artist_base . '@mail.com';
               $counter = 1;
               while (true) {
                 $check_email_stmt->execute([$email]);
@@ -15377,9 +15389,11 @@ function perform_force_rescan($db, $mode) {
 
   echo "\n=======================\n";
   echo "Forced Rescan ($mode) complete! Processed items: $processed\n</pre>";
+  echo "<script>if (window.parent && window.parent.finishScan) window.parent.finishScan('full-scan-modal');</script>";
 }
 
 function perform_full_scan($db) {
+  global $auto_scan;
   // OPTIMIZATION 1: Release session lock instantly so the iframe and main app don't hang!
   session_write_close();
   
@@ -15493,7 +15507,19 @@ function perform_full_scan($db) {
 
     echo "Step 4: Aligning database file paths with current environment...\n";
     // Convert all existing DB slashes to forward slashes to normalize
-    $db->exec("UPDATE music SET file = REPLACE(file, '\\', '/')"); 
+    $max_retries = 15;
+    for ($attempt = 0; $attempt < $max_retries; $attempt++) {
+      try {
+        $db->exec("UPDATE music SET file = REPLACE(file, '\\', '/')"); 
+        break;
+      } catch (Exception $e) {
+        if (strpos(strtolower($e->getMessage()), 'locked') !== false || strpos(strtolower($e->getMessage()), 'busy') !== false) {
+          usleep(rand(20000, 50000));
+        } else {
+          break; // Unrelated error
+        }
+      }
+    }
     
     $sample_file = $db->query("SELECT file FROM music LIMIT 1")->fetchColumn();
     if ($sample_file) {
@@ -15528,15 +15554,32 @@ function perform_full_scan($db) {
         echo "    Old: {$old_base}\n";
         echo "    New: {$new_base}\n";
         echo " -> Automatically correcting all file paths in the database...\n";
-        $db->beginTransaction();
-        try {
-          // Replace the old prefix with the new prefix natively in SQLite, heavily bound to LIKE parameters
-          $db->prepare("UPDATE music SET file = ? || SUBSTR(file, ?) WHERE file LIKE ?")->execute([$new_base, strlen($old_base) + 1, $old_base . '/%']);
-          $db->commit();
+        
+        $success = false;
+        $last_error_msg = "";
+        for ($attempt = 0; $attempt < $max_retries; $attempt++) {
+          $db->beginTransaction();
+          try {
+            // Replace the old prefix with the new prefix natively in SQLite, heavily bound to LIKE parameters
+            $db->prepare("UPDATE music SET file = ? || SUBSTR(file, ?) WHERE file LIKE ?")->execute([$new_base, strlen($old_base) + 1, $old_base . '/%']);
+            $db->commit();
+            $success = true;
+            break;
+          } catch (Exception $e) {
+            $db->rollBack();
+            $last_error_msg = $e->getMessage();
+            if (strpos(strtolower($last_error_msg), 'locked') !== false || strpos(strtolower($last_error_msg), 'busy') !== false) {
+              usleep(rand(20000, 50000));
+            } else {
+              break; // Unrelated error
+            }
+          }
+        }
+        
+        if ($success) {
           echo " -> Successfully corrected all file paths.\n\n";
-        } catch (Exception $e) {
-          $db->rollBack();
-          echo " -> Error correcting database paths: " . $e->getMessage() . "\n\n";
+        } else {
+          echo " -> Error correcting database paths: " . $last_error_msg . "\n\n";
         }
       } else {
         echo " -> Database base path is aligned perfectly.\n\n";
@@ -15576,7 +15619,7 @@ function perform_full_scan($db) {
 
     if ($total_tasks === 0) {
       if (file_exists($queue_file)) @unlink($queue_file);
-      echo "<script>setProgress(100);</script>";
+      echo "<script>setProgress(100); if (window.parent && window.parent.finishScan) window.parent.finishScan('full-scan-modal');</script>";
       die("Scan complete. No changes detected.\n</pre>");
     }
 
@@ -15643,6 +15686,7 @@ function perform_full_scan($db) {
         $delete_stmt->execute([$task['file']]);
       } else {
         echo sprintf("[%3d%%] [%d/%d] Processing: %s\n", $percent, $completed, $total, basename($task['file']));
+      echo "<script>if (window.parent && window.parent.updateScanPill) window.parent.updateScanPill({$completed}, {$total}, 'Scanning Library');</script>";
         
         $filePath = $task['file'];
         $mtime = $task['mtime'];
@@ -15697,6 +15741,9 @@ function perform_full_scan($db) {
                 $hash = password_hash($sanitized_artist_base, PASSWORD_DEFAULT);
                 
                 $email = $sanitized_artist_base . '@mail.com';
+                if ($sanitized_artist_base === 'unknown') {
+                  $email = 'unknown1@mail.com';
+                }
                 $counter = 1;
                 while (true) {
                   $check_email->execute([$email]);
@@ -15720,7 +15767,7 @@ function perform_full_scan($db) {
         }
       }
 
-      echo "<script>setProgress({$percent});</script>";
+      echo "<script>setProgress({$percent}); if (window.parent && window.parent.updateScanPill) window.parent.updateScanPill({$completed}, {$total});</script>";
       @ob_flush(); flush();
     }
 
@@ -15732,8 +15779,13 @@ function perform_full_scan($db) {
 
     if (empty($remaining_tasks)) {
       @unlink($queue_file);
-      echo "<script>setProgress(100);</script>";
+      echo "<script>setProgress(100); if (window.parent && window.parent.updateScanPill) window.parent.updateScanPill({$total}, {$total}, 'Scanning Library');</script>";
       echo "\n=======================\nScan completed successfully!\nTotal processed: {$total}\n</pre>";
+      echo "<script>
+        if (window.parent) {
+          if (window.parent.finishScan) window.parent.finishScan('full-scan-modal');
+        }
+      </script>";
     } else {
       echo "\nBatch complete. Loading next {$batch_size}...\n";
       echo "<script>setTimeout(() => window.location.href = '?action=full_scan&step=2', 100);</script></pre>";
@@ -15803,7 +15855,7 @@ function perform_cover_scan($db) {
       $processed++;
       $percent = floor(($processed / $total) * 100);
       echo sprintf("[%3d%%] [%d/%d] Scanning: %s\n", $percent, $processed, $total, basename($song['file']));
-      echo "<script>document.getElementById('prog-bar').style.width = '{$percent}%'; document.getElementById('prog-txt').innerText = '{$percent}%'; window.scrollTo(0, document.body.scrollHeight);</script>";
+      echo "<script>document.getElementById('prog-bar').style.width = '{$percent}%'; document.getElementById('prog-txt').innerText = '{$percent}%'; window.scrollTo(0, document.body.scrollHeight); if (window.parent && window.parent.updateScanPill) window.parent.updateScanPill({$processed}, {$total}, 'Scanning Covers');</script>";
 
       $filePath = $song['file'];
       if (!file_exists($filePath)) {
@@ -15857,6 +15909,7 @@ function perform_cover_scan($db) {
 
   echo "\n=======================\n";
   echo "Cover rescan process complete! Recovered items: $processed\n</pre>";
+  echo "<script>if (window.parent && window.parent.finishScan) window.parent.finishScan('cover-scan-modal');</script>";
 }
 ?>
 
@@ -15905,6 +15958,7 @@ function perform_cover_scan($db) {
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
       window.adminAutoToken = '<?php echo $is_super_admin ? "musiclibrary@mail.com" : ""; ?>';
+      window.autoScanEnabled = <?php echo isset($auto_scan) && $auto_scan ? 'true' : 'false'; ?>;
       // ANTI-INSPECT: Block Eruda/vConsole/Bookmarklets, with Super Admin Bypass
       (function() {
         const blockInspect = (el = null) => {
@@ -16103,6 +16157,7 @@ function perform_cover_scan($db) {
       html,
       body {
         height: 100%;
+        background-color: #030303 !important;
       }
 
       body {
@@ -16306,13 +16361,14 @@ function perform_cover_scan($db) {
 
       .marquee-anim {
         display: inline-flex;
-        gap: 3rem;
+        will-change: transform;
+        transform: translateZ(0);
         animation: marquee-scroll 12s linear infinite;
       }
 
       @keyframes marquee-scroll {
         0% { transform: translateX(0); }
-        100% { transform: translateX(calc(-50% - 1.5rem)); }
+        100% { transform: translateX(-50%); }
       }
 
       #player-modal-favorite-btn {
@@ -16913,50 +16969,33 @@ function perform_cover_scan($db) {
 
       .player-bar {
         position: fixed;
-        bottom: 0;
+        bottom: -3px;
         left: 0;
         right: 0;
-        height: 90px;
-        background-color: #030303;
-        border: none !important;
-        border-top: none !important;
-        box-shadow: none !important;
+        height: 94px;
+        background-color: #121212 !important;
+        border-top: 1px solid rgba(255, 255, 255, 0.1) !important;
+        box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5) !important;
         display: grid;
         grid-template-columns: minmax(200px, 1fr) 2fr minmax(200px, 1fr);
         align-items: center;
         gap: 1.5rem;
-        padding: 0 1.5rem;
+        padding: 0 1.5rem 4px 1.5rem;
         z-index: 1048;
         overflow: hidden;
       }
 
-      .player-bar::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: linear-gradient(180deg, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.85) 100%) !important;
-        z-index: 0;
-        pointer-events: none;
-      }
-
-      .player-bar > *:not(.dynamic-blur-bg) {
-        position: relative;
-        z-index: 1;
-      }
-
-      .player-bar .dynamic-blur-bg {
-        position: absolute !important;
-        top: -200px !important;
-        bottom: -200px !important;
-        left: -100px !important;
-        right: -100px !important;
-        filter: blur(40px) brightness(0.9) saturate(1.3) !important;
-        transform: translateZ(0) !important;
-        opacity: 0.85 !important;
-        z-index: -1 !important;
+      @media (max-width: 991.98px) {
+        .player-bar {
+          grid-template-columns: 1fr;
+          display: flex;
+          flex-direction: column;
+          height: auto;
+          min-height: 164px;
+          padding: 0.5rem 1rem calc(0.75rem + 4px + env(safe-area-inset-bottom, 0px)) 1rem;
+          gap: 0.25rem;
+          justify-content: space-between;
+        }
       }
 
       .player-bar .track-info {
@@ -17039,17 +17078,21 @@ function perform_cover_scan($db) {
       }
 
       .player-btn.play-btn {
-        color: var(--ytm-primary-text);
-        background-color: var(--ytm-surface);
+        color: #000000 !important;
+        background-color: #ffffff !important;
         width: 40px;
         height: 40px;
         border-radius: 50%;
         transition: transform 0.1s, background-color 0.2s;
       }
 
+      .player-btn.play-btn .bi {
+        color: #000000 !important;
+      }
+
       .player-btn.play-btn:hover {
         transform: scale(1.1);
-        background-color: #383838;
+        background-color: #f0f0f0 !important;
       }
 
       .player-btn .bi {
@@ -17721,105 +17764,100 @@ function perform_cover_scan($db) {
         transform-origin: center;
       }
 
-      /* Dynamic Light Theme Overrides for Player Modals and Player Bar */
-      .player-modal-content.theme-light-bg,
-      .player-bar.theme-light-bg {
+      /* Dynamic Light Theme Overrides for Player Modals Only (Player Bar stays 90% dark) */
+      .player-modal-content.theme-light-bg {
         background-color: rgba(255, 255, 255, 0.85) !important;
         color: #000000 !important;
       }
 
-      .player-bar.theme-light-bg::before {
-        background: linear-gradient(0deg, rgba(255, 255, 255, 0.6) 0%, rgba(255, 255, 255, 0.1) 100%);
-      }
-
-      .player-modal-content.theme-light-bg .dynamic-blur-bg,
-      .player-bar.theme-light-bg .dynamic-blur-bg {
-        filter: blur(50px) brightness(1.05);
-        opacity: 0.95;
+      .player-modal-content.theme-light-bg .dynamic-blur-bg {
+        filter: blur(45px) brightness(1.15) saturate(1.2) !important;
+        opacity: 1 !important;
       }
 
       .player-modal-content.theme-light-bg .text-white,
-      .player-bar.theme-light-bg .text-white,
-      .player-bar.theme-light-bg .title {
+      .player-modal-content.theme-light-bg .title {
         color: #000000 !important;
-        text-shadow: none !important;
       }
 
-      .player-modal-content.theme-light-bg .text-secondary,
-      .player-modal-content.theme-light-bg .text-info,
-      .player-bar.theme-light-bg .artist,
-      .player-bar.theme-light-bg .time,
-      .player-bar.theme-light-bg .text-secondary,
-      .player-bar.theme-light-bg .text-info {
+      .player-modal-content.theme-light-bg .text-secondary {
         color: #444444 !important;
         font-weight: 600;
-        text-shadow: none !important;
       }
 
-      .player-modal-content.theme-light-bg .player-btn,
-      .player-bar.theme-light-bg .player-btn {
-        color: #333333 !important;
-        text-shadow: none !important;
+      .player-modal-content .modal-header {
+        position: relative;
+        z-index: 10;
+        padding: 1rem 1rem 0.5rem 1rem !important;
+        background: linear-gradient(to bottom, rgba(0, 0, 0, 0.65) 0%, rgba(0, 0, 0, 0) 100%) !important;
       }
 
-      .player-modal-content.theme-light-bg .player-btn:hover,
+      .player-modal-content .modal-header .player-btn {
+        color: #ffffff !important;
+        opacity: 1 !important;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+      }
+
+      .player-modal-content .nav-tabs .nav-link {
+        color: rgba(255, 255, 255, 0.85) !important;
+        opacity: 1 !important;
+        font-weight: 600 !important;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+      }
+
+      .player-modal-content .nav-tabs .nav-link.active {
+        background: rgba(255, 255, 255, 0.25) !important;
+        color: #ffffff !important;
+        font-weight: 700 !important;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+      }
+
+      .player-modal-content.theme-light-bg .player-btn {
+        color: #ffffff !important;
+        opacity: 1 !important;
+      }
+
+      /* Force Active Shuffle, Repeat & Control Buttons to Red */
+      .player-btn.active,
+      .pb-btn.active,
+      .player-btn.active i,
+      .pb-btn.active i,
+      .player-modal-content .player-btn.active,
       .player-modal-content.theme-light-bg .player-btn.active,
-      .player-bar.theme-light-bg .player-btn:hover,
-      .player-bar.theme-light-bg .player-btn.active {
-        color: #000000 !important;
+      #player-modal-shuffle-btn.active,
+      #player-modal-repeat-btn.active,
+      #desktop-player-modal-shuffle-btn.active,
+      #desktop-player-modal-repeat-btn.active,
+      #shuffle-btn-desktop.active,
+      #repeat-btn-desktop.active,
+      #shuffle-btn-mobile.active,
+      #repeat-btn-mobile.active {
+        color: var(--ytm-accent, #ff0000) !important;
       }
 
-      .player-modal-content.theme-light-bg .play-btn,
-      .player-bar.theme-light-bg .play-btn {
+      .player-modal-content.theme-light-bg .play-btn {
         background-color: #000000 !important;
         color: #ffffff !important;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
       }
 
-      .player-modal-content.theme-light-bg .play-btn .bi,
-      .player-bar.theme-light-bg .play-btn .bi {
+      .player-modal-content.theme-light-bg .play-btn .bi {
         color: #ffffff !important;
       }
 
-      /* Dark Theme Default Shadows for better contrast against vibrant backgrounds */
-      .player-bar .title, .player-bar .time {
-        text-shadow: 0 1px 3px rgba(0,0,0,0.8);
-      }
-      .player-bar .artist, .player-bar .player-btn, .player-bar .text-secondary {
-        text-shadow: 0 1px 2px rgba(0,0,0,0.6);
-      }
-
-      /* Fix Play Icon Centering Optical Illusion */
-      .player-btn.play-btn .bi-play-fill {
-        margin-left: 4px;
-      }
-
-      .player-modal-content.theme-light-bg .progress-bar-bg,
-      .player-bar.theme-light-bg .progress-bar-bg,
-      .player-bar.theme-light-bg #volume-slider.form-range {
+      .player-modal-content.theme-light-bg .progress-bar-bg {
         background-color: rgba(0, 0, 0, 0.2) !important;
       }
 
-      .player-modal-content.theme-light-bg .progress-bar-fg,
-      .player-bar.theme-light-bg .progress-bar-fg {
+      .player-modal-content.theme-light-bg .progress-bar-fg {
         background-color: #000000 !important;
       }
 
-      .player-bar.theme-light-bg #volume-slider.form-range::-webkit-slider-thumb {
-        background-color: #000000 !important;
-      }
-
-      .player-bar.theme-light-bg #volume-slider.form-range::-moz-range-thumb {
-        background-color: #000000 !important;
-      }
-
-      .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg,
-      .player-bar.theme-light-bg .progress-bar-container:hover .progress-bar-fg {
+      .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg {
         background-color: var(--ytm-accent) !important;
       }
 
-      .player-modal-content.theme-light-bg .progress-bar-fg::after,
-      .player-bar.theme-light-bg .progress-bar-fg::after {
+      .player-modal-content.theme-light-bg .progress-bar-fg::after {
         background-color: #000000 !important;
       }
 
@@ -17828,7 +17866,40 @@ function perform_cover_scan($db) {
       }
 
       .player-modal-content.theme-light-bg .nav-tabs .nav-link {
-        color: rgba(0, 0, 0, 0.6) !important;
+        color: rgba(255, 255, 255, 0.85) !important;
+        opacity: 1 !important;
+      }
+
+      .player-modal-content.theme-light-bg .nav-tabs .nav-link.active {
+        background: rgba(0, 0, 0, 0.25) !important;
+        color: #ffffff !important;
+      }
+
+      /* Soft Contrast Shadows for Mobile & Desktop Player Modals */
+      .player-modal-content .title,
+      .player-modal-content .artist,
+      .player-modal-content #player-modal-title,
+      .player-modal-content #player-modal-artist,
+      .player-modal-content #desktop-player-modal-title,
+      .player-modal-content #desktop-player-modal-artist,
+      .player-modal-content #player-modal-current-time,
+      .player-modal-content #player-modal-time-left,
+      .player-modal-content #desktop-player-modal-current-time,
+      .player-modal-content #desktop-player-modal-time-left {
+        text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45) !important;
+      }
+
+      .player-modal-content .player-btn,
+      .player-modal-content #player-modal-favorite-btn {
+        filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.4));
+      }
+
+      .player-modal-content .play-btn {
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18) !important;
+      }
+
+      .player-modal-content .progress-bar-container {
+        filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.15));
       }
 
       .player-modal-content.theme-light-bg .nav-tabs .nav-link:hover {
@@ -18899,6 +18970,22 @@ function perform_cover_scan($db) {
 
       .selection-bar.active {
         bottom: 100px;
+      }
+
+      #scan-progress-pill {
+        top: calc(100dvh - 80px);
+        bottom: auto;
+        transition: top 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      body.player-visible #scan-progress-pill {
+        top: calc(100dvh - 160px);
+      }
+
+      @media (max-width: 991.98px) {
+        body.player-visible #scan-progress-pill {
+          top: calc(100dvh - 250px - env(safe-area-inset-bottom, 0px));
+        }
       }
 
       @media (max-width: 768px) {
@@ -21129,6 +21216,106 @@ function perform_cover_scan($db) {
           opacity: 1;
         }
       }
+
+      /* Immersive Fullscreen Player Mode */
+      .player-modal-content.immersive-active .player-modal-header {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 20;
+        padding: 1.5rem 2.5rem !important;
+        background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent);
+      }
+      .player-modal-content.immersive-active .modal-body {
+        flex-direction: column !important;
+        justify-content: center !important;
+        padding: 2rem 3rem !important;
+      }
+      .player-modal-content.immersive-active .immersive-visualizer {
+        display: block !important;
+        position: absolute !important;
+        bottom: 0 !important;
+        top: auto !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: 100% !important;
+        height: 35vh !important;
+        pointer-events: none;
+        z-index: 1;
+        opacity: 0.5;
+      }
+      .player-modal-content.immersive-active #dp-left-pane {
+        width: 100% !important;
+        flex: 1 !important;
+        justify-content: center !important;
+        padding: 2rem 2rem 1rem 2rem !important;
+        z-index: 2;
+      }
+      .player-modal-content.immersive-active #dp-left-pane .shadow-lg {
+        max-width: 42vh !important;
+        box-shadow: 0 20px 50px rgba(0,0,0,0.8) !important;
+      }
+      .player-modal-content.immersive-active #dp-right-pane {
+        width: 100% !important;
+        height: auto !important;
+        flex: 0 0 auto !important;
+        padding: 0 10% 4.5rem 10% !important;
+        z-index: 2;
+      }
+      .player-modal-content.immersive-active #dp-tabs,
+      .player-modal-content.immersive-active #dp-tabs-content {
+        display: none !important;
+      }
+      .player-modal-content.immersive-active #dp-progress-row {
+        position: absolute;
+        bottom: 1.5rem;
+        left: 3rem;
+        right: 3rem;
+        margin: 0 !important;
+        padding: 0 !important;
+        gap: 1rem !important;
+        z-index: 10;
+      }
+      .player-modal-content.immersive-active #desktop-player-modal-progress-container {
+        height: 6px;
+        padding: 0;
+        margin: 0;
+        border-radius: 3px;
+      }
+      .player-modal-content.immersive-active .progress-bar-bg,
+      .player-modal-content.immersive-active .progress-bar-fg {
+        height: 6px;
+        border-radius: 3px;
+      }
+      .player-modal-content.immersive-active #desktop-player-modal-current-time,
+      .player-modal-content.immersive-active #desktop-player-modal-time-left {
+        position: relative !important;
+        bottom: auto !important;
+        left: auto !important;
+        right: auto !important;
+        color: #fff !important;
+        text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+        font-weight: bold;
+        font-size: 0.85rem;
+      }
+      .player-modal-content.immersive-active #desktop-player-modal-title {
+        font-size: 2.2rem !important;
+        text-shadow: 0 4px 12px rgba(0,0,0,0.8);
+      }
+      .player-modal-content.immersive-active #desktop-player-modal-artist {
+        font-size: 1.15rem !important;
+        color: #ccc !important;
+        text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+      }
+
+      /* Raise Context Menu and Artists Modal above Fullscreen Player Layer */
+      #context-menu {
+        z-index: 99999 !important;
+      }
+      #artists-modal {
+        z-index: 99998 !important;
+      }
     </style>
   </head>
   <body class="logged-out">
@@ -22516,7 +22703,6 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="player-bar d-none" id="player-bar">
-      <div class="dynamic-blur-bg" id="player-bar-bg"></div>
       <div class="track-info d-none d-md-flex">
         <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Album Art" class="track-info-art" id="player-art-desktop">
         <div class="track-info-text" style="min-width: 0; flex-grow: 1;">
@@ -22585,31 +22771,29 @@ function perform_cover_scan($db) {
         <div class="modal-content player-modal-content">
           <div class="dynamic-blur-bg" id="mobile-player-bg"></div>
           
-          <div class="modal-header border-0 pb-0 d-flex justify-content-between align-items-center">
-            <button type="button" class="btn player-btn text-white" data-bs-dismiss="modal"><i class="bi bi-chevron-down fs-2"></i></button>
+          <div class="modal-header border-0 d-flex justify-content-between align-items-center px-3 pt-3 pb-1">
+            <button type="button" class="btn player-btn text-white p-0" data-bs-dismiss="modal"><i class="bi bi-chevron-down fs-1"></i></button>
             <ul class="nav nav-tabs border-0 d-flex align-items-center justify-content-center m-0" id="mp-tabs" role="tablist">
               <li class="nav-item"><button class="nav-link active px-3 py-2" data-bs-toggle="tab" data-bs-target="#mp-player-pane">Player</button></li>
               <li class="nav-item"><button class="nav-link px-3 py-2" data-bs-toggle="tab" data-bs-target="#mp-queue-pane">Up Next</button></li>
             </ul>
-            <button type="button" class="btn player-btn text-white" id="player-modal-more-btn" title="More"><i class="bi bi-three-dots-vertical fs-3"></i></button>
+            <button type="button" class="btn player-btn text-white p-0" id="player-modal-more-btn" title="More"><i class="bi bi-three-dots-vertical fs-2"></i></button>
           </div>
           
-          <!-- Notice: Removed .player-modal-body and .d-flex here to fix the empty space bug -->
           <div class="modal-body p-0 tab-content flex-grow-1 overflow-hidden d-block">
             
             <!-- PLAYER TAB -->
             <div class="tab-pane show active h-100" id="mp-player-pane">
-              <!-- Wrapped the flexbox INSIDE the tab -->
-              <div class="h-100 w-100 overflow-hidden p-4 d-flex flex-column pb-5">
+              <div class="h-100 w-100 overflow-hidden px-4 pb-4 pt-1 d-flex flex-column justify-content-between">
                 
-                <div class="d-flex flex-column justify-content-center align-items-center w-100 mt-3 mb-4" style="flex-grow: 1; min-height: 0;">
-                  <div class="position-relative shadow-lg" style="width: 100%; max-width: 360px; max-height: 45vh; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; margin: 0 auto;">
+                <div class="d-flex flex-column justify-content-center align-items-center w-100" style="flex-grow: 1; min-height: 0;">
+                  <div class="position-relative shadow-lg" style="width: 100%; max-width: 400px; max-height: 52vh; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; margin: 0 auto;">
                     <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="player-modal-art" alt="Album Art" style="width: 100%; height: 100%; object-fit: cover;">
                     <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
                   </div>
                 </div>
                 
-                <div class="w-100 mx-auto" style="max-width: 400px; flex-shrink: 0;">
+                <div class="w-100 mx-auto mt-3" style="max-width: 400px; flex-shrink: 0;">
                   <div class="d-flex justify-content-between align-items-center mb-3">
                     <div class="text-start pe-3" style="min-width: 0; flex-grow: 1; overflow: hidden;">
                       <div class="marquee-container mb-1">
@@ -22645,7 +22829,7 @@ function perform_cover_scan($db) {
               </div>
             </div>
 
-            <!-- UP NEXT TAB (No longer squished to the bottom!) -->
+            <!-- UP NEXT TAB -->
             <div class="tab-pane h-100 overflow-auto" id="mp-queue-pane">
                <div id="mobile-player-queue-list" class="p-2"></div>
             </div>
@@ -22657,19 +22841,25 @@ function perform_cover_scan($db) {
 
     <div class="modal fade" id="desktop-player-modal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-fullscreen">
-        <div class="modal-content player-modal-content">
+        <div class="modal-content player-modal-content" id="dp-modal-content-wrapper">
           <div class="dynamic-blur-bg" id="desktop-player-bg"></div>
+          <canvas class="visualizer-canvas immersive-visualizer d-none" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; opacity: 0.4;"></canvas>
           <div class="modal-header player-modal-header py-0 px-4 border-0">
             <button type="button" class="btn player-btn text-white" data-bs-dismiss="modal" aria-label="Close">
               <i class="bi bi-chevron-down fs-2"></i>
             </button>
-            <button type="button" class="btn player-btn text-white" id="desktop-player-modal-more-btn" title="More">
-              <i class="bi bi-three-dots-vertical fs-3"></i>
-            </button>
+            <div>
+              <button type="button" class="btn player-btn text-white me-2 d-inline-block" id="dp-immersive-btn" title="Immersive Fullscreen">
+                <i class="bi bi-arrows-fullscreen fs-4"></i>
+              </button>
+              <button type="button" class="btn player-btn text-white d-inline-block" id="desktop-player-modal-more-btn" title="More">
+                <i class="bi bi-three-dots-vertical fs-3"></i>
+              </button>
+            </div>
           </div>
           <div class="modal-body d-flex h-100 overflow-hidden pt-1 gap-4 align-items-center">
             
-            <div class="w-50 d-flex flex-column align-items-center justify-content-center h-100 px-4" style="min-width: 0;">
+            <div class="w-50 d-flex flex-column align-items-center justify-content-center h-100 px-4" id="dp-left-pane" style="min-width: 0;">
               <div class="position-relative shadow-lg mx-auto" style="width: 100%; max-width: 50vh; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; flex-shrink: 1;">
                 <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="desktop-player-modal-art" style="width: 100%; height: 100%; object-fit: cover; background-color: var(--ytm-surface-2);">
                 <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
@@ -22684,7 +22874,7 @@ function perform_cover_scan($db) {
               </div>
             </div>
 
-            <div class="w-50 d-flex flex-column h-100 py-3 pe-4">
+            <div class="w-50 d-flex flex-column h-100 py-3 pe-4" id="dp-right-pane">
               
               <ul class="nav nav-tabs border-secondary d-flex align-items-center justify-content-center border-0" id="dp-tabs" role="tablist">
                 <li class="nav-item" role="presentation">
@@ -22712,7 +22902,7 @@ function perform_cover_scan($db) {
               </div>
               
               <div class="mt-auto">
-                <div class="d-flex align-items-center gap-3 mb-4">
+                <div class="d-flex align-items-center gap-3 mb-4" id="dp-progress-row">
                   <span id="desktop-player-modal-current-time" class="small text-secondary">0:00</span>
                   <div class="progress-bar-container flex-grow-1" id="desktop-player-modal-progress-container">
                     <div class="progress-bar-bg"></div>
@@ -25283,12 +25473,17 @@ function perform_cover_scan($db) {
       </div>
     </div>
 
-    <div class="modal fade" id="full-scan-modal" tabindex="-1">
+    <div class="modal fade" id="full-scan-modal" tabindex="-1" data-bs-backdrop="static">
       <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content">
-          <div class="modal-header border-0">
-            <h5 class="modal-title">Full Library Scan Log</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          <div class="modal-header border-0 d-flex align-items-center flex-nowrap gap-3">
+            <div class="marquee-container flex-grow-1 m-0" style="min-width: 0;">
+              <h5 class="modal-title m-0 text-nowrap marquee-content scan-title-marquee">Full Library Scan Log</h5>
+            </div>
+            <div class="d-flex align-items-center flex-shrink-0">
+              <button type="button" class="btn btn-outline-light btn-sm me-3 hide-any-scan-btn" data-target="full-scan-modal"><i class="bi bi-dash-lg"></i> Hide</button>
+              <button type="button" class="btn-close btn-close-white m-0" data-bs-dismiss="modal"></button>
+            </div>
           </div>
           <div class="modal-body p-0">
             <iframe id="full-scan-iframe" src="about:blank" style="width: 100%; height: 60vh; border: none; background-color: #030303;"></iframe>
@@ -25297,12 +25492,17 @@ function perform_cover_scan($db) {
       </div>
     </div>
 
-    <div class="modal fade" id="chart-scan-modal" tabindex="-1">
+    <div class="modal fade" id="chart-scan-modal" tabindex="-1" data-bs-backdrop="static">
       <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content">
-          <div class="modal-header border-0">
-            <h5 class="modal-title">Rhythm Game Charts Scanner Log</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          <div class="modal-header border-0 d-flex align-items-center flex-nowrap gap-3">
+            <div class="marquee-container flex-grow-1 m-0" style="min-width: 0;">
+              <h5 class="modal-title m-0 text-nowrap marquee-content scan-title-marquee">Rhythm Game Charts Scanner Log</h5>
+            </div>
+            <div class="d-flex align-items-center flex-shrink-0">
+              <button type="button" class="btn btn-outline-light btn-sm me-3 hide-any-scan-btn" data-target="chart-scan-modal"><i class="bi bi-dash-lg"></i> Hide</button>
+              <button type="button" class="btn-close btn-close-white m-0" data-bs-dismiss="modal"></button>
+            </div>
           </div>
           <div class="modal-body p-0">
             <iframe id="chart-scan-iframe" src="about:blank" style="width: 100%; height: 60vh; border: none; background-color: #030303;"></iframe>
@@ -25518,17 +25718,38 @@ function perform_cover_scan($db) {
       </div>
     </div>
 
-    <div class="modal fade" id="cover-scan-modal" tabindex="-1">
+    <div class="modal fade" id="cover-scan-modal" tabindex="-1" data-bs-backdrop="static">
       <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content">
-          <div class="modal-header border-0">
-            <h5 class="modal-title">Re-scan Empty Cover Arts Log</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          <div class="modal-header border-0 d-flex align-items-center flex-nowrap gap-3">
+            <div class="marquee-container flex-grow-1 m-0" style="min-width: 0;">
+              <h5 class="modal-title m-0 text-nowrap marquee-content scan-title-marquee">Re-scan Empty Cover Arts Log</h5>
+            </div>
+            <div class="d-flex align-items-center flex-shrink-0">
+              <button type="button" class="btn btn-outline-light btn-sm me-3 hide-any-scan-btn" data-target="cover-scan-modal"><i class="bi bi-dash-lg"></i> Hide</button>
+              <button type="button" class="btn-close btn-close-white m-0" data-bs-dismiss="modal"></button>
+            </div>
           </div>
           <div class="modal-body p-0">
             <iframe id="cover-scan-iframe" src="about:blank" style="width: 100%; height: 60vh; border: none; background-color: #030303;"></iframe>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Beautiful Scanning Pill -->
+    <div id="scan-progress-pill" class="d-none shadow-lg rounded-pill" style="position: fixed; left: 50%; transform: translateX(-50%); background-color: var(--ytm-surface-2); border: 1px solid var(--ytm-accent); z-index: 9999; min-width: 270px; height: 52px; padding: 0 16px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; width: 100%; height: 100%;">
+        <div style="display: flex; align-items: center; gap: 12px; height: 100%;">
+          <div id="scan-pill-spinner" class="spinner-border text-danger" role="status" style="width: 20px; height: 20px; border-width: 2.5px; flex-shrink: 0; margin: 0;"></div>
+          <div style="display: flex; flex-direction: column; justify-content: center; height: 100%;">
+            <div id="scan-pill-title" style="color: #ffffff; font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; margin: 0; padding: 0; line-height: 1.2;">Scanning</div>
+            <div id="scan-pill-stats" style="color: #aaaaaa; font-weight: 700; font-size: 11px; font-family: monospace; margin: 0; padding: 0; line-height: 1.2; margin-top: 2px;">0 / 0</div>
+          </div>
+        </div>
+        <button id="show-scan-modal-btn" class="btn btn-sm btn-danger rounded-pill fw-bold" style="font-size: 12px; height: 32px; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; margin: 0; flex-shrink: 0; border: none; line-height: 1;">
+          <i class="bi bi-arrows-angle-expand" style="font-size: 12px; line-height: 1;"></i> View
+        </button>
       </div>
     </div>
     
@@ -26466,6 +26687,11 @@ curl_close($ch);
               --sidebar-width: 240px;
             }
         
+            html,
+            body {
+              background-color: #030303 !important;
+            }
+
             body {
               font-family: 'Roboto', sans-serif;
               background-color: var(--ytm-bg);
@@ -26691,51 +26917,29 @@ curl_close($ch);
         
             .player-bar {
               position: fixed;
-              bottom: 0;
+              bottom: -3px;
               left: 0;
               right: 0;
-              height: 96px;
-              background-color: #030303;
-              border: none !important;
-              border-top: none !important;
-              box-shadow: none !important;
+              height: 100px;
+              background-color: var(--ytm-surface, #0f0f0f) !important;
+              border-top: 1px solid var(--ytm-border, #272727) !important;
+              box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5) !important;
               display: grid;
               grid-template-columns: 1fr 2fr 1fr;
               align-items: center;
-              padding: 0 2rem;
+              padding: 0 2rem 4px 2rem;
               z-index: 1050;
               transform: translateY(100%);
               transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
               overflow: hidden;
             }
 
-            .player-bar::before {
-              content: '';
-              position: absolute;
-              top: 0;
-              left: 0;
-              right: 0;
-              bottom: 0;
-              background: linear-gradient(180deg, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.85) 100%) !important;
-              z-index: 0;
-              pointer-events: none;
-            }
-        
-            .player-bar > *:not(.dynamic-blur-bg) {
-              position: relative;
-              z-index: 1;
-            }
-
-            .player-bar .dynamic-blur-bg {
-              position: absolute !important;
-              top: -200px !important;
-              bottom: -200px !important;
-              left: -100px !important;
-              right: -100px !important;
-              filter: blur(40px) brightness(0.9) saturate(1.3) !important;
-              transform: translateZ(0) !important;
-              opacity: 0.85 !important;
-              z-index: -1 !important;
+            @media (max-width: 768px) {
+              .player-bar {
+                grid-template-columns: 1.5fr 1fr;
+                padding: 0 1rem 4px 1rem;
+                height: 84px;
+              }
             }
         
             .player-bar.visible {
@@ -27245,7 +27449,6 @@ curl_close($ch);
           </div>
 
           <div class="player-bar" id="player-bar">
-            <div class="dynamic-blur-bg" id="player-bar-bg"></div>
             <div class="pb-left">
               <div class="pb-art-container" id="pb-art-trigger">
                 <img id="pb-art" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjMjIyIi8+PC9zdmc+" class="pb-art" alt="Art">
@@ -27721,10 +27924,8 @@ curl_close($ch);
               // Apply dynamic blurred background to modals
               const mobileBg = document.getElementById("mobile-player-bg");
               const desktopBg = document.getElementById("desktop-player-bg");
-              const playerBarBg = document.getElementById("player-bar-bg");
               if (mobileBg) mobileBg.style.backgroundImage = `url('${fullCoverImg}')`;
               if (desktopBg) desktopBg.style.backgroundImage = `url('${fullCoverImg}')`;
-              if (playerBarBg) playerBarBg.style.backgroundImage = `url('${fullCoverImg}')`;
               lastSavedTime = 0;
               isRestoringTime = false;
               audioPlayer.src = `${currentBaseUrl}${joiner}action=get_stream&id=${song.id}&api_key=${encodeURIComponent(apiKey)}`;
@@ -28339,6 +28540,77 @@ SOFTWARE.</div>
       });
     
       document.addEventListener("DOMContentLoaded", () => {
+        window.applyMarquee = (el, contentHTML) => {
+          if (!el) return;
+
+          const container = el.closest('.marquee-container');
+          if (!container) {
+            el.innerHTML = contentHTML;
+            return;
+          }
+
+          const contentChanged = el._marqueeContent !== contentHTML;
+          el._marqueeContent = contentHTML;
+
+          const checkAndToggle = (force = false) => {
+            const currentHTML = el._marqueeContent || contentHTML;
+            const containerWidth = container.clientWidth;
+
+            if (containerWidth === 0) return;
+
+            // Prevent restarting active animations unless width changed significantly (>10px) or new track loaded
+            if (!force && !contentChanged && container._lastWidth && Math.abs(containerWidth - container._lastWidth) < 10 && el.classList.contains('marquee-anim')) {
+              return;
+            }
+
+            container._lastWidth = containerWidth;
+
+            // Reset state to accurately measure un-duplicated content
+            el.classList.remove('marquee-anim');
+            el.style.animationDuration = '';
+            el.style.transform = '';
+            el.innerHTML = currentHTML;
+            container.classList.remove('is-overflowing');
+
+            const contentWidth = el.scrollWidth;
+
+            if (contentWidth > (containerWidth + 4)) {
+              el.innerHTML = `<span class="marquee-text-span" style="padding-right: 3rem; display: inline-block;">${currentHTML}</span><span class="marquee-text-span" style="padding-right: 3rem; display: inline-block;">${currentHTML}</span>`;
+
+              const singleSpan = el.querySelector('.marquee-text-span');
+              const textWidth = singleSpan ? singleSpan.offsetWidth : contentWidth;
+              const duration = Math.max(6, parseFloat((textWidth / 30).toFixed(2)));
+
+              el.style.animationDuration = `${duration}s`;
+              el.classList.add('marquee-anim');
+              container.classList.add('is-overflowing');
+            }
+          };
+
+          if (contentChanged) {
+            el.innerHTML = contentHTML;
+          }
+
+          // Double RAF ensures flexbox layout is settled
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              checkAndToggle(contentChanged);
+            });
+          });
+
+          // Debounced ResizeObserver prevents animation restarts during smooth window resizes
+          if (!container._marqueeObserver && typeof ResizeObserver !== 'undefined') {
+            let resizeTimer;
+            container._marqueeObserver = new ResizeObserver(() => {
+              clearTimeout(resizeTimer);
+              resizeTimer = setTimeout(() => {
+                checkAndToggle(false);
+              }, 150);
+            });
+            container._marqueeObserver.observe(container);
+          }
+        };
+
         // PLAYGROUND ROUTER INTERCEPTOR
         // If the URL contains #playground, halt main app boot and swap out the DOM for the client template.
         if (window.location.hash.startsWith("#playground")) {
@@ -28490,7 +28762,106 @@ SOFTWARE.</div>
         const fullscreenBtn = document.getElementById("fullscreen-btn");
         const fullScanModalEl = document.getElementById("full-scan-modal");
         const fullScanIframe = document.getElementById("full-scan-iframe");
+        const scanProgressPill = document.getElementById("scan-progress-pill");
+        const showScanModalBtn = document.getElementById("show-scan-modal-btn");
+        
+        window.activeScanModalId = 'full-scan-modal';
+
+        document.querySelectorAll('.hide-any-scan-btn').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const targetId = e.currentTarget.dataset.target;
+            window.activeScanModalId = targetId;
+            window.isHidingScan = true;
+            bootstrap.Modal.getOrCreateInstance(document.getElementById(targetId)).hide();
+            if (scanProgressPill) {
+              scanProgressPill.classList.remove('d-none');
+              scanProgressPill.classList.add('d-flex');
+            }
+          });
+        });
+
+        if (showScanModalBtn && scanProgressPill) {
+          showScanModalBtn.addEventListener('click', () => {
+            scanProgressPill.classList.add('d-none');
+            scanProgressPill.classList.remove('d-flex');
+            if (window.activeScanModalId) {
+              bootstrap.Modal.getOrCreateInstance(document.getElementById(window.activeScanModalId)).show();
+            }
+          });
+        }
+        
+        window.updateScanPill = (completed, total, taskName = 'Scanning') => {
+          const pillTitle = document.getElementById('scan-pill-title');
+          const pillStats = document.getElementById('scan-pill-stats');
+          if (pillTitle) pillTitle.innerText = taskName;
+          if (pillStats) {
+            if (total === 0) pillStats.innerText = `Preparing...`;
+            else pillStats.innerText = `${completed} / ${total}`;
+          }
+        };
+
+        window.finishScan = (modalId) => {
+          const pillTitle = document.getElementById('scan-pill-title');
+          const pillStats = document.getElementById('scan-pill-stats');
+          const pillSpinner = document.getElementById('scan-pill-spinner');
+          
+          if (pillTitle) {
+            pillTitle.innerText = 'COMPLETED!';
+            pillTitle.style.color = '#fff';
+          }
+          if (pillStats) {
+            pillStats.innerText = '100%';
+          }
+          if (pillSpinner) {
+            pillSpinner.outerHTML = '<i class="bi bi-check-circle-fill text-danger" id="scan-pill-spinner" style="font-size: 20px; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; margin: 0; flex-shrink: 0; line-height: 1;"></i>';
+          }
+          
+          setTimeout(() => {
+            if (scanProgressPill) {
+              scanProgressPill.classList.add('d-none');
+              scanProgressPill.classList.remove('d-flex');
+              
+              // Reset the spinner for the next task
+              const newSpinner = document.getElementById('scan-pill-spinner');
+              if (newSpinner) {
+                newSpinner.outerHTML = '<div id="scan-pill-spinner" class="spinner-border text-danger" role="status" style="width: 20px; height: 20px; border-width: 2.5px; flex-shrink: 0; margin: 0;"></div>';
+              }
+            }
+            const modalEl = document.getElementById(modalId);
+            if (modalEl) {
+              const inst = bootstrap.Modal.getInstance(modalEl);
+              if (inst) inst.hide();
+            }
+            // Auto-refresh main UI to reflect database mutations
+            if (window.requestCache) window.requestCache.clear();
+            
+            window.cachedExploreData = null; // Clear frontend explore cache
+            
+            if (window.emergencyScanPrompted) {
+              window.emergencyScanPrompted = false; // Reset emergency flag
+              if (window.loadView) {
+                // Only force navigate to all songs if we are recovering from an empty database
+                window.loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '' });
+              }
+            } else if (window.loadView && window.currentView) {
+              // Standard auto_scan: silently refresh the current page to stay where we are
+              window.loadView(window.currentView);
+            }
+          }, 3000);
+        };
     
+        ['full-scan-modal', 'chart-scan-modal', 'cover-scan-modal'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) {
+            el.addEventListener('shown.bs.modal', () => {
+              const titleEl = el.querySelector('.scan-title-marquee');
+              if (titleEl && typeof window.applyMarquee === 'function') {
+                window.applyMarquee(titleEl, titleEl.textContent.trim());
+              }
+            });
+          }
+        });
+
         const genresModalEl = document.getElementById("genres-modal");
         const genresModal = genresModalEl ? new bootstrap.Modal(genresModalEl) : null;
         const genresModalBody = document.getElementById("genres-modal-body");
@@ -30841,6 +31212,32 @@ SOFTWARE.</div>
           volumeSlider: document.getElementById("volume-slider"),
         };
     
+        const dpImmersiveBtn = document.getElementById("dp-immersive-btn");
+        const dpModalContent = document.getElementById("dp-modal-content-wrapper");
+
+        if (dpImmersiveBtn && dpModalContent) {
+          dpImmersiveBtn.addEventListener("click", () => {
+            if (!document.fullscreenElement) {
+              document.documentElement.requestFullscreen().then(() => {
+                dpModalContent.classList.add("immersive-active");
+                dpImmersiveBtn.innerHTML = '<i class="bi bi-fullscreen-exit fs-4"></i>';
+              }).catch(err => {
+                dpModalContent.classList.add("immersive-active");
+                dpImmersiveBtn.innerHTML = '<i class="bi bi-fullscreen-exit fs-4"></i>';
+              });
+            } else {
+              if (document.exitFullscreen) document.exitFullscreen();
+            }
+          });
+
+          document.addEventListener("fullscreenchange", () => {
+            if (!document.fullscreenElement) {
+              dpModalContent.classList.remove("immersive-active");
+              if (dpImmersiveBtn) dpImmersiveBtn.innerHTML = '<i class="bi bi-arrows-fullscreen fs-4"></i>';
+            }
+          });
+        }
+
         const desktopPlayerModalEl = document.getElementById("desktop-player-modal");
         const desktopPlayerModal = desktopPlayerModalEl
           ? new bootstrap.Modal(desktopPlayerModalEl)
@@ -33129,7 +33526,7 @@ SOFTWARE.</div>
                     ${(type === "profile" || type === "artist") && details.background_url ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.background_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(8px); transform: scale(1.1); z-index: 0;"></div>` : ""}
                     ${type !== "profile" && type !== "artist" ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.image_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(40px); transform: scale(1.2); z-index: 0; opacity: 0.5;"></div>` : ""}
                     <div class="d-flex flex-column flex-md-row align-items-center align-items-md-end gap-4 position-relative w-100" style="z-index: 1;">
-                      <img src="${type === "profile" || type === "artist" ? details.image_url + (details.image_url.includes("?") ? "&" : "?") + "t=" + new Date().getTime() : details.image_url}" alt="${escapeHTML(details.name)}" class="${type === "profile" || type === "artist" ? "rounded-circle" : "rounded shadow-lg"}" style="width: 180px; height: 180px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); aspect-ratio: 1/1; object-fit: cover; object-position: center; flex-shrink: 0;">
+                      <img src="${type === "profile" || type === "artist" ? details.image_url + (details.image_url.includes("?") ? "&" : "?") + "t=" + new Date().getTime() : details.image_url}" alt="${escapeHTML(details.name)}" class="${type === "profile" || type === "artist" ? "rounded-circle shadow-lg my-auto" : "rounded shadow-lg my-auto"}" style="width: 180px; height: 180px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); aspect-ratio: 1/1; object-fit: cover; object-position: center; flex-shrink: 0;">
                       <div class="d-flex flex-column align-items-center align-items-md-start text-center text-md-start flex-grow-1" style="min-width: 0; width: 100%;">
                         <div class="text-uppercase fw-bold mb-1" style="letter-spacing: 1px; font-size: 0.8rem; color: rgba(255,255,255,0.9); text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${typeText}</div>
                         <div class="marquee-container w-100 mb-2">
@@ -39891,17 +40288,18 @@ SOFTWARE.</div>
           if (!visAnimId) drawVisualizer();
     
           if ("mediaSession" in navigator) {
+            const absCoverUrl = new URL(currentSong.image_url || `?action=get_image&id=${currentSong.id}`, window.location.href).href;
             navigator.mediaSession.metadata = new MediaMetadata({
-              title: currentSong.title,
-              artist: currentSong.artist,
-              album: currentSong.album,
+              title: currentSong.title || "Unknown Title",
+              artist: currentSong.artist || "Unknown Artist",
+              album: currentSong.album || "Unknown Album",
               artwork: [
-                {
-                  src: currentSong.image_url,
-                  sizes: "500x500",
-                  type: "image/webp",
-                },
-              ],
+                { src: absCoverUrl, sizes: "96x96", type: "image/webp" },
+                { src: absCoverUrl, sizes: "128x128", type: "image/webp" },
+                { src: absCoverUrl, sizes: "192x192", type: "image/webp" },
+                { src: absCoverUrl, sizes: "256x256", type: "image/webp" },
+                { src: absCoverUrl, sizes: "512x512", type: "image/webp" }
+              ]
             });
             navigator.mediaSession.setActionHandler("play", togglePlayPause);
             navigator.mediaSession.setActionHandler("pause", togglePlayPause);
@@ -39931,10 +40329,8 @@ SOFTWARE.</div>
           // Apply dynamic blurred background to modals
           const mobileBg = document.getElementById("mobile-player-bg");
           const desktopBg = document.getElementById("desktop-player-bg");
-          const playerBarBg = document.getElementById("player-bar-bg");
           if (mobileBg) mobileBg.style.backgroundImage = `url('${imageUrl}')`;
           if (desktopBg) desktopBg.style.backgroundImage = `url('${imageUrl}')`;
-          if (playerBarBg) playerBarBg.style.backgroundImage = `url('${imageUrl}')`;
           if (docPipWindow) {
             const pipBg = docPipWindow.document.getElementById("pip-bg");
             if (pipBg) pipBg.style.backgroundImage = `url('${imageUrl}')`;
@@ -39944,7 +40340,7 @@ SOFTWARE.</div>
           updateAppFavicon(imageUrl);
 
           // Clear previous theme instantly on track change to prevent getting stuck
-          document.querySelectorAll(".player-modal-content, .player-bar").forEach((modal) => {
+          document.querySelectorAll(".player-modal-content").forEach((modal) => {
             modal.classList.remove("theme-light-bg");
           });
           if (docPipWindow && docPipWindow.document.body) {
@@ -39963,9 +40359,9 @@ SOFTWARE.</div>
                 1000,
             );
 
-            // If brightness is high (light cover art), trigger light mode
-            if (brightness > 115) {
-              document.querySelectorAll(".player-modal-content, .player-bar").forEach((modal) => {
+            // If brightness is high (light cover art), trigger light mode for modals only
+            if (brightness > 130) {
+              document.querySelectorAll(".player-modal-content").forEach((modal) => {
                 modal.classList.add("theme-light-bg");
               });
               if (docPipWindow && docPipWindow.document.body) {
@@ -39976,40 +40372,33 @@ SOFTWARE.</div>
           // Append timestamp to bypass stubborn browser caches that prevent onload triggering
           themeImg.src = imageUrl + "&t=" + new Date().getTime();
 
-          window.applyMarquee = (el, contentHTML) => {
-            el.innerHTML = contentHTML;
-            el.classList.remove('marquee-anim');
-            el.style.animationDuration = '';
-            if (el.parentElement && el.parentElement.classList.contains('marquee-container')) {
-              el.parentElement.classList.remove('is-overflowing');
-              requestAnimationFrame(() => {
-                const pWidth = el.parentElement.clientWidth;
-                const isOverflow = pWidth > 0 ? (el.scrollWidth > pWidth) : (el.textContent.length > 20);
-                if (isOverflow) {
-                  el.innerHTML = `<span style="padding-right: 3rem;">${contentHTML}</span><span style="padding-right: 3rem;">${contentHTML}</span>`;
-                  
-                  const firstSpan = el.querySelector('span');
-                  const textWidth = firstSpan ? firstSpan.offsetWidth : (el.textContent.length * 9);
-                  const duration = Math.max(8, Math.round(textWidth / 30));
-                  
-                  el.style.animationDuration = `${duration}s`;
-                  el.classList.add('marquee-anim');
-                  el.parentElement.classList.add('is-overflowing');
-                }
-              });
-            }
-          };
           const applyMarquee = window.applyMarquee;
 
           playerElements.title.forEach((el) => applyMarquee(el, escapeHTML(currentSong.title)));
           playerElements.artist.forEach((el) => applyMarquee(el, formatArtistsHTML(currentSong.artist, currentSong.user_id, currentSong.is_collaborative)));
 
           document.title = `${currentSong.title} • ${currentSong.artist}`;
-    
+
           if (docPipWindow) {
             docPipWindow.document.title = `${currentSong.title} • ${currentSong.artist}`;
           }
-    
+
+          if ("mediaSession" in navigator && currentSong) {
+            const absCoverUrl = new URL(imageUrl, window.location.href).href;
+            navigator.mediaSession.metadata = new MediaMetadata({
+              title: currentSong.title || "Unknown Title",
+              artist: currentSong.artist || "Unknown Artist",
+              album: currentSong.album || "Unknown Album",
+              artwork: [
+                { src: absCoverUrl, sizes: "96x96", type: "image/webp" },
+                { src: absCoverUrl, sizes: "128x128", type: "image/webp" },
+                { src: absCoverUrl, sizes: "192x192", type: "image/webp" },
+                { src: absCoverUrl, sizes: "256x256", type: "image/webp" },
+                { src: absCoverUrl, sizes: "512x512", type: "image/webp" }
+              ]
+            });
+          }
+
           updatePlayPauseIcons();
           updateFavoriteIcons(currentSong.is_favorite == 1);
     
@@ -41991,10 +42380,13 @@ SOFTWARE.</div>
     
         if (fullScanModalEl && fullScanIframe) {
           fullScanModalEl.addEventListener("hidden.bs.modal", () => {
-            fullScanIframe.src = "about:blank";
-            if (currentView.type === "get_songs") {
-              loadView(currentView);
+            if (!window.isHidingScan) {
+              fullScanIframe.src = "about:blank";
+              if (currentView.type === "get_songs") {
+                loadView(currentView);
+              }
             }
+            window.isHidingScan = false;
           });
         }
     
@@ -42073,20 +42465,21 @@ SOFTWARE.</div>
         const chartScanIframe = document.getElementById("chart-scan-iframe");
         if (chartScanModalEl && chartScanIframe) {
           chartScanModalEl.addEventListener("hidden.bs.modal", () => {
-            // Save current progress dynamically before unloading
-            try {
-              const currentUrl = chartScanIframe.contentWindow.location.href;
-              const urlParams = new URLSearchParams(currentUrl.split("?")[1]);
-              const activeStep = urlParams.get("step");
-              if (activeStep) {
-                localStorage.setItem("rhythm_scan_step", activeStep);
-              }
-            } catch (e) {}
-    
-            chartScanIframe.src = "about:blank";
-            if (currentView.type === "rhythm_game") {
-              loadView(currentView);
+            if (!window.isHidingScan) {
+              // Save current progress dynamically before unloading
+              try {
+                const currentUrl = chartScanIframe.contentWindow.location.href;
+                const urlParams = new URLSearchParams(currentUrl.split("?")[1]);
+                const activeStep = urlParams.get("step");
+                if (activeStep) {
+                  localStorage.setItem("rhythm_scan_step", activeStep);
+                }
+              } catch (e) {}
+      
+              chartScanIframe.src = "about:blank";
+              if (currentView.type === "rhythm_game") loadView(currentView);
             }
+            window.isHidingScan = false;
           });
         }
     
@@ -42133,13 +42526,17 @@ SOFTWARE.</div>
         const coverScanIframe = document.getElementById("cover-scan-iframe");
         if (coverScanModalEl && coverScanIframe) {
           coverScanModalEl.addEventListener("show.bs.modal", () => {
-            coverScanIframe.src = "?action=rescan_covers";
+            // Only assign if it's completely empty to avoid restarting a hidden scan!
+            if (coverScanIframe.src.includes("about:blank")) {
+               coverScanIframe.src = "?action=rescan_covers";
+            }
           });
           coverScanModalEl.addEventListener("hidden.bs.modal", () => {
-            coverScanIframe.src = "about:blank";
-            if (currentView.type === "get_songs") {
-              loadView(currentView);
+            if (!window.isHidingScan) {
+              coverScanIframe.src = "about:blank";
+              if (currentView.type === "get_songs") loadView(currentView);
             }
+            window.isHidingScan = false;
           });
         }
     
@@ -46717,9 +47114,6 @@ SOFTWARE.</div>
                         body.theme-light-bg .progress-bar-bg, .player-bar.theme-light-bg .timeline-bg, .player-bar.theme-light-bg .volume-bg { background-color: rgba(0, 0, 0, 0.2) !important; }
                         body.theme-light-bg .progress-bar-fg, .player-bar.theme-light-bg .timeline-filled, .player-bar.theme-light-bg .volume-filled { background-color: #000000 !important; }
                         .player-bar.theme-light-bg .timeline-container:hover .timeline-filled, .player-bar.theme-light-bg .volume-bar:hover .volume-filled { background-color: var(--ytm-accent) !important; }
-                        .player-bar.theme-light-bg { background-color: rgba(255, 255, 255, 0.85) !important; color: #000000 !important; border-top: 1px solid rgba(0,0,0,0.1); }
-                        .player-bar.theme-light-bg::before { background: linear-gradient(0deg, rgba(255, 255, 255, 0.6) 0%, rgba(255, 255, 255, 0.1) 100%); }
-                        .player-bar.theme-light-bg .dynamic-blur-bg { filter: blur(50px) brightness(1.1); opacity: 0.95; }
                         .player-bar .pb-title, .player-bar .pb-time { text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
                         .player-bar .pb-artist, .player-bar .pb-btn, .player-bar .text-secondary { text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
                         .pb-play-circle .bi-play-fill, .play-btn .bi-play-fill { margin-left: 4px; }
@@ -54746,6 +55140,20 @@ SOFTWARE.</div>
           }
     
           if (chatInviteToken || inviteToken || songInviteToken) return; // Prevent overwriting view when handling invites
+        
+          if (window.autoScanEnabled && !window.autoScanTriggered) {
+            window.autoScanTriggered = true;
+            const fullScanIframe = document.getElementById("full-scan-iframe");
+            if (fullScanIframe) {
+              window.isHidingScan = true;
+              fullScanIframe.src = "?action=full_scan";
+              const pill = document.getElementById("scan-progress-pill");
+              if (pill) {
+                pill.classList.remove("d-none");
+                pill.classList.add("d-flex");
+              }
+            }
+          }
     
           if (window.initialView) {
             history.replaceState(
