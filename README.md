@@ -1,6 +1,6 @@
 # PHP Music
 
-A modern self-hosted music player built in PHP, with a clean UI, SQLite backend, and full PWA (Progressive Web App) features. Scan your music collection, play songs in your browser, manage favorites/playlists, download entire playlists, upload and edit your own songs, view lyrics, write and publish Markdown blogs, edit images, play rhythm game beatmaps, and more—all in one lightweight app.
+A modern self-hosted music player built in PHP, with a clean UI, SQLite backend, and full PWA (Progressive Web App) features. Scan your music collection, play songs in your browser, manage favorites/playlists, download entire playlists, upload and edit your own songs, view lyrics, write and publish Markdown blogs, edit images, play rhythm game beatmaps, write code via an integrated PHPEditor IDE, and more—all in one lightweight app.
 
 ![1](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/1.png)
 ![2](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/2.png) 
@@ -75,6 +75,7 @@ A modern self-hosted music player built in PHP, with a clean UI, SQLite backend,
 
 | Feature | Description | Technical Implementation |
 | :--- | :--- | :--- |
+| **Integrated PHPEditor (IDE)** | Full-fledged code editor for server files directly in the browser. | Built on Ace Editor. Features syntax highlighting, multi-tab support, file tree explorer, auto-saving, file history/rollback, and a terminal console panel. |
 | **Personal Notes notebook** | Keep private logs, song ideas, lyrics, or personal to-do lists within the app. | Stores note data inside a dedicated `personal_notes` table sandboxed to individual accounts. Allows note creation, edits, deletions, and sorting filters (Newest, Oldest, Recently Modified). |
 | **Interactive Calendar** | Built-in date planner and time referencing tool. | Accessible via the sidebar. Features a live clock, dynamic month/year navigation, and a quick date-picker input. |
 | **1:1 Image Cropper** | Crop profile pictures and song covers. | Integrated 1:1 aspect-ratio cropping canvas with panning/zoom to fill gaps, resizing and converting uploads to WebP/JPEG format. |
@@ -224,6 +225,11 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite, follow
 * **Downloader**: Open the "Downloader" tool from the sidebar, enter a Playlist ID, and sequentially batch-download every track in that playlist directly to your local drive.
 * **Offline Management**: Drag-and-drop to manually reorder offline lists. Standalone JSON import/export functions let you keep physical backups of your lists.
 
+### 6. Developer & Power-User Tools
+* **PHPEditor (IDE):** Access the fully integrated IDE from the Admin Panel to write, edit, and manage code files directly on your server. Built with Ace Editor, it features syntax highlighting, multi-tab support, file history restorations, a media viewer, and an interactive terminal console.
+* **Open API Endpoints:** Click "API Documentation" in the sidebar to reveal all internal backend URL hooks (e.g., `?action=get_songs`). You can copy these endpoints to write Python scripts, Discord bots, or external UI interfaces that tap directly into your PHP Music database.
+* **API Playground:** Use the visual API Playground to test JSON payloads, evaluate responses in an integrated code viewer, or execute queries directly via an injected iframe testing environment.
+
 ---
 
 ## Admin Panel
@@ -238,6 +244,7 @@ Access the administrative dashboard by appending `?access=admin` to your URL. Lo
 | **Purging** | Permanently delete user profiles and purge all of their uploaded physical files, playlists, notes, tasks, blogs, and categories from the server database. |
 | **System Library** | Files scanned directly from disk are assigned to the virtual "Music Library" administrator account. |
 | **Drive Manager** | An integrated file manager for server assets (`?access=admin&page=drive`). Features include native `.zip` extraction via context menus, dynamic URL deep linking for active files, an optimized 2-column mobile grid, and recursive folder property calculations (displaying total files, subdirectories, and byte size). |
+| **PHPEditor (IDE)** | Desktop-optimized code editor (`?access=admin&page=ide`) featuring a file explorer, multi-tab Ace Editor, version history, media viewer, and terminal console. |
 
 ---
 
@@ -253,6 +260,7 @@ Access the administrative dashboard by appending `?access=admin` to your URL. Lo
 * **Offline Audio Handling**: The Service Worker intercepts audio stream requests (`?action=get_stream`) and seamlessly constructs `206 Partial Content` range slices from cached file buffers, enabling background media seeking even when fully offline.
 * Uploads are safely stored in `/uploads/{artist_slug}/` directories.
 * Complete metadata modification is supported via the `edit_metadata` action which updates the database, writes ID3 tags back into the file using getID3's writetags function, and mirrors covers in dedicated folders.
+* The built-in PHPEditor uses Ace Editor for syntax highlighting and interacts seamlessly with the server's file system, tracking file versions for easy rollback.
 * Playlists, offline lists, and favorites support fluid drag-and-drop ordering powered by SortableJS, pushing positional arrays back to the server.
 * Collaborative playlists track individual song contributions via an `added_by` column on the `playlist_songs` table, and authenticate editor permissions securely using a `playlist_collaborators` lookup.
 * Play histories and view counts are continuously logged locally (after 30 seconds of playback) to generate personalized "For You" shelves and track statistics.

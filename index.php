@@ -28,8 +28,9 @@ $htaccess_path = __DIR__ . '/.htaccess';
 $needs_htaccess_update = false;
 
 if (file_exists($htaccess_path)) {
-  // If the old overly-strict FilesMatch is present, force an update to fix X-Sendfile audio playback
-  if (strpos(file_get_contents($htaccess_path), 'mp3|m4a') !== false) {
+  $content = file_get_contents($htaccess_path);
+  // If the old overly-strict FilesMatch is present or file is empty, force an update
+  if (empty(trim($content)) || strpos($content, 'mp3|m4a') !== false) {
     $needs_htaccess_update = true;
   }
 } else {
@@ -386,7 +387,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '7.3');
+define('APP_VERSION', '7.4');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1203,6 +1204,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
               break;
 
+            case 'terminal_cmd':
+              $cmd = $input['cmd'] ?? '';
+              $output = [];
+              if (preg_match('/^(git|ls|pwd|whoami|echo|php -v|cat|top)/i', $cmd)) {
+                exec($cmd . ' 2>&1', $output);
+                echo json_encode(['success' => true, 'output' => htmlspecialchars(implode("\n", $output))]);
+              } else {
+                echo json_encode(['success' => false, 'output' => "Command restricted. Only safe commands allowed (git, ls, pwd, php -v, etc)."]);
+              }
+              break;
+
+            case 'git_history':
+              $output = [];
+              exec('git log -n 50 --oneline 2>&1', $output);
+              echo json_encode(['success' => true, 'history' => htmlspecialchars(implode("\n", $output))]);
+              break;
+
             default:
               throw new Exception('Unknown POST action');
           }
@@ -1871,9 +1889,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/theme/material-darker.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/dialog/dialog.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ace.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-searchbox.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-modelist.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-language_tools.min.js"></script>
     <style>
       :root {
         --ytm-bg: #030303;
@@ -2462,8 +2481,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <a href="?access=admin&page=reports" class="nav-link <?php echo (($_GET['page'] ?? '') === 'reports') ? 'active' : ''; ?>"><i class="bi bi-shield-fill-exclamation"></i><span>Profile Reports</span></a>
             <a href="?access=admin&page=appeals" class="nav-link <?php echo (($_GET['page'] ?? '') === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
             <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Drive Manager</span></a>
+            <a href="?access=admin&page=ide" class="nav-link <?php echo (($_GET['page'] ?? '') === 'ide') ? 'active' : ''; ?>"><i class="bi bi-code-slash"></i><span>PHPEditor (IDE)</span></a>
             <a href="?access=admin&page=api" class="nav-link <?php echo (($_GET['page'] ?? '') === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
-            <a href="?access=admin&page=manage" class="nav-link <?php echo (($_GET['page'] ?? '') === 'manage') ? 'active' : ''; ?>"><i class="bi bi-collection-fill"></i><span>Manage Content</span></a>
             <a href="./#playground" target="_blank" class="nav-link"><i class="bi bi-window-stack"></i><span>API Playground</span></a>
           </div>
           
@@ -2881,542 +2900,1430 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
             <iframe src="./" onload="document.getElementById('manage-iframe-spinner').style.display='none';" style="width: 117.647%; height: 117.647%; border: none; transform: scale(0.85); transform-origin: top left; position: absolute; top: 0; left: 0; display: block; z-index: 5;"></iframe>
           </div>
+        <?php elseif (($_GET['page'] ?? '') === 'ide'): ?>
+          <div class="d-flex d-lg-none align-items-center justify-content-center h-100 p-4 text-center">
+            <div>
+              <i class="bi bi-display fs-1 text-danger"></i>
+              <h4 class="mt-3 fw-bold">Desktop Required</h4>
+              <p class="text-secondary">The PHPEditor (IDE) interface is optimized for larger screens and physical keyboards. Please access this page on a desktop device.</p>
+            </div>
+          </div>
+          
+          <style>
+            .ide-container { padding: 0 !important; background-color: #0a0a0a; display: flex; flex-direction: column; overflow: hidden; height: 100%; width: 100%; }
+            .ide-header { height: 48px; background-color: #121212; border-bottom: 1px solid #2d2d2d; display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; flex-shrink: 0; }
+            .ide-header-title { color: #e3e3e3; font-weight: bold; font-size: 1rem; display: flex; align-items: center; gap: 8px; }
+            .ide-header-title span { background: #262626; color: #aaaaaa; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: normal; margin-left: 8px; }
+            .ide-actions { display: flex; gap: 8px; }
+            .ide-btn { background: transparent; border: 1px solid #555555; color: #e3e3e3; border-radius: 4px; padding: 4px 12px; font-size: 0.85rem; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: 0.2s; }
+            .ide-btn:hover { background: #262626; color: #ffffff; }
+            .ide-btn.primary { background: #ff0000; border-color: #ff0000; color: #ffffff; }
+            .ide-btn.primary:hover { background: #cc0000; }
+            .ide-body { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+            .ide-sidebar { width: 250px; background-color: #0a0a0a; border-right: 1px solid #2d2d2d; display: flex; flex-direction: column; flex-shrink: 0; position: relative; }
+            .ide-sidebar-header { padding: 12px; color: #ffffff; font-size: 0.75rem; font-weight: bold; letter-spacing: 1px; border-bottom: 1px solid #1a1a1a; display: flex; justify-content: space-between; }
+            .ide-file-tree { flex: 1; overflow-y: auto; padding: 8px; font-size: 0.85rem; }
+            .ide-tree-item { padding: 4px 8px; color: #aaaaaa; cursor: pointer; display: flex; align-items: center; gap: 8px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .ide-tree-item:hover { background-color: #1a1a1a; color: #ffffff; }
+            .ide-tree-item.active { background-color: rgba(255, 0, 0, 0.2); color: #ffffff; border-left: 3px solid #ff0000; border-radius: 0 4px 4px 0; }
+            .ide-editor-wrapper { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+            .ide-tabs { display: flex; background: #0a0a0a; border-bottom: 1px solid #2d2d2d; overflow-x: auto; flex-shrink: 0; }
+            .ide-tabs::-webkit-scrollbar { height: 4px; }
+            .ide-tabs::-webkit-scrollbar-thumb { background: #555555; }
+            .ide-tab { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: #0a0a0a; border-right: 1px solid #2d2d2d; color: #aaaaaa; font-size: 0.85rem; border-top: 2px solid transparent; cursor: pointer; white-space: nowrap; }
+            .ide-tab.active { background: #121212; color: #ffffff; border-top: 2px solid #ff0000; }
+            .ide-tab:hover:not(.active) { background: #1a1a1a; color: #e3e3e3; }
+            .ide-tab-close { opacity: 0.5; transition: 0.2s; padding: 2px; border-radius: 4px; }
+            .ide-tab-close:hover { opacity: 1; background: rgba(255,0,0,0.2); color: #ff0000; }
+            .ide-editor-container { flex: 1; position: relative; background: #121212; }
+            
+            /* Bottom Terminal Panel */
+            .ide-bottom-panel { display: none; flex-direction: column; background: #0a0a0a; height: 250px; flex-shrink: 0; position: relative; }
+            .ide-bottom-panel.active { display: flex; }
+            .ide-bottom-panel.fullscreen { position: absolute; top: 48px; left: 300px; right: 0; bottom: 0; height: auto !important; z-index: 100; border-left: 1px solid #2d2d2d; }
+            .ide-panel-resizer { height: 4px; background: #2d2d2d; cursor: ns-resize; width: 100%; transition: background 0.2s; flex-shrink: 0; z-index: 10; }
+            .ide-panel-resizer:hover, .ide-panel-resizer.resizing { background: #ff0000; }
+            .panel-header { display: flex; justify-content: space-between; align-items: center; background: #121212; border-bottom: 1px solid #2d2d2d; padding: 0 16px; height: 35px; flex-shrink: 0; }
+            .panel-tabs { display: flex; height: 100%; gap: 16px; }
+            .panel-tab { color: #aaaaaa; font-size: 0.8rem; text-transform: uppercase; cursor: pointer; display: flex; align-items: center; border-bottom: 2px solid transparent; }
+            .panel-tab.active { color: #ffffff; border-bottom-color: #ff0000; font-weight: bold; }
+            .panel-tab:hover:not(.active) { color: #e3e3e3; }
+            .panel-actions { display: flex; gap: 12px; color: #aaaaaa; }
+            .panel-actions i { cursor: pointer; transition: 0.2s; font-size: 0.9rem; }
+            .panel-actions i:hover { color: #ffffff; }
+            .panel-content-area { flex: 1; overflow: auto; background: #0a0a0a; color: #e3e3e3; font-family: monospace; font-size: 0.85rem; padding: 12px; position: relative; }
+            .panel-pane { display: none; height: 100%; width: 100%; }
+            .panel-pane.active { display: block; }
+            
+            /* Activity Bar & Modals */
+            .ide-activity-bar { width: 50px; background-color: #000000; border-right: 1px solid #1a1a1a; display: flex; flex-direction: column; align-items: center; padding-top: 12px; flex-shrink: 0; z-index: 10; }
+            .ide-activity-action { width: 38px; height: 38px; display: flex; justify-content: center; align-items: center; color: #888; font-size: 1.3rem; cursor: pointer; border-radius: 8px; margin-bottom: 8px; transition: 0.2s; }
+            .ide-activity-action.active, .ide-activity-action:hover { color: #ff0000; background: rgba(255, 0, 0, 0.1); }
+            
+            .ide-ctx-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #121212; border: 1px solid #2d2d2d; border-radius: 12px; width: 320px; box-shadow: 0 15px 40px rgba(0,0,0,0.8); z-index: 5000; display: none; flex-direction: column; padding: 12px; }
+            .ide-ctx-title { color: #aaaaaa; font-size: 0.85rem; padding: 8px 12px; font-weight: bold; border-bottom: 1px solid #2d2d2d; margin-bottom: 8px; word-break: break-all; }
+            .ide-ctx-btn { background: transparent; border: none; color: #e3e3e3; text-align: left; padding: 10px 12px; border-radius: 6px; cursor: pointer; transition: 0.2s; display: flex; align-items: center; gap: 10px; font-size: 0.9rem; width: 100%; }
+            .ide-ctx-btn:hover { background: #1a1a1a; color: #ffffff; }
+            .ide-ctx-btn.text-danger:hover { background: rgba(255,0,0,0.1); }
+            
+            #ide-media-viewer { background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px); background-size: 20px 20px; }
+
+            /* Main Sidebar Resizer */
+            .ide-sidebar-resizer {
+              position: absolute;
+              top: 0;
+              right: 0;
+              width: 4px;
+              height: 100%;
+              cursor: col-resize;
+              background: transparent;
+              z-index: 10;
+              transition: background 0.2s;
+            }
+
+            .ide-sidebar-resizer:hover, .ide-sidebar-resizer.resizing {
+              background: #ff0000;
+            }
+
+            /* Compact Modern Dark Theme for Ace Editor Searchbox (Drive & IDE) */
+            .ace_editor, .ace_editor * {
+              box-sizing: content-box !important;
+            }
+
+            .ace_search {
+              background-color: #121212 !important;
+              color: #e3e3e3 !important;
+              border: 1px solid #333333 !important;
+              border-radius: 8px !important;
+              box-shadow: 0 4px 16px rgba(0, 0, 0, 0.8) !important;
+              font-family: 'Roboto', system-ui, sans-serif !important;
+              font-size: 11px !important;
+              padding: 8px !important;
+              max-width: 220px !important;
+              width: 100% !important;
+              box-sizing: border-box !important;
+              z-index: 9999 !important;
+            }
+
+            .ace_search * {
+              box-sizing: border-box !important;
+              font-family: inherit !important;
+              font-size: 11px !important;
+              line-height: normal !important;
+              margin: 0 !important;
+            }
+
+            .ace_search_form {
+              display: flex !important;
+              flex-wrap: wrap !important;
+              gap: 4px !important;
+              margin-bottom: 6px !important;
+              width: 100% !important;
+            }
+
+            .ace_replace_form {
+              display: flex;
+              flex-wrap: wrap !important;
+              gap: 4px !important;
+              margin-bottom: 6px !important;
+              width: 100% !important;
+            }
+
+            /* Respect Ace's default hidden state for Replace form */
+            .ace_replace_form[style*="display: none"],
+            .ace_replace_form[style*="display:none"],
+            .ace_replace_form.ace_hidden {
+              display: none !important;
+            }
+
+            .ace_search_field {
+              background: #030303 !important;
+              color: #ffffff !important;
+              border: 1px solid #333333 !important;
+              border-radius: 4px !important;
+              padding: 4px 20px 4px 6px !important;
+              height: 24px !important;
+              min-height: 24px !important;
+              outline: none !important;
+              flex: 1 1 100% !important;
+              width: 100% !important;
+            }
+
+            .ace_search_field:focus {
+              border-color: #ff0000 !important;
+            }
+
+            .ace_searchbtn {
+              background: #282828 !important;
+              color: #ffffff !important;
+              border: 1px solid #404040 !important;
+              border-radius: 4px !important;
+              padding: 2px 6px !important;
+              height: 22px !important;
+              min-height: 22px !important;
+              line-height: 16px !important;
+              cursor: pointer !important;
+              font-weight: 500 !important;
+              flex: 1 1 auto !important;
+              width: auto !important;
+              text-align: center !important;
+            }
+
+            .ace_searchbtn:hover {
+              background: #ff0000 !important;
+              border-color: #ff0000 !important;
+              color: #ffffff !important;
+            }
+
+            .ace_search_options {
+              display: flex !important;
+              align-items: center !important;
+              flex-wrap: wrap !important;
+              gap: 4px !important;
+              margin-top: 4px !important;
+            }
+
+            .ace_button {
+              background: #282828 !important;
+              color: #aaaaaa !important;
+              border: 1px solid #404040 !important;
+              border-radius: 4px !important;
+              padding: 2px 4px !important;
+              cursor: pointer !important;
+              font-weight: 700 !important;
+              font-size: 10px !important;
+            }
+
+            .ace_button:hover,
+            .ace_button.checked {
+              background: #ff0000 !important;
+              color: #ffffff !important;
+              border-color: #ff0000 !important;
+            }
+
+            .ace_searchbtn_close {
+              position: absolute !important;
+              top: 12px !important;
+              right: 10px !important;
+              width: 16px !important;
+              height: 16px !important;
+              background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 14 14"><path d="M14 1.4L12.6 0 7 5.6 1.4 0 0 1.4 5.6 7 0 12.6 1.4 14 7 8.4 12.6 14 14 12.6 8.4 7z" fill="%23aaaaaa"/></svg>') no-repeat center !important;
+              background-size: 8px !important;
+              border: none !important;
+              cursor: pointer !important;
+              opacity: 0.7 !important;
+              padding: 0 !important;
+            }
+
+            .ace_searchbtn_close:hover {
+              opacity: 1 !important;
+            }
+
+            .ace_search_counter {
+              color: #aaaaaa !important;
+              font-size: 10px !important;
+              margin-top: 2px !important;
+              width: 100% !important;
+              text-align: center;
+            }
+          </style>
+          
+          <div class="ide-container d-none d-lg-flex">
+            <div class="ide-header">
+              <div class="ide-header-title">
+                <i class="bi bi-braces text-danger"></i> PHPEditor
+                <span id="ide-current-file">No file selected</span>
+              </div>
+              <div class="ide-actions">
+                <button class="ide-btn" id="ide-find-btn" title="Ctrl+F"><i class="bi bi-search"></i> Find</button>
+                <button class="ide-btn" id="ide-save-btn" title="Ctrl+S"><i class="bi bi-floppy"></i> Save</button>
+                <button class="ide-btn" id="ide-preview-btn"><i class="bi bi-play-fill"></i> Execute / Preview</button>
+              </div>
+            </div>
+            
+            <div class="ide-ctx-modal" id="ide-ctx-modal">
+              <div class="ide-ctx-title" id="ide-ctx-title">file.php</div>
+              <input type="hidden" id="ide-ctx-path">
+              <input type="hidden" id="ide-ctx-is-folder">
+              <button class="ide-ctx-btn" id="ide-btn-new-file"><i class="bi bi-file-earmark-plus"></i> New file here</button>
+              <button class="ide-ctx-btn" id="ide-btn-new-folder"><i class="bi bi-folder-plus"></i> New folder here</button>
+              <button class="ide-ctx-btn" id="ide-btn-rename"><i class="bi bi-pencil-square"></i> Rename</button>
+              <button class="ide-ctx-btn text-danger" id="ide-btn-delete"><i class="bi bi-trash"></i> Delete</button>
+              <hr class="border-secondary my-2 opacity-25">
+              <button class="ide-ctx-btn justify-content-center text-secondary fw-bold" onclick="document.getElementById('ide-ctx-modal').style.display='none'">Cancel</button>
+            </div>
+
+            <div class="ide-body">
+              <!-- Thin Sidebar (Activity Bar) -->
+              <div class="ide-activity-bar">
+                <div class="ide-activity-action active" id="act-explorer" title="Explorer" onclick="window.switchIdeSidebar('explorer')"><i class="bi bi-files"></i></div>
+                <div class="ide-activity-action" id="act-git" title="Drive Activity" onclick="window.switchIdeSidebar('git')"><i class="bi bi-activity"></i></div>
+                <div class="ide-activity-action" id="act-history" title="File History" onclick="window.switchIdeSidebar('history')"><i class="bi bi-clock-history"></i></div>
+                <div class="ide-activity-action mt-auto mb-2 text-info" title="Terminal" onclick="window.toggleIdeTerminal()"><i class="bi bi-terminal-fill"></i></div>
+                <div class="ide-activity-action mb-3 text-success" title="Backup ZIP" onclick="window.exportWorkspace()"><i class="bi bi-file-zip-fill"></i></div>
+              </div>
+
+              <!-- Main Sidebar -->
+              <div class="ide-sidebar" id="ide-main-sidebar">
+                <div class="ide-sidebar-resizer" id="ide-sidebar-resizer"></div>
+                <div class="ide-sidebar-header" id="ide-sidebar-title">
+                  EXPLORER
+                  <i class="bi bi-arrow-clockwise" style="cursor:pointer;" id="ide-refresh-tree" title="Refresh"></i>
+                </div>
+                
+                <div class="ide-file-tree" id="ide-file-tree">
+                  <div class="text-center mt-4 text-secondary"><i class="spinner-border spinner-border-sm"></i> Loading...</div>
+                </div>
+                
+                <div class="ide-file-tree d-none" id="ide-git-tree" style="padding: 12px; font-family: monospace; font-size: 0.8rem; color: #ccc;">
+                  <div class="text-center mt-4 text-secondary"><i class="spinner-border spinner-border-sm"></i> Loading Activity...</div>
+                </div>
+                
+                <div class="ide-file-tree d-none" id="ide-history-tree" style="padding: 12px; font-family: monospace; font-size: 0.8rem; color: #ccc;">
+                  <div class="text-center mt-4 text-secondary">Select a file in Explorer to view its history.</div>
+                </div>
+              </div>
+              
+              <div class="ide-editor-wrapper">
+                <div class="ide-tabs" id="ide-tabs-container">
+                  <!-- Dynamic Tabs -->
+                </div>
+                <div class="ide-editor-container">
+                  <div id="ide-editor" class="position-absolute w-100 h-100"></div>
+                  <div id="ide-media-viewer" class="position-absolute w-100 h-100 d-none flex-column align-items-center justify-content-center bg-dark">
+                    <div id="ide-media-content" class="shadow-lg rounded" style="max-width: 90%; max-height: 90%;"></div>
+                    <div id="ide-media-info" class="mt-3 text-secondary font-monospace small"></div>
+                  </div>
+                  <div id="ide-empty-state" class="position-absolute w-100 h-100 d-flex flex-column align-items-center justify-content-center text-secondary">
+                    <i class="bi bi-code-slash mb-3" style="font-size: 4rem; opacity: 0.3;"></i>
+                    <h5>PHP Music IDE</h5>
+                    <p class="small">Select a file from the explorer to begin.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Bottom Terminal / Output Panel -->
+            <div class="ide-bottom-panel" id="ide-bottom-panel">
+              <div class="ide-panel-resizer" id="ide-panel-resizer"></div>
+              <div class="panel-header">
+                <div class="panel-tabs">
+                  <div class="panel-tab active" data-target="output">OUTPUT</div>
+                  <div class="panel-tab" data-target="problems">PROBLEMS</div>
+                  <div class="panel-tab" data-target="terminal">TERMINAL</div>
+                </div>
+                <div class="panel-actions">
+                  <i class="bi bi-x-circle" id="panel-clear" title="Clear Console"></i>
+                  <i class="bi bi-chevron-up" id="panel-fullscreen" title="Toggle Size"></i>
+                  <i class="bi bi-x" id="panel-close" title="Close Panel"></i>
+                </div>
+              </div>
+              <div class="panel-content-area">
+                <div class="panel-pane active" id="pane-output">
+                  <iframe id="ide-preview-iframe" class="w-100 h-100 border-0 bg-white" src="about:blank"></iframe>
+                </div>
+                <div class="panel-pane" id="pane-terminal">
+                  <div class="text-success">PHP Music Console v1.0.0</div>
+                  <div class="text-secondary mt-1">Terminal environment linked to server.</div>
+                  <div id="terminal-logs" class="mt-2" style="white-space: pre-wrap; font-family: monospace;"></div>
+                  <div class="d-flex align-items-center mt-2">
+                    <span class="text-success me-2"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'admin@server'); ?>:~$</span>
+                    <input type="text" id="ide-terminal-input" class="bg-transparent border-0 text-light flex-grow-1 outline-none shadow-none" style="outline:none; font-family: monospace;" placeholder="Type a command (e.g. ls, pwd)...">
+                  </div>
+                </div>
+                <div class="panel-pane" id="pane-problems">
+                  <div class="text-secondary">No problems have been detected in the workspace.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+         <script>
+            (function initIDE() {
+              const editorDiv = document.getElementById('ide-editor');
+              if (!editorDiv) return; // Only run on IDE page
+              
+              const mediaViewer = document.getElementById('ide-media-viewer');
+              const mediaContent = document.getElementById('ide-media-content');
+              const emptyState = document.getElementById('ide-empty-state');
+              
+              const aceEditor = ace.edit(editorDiv);
+              aceEditor.setTheme("ace/theme/tomorrow_night_eighties");
+              aceEditor.session.setMode("ace/mode/php");
+              aceEditor.setOptions({ fontSize: "14px", showPrintMargin: false, enableBasicAutocompletion: true });
+
+              // Hook directly into Ace Editor commands to intercept Ctrl+S reliably inside the text area
+              aceEditor.commands.addCommand({
+                name: 'save',
+                bindKey: {win: 'Ctrl-S', mac: 'Cmd-S'},
+                exec: function() {
+                  if (typeof window.saveCurrentFile === 'function') window.saveCurrentFile();
+                }
+              });
+
+              // Automatically resize ACE on container layout changes (fixes buggy unclickable lines)
+              if (typeof ResizeObserver !== 'undefined') {
+                new ResizeObserver(() => aceEditor.resize(true)).observe(editorDiv);
+              }
+              
+              // Automatically resize ACE on container layout changes (fixes buggy unclickable lines)
+              if (typeof ResizeObserver !== 'undefined') {
+                new ResizeObserver(() => aceEditor.resize()).observe(editorDiv);
+              }
+              
+              const treeEl = document.getElementById('ide-file-tree');
+              const currentFileEl = document.getElementById('ide-current-file');
+              const tabsContainer = document.getElementById('ide-tabs-container');
+              const bottomPanel = document.getElementById('ide-bottom-panel');
+              const previewIframe = document.getElementById('ide-preview-iframe');
+              const historyContent = document.getElementById('ide-history-content');
+              
+              let currentPath = '';
+              let openFiles = JSON.parse(localStorage.getItem('ide_open_files') || '[]');
+              let activeTabPath = localStorage.getItem('ide_active_tab') || '';
+              
+              const mediaExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'mp4', 'webm', 'mp3', 'wav', 'ogg'];
+
+              const termLog = (msg, isError = false) => {
+                const logs = document.getElementById('terminal-logs');
+                if (logs) logs.innerHTML += `<div class="${isError ? 'text-danger' : 'text-light'}">${msg}</div>`;
+              };
+
+              const loadTree = async (path = '') => {
+                try {
+                  const res = await fetch(`?access=admin&page=drive&api=true&action=list&path=${encodeURIComponent(path)}`);
+                  const data = await res.json();
+                  if(data && data.success) renderTree(data, path);
+                } catch(e) {
+                  treeEl.innerHTML = '<div class="text-danger p-2">Error loading files</div>';
+                }
+              };
+              
+              const renderTree = (data, basePath) => {
+                let html = '';
+                if(basePath) {
+                  const parent = basePath.split('/').slice(0,-1).join('/');
+                  html += `<div class="ide-tree-item ide-folder-toggle" data-path="${parent}"><i class="bi bi-arrow-90deg-up text-warning"></i> Back (..)</div>`;
+                }
+                data.folders.forEach(f => {
+                  html += `<div class="ide-tree-item ide-folder-toggle" data-path="${f.path}" data-name="${f.name}"><i class="bi bi-folder-fill text-warning"></i> ${f.name}</div>`;
+                });
+                data.files.forEach(f => {
+                  let icon = 'bi-file-earmark-code text-info';
+                  if(f.ext === 'php') icon = 'bi-filetype-php text-primary';
+                  if(f.ext === 'js' || f.ext === 'json') icon = 'bi-filetype-js text-warning';
+                  if(f.ext === 'css') icon = 'bi-filetype-css text-info';
+                  if(f.isImage) icon = 'bi-image text-success';
+                  if(['mp4','webm','mp3','wav','ogg'].includes(f.ext)) icon = 'bi-play-circle text-danger';
+                  
+                  html += `<div class="ide-tree-item ide-file-item" data-path="${f.path}" data-name="${f.name}" data-ext="${f.ext}"><i class="bi ${icon}"></i> ${f.name}</div>`;
+                });
+                treeEl.innerHTML = html;
+                
+                treeEl.querySelectorAll('.ide-folder-toggle').forEach(el => {
+                  el.addEventListener('click', () => loadTree(el.dataset.path));
+                  el.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    window.showIdeContextMenu(el.dataset.path, el.dataset.name, true);
+                  });
+                });
+                
+                treeEl.querySelectorAll('.ide-file-item').forEach(el => {
+                  el.addEventListener('click', () => {
+                    const path = el.dataset.path;
+                    const name = el.dataset.name;
+                    const ext = el.dataset.ext;
+                    if (!openFiles.find(f => f.path === path)) {
+                      openFiles.push({ path, name, ext });
+                      localStorage.setItem('ide_open_files', JSON.stringify(openFiles));
+                    }
+                    window.ideOpenTab(path);
+                  });
+                  el.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    window.showIdeContextMenu(el.dataset.path, el.dataset.name, false);
+                  });
+                });
+                
+                // Highlight active tree item
+                treeEl.querySelectorAll('.ide-tree-item').forEach(i => i.classList.remove('active'));
+                if (activeTabPath) {
+                  const activeEl = treeEl.querySelector(`[data-path="${activeTabPath}"]`);
+                  if(activeEl) activeEl.classList.add('active');
+                }
+              };
+              
+              const renderTabs = () => {
+                tabsContainer.innerHTML = openFiles.map(f => `
+                  <div class="ide-tab ${f.path === activeTabPath ? 'active' : ''}" data-path="${f.path}">
+                    <span class="tab-title flex-grow-1" onclick="window.ideOpenTab('${f.path}')">${f.name}</span>
+                    <i class="bi bi-x ide-tab-close" onclick="window.ideCloseTab('${f.path}', event)"></i>
+                  </div>
+                `).join('');
+                
+                if (openFiles.length === 0) {
+                  editorDiv.style.display = 'none';
+                  mediaViewer.classList.replace('d-flex', 'd-none');
+                  emptyState.classList.replace('d-none', 'd-flex');
+                  currentFileEl.textContent = 'No file selected';
+                  currentPath = '';
+                  activeTabPath = '';
+                }
+              };
+
+              window.ideOpenTab = async (path) => {
+                activeTabPath = path;
+                currentPath = path;
+                localStorage.setItem('ide_active_tab', path);
+                renderTabs();
+                
+                // Highlight active tree item dynamically
+                const treeEl = document.getElementById('ide-file-tree');
+                if (treeEl) {
+                  treeEl.querySelectorAll('.ide-tree-item').forEach(i => i.classList.remove('active'));
+                  const safePath = path.replace(/"/g, '\\"');
+                  const activeEl = treeEl.querySelector(`[data-path="${safePath}"]`);
+                  if(activeEl) activeEl.classList.add('active');
+                }
+                
+                const file = openFiles.find(f => f.path === path);
+                if (!file) return;
+                
+                currentFileEl.textContent = path;
+                emptyState.classList.replace('d-flex', 'd-none');
+                
+                if (mediaExts.includes(file.ext)) {
+                  editorDiv.style.display = 'none';
+                  editorDiv.style.pointerEvents = 'none';
+                  mediaViewer.classList.replace('d-none', 'd-flex');
+                  const streamUrl = `?access=admin&page=drive&api=true&action=stream&file=${encodeURIComponent(path)}`;
+                  
+                  if (file.isImage || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(file.ext)) {
+                    mediaContent.innerHTML = `<img src="${streamUrl}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
+                  } else if (['mp4', 'webm'].includes(file.ext)) {
+                    mediaContent.innerHTML = `<video src="${streamUrl}" controls style="max-width: 100%; max-height: 100%; outline: none;"></video>`;
+                  } else {
+                    mediaContent.innerHTML = `
+                      <i class="bi bi-music-note-beamed text-danger mb-3" style="font-size: 4rem;"></i>
+                      <audio src="${streamUrl}" controls style="width: 300px; outline: none;"></audio>
+                    `;
+                  }
+                  document.getElementById('ide-media-info').textContent = path;
+                  termLog(`Opened media file: ${path}`);
+                  fetchHistory(path, file.name);
+                } else {
+                  mediaViewer.classList.replace('d-flex', 'd-none');
+                  editorDiv.style.display = 'block';
+                  editorDiv.style.pointerEvents = 'auto';
+                  termLog(`Fetching text buffer: ${path}`);
+                  
+                  const res = await fetch(`?access=admin&page=drive&api=true&action=read&file=${encodeURIComponent(path)}`);
+                  const data = await res.json();
+                  if(data && data.success) {
+                    aceEditor.setValue(data.content, -1);
+                    let modelist = ace.require("ace/ext/modelist");
+                    let mode = modelist.getModeForPath(file.name).mode;
+                    aceEditor.session.setMode(mode);
+                    setTimeout(() => {
+                      aceEditor.resize(true);
+                      aceEditor.clearSelection();
+                    }, 100);
+                    termLog(`Loaded ${data.content.length} bytes.`);
+                    fetchHistory(path, file.name);
+                    
+                    // Automatically update preview output iframe when changing active file tab
+                    const outputTab = document.querySelector('.panel-tab[data-target="output"]');
+                    if (outputTab && outputTab.classList.contains('active') && bottomPanel.classList.contains('active')) {
+                      previewIframe.src = './' + currentPath;
+                    }
+                  } else {
+                    termLog(`Failed to read file: ${data.error}`, true);
+                  }
+                }
+              };
+
+              window.ideCloseTab = (path, e) => {
+                e.stopPropagation();
+                const idx = openFiles.findIndex(f => f.path === path);
+                openFiles = openFiles.filter(f => f.path !== path);
+                localStorage.setItem('ide_open_files', JSON.stringify(openFiles));
+                
+                if (activeTabPath === path) {
+                  if (openFiles.length > 0) {
+                    const nextIdx = Math.min(idx, openFiles.length - 1);
+                    window.ideOpenTab(openFiles[nextIdx].path);
+                  } else {
+                    activeTabPath = '';
+                    currentPath = '';
+                    localStorage.removeItem('ide_active_tab');
+                    renderTabs();
+                  }
+                } else {
+                  renderTabs();
+                }
+              };
+              
+              const fetchHistory = async (path, name) => {
+                const histPane = document.getElementById('ide-history-tree');
+                if(!histPane) return;
+                const res = await fetch(`?access=admin&page=drive&api=true&action=get_versions`, {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({ file: path })
+                });
+                const data = await res.json();
+                if (data && data.success && data.versions.length > 0) {
+                  histPane.innerHTML = `<div class="mb-3 text-white fw-bold">History: ${name}</div>` + 
+                    data.versions.map(v => `
+                      <div class="d-flex flex-column bg-dark p-2 rounded mb-2 border border-secondary">
+                        <span class="text-info mb-1">${new Date(v.mtime * 1000).toLocaleString()}</span>
+                        <div class="d-flex justify-content-between align-items-center">
+                          <span class="text-secondary">${v.size}</span>
+                          <button class="btn btn-sm btn-outline-warning py-0" onclick="window.ideRestoreVersion('${path}', '${v.name}')">Restore</button>
+                        </div>
+                      </div>
+                    `).join('');
+                } else {
+                  histPane.innerHTML = `<div class="text-secondary">No version history found for ${name}.</div>`;
+                }
+              };
+
+              window.ideRestoreVersion = async (path, versionName) => {
+                if(!confirm(`Restore version ${versionName}? Current state will be backed up.`)) return;
+                termLog(`Restoring version ${versionName} for ${path}...`);
+                const res = await fetch(`?access=admin&page=drive&api=true&action=restore_version`, {
+                  method: 'POST',
+                  headers: {'Content-Type':'application/json'},
+                  body: JSON.stringify({ file: path, version_name: versionName })
+                });
+                const data = await res.json();
+                if (data && data.success) {
+                  termLog(`Restore successful. Reloading buffer.`);
+                  window.ideOpenTab(path); // Reload
+                } else {
+                  termLog(`Restore failed: ${data.error}`, true);
+                }
+              };
+              
+              // Mark File as Unsaved visually using Ace Editor's logic hooks
+              aceEditor.on("change", () => {
+                const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath}"] .tab-title`);
+                if (activeTab && !activeTab.innerText.endsWith(' *')) {
+                  activeTab.innerText += ' *';
+                }
+              });
+              
+              window.saveCurrentFile = async (silent = false) => {
+                if(!currentPath) {
+                  if(!silent) alert('No file open');
+                  return;
+                }
+                const file = openFiles.find(f => f.path === currentPath);
+                if(file && mediaExts.includes(file.ext)) {
+                  if(!silent) termLog('Cannot save binary media files.', true);
+                  return;
+                }
+                
+                const btn = document.getElementById('ide-save-btn');
+                const orig = btn.innerHTML;
+                if(!silent) btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
+                
+                const content = aceEditor.getValue();
+                const res = await fetch(`?access=admin&page=drive&api=true&action=write`, {
+                  method: 'POST',
+                  headers: {'Content-Type':'application/json'},
+                  // The backend strictly requires the 'action' key inside the JSON body payload to process the stream
+                  body: JSON.stringify({ action: 'write', file: currentPath, content: content })
+                });
+                const data = await res.json();
+                if(data && data.success) {
+                  // Remove Save Indicator (*) from visually active tab
+                  const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath}"] .tab-title`);
+                  if (activeTab && activeTab.innerText.endsWith(' *')) {
+                    activeTab.innerText = activeTab.innerText.slice(0, -2);
+                  }
+                  
+                  if(!silent) {
+                    btn.innerHTML = '<i class="bi bi-check"></i> Saved';
+                    btn.classList.add('text-success');
+                    termLog(`Saved ${currentPath} successfully.`);
+                    fetchHistory(currentPath, file.name); // Refresh history
+                    
+                    // Auto-refresh preview if output tab is open
+                    const outputTab = document.querySelector('.panel-tab[data-target="output"]');
+                    if (outputTab && outputTab.classList.contains('active') && bottomPanel.classList.contains('active')) {
+                      previewIframe.src = './' + currentPath;
+                    }
+                    setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('text-success'); }, 2000);
+                  }
+                } else {
+                  if(!silent) {
+                    btn.innerHTML = orig;
+                    termLog(`Save failed: ${data.error}`, true);
+                  }
+                }
+              };
+
+              // Automatic saving every 10 seconds if editor has changes to prevent data loss safely
+              setInterval(() => {
+                const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath}"] .tab-title`);
+                if (currentPath && activeTab && activeTab.innerText.endsWith(' *')) {
+                  const file = openFiles.find(f => f.path === currentPath);
+                  if (file && !mediaExts.includes(file.ext)) {
+                    window.saveCurrentFile(true);
+                  }
+                }
+              }, 10000);
+
+              document.getElementById('ide-save-btn').onclick = () => window.saveCurrentFile(false);
+              
+              // Custom Context Modal & Sidebar Interactivity Definitions
+              window.showIdeContextMenu = (path, name, isFolder) => {
+                const modal = document.getElementById('ide-ctx-modal');
+                document.getElementById('ide-ctx-title').innerText = name || '/ (Root)';
+                document.getElementById('ide-ctx-path').value = path || '';
+                document.getElementById('ide-ctx-is-folder').value = isFolder ? '1' : '0';
+                
+                // Hide file/folder creation options if the clicked item is a file
+                document.getElementById('ide-btn-new-file').style.display = isFolder ? 'flex' : 'none';
+                document.getElementById('ide-btn-new-folder').style.display = isFolder ? 'flex' : 'none';
+                
+                modal.style.display = 'flex';
+              };
+
+              const driveFetch = async (action, body) => {
+                const res = await fetch(`?access=admin&page=drive&api=true&action=${action}`, {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify(body)
+                });
+                return res.json();
+              };
+
+              document.getElementById('ide-btn-new-file').onclick = async () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                const name = prompt('Enter new file name:');
+                if(name) {
+                  const targetPath = (path ? path + '/' : '');
+                  const res = await driveFetch('add_file', { action: 'add_file', name: targetPath + name });
+                  if(res.success) loadTree(); else alert(res.error);
+                }
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+              };
+
+              document.getElementById('ide-btn-new-folder').onclick = async () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                const name = prompt('Enter new folder name:');
+                if(name) {
+                  const targetPath = (path ? path + '/' : '');
+                  const res = await driveFetch('add_folder', { action: 'add_folder', name: targetPath + name });
+                  if(res.success) loadTree(); else alert(res.error);
+                }
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+              };
+
+              document.getElementById('ide-btn-rename').onclick = async () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                const name = prompt('Enter new name:');
+                if(name && path) {
+                  const res = await driveFetch('rename', { action: 'rename', old: path, new: name });
+                  if(res.success) {
+                    // Update active open tabs immediately
+                    const openFile = openFiles.find(f => f.path === path);
+                    if (openFile) {
+                      const newPath = path.substring(0, path.lastIndexOf('/') + 1) + name;
+                      openFile.path = newPath;
+                      openFile.name = name;
+                      openFile.ext = name.split('.').pop().toLowerCase();
+                      if (currentPath === path) currentPath = newPath;
+                      if (activeTabPath === path) activeTabPath = newPath;
+                      localStorage.setItem('ide_open_files', JSON.stringify(openFiles));
+                      localStorage.setItem('ide_active_tab', activeTabPath);
+                      renderTabs();
+                    }
+                    loadTree(); 
+                  } else alert(res.error);
+                }
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+              };
+
+              document.getElementById('ide-btn-delete').onclick = async () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                if(path && confirm('Are you sure you want to move this to trash?')) {
+                  const res = await driveFetch('trash', { action: 'trash', items: [path] });
+                  if(res.success) {
+                    // If the deleted file was open in a tab, destroy the tab safely
+                    const openFileIdx = openFiles.findIndex(f => f.path === path);
+                    if (openFileIdx !== -1) {
+                      window.ideCloseTab(path, {stopPropagation:()=>{}});
+                    }
+                    loadTree(); 
+                  } else alert(res.error);
+                }
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+              };
+
+              window.toggleIdeTerminal = () => {
+                const bp = document.getElementById('ide-bottom-panel');
+                if(bp.classList.contains('active')) {
+                  bp.classList.remove('active');
+                } else {
+                  bp.classList.add('active');
+                  document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+                  document.querySelector('.panel-tab[data-target="terminal"]').classList.add('active');
+                  document.querySelectorAll('.panel-pane').forEach(p => p.classList.remove('active'));
+                  document.getElementById('pane-terminal').classList.add('active');
+                }
+                setTimeout(() => aceEditor.resize(true), 50);
+              };
+
+              window.switchIdeSidebar = (view) => {
+                const sidebar = document.getElementById('ide-main-sidebar');
+                const actionEl = document.getElementById('act-' + view);
+                
+                if (actionEl.classList.contains('active')) {
+                  sidebar.classList.toggle('d-none');
+                  actionEl.classList.toggle('active');
+                  setTimeout(() => aceEditor.resize(true), 50);
+                  return;
+                }
+                
+                sidebar.classList.remove('d-none');
+                document.querySelectorAll('.ide-activity-action').forEach(el => el.classList.remove('active'));
+                actionEl.classList.add('active');
+                
+                document.getElementById('ide-file-tree').classList.add('d-none');
+                document.getElementById('ide-git-tree').classList.add('d-none');
+                document.getElementById('ide-history-tree').classList.add('d-none');
+                
+                if(view === 'explorer') {
+                  document.getElementById('ide-sidebar-title').innerText = 'EXPLORER';
+                  document.getElementById('ide-file-tree').classList.remove('d-none');
+                } else if(view === 'git') {
+                  document.getElementById('ide-sidebar-title').innerText = 'DRIVE ACTIVITY';
+                  document.getElementById('ide-git-tree').classList.remove('d-none');
+                  window.fetchGitLog();
+                } else if(view === 'history') {
+                  document.getElementById('ide-sidebar-title').innerText = 'FILE HISTORY';
+                  document.getElementById('ide-history-tree').classList.remove('d-none');
+                }
+                setTimeout(() => aceEditor.resize(true), 50);
+              };
+
+              window.fetchGitLog = async () => {
+                const gitPane = document.getElementById('ide-git-tree');
+                if(!gitPane) return;
+                gitPane.innerHTML = '<div class="text-center mt-4 text-secondary"><i class="spinner-border spinner-border-sm"></i> Loading Activity...</div>';
+                try {
+                  const res = await fetch(`?access=admin&page=drive&api=true&action=activity`).then(r => r.json());
+                  if(res && res.success) {
+                    if (Object.keys(res.activity).length === 0) {
+                      gitPane.innerHTML = '<div class="text-secondary p-2">No activity found.</div>';
+                    } else {
+                      let html = '';
+                      for (const [group, items] of Object.entries(res.activity)) {
+                        html += `<div class="mb-2 text-white fw-bold border-bottom border-secondary pb-1">${group}</div>`;
+                        items.forEach(item => {
+                          const date = new Date(item.mtime * 1000);
+                          const timeStr = date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                          html += `
+                            <div class="d-flex flex-column bg-dark p-2 rounded mb-2 border border-secondary" style="cursor: pointer;" onclick="window.ideOpenTab('${item.path}')">
+                              <div class="d-flex justify-content-between">
+                                <span class="text-info">${timeStr}</span>
+                                <span class="text-secondary" style="font-size: 0.7rem;">${item.action.toUpperCase()}</span>
+                              </div>
+                              <div class="text-white text-truncate mt-1">${item.name}</div>
+                            </div>
+                          `;
+                        });
+                      }
+                      gitPane.innerHTML = html;
+                    }
+                  } else {
+                    gitPane.innerHTML = '<div class="text-danger p-2">Failed to fetch drive activity.</div>';
+                  }
+                } catch (e) {
+                  gitPane.innerHTML = '<div class="text-danger p-2">Error communicating with server.</div>';
+                }
+              };
+
+              const sidebarResizer = document.getElementById('ide-sidebar-resizer');
+              const mainSidebar = document.getElementById('ide-main-sidebar');
+              let isResizingSidebar = false;
+              if (sidebarResizer) {
+                sidebarResizer.addEventListener('mousedown', (e) => {
+                  isResizingSidebar = true;
+                  sidebarResizer.classList.add('resizing');
+                  document.body.style.cursor = 'col-resize';
+                  e.preventDefault();
+                });
+                document.addEventListener('mousemove', (e) => {
+                  if (!isResizingSidebar) return;
+                  const newW = e.clientX - mainSidebar.getBoundingClientRect().left;
+                  if (newW > 150 && newW < 600) {
+                    mainSidebar.style.width = newW + 'px';
+                    aceEditor.resize(true);
+                  }
+                });
+                document.addEventListener('mouseup', () => {
+                  if (isResizingSidebar) {
+                    isResizingSidebar = false;
+                    sidebarResizer.classList.remove('resizing');
+                    document.body.style.cursor = 'default';
+                    aceEditor.resize(true);
+                  }
+                });
+              }
+
+              window.exportWorkspace = async () => {
+                if(confirm("Download entire workspace as ZIP? This may take a while.")) {
+                   window.location.href = "?access=admin&page=drive&batch=context&path=";
+                }
+              };
+
+              // Resizer Logic (Drags bottom panel height independently without glitching the viewport bounds)
+              const resizer = document.getElementById('ide-panel-resizer');
+              let isResizing = false;
+
+              if(resizer) {
+                resizer.addEventListener('mousedown', (e) => {
+                  isResizing = true;
+                  resizer.classList.add('resizing');
+                  document.body.style.cursor = 'ns-resize';
+                  e.preventDefault();
+                });
+
+                document.addEventListener('mousemove', (e) => {
+                  if (!isResizing) return;
+                  const containerH = document.querySelector('.ide-body').offsetHeight;
+                  const newH = document.body.clientHeight - e.clientY;
+                  if (newH > 35 && newH < containerH - 50) {
+                    bottomPanel.style.height = newH + 'px';
+                    aceEditor.resize(true);
+                  }
+                });
+
+                document.addEventListener('mouseup', () => {
+                  if(isResizing) {
+                    isResizing = false;
+                    resizer.classList.remove('resizing');
+                    document.body.style.cursor = 'default';
+                    aceEditor.resize(true);
+                  }
+                });
+              }
+              
+              if (window.ideKeydownHandler) {
+                document.removeEventListener('keydown', window.ideKeydownHandler);
+              }
+              window.ideKeydownHandler = (e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+                  const ideCont = document.querySelector('.ide-container:not(.d-none)');
+                  if (ideCont && window.getComputedStyle(ideCont).display !== 'none') {
+                    e.preventDefault();
+                    if (typeof window.saveCurrentFile === 'function') window.saveCurrentFile();
+                  }
+                }
+              };
+              document.addEventListener('keydown', window.ideKeydownHandler);
+              
+              document.getElementById('ide-find-btn').addEventListener('click', () => {
+                if (aceEditor) aceEditor.execCommand('find');
+              });
+
+              // Advanced Ace Searchbox Navigation Fix (Touch-to-Mouse Converter)
+              (function() {
+                // Helper: Synthesize authentic desktop MouseEvents from Touch
+                const dispatchMouseClick = (target, touch) => {
+                  if (!target) return;
+                  const rect = target.getBoundingClientRect();
+                  const clientX = touch ? touch.clientX : (rect.left + rect.width / 2);
+                  const clientY = touch ? touch.clientY : (rect.top + rect.height / 2);
+
+                  const eventInit = {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    detail: 1,
+                    clientX: clientX,
+                    clientY: clientY,
+                    screenX: clientX,
+                    screenY: clientY,
+                    button: 0,
+                    buttons: 1
+                  };
+
+                  target.dispatchEvent(new MouseEvent('mousedown', eventInit));
+                  target.dispatchEvent(new MouseEvent('mouseup', eventInit));
+                  target.dispatchEvent(new MouseEvent('click', eventInit));
+                };
+
+                let activeTouchTarget = null;
+
+                // 1. Touch-to-Mouse Event Converter for Ace Searchbox
+                document.addEventListener('touchstart', function(e) {
+                  const target = e.target.closest('.ace_searchbtn, .ace_button, .ace_searchbtn_close, [action]');
+                  if (target) {
+                    activeTouchTarget = target;
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }
+                }, { passive: false, capture: true });
+
+                document.addEventListener('touchend', function(e) {
+                  const target = e.target.closest('.ace_searchbtn, .ace_button, .ace_searchbtn_close, [action]') || activeTouchTarget;
+                  if (target && target.closest('.ace_search')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const touch = e.changedTouches ? e.changedTouches[0] : null;
+                    dispatchMouseClick(target, touch);
+                  }
+                  activeTouchTarget = null;
+                }, { passive: false, capture: true });
+
+                // 2. Keyboard Navigation (Enter = Next, Shift+Enter = Prev)
+                document.addEventListener('keydown', function(e) {
+                  if (e.target && e.target.classList && e.target.classList.contains('ace_search_field')) {
+                    if (e.key === 'Enter' || e.keyCode === 13) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const searchBox = e.target.closest('.ace_search');
+                      if (!searchBox) return;
+
+                      const isReplaceInput = e.target.closest('.ace_replace_form');
+                      if (isReplaceInput) {
+                        const replaceBtn = searchBox.querySelector('[action="replaceAndFindNext"], [action="replace"], .ace_searchbtn[action="replace"]');
+                        if (replaceBtn) dispatchMouseClick(replaceBtn);
+                      } else {
+                        if (e.shiftKey) {
+                          const prevBtn = searchBox.querySelector('[action="findPrev"], .ace_searchbtn.prev, .prev');
+                          if (prevBtn) dispatchMouseClick(prevBtn);
+                        } else {
+                          const nextBtn = searchBox.querySelector('[action="findNext"], .ace_searchbtn.next, .next');
+                          if (nextBtn) dispatchMouseClick(nextBtn);
+                        }
+                      }
+                    }
+                  }
+                }, true);
+              })();
+
+              document.getElementById('ide-preview-btn').addEventListener('click', () => {
+                bottomPanel.classList.add('active');
+                document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+                document.querySelector('.panel-tab[data-target="output"]').classList.add('active');
+                document.querySelectorAll('.panel-pane').forEach(p => p.classList.remove('active'));
+                document.getElementById('pane-output').classList.add('active');
+                
+                termLog(`Executing preview for ${currentPath || 'index'}...`);
+                previewIframe.src = currentPath ? ('./' + currentPath) : './';
+              });
+
+              // Bottom Panel Tab Switching
+              document.querySelectorAll('.panel-tab').forEach(tab => {
+                tab.addEventListener('click', () => {
+                  document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+                  tab.classList.add('active');
+                  document.querySelectorAll('.panel-pane').forEach(p => p.classList.remove('active'));
+                  document.getElementById(`pane-${tab.dataset.target}`).classList.add('active');
+                });
+              });
+
+              document.getElementById('panel-close').addEventListener('click', () => {
+                bottomPanel.classList.remove('active');
+              });
+
+              document.getElementById('panel-fullscreen').addEventListener('click', (e) => {
+                bottomPanel.classList.toggle('fullscreen');
+                e.target.className = bottomPanel.classList.contains('fullscreen') ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
+                setTimeout(() => aceEditor.resize(true), 50);
+              });
+
+              document.getElementById('panel-clear').addEventListener('click', () => {
+                document.getElementById('terminal-logs').innerHTML = '';
+              });
+
+              const termInput = document.getElementById('ide-terminal-input');
+              if (termInput) {
+                termInput.addEventListener('keydown', async (e) => {
+                  if (e.key === 'Enter' && termInput.value.trim() !== '') {
+                    const cmd = termInput.value.trim();
+                    const termPrompt = '<?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'admin@server'); ?>:~$';
+                    termLog(`<span class="text-success">${termPrompt}</span> ${cmd}`);
+                    termInput.value = '';
+                    
+                    if (cmd === 'clear') {
+                      document.getElementById('terminal-logs').innerHTML = '';
+                    } else {
+                      try {
+                        const res = await driveFetch('terminal_cmd', { action: 'terminal_cmd', cmd });
+                        if (res && res.success) {
+                          if (res.output) termLog(res.output);
+                        } else {
+                          termLog(`<span class="text-danger">${res.output || 'Command failed'}</span>`);
+                        }
+                      } catch (err) {
+                        termLog(`<span class="text-danger">Failed to execute command.</span>`);
+                      }
+                    }
+                  }
+                });
+              }
+              
+              document.getElementById('ide-refresh-tree').addEventListener('click', () => loadTree());
+              
+              // Initialization
+              loadTree();
+              if (openFiles.length > 0) {
+                renderTabs();
+                if (activeTabPath) {
+                  window.ideOpenTab(activeTabPath);
+                } else {
+                  window.ideOpenTab(openFiles[0].path);
+                }
+              }
+            })();
+          </script>
+
         <?php elseif (($_GET['page'] ?? '') === 'drive'): ?>
           <!-- PHPDrive UI -->
           <style>
-            :root {
-              --ytm-bg: #030303;
-              --ytm-surface: #121212;
-              --ytm-surface-2: #282828;
-              --ytm-primary-text: #ffffff;
-              --ytm-secondary-text: #aaaaaa;
-              --ytm-accent: #ff0000;
+            .drive-app-container {
+              --theme-primary: #ff3333;
+              --theme-on-primary: #ffffff;
+              --theme-primary-container: #4a0000;
+              --theme-on-primary-container: #ffc2c2;
+              --theme-surface: #0a0a0a;
+              --theme-surface-container-low: #121212;
+              --theme-surface-container: #1a1a1a;
+              --theme-surface-container-high: #262626;
+              --theme-on-surface: #e3e3e3;
+              --theme-on-surface-variant: #aaaaaa;
+              --theme-outline: #555555;
+              --theme-outline-variant: #2d2d2d;
+              --theme-secondary-container: #ff0000;
+              --theme-on-secondary-container: #ffffff;
+
+              --font-body: 'Roboto', sans-serif;
+              --font-title: 'Google Sans', sans-serif;
+              --transition: 0.2s cubic-bezier(0.2, 0, 0, 1);
             }
-        
-            body {
-              background-color: var(--ytm-bg);
-              color: var(--ytm-primary-text);
-              font-family: 'Roboto', sans-serif;
+
+            /* Compact Modern Dark Theme for Ace Editor Searchbox (Drive & IDE) */
+            .ace_editor, .ace_editor * {
+              box-sizing: content-box !important;
             }
-        
-            .app-container {
-              display: flex;
-              height: 100dvh;
-              flex-direction: column;
-              overflow: hidden;
-            }
-        
-            .sidebar {
-              width: 260px;
-              background-color: var(--ytm-surface);
-              border-right: 1px solid var(--ytm-surface-2);
-              display: flex;
-              flex-direction: column;
-              flex-shrink: 0;
-              z-index: 1045;
-              transition: transform 0.3s ease;
-              overflow-y: auto;
-              box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.02);
-            }
-        
-            .main-content {
-              flex-grow: 1;
-              display: flex;
-              flex-direction: column;
-              overflow-y: auto;
-              overflow-x: hidden;
-              background-color: var(--ytm-bg);
-            }
-        
-            .content-area-wrapper {
-              padding: 1.5rem 2rem;
-            }
-        
-            .sidebar .logo {
-              font-size: 1.25rem;
-              font-weight: 700;
-              display: flex;
-              align-items: center;
-              gap: 8px;
-            }
-        
-            .sidebar .logo span {
-              color: var(--ytm-accent);
-            }
-        
-            .nav-link {
-              color: var(--ytm-secondary-text);
-              display: flex;
-              align-items: center;
-              font-weight: 500;
-              gap: 1rem;
-              text-decoration: none;
-              padding: 0.75rem 1.25rem;
-              margin: 0.2rem 0.75rem;
-              border-radius: 12px;
-              transition: all 0.2s ease-in-out;
-              border: none;
-              border-left: 4px solid transparent;
-              /* Left red indicator base */
-              border-radius: 0 12px 12px 0;
-              /* Flat left side, rounded right */
-            }
-        
-            .nav-link:hover {
-              color: var(--ytm-primary-text);
-              background-color: rgba(255, 255, 255, 0.05);
-              border-left-color: var(--ytm-accent);
-            }
-        
-            .nav-link.active {
-              background-color: rgba(255, 0, 0, 0.1);
-              color: var(--ytm-accent);
-              font-weight: 700;
-              border-left-color: var(--ytm-accent);
-            }
-        
-            .nav-link .bi {
-              font-size: 1.25rem;
-              width: 24px;
-              text-align: center;
-              transition: color 0.2s;
-            }
-        
-            .nav-link:hover .bi {
-              color: var(--ytm-primary-text);
-            }
-        
-            .nav-link.active .bi {
-              color: var(--ytm-accent);
-            }
-        
-            .offcanvas-lg {
-              background-color: var(--ytm-surface) !important;
-              box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8) !important;
-            }
-        
-            .page-header {
-              padding: 1.5rem 2rem 1.5rem 2rem;
-            }
-        
-            .content-title {
-              font-size: 2rem;
-              font-weight: 700;
-              margin-bottom: 0;
-            }
-        
-            .user-list {
-              display: flex;
-              flex-direction: column;
-              gap: 12px;
-            }
-        
-            .user-list-header {
-              display: grid;
-              grid-template-columns: 60px 40px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 80px 60px;
-              align-items: center;
-              gap: 1rem;
-              padding: 0 1rem;
-              font-weight: 600;
-              color: var(--ytm-secondary-text);
-              font-size: 0.85rem;
-              text-transform: uppercase;
-              letter-spacing: 1px;
-            }
-        
-            .user-item {
-              display: grid;
-              grid-template-columns: 60px 40px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 80px 60px;
-              align-items: center;
-              gap: 1rem;
-              padding: 1rem;
-              background-color: var(--ytm-surface);
-              border: 1px solid var(--ytm-surface-2);
-              border-radius: 12px;
-              transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
-              color: var(--ytm-primary-text);
-            }
-        
-            .user-item:hover {
-              transform: translateY(-3px);
-              box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-              border-color: #555;
-              background-color: #181818;
-            }
-        
-            .user-item .badge {
-              font-size: 0.75rem;
-              padding: 0.4em 0.6em;
-              letter-spacing: 0.5px;
-            }
-        
-            .user-item .dropdown-menu {
-              font-size: 0.85rem;
-              border: 1px solid #555;
-              border-radius: 10px;
-            }
-        
-            .user-item .dropdown-item {
-              padding: 0.5rem 1rem;
-              transition: background 0.2s;
-            }
-        
-            .user-item .dropdown-item:hover {
-              background-color: var(--ytm-surface-2);
-            }
-        
-            .login-container {
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              min-height: 100vh;
-            }
-        
-            .login-card {
-              background-color: var(--ytm-surface);
-              width: 100%;
-              max-width: 400px;
-              padding: 2rem;
-              border-radius: 8px;
-            }
-        
-            .form-control {
-              background-color: var(--ytm-surface-2);
-              border: 1px solid #404040;
-              color: var(--ytm-primary-text);
-            }
-        
-            .form-control:focus {
-              background-color: var(--ytm-surface-2);
-              border-color: #666;
-              color: var(--ytm-primary-text);
-              box-shadow: none;
-            }
-        
-            .pagination .page-link {
-              background-color: var(--ytm-surface-2);
-              border-color: #404040;
-              color: var(--ytm-primary-text);
-            }
-        
-            .pagination .page-item.active .page-link {
-              background-color: var(--ytm-accent);
-              border-color: var(--ytm-accent);
-            }
-        
-            .pagination .page-item.disabled .page-link {
-              background-color: var(--ytm-surface);
-              border-color: #404040;
-              color: var(--ytm-secondary-text);
-            }
-        
-            @media (min-width: 992px) {
-              .app-container {
-                flex-direction: row;
-                height: 100vh;
-                overflow: hidden;
-              }
-        
-              .sidebar {
-                overflow-y: auto;
-              }
-            }
-        
-            @media (max-width: 991.98px) {
-              .app-container {
-                flex-direction: column;
-                height: auto;
-                overflow: visible;
-              }
-        
-              .sidebar {
-                padding: 0;
-                overflow-y: visible;
-              }
-        
-              .main-content {
-                overflow-y: visible;
-              }
-        
-              .content-area-wrapper {
-                padding: 1rem;
-              }
-        
-              .page-header {
-                padding: 1rem;
-                flex-direction: column !important;
-                align-items: stretch !important;
-                gap: 1rem;
-              }
-        
-              .page-header form {
-                max-width: 100% !important;
-                flex-direction: column;
-                gap: 0.5rem;
-              }
-        
-              .page-header form select {
-                width: 100% !important;
-                margin: 0 !important;
-              }
-        
-              .page-header form .input-group {
-                flex-wrap: nowrap !important;
-              }
-        
-              .page-header form .input-group input {
-                width: 1% !important;
-                flex: 1 1 auto !important;
-                margin: 0 !important;
-              }
-        
-              .content-title {
-                font-size: 1.5rem;
-              }
-        
-              .user-list-header {
-                display: none;
-              }
-        
-              .user-item {
-                display: grid;
-                grid-template-columns: 45px 1fr auto;
-                grid-template-rows: auto auto;
-                grid-template-areas: "avatar main action" "stats stats stats";
-                padding: 1.25rem 1rem;
-                gap: 0.75rem 0.75rem;
-              }
-        
-              .user-item-id,
-              .user-item-email-desktop,
-              .user-item-artist-desktop,
-              .user-item-verified-desktop,
-              .user-item-last-up-desktop,
-              .user-item-count-desktop {
-                display: none;
-              }
-        
-              .user-item-avatar {
-                grid-area: avatar;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                align-self: center;
-              }
-        
-              .user-item-avatar img {
-                width: 45px !important;
-                height: 45px !important;
-              }
-        
-              .user-item-main {
-                grid-area: main;
-                display: flex;
-                flex-direction: column;
-                gap: 0.25rem;
-                justify-content: center;
-                min-width: 0;
-              }
-        
-              .user-item-main .user-id-mobile {
-                font-size: 0.8rem;
-                color: var(--ytm-secondary-text);
-              }
-        
-              .user-item-main .user-email {
-                font-weight: 500;
-              }
-        
-              .user-item-main .user-artist {
-                font-size: 0.9rem;
-                color: var(--ytm-secondary-text);
-              }
-        
-              .user-item-action {
-                grid-area: action;
-                display: flex;
-                flex-direction: column;
-                gap: 0.5rem;
-                align-items: center;
-              }
-        
-              .user-item-stats {
-                grid-area: stats;
-                display: flex;
-                justify-content: space-around;
-                align-items: center;
-                border-top: 1px solid var(--ytm-surface-2);
-                padding-top: 0.75rem;
-                margin-top: 0.75rem;
-                font-size: 0.8rem;
-                text-align: center;
-              }
-        
-              .user-item-stats>div {
-                display: flex;
-                flex-direction: column;
-              }
-        
-              .user-item-stats .label {
-                text-transform: uppercase;
-                color: var(--ytm-secondary-text);
-                font-size: 0.7rem;
-                margin-bottom: 0.25rem;
-              }
-            }
-        
-            @media (min-width: 992px) {
-        
-              .user-item-main,
-              .user-item-stats {
-                display: none;
-              }
-            }
-        
-            #api-modal .modal-content {
-              background-color: #030712 !important;
-              font-family: 'Roboto', -apple-system, sans-serif;
-              border: none;
-            }
-        
-            .api-header-modern {
-              background: rgba(17, 24, 39, 0.8) !important;
-              backdrop-filter: blur(16px);
-              -webkit-backdrop-filter: blur(16px);
-              border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
-            }
-        
-            .api-sidebar-modern {
-              background-color: #0b0f19 !important;
-              border-right: 1px solid rgba(255, 255, 255, 0.05) !important;
-            }
-        
-            .api-nav-link-modern {
-              color: #9ca3af !important;
-              font-weight: 500;
-              font-size: 0.875rem;
-              padding: 0.65rem 1rem !important;
+
+            .ace_search {
+              background-color: #121212 !important;
+              color: #e3e3e3 !important;
+              border: 1px solid #333333 !important;
               border-radius: 8px !important;
-              transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+              box-shadow: 0 4px 16px rgba(0, 0, 0, 0.8) !important;
+              font-family: 'Roboto', system-ui, sans-serif !important;
+              font-size: 11px !important;
+              padding: 8px !important;
+              max-width: 220px !important;
+              width: 100% !important;
+              box-sizing: border-box !important;
+              z-index: 9999 !important;
+            }
+
+            .ace_search * {
+              box-sizing: border-box !important;
+              font-family: inherit !important;
+              font-size: 11px !important;
+              line-height: normal !important;
+              margin: 0 !important;
+            }
+
+            .ace_search_form {
+              display: flex !important;
+              flex-wrap: wrap !important;
+              gap: 4px !important;
+              margin-bottom: 6px !important;
+              width: 100% !important;
+            }
+
+            .ace_replace_form {
               display: flex;
-              align-items: center;
-              gap: 12px;
-              text-decoration: none;
-              border-left: 3px solid transparent !important;
+              flex-wrap: wrap !important;
+              gap: 4px !important;
+              margin-bottom: 6px !important;
+              width: 100% !important;
             }
-        
-            .api-nav-link-modern:hover {
-              color: #f3f4f6 !important;
-              background: rgba(255, 255, 255, 0.03) !important;
+
+            /* Respect Ace's default hidden state for Replace form */
+            .ace_replace_form[style*="display: none"],
+            .ace_replace_form[style*="display:none"],
+            .ace_replace_form.ace_hidden {
+              display: none !important;
             }
-        
-            .api-nav-link-modern.active {
+
+            .ace_search_field {
+              background: #030303 !important;
               color: #ffffff !important;
-              background: linear-gradient(90deg, rgba(239, 68, 68, 0.1) 0%, rgba(239, 68, 68, 0.01) 100%) !important;
-              border-left-color: var(--ytm-accent) !important;
-              font-weight: 600 !important;
+              border: 1px solid #333333 !important;
+              border-radius: 4px !important;
+              padding: 4px 20px 4px 6px !important;
+              height: 24px !important;
+              min-height: 24px !important;
+              outline: none !important;
+              flex: 1 1 100% !important;
+              width: 100% !important;
             }
-        
-            .playground-box-modern {
-              background: #0b0f19 !important;
-              border: 1px solid rgba(255, 255, 255, 0.04);
-              border-radius: 20px;
-              box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+
+            .ace_search_field:focus {
+              border-color: #ff0000 !important;
             }
-        
-            .api-input-modern {
-              background-color: #030712 !important;
-              border: 1px solid rgba(255, 255, 255, 0.08) !important;
+
+            .ace_searchbtn {
+              background: #282828 !important;
               color: #ffffff !important;
-              border-radius: 12px !important;
-              transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+              border: 1px solid #404040 !important;
+              border-radius: 4px !important;
+              padding: 2px 6px !important;
+              height: 22px !important;
+              min-height: 22px !important;
+              line-height: 16px !important;
+              cursor: pointer !important;
+              font-weight: 500 !important;
+              flex: 1 1 auto !important;
+              width: auto !important;
+              text-align: center !important;
             }
-        
-            .api-input-modern:focus {
-              background-color: #030712 !important;
-              border-color: var(--ytm-accent) !important;
-              box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15) !important;
-              color: #fff !important;
-            }
-        
-            .api-badge-get {
-              background: rgba(16, 185, 129, 0.1) !important;
-              color: #10b981 !important;
-              border: 1px solid rgba(16, 185, 129, 0.2) !important;
-              font-weight: 700;
-              letter-spacing: 0.5px;
-            }
-        
-            .api-badge-post {
-              background: rgba(245, 158, 11, 0.1) !important;
-              color: #f59e0b !important;
-              border: 1px solid rgba(245, 158, 11, 0.2) !important;
-              font-weight: 700;
-              letter-spacing: 0.5px;
-            }
-        
-            .api-btn-primary {
-              background-color: var(--ytm-accent) !important;
+
+            .ace_searchbtn:hover {
+              background: #ff0000 !important;
+              border-color: #ff0000 !important;
               color: #ffffff !important;
+            }
+
+            .ace_search_options {
+              display: flex !important;
+              align-items: center !important;
+              flex-wrap: wrap !important;
+              gap: 4px !important;
+              margin-top: 4px !important;
+            }
+
+            .ace_button {
+              background: #282828 !important;
+              color: #aaaaaa !important;
+              border: 1px solid #404040 !important;
+              border-radius: 4px !important;
+              padding: 2px 4px !important;
+              cursor: pointer !important;
+              font-weight: 700 !important;
+              font-size: 10px !important;
+            }
+
+            .ace_button:hover,
+            .ace_button.checked {
+              background: #ff0000 !important;
+              color: #ffffff !important;
+              border-color: #ff0000 !important;
+            }
+
+            .ace_searchbtn_close {
+              position: absolute !important;
+              top: 12px !important;
+              right: 10px !important;
+              width: 16px !important;
+              height: 16px !important;
+              background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 14 14"><path d="M14 1.4L12.6 0 7 5.6 1.4 0 0 1.4 5.6 7 0 12.6 1.4 14 7 8.4 12.6 14 14 12.6 8.4 7z" fill="%23aaaaaa"/></svg>') no-repeat center !important;
+              background-size: 8px !important;
               border: none !important;
-              border-radius: 12px !important;
-              transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+              cursor: pointer !important;
+              opacity: 0.7 !important;
+              padding: 0 !important;
             }
-        
-            .api-btn-primary:hover {
-              background-color: #dc2626 !important;
-              transform: translateY(-1px);
-              box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25);
+
+            .ace_searchbtn_close:hover {
+              opacity: 1 !important;
             }
-        
-            .api-btn-secondary {
-              background-color: rgba(255, 255, 255, 0.05) !important;
-              color: #f3f4f6 !important;
-              border: 1px solid rgba(255, 255, 255, 0.08) !important;
-              border-radius: 12px !important;
-              transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+
+            .ace_search_counter {
+              color: #aaaaaa !important;
+              font-size: 10px !important;
+              margin-top: 2px !important;
+              width: 100% !important;
+              text-align: center;
             }
-        
-            .api-btn-secondary:hover {
-              background-color: rgba(255, 255, 255, 0.1) !important;
-              color: #ffffff !important;
-              transform: translateY(-1px);
-            }
-        
-            .mac-window-frame {
-              border-radius: 14px;
-              overflow: hidden;
-              border: 1px solid rgba(255, 255, 255, 0.05);
-              background-color: #030712;
-            }
-        
-            .mac-title-bar {
-              background-color: #0b0f19;
-              height: 42px;
-              display: flex;
-              align-items: center;
-              padding: 0 16px;
-              border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-            }
-        
-            .mac-dot {
-              width: 12px;
-              height: 12px;
-              border-radius: 50%;
-              margin-right: 8px;
-              display: inline-block;
-            }
-        
-            .mac-dot-red {
-              background-color: #ff5f56;
-            }
-        
-            .mac-dot-yellow {
-              background-color: #ffbd2e;
-            }
-        
-            .mac-dot-green {
-              background-color: #27c93f;
+
+            .drive-app-container * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+            .drive-app-container { font-family: var(--font-body); background-color: var(--theme-surface); color: var(--theme-on-surface); height: 100%; overflow: hidden; display: flex; flex-direction: column; width: 100%; position: relative; }
+
+            .drive-app-container .material-symbols-rounded { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; user-select: none; color: var(--theme-on-surface); }
+            .drive-app-container .icon-filled { font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+
+            .drive-app-container .drive-header { height: 64px; display: flex; align-items: center; padding: 0 16px; gap: 12px; background-color: var(--theme-surface); flex-shrink: 0; border-bottom: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .drive-menu-btn { display: flex; }
+            .drive-app-container .logo-container { display: flex; align-items: center; gap: 8px; width: auto; cursor: pointer; flex-shrink: 0; }
+            .drive-app-container .logo-img { width: 36px; height: 36px; border-radius: 8px; background: #ff0000; color: #ffffff; display: flex; align-items: center; justify-content: center; }
+            .drive-app-container .logo-img .material-symbols-rounded { color: #ffffff; }
+            .drive-app-container .logo-text { font-family: var(--font-title); font-size: 20px; font-weight: 700; color: var(--theme-on-surface); }
+
+            .drive-app-container .search-bar { flex: 1; max-width: 600px; height: 44px; background-color: var(--theme-surface-container-high); border-radius: 22px; display: flex; align-items: center; padding: 0 16px; gap: 10px; transition: background-color var(--transition); margin: 0 12px; border: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .search-bar:focus-within { background-color: var(--theme-surface-container-low); border-color: #ff3333; }
+            .drive-app-container .search-bar input { flex: 1; border: none; background: none; outline: none; font-size: 15px; color: var(--theme-on-surface); font-family: var(--font-body); width: 100%; }
+            .drive-app-container .search-bar input::placeholder { color: var(--theme-on-surface-variant); }
+            .drive-app-container .search-icon { color: var(--theme-on-surface-variant); }
+
+            .drive-app-container .header-actions { display: flex; gap: 4px; align-items: center; margin-left: auto; }
+            .drive-app-container .icon-btn { width: 40px; height: 40px; border-radius: 50%; border: none; background: transparent; color: var(--theme-on-surface-variant); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background-color var(--transition); position: relative; }
+            .drive-app-container .icon-btn:hover { background-color: var(--theme-surface-container-high); }
+            .drive-app-container .icon-btn.active { background-color: #ff0000; color: #ffffff; }
+            .drive-app-container .icon-btn .material-symbols-rounded { color: var(--theme-on-surface-variant); }
+            .drive-app-container .icon-btn:hover .material-symbols-rounded { color: var(--theme-on-surface); }
+
+            .drive-app-container .main-wrapper { display: flex; flex: 1; overflow: hidden; position: relative; }
+
+            .drive-app-container .sidebar-drive { width: 240px; display: flex; flex-direction: column; padding: 16px 12px; gap: 16px; flex-shrink: 0; background: var(--theme-surface); z-index: 100; transition: width 0.3s ease, padding 0.3s ease, left 0.3s ease; border-right: 1px solid var(--theme-outline-variant); overflow: hidden; white-space: nowrap; }
+            @media (min-width: 769px) { .drive-app-container .sidebar-drive.collapsed { width: 0; padding-left: 0; padding-right: 0; border-right-color: transparent; } }
+            .drive-app-container .sidebar-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 99; display: none; opacity: 0; transition: opacity 0.3s; }
+
+            .drive-app-container .fab { height: 52px; border-radius: 16px; background-color: #ff0000; color: #ffffff; border: none; display: inline-flex; align-items: center; padding: 0 20px 0 16px; gap: 12px; font-family: var(--font-title); font-size: 14px; font-weight: 700; cursor: pointer; box-shadow: 0 4px 12px rgba(255,0,0,0.3); transition: transform var(--transition), background-color var(--transition); width: fit-content; }
+            .drive-app-container .fab:hover { transform: scale(1.03); background-color: #ff1a1a; }
+            .drive-app-container .fab .material-symbols-rounded { color: #ffffff; }
+
+            .drive-app-container .nav-list { display: flex; flex-direction: column; gap: 4px; }
+            .drive-app-container .nav-item-drive { display: flex; align-items: center; gap: 12px; height: 44px; padding: 0 16px; border-radius: 22px; color: var(--theme-on-surface-variant); cursor: pointer; font-size: 14px; font-weight: 500; transition: background-color var(--transition); text-decoration: none; }
+            .drive-app-container .nav-item-drive:hover { background-color: var(--theme-surface-container-low); color: var(--theme-on-surface); }
+            .drive-app-container .nav-item-drive.active { background-color: #ff0000; color: #ffffff; font-weight: 700; }
+            .drive-app-container .nav-item-drive .material-symbols-rounded { color: var(--theme-on-surface-variant); }
+            .drive-app-container .nav-item-drive.active .material-symbols-rounded { color: #ffffff; font-variation-settings: 'FILL' 1; }
+
+            .drive-app-container .content-area-drive { flex: 1; display: flex; flex-direction: column; background-color: var(--theme-surface); margin: 0; overflow: hidden; position: relative; }
+            .drive-app-container .content-header-drive { height: 52px; display: flex; align-items: center; padding: 0 20px; border-bottom: 1px solid var(--theme-outline-variant); justify-content: space-between; }
+            .drive-app-container .breadcrumbs { display: flex; align-items: center; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); gap: 4px; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+            .drive-app-container .breadcrumb-item { cursor: pointer; border-radius: 8px; padding: 4px 8px; transition: background-color var(--transition); color: var(--theme-on-surface); }
+            .drive-app-container .breadcrumb-item:hover { background-color: var(--theme-surface-container); }
+            .drive-app-container .breadcrumb-sep { color: var(--theme-on-surface-variant); font-size: 18px; }
+
+            .drive-app-container .chips-container { display: flex; gap: 8px; padding: 12px 20px; overflow-x: auto; scrollbar-width: none; flex-shrink: 0; }
+            .drive-app-container .chip { border: 1px solid var(--theme-outline-variant); padding: 6px 16px; border-radius: 16px; font-size: 13px; cursor: pointer; background: transparent; transition: background var(--transition); display: flex; align-items: center; gap: 6px; color: var(--theme-on-surface); }
+            .drive-app-container .chip.active { background: #ff0000; color: #ffffff; border-color: transparent; font-weight: 700; }
+            .drive-app-container .chip .material-symbols-rounded { color: inherit; }
+
+            .drive-app-container .recents-container { margin-bottom: 16px; flex-shrink: 0; }
+            .drive-app-container .recents-tray { display: flex; gap: 12px; overflow-x: auto; padding: 8px 0; scrollbar-width: none; }
+            .drive-app-container .recent-card { width: 140px; background: var(--theme-surface-container-low); border-radius: 12px; padding: 12px; flex-shrink: 0; cursor: pointer; user-select: none; border: 1px solid var(--theme-outline-variant); transition: background var(--transition); color: var(--theme-on-surface); }
+            .drive-app-container .recent-card:hover { background: var(--theme-surface-container-high); border-color: #ff3333; }
+            .drive-app-container .recent-card .material-symbols-rounded { color: #ff3333; }
+            .drive-app-container .recent-name { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 8px; }
+
+            /* Mobile Bottom Area Padding Fix */
+            .drive-app-container .file-list-container { flex: 1; overflow-y: auto; padding: 0 20px calc(180px + env(safe-area-inset-bottom, 20px)); position: relative; }
+            .drive-app-container .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--theme-on-surface-variant); margin: 16px 0 12px 4px; }
+
+            .drive-app-container .grid-view { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+            .drive-app-container .list-view { display: flex; flex-direction: column; gap: 4px; }
+
+            .drive-app-container .item-card { background-color: var(--theme-surface-container-low); border-radius: 12px; border: 1px solid var(--theme-outline-variant); cursor: pointer; user-select: none; transition: background-color var(--transition), border-color var(--transition); display: flex; flex-direction: column; position: relative; overflow: hidden; color: var(--theme-on-surface); }
+            .drive-app-container .item-card:hover { background-color: var(--theme-surface-container-high); border-color: #ff3333; }
+            .drive-app-container .item-card.selected { background-color: rgba(255, 0, 0, 0.2); border-color: #ff0000; color: #ffffff; }
+
+            .drive-app-container .card-checkbox { position: absolute; top: 8px; left: 8px; width: 24px; height: 24px; color: var(--theme-on-surface-variant); z-index: 10; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity var(--transition); }
+            .drive-app-container .item-card:hover .card-checkbox, .drive-app-container .item-card.selected .card-checkbox { opacity: 1; }
+            .drive-app-container .item-card.selected .card-checkbox { color: #ff0000; font-variation-settings: 'FILL' 1; }
+            .drive-app-container .card-checkbox .material-symbols-rounded { color: inherit; }
+
+            .drive-app-container .card-star { position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; color: var(--theme-on-surface-variant); z-index: 10; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity var(--transition); }
+            .drive-app-container .item-card:hover .card-star, .drive-app-container .item-card.starred .card-star { opacity: 1; }
+            .drive-app-container .item-card.starred .card-star { color: #f5b041; font-variation-settings: 'FILL' 1; }
+            .drive-app-container .card-star .material-symbols-rounded { color: inherit; }
+
+            .drive-app-container .grid-view .item-card { height: 60px; padding: 0 36px; flex-direction: row; align-items: center; gap: 10px; }
+            .drive-app-container .grid-view .file-card { height: 180px; flex-direction: column; align-items: stretch; gap: 0; padding: 0; }
+            .drive-app-container .grid-view .file-card .file-preview { flex: 1; background-color: #000000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
+            .drive-app-container .grid-view .file-card .file-preview img { width: 100%; height: 100%; object-fit: cover; }
+            .drive-app-container .grid-view .file-card .file-preview .material-symbols-rounded { font-size: 56px; color: #ff3333; }
+            .drive-app-container .grid-view .file-card .file-info-bar { height: 50px; display: flex; align-items: center; padding: 0 36px; gap: 10px; border-top: 1px solid var(--theme-outline-variant); }
+
+            .drive-app-container .list-view .item-card { height: 46px; border-radius: 8px; border: 1px solid transparent; flex-direction: row; align-items: center; padding: 0 36px; gap: 12px; background: transparent; }
+            .drive-app-container .list-view .item-card:hover { background-color: var(--theme-surface-container-low); border-color: var(--theme-outline-variant); }
+            .drive-app-container .list-view .item-card.selected { background-color: rgba(255, 0, 0, 0.2); border-color: #ff0000; }
+
+            .drive-app-container .item-icon { color: #ff3333; display: flex; align-items: center; justify-content: center; }
+            .drive-app-container .folder-icon { color: #ff3333; font-variation-settings: 'FILL' 1; }
+            .drive-app-container .item-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; font-weight: 500; }
+            .drive-app-container .item-meta { display: none; font-size: 12px; color: var(--theme-on-surface-variant); width: 100px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .drive-app-container .list-view .item-meta { display: block; }
+
+            .drive-app-container .context-menu, .drive-app-container .floating-menu, .drive-app-container .sort-menu { position: fixed; background-color: var(--theme-surface-container-high); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); padding: 8px 0; z-index: 1000; min-width: 200px; display: none; flex-direction: column; border: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .menu-item { display: flex; align-items: center; gap: 12px; padding: 10px 16px; font-size: 14px; color: var(--theme-on-surface); cursor: pointer; transition: background-color var(--transition); }
+            .drive-app-container .menu-item:hover { background-color: var(--theme-surface-container); color: #ffffff; }
+            .drive-app-container .menu-item .material-symbols-rounded { font-size: 20px; color: var(--theme-on-surface-variant); }
+            .drive-app-container .menu-item:hover .material-symbols-rounded { color: #ff3333; }
+            .drive-app-container .menu-item.active { background-color: #ff0000; color: #ffffff; }
+            .drive-app-container .menu-divider { height: 1px; background-color: var(--theme-outline-variant); margin: 4px 0; }
+
+            .drive-app-container .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 2000; display: none; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
+            .drive-app-container .modal-drive { background-color: var(--theme-surface-container); border-radius: 20px; width: 90%; max-width: 400px; padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.5); border: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .modal-title-drive { font-family: var(--font-title); font-size: 20px; font-weight: 700; color: var(--theme-on-surface); }
+            .drive-app-container .modal-input-drive { background-color: var(--theme-surface-container-high); border: 1px solid var(--theme-outline); border-radius: 8px; padding: 12px 16px; font-size: 15px; color: var(--theme-on-surface); outline: none; border-bottom: 2px solid #ff0000; width: 100%; }
+
+            .drive-app-container .btn-drive { padding: 0 20px; height: 38px; border-radius: 19px; font-weight: 600; font-size: 14px; cursor: pointer; border: none; transition: background-color var(--transition); display: inline-flex; align-items: center; gap: 8px; }
+            .drive-app-container .btn-text-drive { background: transparent; color: #ff3333; }
+            .drive-app-container .btn-text-drive:hover { background-color: rgba(255,0,0,0.1); }
+            .drive-app-container .btn-filled-drive { background-color: #ff0000; color: #ffffff; }
+
+            .drive-app-container .editor-overlay-drive { position: fixed; inset: 0; background-color: var(--theme-surface); z-index: 3000; display: none; flex-direction: column; }
+            .drive-app-container .editor-header-drive { height: 60px; display: flex; align-items: center; padding: 0 16px; gap: 16px; border-bottom: 1px solid var(--theme-outline-variant); background-color: var(--theme-surface-container-low); flex-shrink: 0; }
+            .drive-app-container .editor-title-drive { flex: 1; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .drive-app-container .versions-list { max-height: 250px; overflow-y: auto; background: var(--theme-surface-container-high); border-radius: 8px; padding: 4px; }
+            .drive-app-container .version-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .version-item:last-child { border-bottom: none; }
+
+            .drive-app-container .snackbar-container-drive { position: fixed; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); z-index: 4000; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+            .drive-app-container .snackbar-drive { background-color: var(--theme-on-surface); color: var(--theme-surface); padding: 12px 20px; border-radius: 8px; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: space-between; min-width: 280px; max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); opacity: 0; margin-bottom: -20px; transition: opacity 0.3s, margin-bottom 0.3s; }
+            .drive-app-container .snackbar-drive.show { opacity: 1; margin-bottom: 0; }
+
+            .drive-app-container .properties-pane { width: 300px; background-color: var(--theme-surface); border-left: 1px solid var(--theme-outline-variant); flex-direction: column; display: none; color: var(--theme-on-surface); }
+            .drive-app-container .properties-header { height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .properties-content { padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+            .drive-app-container .prop-row { display: flex; flex-direction: column; gap: 4px; }
+            .drive-app-container .prop-label { font-size: 12px; color: var(--theme-on-surface-variant); }
+            .drive-app-container .prop-val { font-size: 14px; color: var(--theme-on-surface); word-break: break-all; }
+
+            .drive-app-container .hidden { display: none !important; }
+
+            .drive-app-container .mobile-only { display: none; }
+
+            @media (max-width: 768px) {
+              .drive-app-container .mobile-only { display: flex; }
+              .drive-app-container .grid-view { grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important; }
+              .drive-app-container .grid-view .item-card { height: 50px; padding: 0 12px !important; }
+              .drive-app-container .grid-view .file-card { height: 160px; padding: 0 !important; }
+              .drive-app-container .grid-view .file-card .file-info-bar { padding: 0 10px !important; gap: 6px !important; }
+              .drive-app-container .properties-pane { position: fixed; top: 0; bottom: 0; left: 0; right: 0; width: 100% !important; height: 100% !important; z-index: 3100 !important; border: none; }
+              .drive-app-container .grid-view { grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important; }
+              .drive-app-container .grid-view .item-card { height: 50px; padding: 0 16px; }
+              .drive-app-container .grid-view .file-card { height: 160px; }
+              .drive-app-container .search-bar { display: none; }
+              .drive-app-container .search-bar.mobile-active {
+                display: flex;
+                position: absolute;
+                left: 0; right: 0; top: 0; bottom: 0;
+                height: 64px;
+                margin: 0;
+                border-radius: 0;
+                background: var(--theme-surface);
+                z-index: 10;
+                padding: 0 8px;
+                max-width: 100%;
+                border: none;
+              }
+              .drive-app-container .search-bar.mobile-active #searchIcon { display: none; }
+              .drive-app-container .search-bar.mobile-active #closeSearchBtn { display: flex; }
+
+              .drive-app-container .sidebar-drive { position: fixed; left: -280px; top: 0; bottom: 0; width: 280px; padding-top: 64px; }
+              .drive-app-container .sidebar-drive.open { left: 0; }
+              .drive-app-container .sidebar-overlay.open { display: block; opacity: 1; }
+              .drive-app-container .content-area-drive { margin: 0; border-radius: 0; }
+              .drive-app-container .fab { position: fixed; bottom: calc(28px + env(safe-area-inset-bottom, 20px)) !important; right: 20px; z-index: 90; width: 52px; height: 52px; padding: 0; justify-content: center; border-radius: 26px; }
+              .drive-app-container .fab .text { display: none; }
             }
           </style>
 
@@ -3578,25 +4485,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </div>
             </div>
 
-            <div id="frOverlay" style="position: fixed; top: 16px; right: 24px; z-index: 4000; display: none; pointer-events: none;">
-              <div style="width: 320px; display: flex; flex-direction: column; background-color: var(--theme-surface-container-high); border: 1px solid var(--theme-outline-variant); border-radius: 8px; pointer-events: auto; box-shadow: 0 4px 16px rgba(0,0,0,0.5); overflow: hidden;">
-                <div style="display: flex; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--theme-outline-variant);">
-                  <span class="material-symbols-rounded" style="font-size: 18px; color: var(--theme-on-surface-variant); margin-right: 8px;">search</span>
-                  <input type="text" id="frFindInput" placeholder="Find" style="flex: 1; background: none; border: none; color: var(--theme-on-surface); outline: none; font-size: 14px; width: 100%;">
-                  <span id="frMatchCount" style="color: var(--theme-on-surface-variant); font-size: 12px; margin: 0 8px; white-space: nowrap;">0/0</span>
-                  <button class="icon-btn" style="width: 28px; height: 28px;" onclick="driveApp.frNext(true)" title="Previous"><span class="material-symbols-rounded" style="font-size: 18px;">expand_less</span></button>
-                  <button class="icon-btn" style="width: 28px; height: 28px;" onclick="driveApp.frNext(false)" title="Next"><span class="material-symbols-rounded" style="font-size: 18px;">expand_more</span></button>
-                  <button class="icon-btn" style="width: 28px; height: 28px; margin-left: 4px;" onclick="driveApp.closeFindReplace()" title="Close"><span class="material-symbols-rounded" style="font-size: 18px;">close</span></button>
-                </div>
-                <div style="display: flex; align-items: center; padding: 6px 12px; background-color: var(--theme-surface-container-low);">
-                  <span class="material-symbols-rounded" style="font-size: 18px; color: var(--theme-on-surface-variant); margin-right: 8px;">edit</span>
-                  <input type="text" id="frReplaceInput" placeholder="Replace" style="flex: 1; background: none; border: none; color: var(--theme-on-surface); outline: none; font-size: 14px; width: 100%;">
-                  <button style="background: transparent; border: 1px solid var(--theme-outline); color: var(--theme-on-surface); border-radius: 4px; padding: 4px 8px; font-size: 12px; cursor: pointer; margin-right: 4px;" onmouseover="this.style.backgroundColor='var(--theme-surface-container-high)'" onmouseout="this.style.backgroundColor='transparent'" onclick="driveApp.frReplaceAction(false)">Replace</button>
-                  <button style="background: transparent; border: 1px solid var(--theme-outline); color: var(--theme-on-surface); border-radius: 4px; padding: 4px 8px; font-size: 12px; cursor: pointer;" onmouseover="this.style.backgroundColor='var(--theme-surface-container-high)'" onmouseout="this.style.backgroundColor='transparent'" onclick="driveApp.frReplaceAction(true)">All</button>
-                </div>
-              </div>
-            </div>
-
             <div class="editor-overlay-drive" id="editorOverlay">
               <div class="editor-header-drive">
                 <button class="icon-btn" onclick="driveApp.closeEditor()"><span class="material-symbols-rounded">arrow_back</span></button>
@@ -3614,7 +4502,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </div>
               <div style="flex:1; overflow:hidden; display:flex; flex-direction:column;">
                 <div id="desktopEditorContainer" style="flex: 1; display: none; position: relative; min-height: 0;">
-                  <textarea id="editorTextarea"></textarea>
+                  <!-- Ace Editor Instance Mount Point -->
                 </div>
                 <div id="mobileEditorContainer" style="flex: 1; display: none; flex-direction: column;">
                   <textarea style="flex:1; border:none; outline:none; background:transparent; padding:16px 16px 120px 16px; font-family:monospace; font-size:16px; color:var(--theme-on-surface); resize:none; width:100%; line-height:1.5; height:100%;" id="mobileTextarea" spellcheck="false"></textarea>
@@ -3735,6 +4623,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   document.getElementById('contextMenu').style.display = 'none';
                   document.getElementById('sortMenu').style.display = 'none';
                   document.getElementById('moreMenu').style.display = 'none';
+                });
+
+                document.addEventListener('keydown', (e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                    const editorOverlay = document.getElementById('editorOverlay');
+                    if (editorOverlay && editorOverlay.style.display === 'flex') {
+                      e.preventDefault();
+                      this.saveFile();
+                    }
+                  }
                 });
 
                 const dropZone = document.getElementById('dropZone');
@@ -4973,42 +5871,44 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   this.updateEditorWrapUI();
                   const res = await this.fetchAPI(`read&file=${encodeURIComponent(item.path)}`);
                   if (res && res.success) {
-                    if (window.innerWidth <= 768) {
-                      mobileContainer.style.display = 'flex';
-                      const textEl = document.getElementById('mobileTextarea');
-                      textEl.value = res.content;
-                    } else {
-                      desktopContainer.style.display = 'block';
-                      let mode = 'text/plain';
-                      // Disable complex token parsing on files >= 2MB to keep 60fps interaction responsiveness
-                      if (res.content && res.content.length < 2 * 1024 * 1024) {
-                        if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
-                        if (item.ext === 'html') mode = 'text/html';
-                        if (item.ext === 'css') mode = 'text/css';
-                        if (item.ext === 'php') mode = 'application/x-httpd-php';
-                      }
-
-                      if (this.editor) {
-                        this.editor.toTextArea();
-                        this.editor = null;
-                      }
-
-                      this.editor = CodeMirror.fromTextArea(document.getElementById('editorTextarea'), {
-                        lineNumbers: true,
-                        theme: 'material-darker',
-                        mode: mode,
-                        indentUnit: 2,
-                        tabSize: 2,
-                        lineWrapping: this.editorWrap,
-                        viewportMargin: 10
-                      });
-                      
-                      // Batch document insertion in a single redraw operation
-                      this.editor.operation(() => {
-                        this.editor.setValue(res.content);
-                      });
-                      setTimeout(() => this.editor.refresh(), 50);
+                    desktopContainer.style.display = 'block';
+                    let mode = 'text/plain';
+                    // Disable complex token parsing on files >= 2MB to keep 60fps interaction responsiveness
+                    if (res.content && res.content.length < 2 * 1024 * 1024) {
+                      if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
+                      if (item.ext === 'html') mode = 'text/html';
+                      if (item.ext === 'css') mode = 'text/css';
+                      if (item.ext === 'php') mode = 'application/x-httpd-php';
                     }
+
+                    if (this.editor) {
+                      this.editor.destroy();
+                      if (this.editor.container) this.editor.container.remove();
+                      this.editor = null;
+                    }
+
+                    const editorDiv = document.createElement('div');
+                    editorDiv.id = "aceEditorInstance";
+                    editorDiv.style.width = "100%";
+                    editorDiv.style.height = "100%";
+                    desktopContainer.appendChild(editorDiv);
+
+                    this.editor = ace.edit("aceEditorInstance");
+                    this.editor.setTheme("ace/theme/tomorrow_night_eighties");
+                    
+                    let modelist = ace.require("ace/ext/modelist");
+                    let aceMode = modelist.getModeForPath(item.name).mode;
+                    this.editor.session.setMode(aceMode);
+                    
+                    this.editor.setOptions({
+                      fontSize: "14px",
+                      wrap: this.editorWrap,
+                      showPrintMargin: false,
+                      enableBasicAutocompletion: true,
+                      enableLiveAutocompletion: true
+                    });
+                    
+                    this.editor.setValue(res.content, -1);
                   }
                 }
               }
@@ -5064,127 +5964,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               editorFind() {
-                this.openFindReplace();
-              }
-
-              openFindReplace() {
-                document.getElementById('frOverlay').style.display = 'flex';
-                const input = document.getElementById('frFindInput');
-                input.focus();
-                if (!this.frBound) {
-                  input.addEventListener('input', () => this.frSearch());
-                  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); this.frNext(e.shiftKey); } });
-                  document.getElementById('frReplaceInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); this.frReplaceAction(false); } });
-                  this.frBound = true;
-                }
-                this.frSearch();
-              }
-
-              closeFindReplace() {
-                document.getElementById('frOverlay').style.display = 'none';
-                if (this.editor) this.editor.getAllMarks().forEach(m => m.clear());
-                document.getElementById('frMatchCount').textContent = '0/0';
-              }
-
-              frSearch() {
-                const term = document.getElementById('frFindInput').value;
-                this.frMatches = [];
-                this.frCurrent = -1;
-                const countEl = document.getElementById('frMatchCount');
-                
-                if (!term) {
-                  countEl.textContent = '0/0';
-                  if (this.editor) this.editor.getAllMarks().forEach(m => m.clear());
-                  return;
-                }
-
                 if (this.editor) {
-                this.editor.operation(() => {
-                  this.editor.getAllMarks().forEach(m => m.clear());
-                  const cursor = this.editor.getSearchCursor(term);
-                  let limit = 500; // Limit active visual DOM highlights to 500 to protect rendering performance
-                  while (cursor.findNext()) {
-                    const match = {from: cursor.from(), to: cursor.to()};
-                    this.frMatches.push(match);
-                    if (limit > 0) {
-                      this.editor.markText(match.from, match.to, {className: 'search-highlight'});
-                      limit--;
-                    }
-                  }
-                });
-              } else {
-                const text = document.getElementById('mobileTextarea').value;
-                  let idx = text.indexOf(term);
-                  while (idx !== -1) {
-                    this.frMatches.push({start: idx, end: idx + term.length});
-                    idx = text.indexOf(term, idx + term.length);
-                  }
+                  this.editor.execCommand("find");
                 }
-                
-                countEl.textContent = `0/${this.frMatches.length}`;
-              }
-
-              frNext(reverse = false) {
-                if (this.frMatches.length === 0) return;
-                if (reverse) {
-                  this.frCurrent = this.frCurrent <= 0 ? this.frMatches.length - 1 : this.frCurrent - 1;
-                } else {
-                  this.frCurrent = this.frCurrent >= this.frMatches.length - 1 ? 0 : this.frCurrent + 1;
-                }
-                
-                document.getElementById('frMatchCount').textContent = `${this.frCurrent + 1}/${this.frMatches.length}`;
-                
-                if (this.editor) {
-                  const m = this.frMatches[this.frCurrent];
-                  this.editor.setSelection(m.from, m.to);
-                  this.editor.scrollIntoView(m.from, 100);
-                } else {
-                  const ta = document.getElementById('mobileTextarea');
-                  const m = this.frMatches[this.frCurrent];
-                  ta.setSelectionRange(m.start, m.end);
-                  ta.focus();
-                }
-              }
-
-              frReplaceAction(all = false) {
-                const term = document.getElementById('frFindInput').value;
-                const rep = document.getElementById('frReplaceInput').value;
-                if (!term) return;
-
-                if (this.editor) {
-                  if (all) {
-                    this.editor.operation(() => {
-                      const cursor = this.editor.getSearchCursor(term);
-                      while (cursor.findNext()) cursor.replace(rep);
-                    });
-                  } else {
-                    if (this.frCurrent > -1 && this.frMatches[this.frCurrent]) {
-                      const m = this.frMatches[this.frCurrent];
-                      if (this.editor.getRange(m.from, m.to) === term) this.editor.replaceRange(rep, m.from, m.to);
-                    }
-                  }
-                } else {
-                  const ta = document.getElementById('mobileTextarea');
-                  ta.focus();
-                  if (all) {
-                    for (let i = this.frMatches.length - 1; i >= 0; i--) {
-                      const m = this.frMatches[i];
-                      if (ta.value.substring(m.start, m.end) === term) {
-                        ta.setSelectionRange(m.start, m.end);
-                        document.execCommand('insertText', false, rep);
-                      }
-                    }
-                  } else {
-                    if (this.frCurrent > -1 && this.frMatches[this.frCurrent]) {
-                      const m = this.frMatches[this.frCurrent];
-                      if (ta.value.substring(m.start, m.end) === term) {
-                        ta.setSelectionRange(m.start, m.end);
-                        document.execCommand('insertText', false, rep);
-                      }
-                    }
-                  }
-                }
-                this.frSearch();
               }
 
               toggleEditorWrap() {
@@ -5192,7 +5974,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 localStorage.setItem('drive_editorWrap', this.editorWrap);
                 this.updateEditorWrapUI();
                 if (this.editor) {
-                  this.editor.setOption('lineWrapping', this.editorWrap);
+                  this.editor.setOption('wrap', this.editorWrap);
                 }
               }
 
@@ -5214,11 +5996,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               closeEditor() {
-                this.closeFindReplace();
                 document.getElementById('editorOverlay').style.display = 'none';
                 this.currentEditFile = null;
                 if (this.editor) {
-                  this.editor.toTextArea();
+                  this.editor.destroy();
+                  if (this.editor.container) this.editor.container.remove();
                   this.editor = null;
                 }
                 this.restoreDocumentTitle();
@@ -5840,18 +6622,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         }
       }
     </script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/search.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/searchcursor.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/search/jump-to-line.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/dialog/dialog.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/xml/xml.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/javascript/javascript.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/css/css.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/htmlmixed/htmlmixed.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/php/php.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/clike/clike.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   </body>
 </html>
 <?php
@@ -5974,8 +6744,8 @@ function extract_safe_tag($comments, $tag, $fallback = '') {
     $val = $comments[$tag][0];
     
     // FIX 1: Remove double-encoded Mojibake strings appended with a slash
-    // 'Ã' is the classic signature of a UTF-8 string corrupted into Latin-1.
-    $val = preg_replace('/\s*\/\s*[Ããäåæçèé].*/', '', $val);
+    // 'Ãƒ' is the classic signature of a UTF-8 string corrupted into Latin-1.
+    $val = preg_replace('/\s*\/\s*[ÃƒÃ£Ã¤Ã¥Ã¦Ã§Ã¨Ã©].*/', '', $val);
     
     // FIX 2: Remove exact duplicate strings appended with a slash (e.g. "Title / Title")
     if (strpos($val, '/') !== false) {
@@ -13911,7 +14681,7 @@ HTML;
         <body>
           <div id='header-wrap'>
             <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-            <div id='warning-txt'>⚠️ Optimizing database layout. Do not close this window!</div>
+            <div id='warning-txt'>âš ï¸ Optimizing database layout. Do not close this window!</div>
           </div>
           <pre id="log-output">PHP Music Library - SQLite VACUUM
 ===================================================
@@ -14061,7 +14831,7 @@ HTML;
         <body>
           <div id='header-wrap'>
             <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-            <div id='warning-txt'>⚠️ Wiping note charts to prepare for regeneration!</div>
+            <div id='warning-txt'>âš ï¸ Wiping note charts to prepare for regeneration!</div>
           </div>
           <pre id="log-output">PHP Music Library - Note Charts Reset & Wipe Scanner
 ===================================================
@@ -14184,7 +14954,7 @@ HTML;
                 <button id="super-admin-reset-btn" style="position: absolute; right: 15px; top: 10px; background-color: #ff3b30; color: #fff; border: none; border-radius: 20px; padding: 4px 16px; font-family: inherit; font-size: 11px; font-weight: bold; cursor: pointer; height: 26px;">Reset & Re-scan All</button>
               <?php endif; ?>
             </div>
-            <div id='warning-txt' style="margin-bottom: 8px;">⚠️ Division <?php echo $step; ?>/6 (<?php echo strtoupper($current_diff); ?>): Scanning and generating permanently on the server!</div>
+            <div id='warning-txt' style="margin-bottom: 8px;">âš ï¸ Division <?php echo $step; ?>/6 (<?php echo strtoupper($current_diff); ?>): Scanning and generating permanently on the server!</div>
           </div>
           <pre id="log-output">PHP Music Library - Server-Side Note Charts Generation Scanner
 =============================================================
@@ -15223,7 +15993,7 @@ function perform_force_rescan($db, $mode) {
 
   echo "<div id='header-wrap'>
           <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-          <div id='warning-txt'>⚠️ Forced Rescan (" . strtoupper($mode) . "). Do not close this window!</div>
+          <div id='warning-txt'>âš ï¸ Forced Rescan (" . strtoupper($mode) . "). Do not close this window!</div>
         </div>";
   echo "<pre>";
   echo "PHP Music Library - Forced Metadata Rescan\n";
@@ -15434,7 +16204,7 @@ function perform_full_scan($db) {
   
   echo "<div id='header-wrap'>
           <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-          <div id='warning-txt'>⚠️ Please wait and don't close this modal, the process can take very long!</div>
+          <div id='warning-txt'>âš ï¸ Please wait and don't close this modal, the process can take very long!</div>
         </div>";
   echo "<pre>";
   echo "PHP Music Library - Full Scan (Optimized Queue System)\n";
@@ -15815,7 +16585,7 @@ function perform_cover_scan($db) {
 
   echo "<div id='header-wrap'>
           <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-          <div id='warning-txt'>⚠️ Re-scanning metadata cover arts. Do not close this window!</div>
+          <div id='warning-txt'>âš ï¸ Re-scanning metadata cover arts. Do not close this window!</div>
         </div>";
   echo "<pre>";
   echo "PHP Music Library - Cover Rescan Process\n";
@@ -22061,7 +22831,7 @@ function perform_cover_scan($db) {
                       <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-shield-lock-fill"></i></div>
                       <div>
                         <strong class="text-white">Cryptographic Account Backups</strong><br>
-                        <span class="text-secondary">In Settings, you can choose to "Delete Account but Keep Data". The server destroys your email/password logic, turns you into an anonymous ghost account, and provides a complex Backup Key. Keep this key safe—you can enter it into the "Restore Account" module later to reclaim your exact library under a totally different name!</span>
+                        <span class="text-secondary">In Settings, you can choose to "Delete Account but Keep Data". The server destroys your email/password logic, turns you into an anonymous ghost account, and provides a complex Backup Key. Keep this key safeâ€”you can enter it into the "Restore Account" module later to reclaim your exact library under a totally different name!</span>
                       </div>
                     </div>
                   </li>
@@ -22128,7 +22898,7 @@ function perform_cover_scan($db) {
                   </div>
                   <div class="col-12 col-md-6 d-flex align-items-center gap-3">
                     <div class="p-2 bg-dark rounded text-white fs-5" style="min-width: 45px; text-align: center;"><i class="bi bi-repeat"></i></div>
-                    <span class="text-secondary"><strong>Repeat:</strong> Cycle (Off → Repeat All → Repeat One).</span>
+                    <span class="text-secondary"><strong>Repeat:</strong> Cycle (Off â†’ Repeat All â†’ Repeat One).</span>
                   </div>
                   <div class="col-12 col-md-6 d-flex align-items-center gap-3">
                     <div class="p-2 bg-dark rounded text-white fs-5" style="min-width: 45px; text-align: center;"><i class="bi bi-three-dots-vertical"></i></div>
@@ -22332,7 +23102,7 @@ function perform_cover_scan($db) {
                 </div>
                 <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
                   <li><strong>Trigger Instructions:</strong> Press the 'R' key sequentially to cycle through repeat states.</li>
-                  <li><strong>Context & Requirements:</strong> Cycles through the three primary modes: Repeat Off → Repeat All (loops active playlist) → Repeat One (loops current song).</li>
+                  <li><strong>Context & Requirements:</strong> Cycles through the three primary modes: Repeat Off â†’ Repeat All (loops active playlist) â†’ Repeat One (loops current song).</li>
                 </ul>
               </div>
     
@@ -25675,17 +26445,17 @@ function perform_cover_scan($db) {
                 <div class="row g-3 text-center mb-4">
                   <div class="col-3">
                     <div class="fw-bold fs-5 text-white">PERFECT</div>
-                    <div class="text-success small">±45ms</div>
+                    <div class="text-success small">Â±45ms</div>
                     <div class="text-secondary small">100% Acc</div>
                   </div>
                   <div class="col-3">
                     <div class="fw-bold fs-5" style="color: #ff3b30;">GREAT</div>
-                    <div class="text-success small">±80ms</div>
+                    <div class="text-success small">Â±80ms</div>
                     <div class="text-secondary small">75% Acc</div>
                   </div>
                   <div class="col-3">
                     <div class="fw-bold fs-5" style="color: #ffa000;">GOOD</div>
-                    <div class="text-success small">±125ms</div>
+                    <div class="text-success small">Â±125ms</div>
                     <div class="text-secondary small">40% Acc</div>
                   </div>
                   <div class="col-3">
@@ -26638,7 +27408,7 @@ curl_close($ch);
           <div class="modal-body p-4">
             <label class="form-label text-secondary small fw-bold mb-2">SELECT DESTINATION</label>
             <select id="project-move-select" class="form-select bg-dark text-white border-secondary mb-4">
-              <option value="">🏠 Personal (Private)</option>
+              <option value="">ðŸ  Personal (Private)</option>
               <!-- Populated dynamically via JS -->
             </select>
             <button type="button" class="btn btn-info w-100 fw-bold" id="confirm-move-project-btn">Move to Destination</button>
@@ -28351,7 +29121,7 @@ curl_close($ch);
           <div class="modal-body text-light">
             <div class="p-3 rounded" style="background: rgba(0,0,0,0.2); font-family: 'Courier New', Courier, monospace; font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap;">MIT License
 
-Copyright (c) 2026 赤葦だんご
+Copyright (c) 2026 èµ¤è‘¦ã ã‚“ã”
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -29584,7 +30354,7 @@ SOFTWARE.</div>
                             </button>
                             <ul class="dropdown-menu shadow-lg border-0" style="background-color: #1e1e1e; min-width: 180px; z-index: 9999; border-radius: 12px; padding: 0.5rem 0;">
                               <li class="px-3 py-2 d-flex justify-content-between mb-1" style="background: rgba(255,255,255,0.05);">
-                                ${["👍", "❤️", "😂", "😮", "😢"].map((em) => `<button class="btn btn-link p-0 text-decoration-none fs-5" style="transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'" onclick="window.toggleMsgReaction(${m.id}, '${em}')">${em}</button>`).join("")}
+                                ${["ðŸ‘", "â¤ï¸", "ðŸ˜‚", "ðŸ˜®", "ðŸ˜¢"].map((em) => `<button class="btn btn-link p-0 text-decoration-none fs-5" style="transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'" onclick="window.toggleMsgReaction(${m.id}, '${em}')">${em}</button>`).join("")}
                               </li>
                               <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.toggleStarMsg(${m.id})"><i class="bi ${m.is_starred ? "bi-star-fill text-warning" : "bi-star text-secondary"} fs-5"></i> ${m.is_starred ? "Unstar" : "Star"}</button></li>
                               <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.setChatReply(${m.id}, '${safeSender}', '${safeContent}')"><i class="bi bi-reply-fill text-info fs-5"></i> Reply</button></li>
@@ -32239,7 +33009,7 @@ SOFTWARE.</div>
                 const sec = parseFloat(t.slice(4, -1));
                 parsed.push({
                   time: min * 60 + sec,
-                  text: text || "♪",
+                  text: text || "â™ª",
                 });
               });
             }
@@ -34197,9 +34967,9 @@ SOFTWARE.</div>
                 name = item.name;
                 subtext =
                   type === "get_collab_playlists"
-                    ? `by ${item.creator} • ${formatSongCount(item.song_count)} songs`
+                    ? `by ${item.creator} â€¢ ${formatSongCount(item.song_count)} songs`
                     : type === "get_mixes"
-                      ? `Auto Mix • ${formatSongCount(item.song_count)} songs`
+                      ? `Auto Mix â€¢ ${formatSongCount(item.song_count)} songs`
                       : `${formatSongCount(item.song_count)} songs`;
                 imageId = item.image_id;
                 dataType = type === "get_mixes" ? "mix" : "playlist";
@@ -34537,7 +35307,7 @@ SOFTWARE.</div>
                           <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
                           <div class="d-flex flex-column justify-content-center overflow-hidden w-100">
                             <h4 class="text-white text-truncate mb-1 fw-bold">${escapeHTML(song.title)}</h4>
-                            <p class="text-secondary text-truncate mb-0">Song • ${escapeHTML(song.artist)}</p>
+                            <p class="text-secondary text-truncate mb-0">Song â€¢ ${escapeHTML(song.artist)}</p>
                           </div>
                           <button class="btn btn-danger rounded-circle ms-auto me-2 d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; flex-shrink: 0;"><i class="bi bi-play-fill fs-3"></i></button>
                         </div>
@@ -40377,10 +41147,10 @@ SOFTWARE.</div>
           playerElements.title.forEach((el) => applyMarquee(el, escapeHTML(currentSong.title)));
           playerElements.artist.forEach((el) => applyMarquee(el, formatArtistsHTML(currentSong.artist, currentSong.user_id, currentSong.is_collaborative)));
 
-          document.title = `${currentSong.title} • ${currentSong.artist}`;
+          document.title = `${currentSong.title} â€¢ ${currentSong.artist}`;
 
           if (docPipWindow) {
-            docPipWindow.document.title = `${currentSong.title} • ${currentSong.artist}`;
+            docPipWindow.document.title = `${currentSong.title} â€¢ ${currentSong.artist}`;
           }
 
           if ("mediaSession" in navigator && currentSong) {
@@ -42064,7 +42834,7 @@ SOFTWARE.</div>
                               <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" class="search-dropdown-img" style="width: 50px; height: 50px; border-radius: 50%;">
                               <div class="search-dropdown-text">
                                 <div class="search-dropdown-title fw-bold" style="font-size: 1rem;">${escapeHTML(song.title)}</div>
-                                <div class="search-dropdown-subtitle">Song • ${escapeHTML(song.artist)}</div>
+                                <div class="search-dropdown-subtitle">Song â€¢ ${escapeHTML(song.artist)}</div>
                               </div>
                             </div>
                             <button class="more-btn p-1 border-0 bg-transparent text-secondary flex-shrink-0 ms-2" data-song-id="${song.id}"><i class="bi bi-three-dots-vertical fs-5"></i></button>
@@ -51043,7 +51813,7 @@ SOFTWARE.</div>
             .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, (c) => c);
         };
         const pdTruncate = (str, len = 50) =>
-          str.length > len ? str.substring(0, len) + "…" : str;
+          str.length > len ? str.substring(0, len) + "â€¦" : str;
     
         const pdLog = (message, isError = false) => {
           const time = new Date().toLocaleTimeString();
@@ -51160,7 +51930,7 @@ SOFTWARE.</div>
         const pdStopAutoDownload = () => {
           if (!pdIsDownloading) return;
           pdStopRequested = true;
-          pdLog("⏹️ Stopping download process...", false);
+          pdLog("â¹ï¸ Stopping download process...", false);
           pdStartAutoBtn.disabled = true;
           pdStartAutoBtn.innerHTML =
             '<i class="bi bi-stop-fill" style="color: #ffffff !important;"></i> Stopping...';
@@ -51180,13 +51950,13 @@ SOFTWARE.</div>
     
           const songsToDownload = pdAllSongs.filter((s) => s.pdSelected !== false);
           pdLog(
-            `🚀 Starting sequential download of ${songsToDownload.length} selected songs. Click "Stop Download" to cancel.`,
+            `ðŸš€ Starting sequential download of ${songsToDownload.length} selected songs. Click "Stop Download" to cancel.`,
           );
     
           for (let i = 0; i < songsToDownload.length; i++) {
             if (pdStopRequested) {
               pdLog(
-                `⏹️ Download stopped by user after ${i}/${songsToDownload.length} songs.`,
+                `â¹ï¸ Download stopped by user after ${i}/${songsToDownload.length} songs.`,
               );
               break;
             }
@@ -51202,7 +51972,7 @@ SOFTWARE.</div>
     
           if (!pdStopRequested)
             pdLog(
-              `✅ All ${songsToDownload.length} selected songs have been sent for download!`,
+              `âœ… All ${songsToDownload.length} selected songs have been sent for download!`,
             );
           pdIsDownloading = false;
           pdStopRequested = false;
@@ -51245,7 +52015,7 @@ SOFTWARE.</div>
               pdResultsCard.classList.remove("d-none");
               pdPlaylistTitle.innerHTML = `<i class="bi bi-music-note-beamed" style="color: #ffffff !important;"></i> Playlist loaded <span class="badge bg-secondary ms-2">${pdAllSongs.length} songs</span> <span class="badge bg-info ms-2">~${formatBytes(totalSizeBytes)}</span>`;
               pdLog(
-                `✅ Successfully loaded ${pdAllSongs.length} songs (~${formatBytes(totalSizeBytes)}).`,
+                `âœ… Successfully loaded ${pdAllSongs.length} songs (~${formatBytes(totalSizeBytes)}).`,
               );
               pdRenderSongRows();
               const loader = document.getElementById("pd-infinite-scroll-loader");
@@ -51258,7 +52028,7 @@ SOFTWARE.</div>
               }
             } else {
               showToast("Playlist not found or empty", "error");
-              pdLog("❌ Failed to load playlist or it is empty.", true);
+              pdLog("âŒ Failed to load playlist or it is empty.", true);
             }
           } catch (err) {
             showToast("Error fetching playlist", "error");
@@ -51423,10 +52193,10 @@ SOFTWARE.</div>
                   let previewText = window.getPreviewText(m.content);
                   if (m.has_image) {
                     if (m.media_type && m.media_type.startsWith("video/"))
-                      previewText = "📹 Video";
+                      previewText = "ðŸ“¹ Video";
                     else if (m.media_type && m.media_type.startsWith("audio/"))
-                      previewText = "🎵 Audio";
-                    else previewText = "📷 Photo";
+                      previewText = "ðŸŽµ Audio";
+                    else previewText = "ðŸ“· Photo";
                   }
                   showNativeNotification(`New message from ${m.name}`, previewText);
                 }
@@ -52221,13 +52991,13 @@ SOFTWARE.</div>
     
         const populateProjectMoveSelect = async (type) => {
           const select = document.getElementById("project-move-select");
-          select.innerHTML = '<option value="">🏠 Personal (Private)</option>';
+          select.innerHTML = '<option value="">ðŸ  Personal (Private)</option>';
           const projs = await fetchData(`?action=get_projects&filter=${type}`);
           if (projs && projs.length > 0) {
             projs.forEach((p) => {
               select.insertAdjacentHTML(
                 "beforeend",
-                `<option value="${p.id}">📁 Project: ${escapeHTML(p.name)}</option>`,
+                `<option value="${p.id}">ðŸ“ Project: ${escapeHTML(p.name)}</option>`,
               );
             });
           }
@@ -54148,7 +54918,7 @@ SOFTWARE.</div>
                 items
                   .map(
                     (t) =>
-                      `<li style="padding: 6px 0; border-bottom: 1px solid #eee;">${t.completed ? '<strong style="color:#27c93f;">[✓]</strong>' : '<span style="color:#888;">[ ]</span>'} ${escapeHTML(decodeHTML(t.text || ""))}</li>`,
+                      `<li style="padding: 6px 0; border-bottom: 1px solid #eee;">${t.completed ? '<strong style="color:#27c93f;">[âœ“]</strong>' : '<span style="color:#888;">[ ]</span>'} ${escapeHTML(decodeHTML(t.text || ""))}</li>`,
                   )
                   .join("") +
                 "</ul>";
@@ -55909,7 +56679,7 @@ SOFTWARE.</div>
                              <div class="marquee-container w-100 mb-1">
                                <h6 class="text-white fw-bold m-0 marquee-content tooltip-marquee" style="font-size: 1.05rem;">${escapeHTML(data.name)}</h6>
                              </div>
-                             <div class="text-secondary" style="font-size: 0.8rem;">${formatSongCount(data.song_count || 0)} tracks • ${formatTime(data.total_duration || 0)}</div>
+                             <div class="text-secondary" style="font-size: 0.8rem;">${formatSongCount(data.song_count || 0)} tracks â€¢ ${formatTime(data.total_duration || 0)}</div>
                              ${data.followers_count !== undefined ? `<div class="text-info mt-1" style="font-size: 0.75rem;"><i class="bi bi-people-fill"></i> ${formatSongCount(data.followers_count)} followers</div>` : `<div class="text-secondary mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(data.play_count || 0)} plays</div>`}
                           </div>
                         </div>
@@ -60471,7 +61241,7 @@ SOFTWARE.</div>
                         <div class="text-secondary small fw-bold plays-val mb-1" style="font-size: 0.75rem; font-family: monospace;">Plays: <b class="text-white">${artist.plays || 0}</b></div>
     
                         <!-- Row 5: Tracks -->
-                        <div class="text-secondary fw-bold text-truncate rg-tracks-count" style="font-size: 0.85rem; color: #a1a1aa !important;"><i class="bi bi-music-note-beamed text-danger me-1"></i> ${artist.count} Tracks ${artist.followers > 0 ? `• <i class="bi bi-people-fill text-info ms-1 me-1"></i> ${formatSongCount(artist.followers)}` : ""}</div>
+                        <div class="text-secondary fw-bold text-truncate rg-tracks-count" style="font-size: 0.85rem; color: #a1a1aa !important;"><i class="bi bi-music-note-beamed text-danger me-1"></i> ${artist.count} Tracks ${artist.followers > 0 ? `â€¢ <i class="bi bi-people-fill text-info ms-1 me-1"></i> ${formatSongCount(artist.followers)}` : ""}</div>
                       </div>
     
                       <div class="d-flex align-items-center justify-content-center ms-2 right-actions-col" style="flex-shrink: 0; align-self: stretch; min-height: 84px;">
