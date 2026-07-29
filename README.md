@@ -6,6 +6,10 @@ A modern self-hosted music player built in PHP, with a clean UI, SQLite backend,
 ![2](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/2.png) 
 ![3](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/3.png)
 ![4](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/4.png) 
+![5](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/5.png) 
+![6](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/6.png) 
+![7](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/7.png) 
+![8](https://raw.githubusercontent.com/HirotakaDango/php-music-wiki/refs/heads/main/8.png) 
 
 ---
 

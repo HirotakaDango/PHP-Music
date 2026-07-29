@@ -387,7 +387,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '7.4');
+define('APP_VERSION', '7.5');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -700,7 +700,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         'png' => 'image/png', 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'gif' => 'image/gif',
         'txt' => 'text/plain', 'html' => 'text/plain', 'css' => 'text/plain',
         'js' => 'text/plain', 'json' => 'text/plain', 'xml' => 'text/plain',
-        'php' => 'text/plain'
+        'php' => 'text/plain', 'md' => 'text/markdown', 'markdown' => 'text/markdown'
       ];
       $mime = $mimeTypes[$ext] ?? 'application/octet-stream';
       
@@ -1021,6 +1021,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   $versions[] = ['name' => $v, 'mtime' => filemtime($verDir . '/' . $v), 'size' => formatBytes(filesize($verDir . '/' . $v))];
                 }
                 usort($versions, function($a, $b) { return $b['mtime'] - $a['mtime']; });
+                $versions = array_slice($versions, 0, 25);
               }
               echo json_encode(['success' => true, 'versions' => $versions]);
               break;
@@ -1429,7 +1430,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $ninetyDaysAgo = time() - (90 * 24 * 60 * 60);
               $db->prepare("DELETE FROM drive_activity WHERE timestamp < ?")->execute([$ninetyDaysAgo]);
 
-              $stmt = $db->prepare("SELECT file_name, file_path, action, timestamp FROM drive_activity ORDER BY timestamp DESC LIMIT 50");
+              $stmt = $db->prepare("SELECT file_name, file_path, action, timestamp FROM drive_activity ORDER BY timestamp DESC LIMIT 25");
               $stmt->execute();
               $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
               
@@ -1489,6 +1490,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               break;
 
             case 'read':
+              @ini_set('memory_limit', '512M');
               $file = $_GET['file'] ?? '';
               $full = $baseDir . '/' . $file;
               if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) throw new Exception('Invalid file');
@@ -1893,6 +1895,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-searchbox.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-modelist.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-language_tools.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
       :root {
         --ytm-bg: #030303;
@@ -1924,7 +1927,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         flex-direction: column;
         flex-shrink: 0;
         z-index: 1045;
-        transition: transform 0.3s ease;
+        transition: width 0.3s ease, transform 0.3s ease;
         overflow-y: auto;
         box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.02);
       }
@@ -1998,6 +2001,53 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
       .nav-link.active .bi {
         color: var(--ytm-accent);
+      }
+
+      /* Desktop Minimized Sidebar Mode */
+      @media (min-width: 992px) {
+        .sidebar.minimized {
+          width: 80px;
+        }
+        .sidebar.minimized .nav-link {
+          justify-content: center;
+          padding-left: 0 !important;
+          padding-right: 0 !important;
+          margin-left: 0.5rem;
+          margin-right: 0.5rem;
+          border-radius: 12px !important;
+        }
+        .sidebar.minimized .nav-link span {
+          display: none;
+        }
+        .sidebar.minimized .nav-link .bi {
+          margin: 0;
+          font-size: 1.5rem;
+        }
+        .sidebar.minimized .admin-profile-info,
+        .sidebar.minimized .admin-profile-badge,
+        .sidebar.minimized .sidebar-logo-text {
+          display: none !important;
+        }
+        .sidebar.minimized #desktop-sidebar-toggle {
+          margin-left: auto !important;
+          margin-right: auto !important;
+        }
+        .sidebar.minimized .admin-profile-img {
+          width: 44px !important;
+          height: 44px !important;
+          margin-bottom: 0 !important;
+        }
+        .sidebar.minimized .p-4.border-bottom {
+          padding: 1rem 0 !important;
+        }
+      }
+
+      /* Fullscreen IDE Mode */
+      .app-container.ide-fullscreen .sidebar {
+        display: none !important;
+      }
+      .app-container.ide-fullscreen .d-lg-none.p-3.border-bottom {
+        display: none !important;
       }
 
       .offcanvas-lg {
@@ -2468,11 +2518,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#admin-sidebar"></button>
         </div>
         <div class="offcanvas-body d-flex flex-column p-0 h-100">
-          <div class="p-4 border-bottom text-center d-flex flex-column align-items-center mb-4 shadow-sm" style="border-color: var(--ytm-surface-2) !important; background-color: rgba(255,255,255,0.02);">
-            <img src="?access=api&action=get_profile_picture&id=<?php echo $_SESSION['admin_id'] ?? '0'; ?>&v=<?php echo time(); ?>" alt="Admin Profile" class="rounded-circle shadow-lg border border-secondary mb-3" style="width: 80px; height: 80px; object-fit: cover;">
-            <h5 class="m-0 fw-bold text-white text-truncate w-100 px-2" style="font-size: 1.25rem;"><?php echo htmlspecialchars($_SESSION['user_artist'] ?? 'Admin'); ?></h5>
-            <div class="text-secondary text-truncate w-100 mt-1 px-2" style="font-size: 0.85rem;"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'Admin'); ?></div>
-            <div class="badge bg-dark border border-secondary text-secondary mt-3 px-3 py-2 rounded-pill shadow-sm" style="letter-spacing: 1px;">ID: <?php echo $_SESSION['admin_id'] ?? '0'; ?></div>
+          <div class="d-none d-lg-flex align-items-center justify-content-between p-3 border-bottom" style="border-color: var(--ytm-surface-2) !important;">
+            <div class="logo d-flex align-items-center sidebar-logo-text m-0 p-0" style="font-size: 1.25rem; font-weight: 700;">
+              Admin<span style="color: var(--ytm-accent);">Panel</span>
+            </div>
+            <button class="btn text-secondary p-0" id="desktop-sidebar-toggle" title="Toggle Sidebar">
+              <i class="bi bi-layout-sidebar fs-3"></i>
+            </button>
+          </div>
+          <div class="p-4 border-bottom text-center d-flex flex-column align-items-center shadow-sm" style="border-color: var(--ytm-surface-2) !important; background-color: rgba(255,255,255,0.02);">
+            <img src="?access=api&action=get_profile_picture&id=<?php echo $_SESSION['admin_id'] ?? '0'; ?>&v=<?php echo time(); ?>" alt="Admin Profile" class="rounded-circle shadow-lg border border-secondary mb-3 admin-profile-img" style="width: 80px; height: 80px; object-fit: cover; transition: all 0.3s ease;">
+            <h5 class="m-0 fw-bold text-white text-truncate w-100 px-2 admin-profile-info" style="font-size: 1.25rem;"><?php echo htmlspecialchars($_SESSION['user_artist'] ?? 'Admin'); ?></h5>
+            <div class="text-secondary text-truncate w-100 mt-1 px-2 admin-profile-info" style="font-size: 0.85rem;"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'Admin'); ?></div>
+            <div class="badge bg-dark border border-secondary text-secondary mt-3 px-3 py-2 rounded-pill shadow-sm admin-profile-badge" style="letter-spacing: 1px;">ID: <?php echo $_SESSION['admin_id'] ?? '0'; ?></div>
           </div>
           
           <div class="mb-4 mt-3 d-flex flex-column">
@@ -2492,8 +2550,141 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <a href="?access=admin&logout=1" class="nav-link text-danger"><i class="bi bi-box-arrow-left"></i><span>Logout</span></a>
           </div>
         </div>
+        <script>
+          document.addEventListener('DOMContentLoaded', () => {
+            const sidebar = document.getElementById('admin-sidebar');
+            const toggleBtn = document.getElementById('desktop-sidebar-toggle');
+            if (toggleBtn && sidebar) {
+              const updateToggleIcon = (isMin) => {
+                const icon = toggleBtn.querySelector('i');
+                if (icon) {
+                  icon.className = isMin ? 'bi bi-layout-sidebar-reverse fs-4' : 'bi bi-layout-sidebar fs-4';
+                }
+              };
+              if (localStorage.getItem('admin_sidebar_minimized') === 'true') {
+                sidebar.classList.add('minimized');
+                toggleBtn.classList.add('mx-auto');
+                updateToggleIcon(true);
+              }
+              toggleBtn.addEventListener('click', () => {
+                sidebar.classList.toggle('minimized');
+                const isMin = sidebar.classList.contains('minimized');
+                toggleBtn.classList.toggle('mx-auto', isMin);
+                updateToggleIcon(isMin);
+                localStorage.setItem('admin_sidebar_minimized', isMin);
+                setTimeout(() => { window.dispatchEvent(new Event('resize')); }, 300);
+              });
+            }
+
+            // Seamless Admin Panel SPA Page Transition Router
+            const overlay = document.getElementById('admin-loader-overlay');
+
+            const showAdminLoader = () => {
+              if (overlay) {
+                overlay.style.pointerEvents = 'auto';
+                overlay.style.opacity = '1';
+              }
+            };
+
+            const hideAdminLoader = () => {
+              if (overlay) {
+                overlay.style.opacity = '0';
+                setTimeout(() => {
+                  overlay.style.pointerEvents = 'none';
+                }, 250);
+              }
+            };
+
+            const loadAdminPage = async (url, pushState = true) => {
+              showAdminLoader();
+              try {
+                const res = await fetch(url);
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const htmlText = await res.text();
+
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(htmlText, 'text/html');
+
+                const newMain = doc.querySelector('main.main-content');
+                const currentMain = document.querySelector('main.main-content');
+
+                if (newMain && currentMain) {
+                  const activeOverlay = document.getElementById('admin-loader-overlay');
+
+                  // Sync Fullscreen IDE state based on current page destination
+                  if (url.includes('page=ide') && localStorage.getItem('admin_ide_fullscreen') === 'true') {
+                    appContainer.classList.add('ide-fullscreen');
+                  } else {
+                    appContainer.classList.remove('ide-fullscreen');
+                  }
+
+                  currentMain.innerHTML = newMain.innerHTML;
+
+                  if (activeOverlay && !currentMain.contains(activeOverlay)) {
+                    currentMain.prepend(activeOverlay);
+                  }
+
+                  // Update active sidebar navigation links
+                  const newNavLinks = doc.querySelectorAll('.sidebar .nav-link');
+                  const currentNavLinks = document.querySelectorAll('.sidebar .nav-link');
+                  newNavLinks.forEach((newLink, idx) => {
+                    if (currentNavLinks[idx]) {
+                      currentNavLinks[idx].className = newLink.className;
+                    }
+                  });
+
+                  if (pushState) {
+                    history.pushState({ adminUrl: url }, '', url);
+                  }
+
+                  // Re-execute embedded scripts inside the newly injected main content
+                  currentMain.querySelectorAll('script').forEach(oldScript => {
+                    const newScript = document.createElement('script');
+                    Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
+                    newScript.appendChild(document.createTextNode(oldScript.innerHTML));
+                    oldScript.parentNode.replaceChild(newScript, oldScript);
+                  });
+
+                  currentMain.scrollTop = 0;
+                } else {
+                  window.location.href = url;
+                }
+              } catch (err) {
+                console.error('Admin SPA Load Error:', err);
+                window.location.href = url;
+              } finally {
+                hideAdminLoader();
+              }
+            };
+
+            document.addEventListener('click', (e) => {
+              const link = e.target.closest('a');
+              if (!link) return;
+
+              const href = link.getAttribute('href');
+              if (!href) return;
+
+              if (href.includes('access=admin') && !href.includes('logout=1') && link.target !== '_blank' && !link.hasAttribute('download')) {
+                e.preventDefault();
+                loadAdminPage(href, true);
+              }
+            });
+
+            window.addEventListener('popstate', () => {
+              if (location.search.includes('access=admin')) {
+                loadAdminPage(location.href, false);
+              }
+            });
+          });
+        </script>
       </nav>
       <main class="main-content position-relative">
+        <!-- Admin Content Area Loading Overlay -->
+        <div id="admin-loader-overlay" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(3, 3, 3, 0.75); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); z-index: 1000; display: flex; flex-direction: column; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.2s ease;">
+          <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.25em;" role="status"></div>
+          <div class="text-white mt-3 fw-bold small" style="letter-spacing: 1px;">LOADING...</div>
+        </div>
+
         <?php if (!empty($_SESSION['admin_flash_msg'])): ?>
           <div class="alert alert-success alert-dismissible fade show m-4 position-absolute top-0 end-0 shadow-lg z-3" style="max-width: 90vw; word-break: break-word;" role="alert">
             <i class="bi bi-check-circle-fill me-2"></i> <?php echo htmlspecialchars($_SESSION['admin_flash_msg']); ?>
@@ -2910,63 +3101,443 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </div>
           
           <style>
-            .ide-container { padding: 0 !important; background-color: #0a0a0a; display: flex; flex-direction: column; overflow: hidden; height: 100%; width: 100%; }
-            .ide-header { height: 48px; background-color: #121212; border-bottom: 1px solid #2d2d2d; display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; flex-shrink: 0; }
-            .ide-header-title { color: #e3e3e3; font-weight: bold; font-size: 1rem; display: flex; align-items: center; gap: 8px; }
-            .ide-header-title span { background: #262626; color: #aaaaaa; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: normal; margin-left: 8px; }
-            .ide-actions { display: flex; gap: 8px; }
-            .ide-btn { background: transparent; border: 1px solid #555555; color: #e3e3e3; border-radius: 4px; padding: 4px 12px; font-size: 0.85rem; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: 0.2s; }
-            .ide-btn:hover { background: #262626; color: #ffffff; }
-            .ide-btn.primary { background: #ff0000; border-color: #ff0000; color: #ffffff; }
-            .ide-btn.primary:hover { background: #cc0000; }
-            .ide-body { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-            .ide-sidebar { width: 250px; background-color: #0a0a0a; border-right: 1px solid #2d2d2d; display: flex; flex-direction: column; flex-shrink: 0; position: relative; }
-            .ide-sidebar-header { padding: 12px; color: #ffffff; font-size: 0.75rem; font-weight: bold; letter-spacing: 1px; border-bottom: 1px solid #1a1a1a; display: flex; justify-content: space-between; }
-            .ide-file-tree { flex: 1; overflow-y: auto; padding: 8px; font-size: 0.85rem; }
-            .ide-tree-item { padding: 4px 8px; color: #aaaaaa; cursor: pointer; display: flex; align-items: center; gap: 8px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-            .ide-tree-item:hover { background-color: #1a1a1a; color: #ffffff; }
-            .ide-tree-item.active { background-color: rgba(255, 0, 0, 0.2); color: #ffffff; border-left: 3px solid #ff0000; border-radius: 0 4px 4px 0; }
-            .ide-editor-wrapper { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-            .ide-tabs { display: flex; background: #0a0a0a; border-bottom: 1px solid #2d2d2d; overflow-x: auto; flex-shrink: 0; }
-            .ide-tabs::-webkit-scrollbar { height: 4px; }
-            .ide-tabs::-webkit-scrollbar-thumb { background: #555555; }
-            .ide-tab { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: #0a0a0a; border-right: 1px solid #2d2d2d; color: #aaaaaa; font-size: 0.85rem; border-top: 2px solid transparent; cursor: pointer; white-space: nowrap; }
-            .ide-tab.active { background: #121212; color: #ffffff; border-top: 2px solid #ff0000; }
-            .ide-tab:hover:not(.active) { background: #1a1a1a; color: #e3e3e3; }
-            .ide-tab-close { opacity: 0.5; transition: 0.2s; padding: 2px; border-radius: 4px; }
-            .ide-tab-close:hover { opacity: 1; background: rgba(255,0,0,0.2); color: #ff0000; }
-            .ide-editor-container { flex: 1; position: relative; background: #121212; }
-            
+            .ide-container {
+              padding: 0 !important;
+              background-color: #0a0a0a;
+              display: flex;
+              flex-direction: column;
+              overflow: hidden;
+              height: 100%;
+              width: 100%;
+            }
+
+            .ide-header {
+              height: 48px;
+              background-color: #121212;
+              border-bottom: 1px solid #2d2d2d;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0 1rem;
+              flex-shrink: 0;
+            }
+
+            .ide-header-title {
+              color: #e3e3e3;
+              font-weight: bold;
+              font-size: 1rem;
+              display: flex;
+              align-items: center;
+              gap: 8px;
+            }
+
+            .ide-header-title span {
+              background: #262626;
+              color: #aaaaaa;
+              padding: 2px 8px;
+              border-radius: 4px;
+              font-size: 0.75rem;
+              font-weight: normal;
+              margin-left: 8px;
+            }
+
+            .ide-actions {
+              display: flex;
+              gap: 8px;
+            }
+
+            .ide-btn {
+              background: transparent;
+              border: 1px solid #555555;
+              color: #e3e3e3;
+              border-radius: 4px;
+              padding: 4px 12px;
+              font-size: 0.85rem;
+              cursor: pointer;
+              display: flex;
+              align-items: center;
+              gap: 6px;
+              transition: 0.2s;
+            }
+
+            .ide-btn:hover {
+              background: #262626;
+              color: #ffffff;
+            }
+
+            .ide-btn.primary {
+              background: #ff0000;
+              border-color: #ff0000;
+              color: #ffffff;
+            }
+
+            .ide-btn.primary:hover {
+              background: #cc0000;
+            }
+
+            .ide-body {
+              display: flex;
+              flex: 1;
+              min-height: 0;
+              overflow: hidden;
+            }
+
+            .ide-sidebar {
+              width: 200px;
+              background-color: #0a0a0a;
+              border-right: 1px solid #2d2d2d;
+              display: flex;
+              flex-direction: column;
+              flex-shrink: 0;
+              position: relative;
+            }
+
+            .ide-sidebar-header {
+              padding: 12px;
+              color: #ffffff;
+              font-size: 0.75rem;
+              font-weight: bold;
+              letter-spacing: 1px;
+              border-bottom: 1px solid #1a1a1a;
+              display: flex;
+              justify-content: space-between;
+            }
+
+            .ide-file-tree {
+              flex: 1;
+              overflow-y: auto;
+              padding: 8px;
+              font-size: 0.85rem;
+            }
+
+            .ide-tree-item {
+              padding: 4px 8px;
+              color: #aaaaaa;
+              cursor: pointer;
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              border-radius: 4px;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+
+            .ide-tree-item:hover {
+              background-color: #1a1a1a;
+              color: #ffffff;
+            }
+
+            .ide-tree-item.active {
+              background-color: rgba(255, 0, 0, 0.2);
+              color: #ffffff;
+              border-left: 3px solid #ff0000;
+              border-radius: 0 4px 4px 0;
+            }
+
+            .ide-editor-wrapper {
+              flex: 1;
+              display: flex;
+              flex-direction: column;
+              min-width: 0;
+            }
+
+            .ide-tabs {
+              display: flex;
+              background: #0a0a0a;
+              border-bottom: 1px solid #2d2d2d;
+              overflow-x: auto;
+              flex-shrink: 0;
+            }
+
+            .ide-tabs::-webkit-scrollbar {
+              height: 4px;
+            }
+
+            .ide-tabs::-webkit-scrollbar-thumb {
+              background: #555555;
+            }
+
+            .ide-tab {
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              padding: 8px 16px;
+              background: #0a0a0a;
+              border-right: 1px solid #2d2d2d;
+              color: #aaaaaa;
+              font-size: 0.85rem;
+              border-top: 2px solid transparent;
+              cursor: pointer;
+              white-space: nowrap;
+            }
+
+            .ide-tab.active {
+              background: #121212;
+              color: #ffffff;
+              border-top: 2px solid #ff0000;
+            }
+
+            .ide-tab:hover:not(.active) {
+              background: #1a1a1a;
+              color: #e3e3e3;
+            }
+
+            .ide-tab-close {
+              opacity: 0.5;
+              transition: 0.2s;
+              padding: 2px;
+              border-radius: 4px;
+            }
+
+            .ide-tab-close:hover {
+              opacity: 1;
+              background: rgba(255, 0, 0, 0.2);
+              color: #ff0000;
+            }
+
+            .ide-editor-container {
+              flex: 1;
+              position: relative;
+              background: #121212;
+              display: flex;
+              flex-direction: column;
+            }
+
+            .ide-status-bar {
+              height: 24px;
+              background-color: #1e1e1e;
+              color: #ffffff;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0 10px;
+              font-size: 0.75rem;
+              flex-shrink: 0;
+              z-index: 10;
+            }
+
+            .ide-status-left,
+            .ide-status-right {
+              display: flex;
+              align-items: center;
+              gap: 12px;
+            }
+
+            .ide-status-item {
+              cursor: pointer;
+              transition: opacity 0.2s;
+              display: flex;
+              align-items: center;
+              gap: 4px;
+            }
+
+            .ide-status-item:hover {
+              opacity: 0.8;
+            }
+
             /* Bottom Terminal Panel */
-            .ide-bottom-panel { display: none; flex-direction: column; background: #0a0a0a; height: 250px; flex-shrink: 0; position: relative; }
-            .ide-bottom-panel.active { display: flex; }
-            .ide-bottom-panel.fullscreen { position: absolute; top: 48px; left: 300px; right: 0; bottom: 0; height: auto !important; z-index: 100; border-left: 1px solid #2d2d2d; }
-            .ide-panel-resizer { height: 4px; background: #2d2d2d; cursor: ns-resize; width: 100%; transition: background 0.2s; flex-shrink: 0; z-index: 10; }
-            .ide-panel-resizer:hover, .ide-panel-resizer.resizing { background: #ff0000; }
-            .panel-header { display: flex; justify-content: space-between; align-items: center; background: #121212; border-bottom: 1px solid #2d2d2d; padding: 0 16px; height: 35px; flex-shrink: 0; }
-            .panel-tabs { display: flex; height: 100%; gap: 16px; }
-            .panel-tab { color: #aaaaaa; font-size: 0.8rem; text-transform: uppercase; cursor: pointer; display: flex; align-items: center; border-bottom: 2px solid transparent; }
-            .panel-tab.active { color: #ffffff; border-bottom-color: #ff0000; font-weight: bold; }
-            .panel-tab:hover:not(.active) { color: #e3e3e3; }
-            .panel-actions { display: flex; gap: 12px; color: #aaaaaa; }
-            .panel-actions i { cursor: pointer; transition: 0.2s; font-size: 0.9rem; }
-            .panel-actions i:hover { color: #ffffff; }
-            .panel-content-area { flex: 1; overflow: auto; background: #0a0a0a; color: #e3e3e3; font-family: monospace; font-size: 0.85rem; padding: 12px; position: relative; }
-            .panel-pane { display: none; height: 100%; width: 100%; }
-            .panel-pane.active { display: block; }
-            
+            .ide-bottom-panel {
+              display: none;
+              flex-direction: column;
+              background: #0a0a0a;
+              height: 250px;
+              flex-shrink: 0;
+              position: relative;
+            }
+
+            .ide-bottom-panel.active {
+              display: flex;
+            }
+
+            .ide-bottom-panel.fullscreen {
+              position: absolute;
+              top: 48px;
+              left: 300px;
+              right: 0;
+              bottom: 0;
+              height: auto !important;
+              z-index: 100;
+              border-left: 1px solid #2d2d2d;
+            }
+
+            .ide-panel-resizer {
+              height: 4px;
+              background: #2d2d2d;
+              cursor: ns-resize;
+              width: 100%;
+              transition: background 0.2s;
+              flex-shrink: 0;
+              z-index: 10;
+            }
+
+            .ide-panel-resizer:hover,
+            .ide-panel-resizer.resizing {
+              background: #ff0000;
+            }
+
+            .panel-header {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              background: #121212;
+              border-bottom: 1px solid #2d2d2d;
+              padding: 0 16px;
+              height: 35px;
+              flex-shrink: 0;
+            }
+
+            .panel-tabs {
+              display: flex;
+              height: 100%;
+              gap: 16px;
+            }
+
+            .panel-tab {
+              color: #aaaaaa;
+              font-size: 0.8rem;
+              text-transform: uppercase;
+              cursor: pointer;
+              display: flex;
+              align-items: center;
+              border-bottom: 2px solid transparent;
+            }
+
+            .panel-tab.active {
+              color: #ffffff;
+              border-bottom-color: #ff0000;
+              font-weight: bold;
+            }
+
+            .panel-tab:hover:not(.active) {
+              color: #e3e3e3;
+            }
+
+            .panel-actions {
+              display: flex;
+              gap: 12px;
+              color: #aaaaaa;
+            }
+
+            .panel-actions i {
+              cursor: pointer;
+              transition: 0.2s;
+              font-size: 0.9rem;
+            }
+
+            .panel-actions i:hover {
+              color: #ffffff;
+            }
+
+            .panel-content-area {
+              flex: 1;
+              overflow: auto;
+              background: #0a0a0a;
+              color: #e3e3e3;
+              font-family: monospace;
+              font-size: 0.85rem;
+              padding: 12px;
+              position: relative;
+            }
+
+            .panel-pane {
+              display: none;
+              height: 100%;
+              width: 100%;
+            }
+
+            .panel-pane.active {
+              display: block;
+            }
+
             /* Activity Bar & Modals */
-            .ide-activity-bar { width: 50px; background-color: #000000; border-right: 1px solid #1a1a1a; display: flex; flex-direction: column; align-items: center; padding-top: 12px; flex-shrink: 0; z-index: 10; }
-            .ide-activity-action { width: 38px; height: 38px; display: flex; justify-content: center; align-items: center; color: #888; font-size: 1.3rem; cursor: pointer; border-radius: 8px; margin-bottom: 8px; transition: 0.2s; }
-            .ide-activity-action.active, .ide-activity-action:hover { color: #ff0000; background: rgba(255, 0, 0, 0.1); }
-            
-            .ide-ctx-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #121212; border: 1px solid #2d2d2d; border-radius: 12px; width: 320px; box-shadow: 0 15px 40px rgba(0,0,0,0.8); z-index: 5000; display: none; flex-direction: column; padding: 12px; }
-            .ide-ctx-title { color: #aaaaaa; font-size: 0.85rem; padding: 8px 12px; font-weight: bold; border-bottom: 1px solid #2d2d2d; margin-bottom: 8px; word-break: break-all; }
-            .ide-ctx-btn { background: transparent; border: none; color: #e3e3e3; text-align: left; padding: 10px 12px; border-radius: 6px; cursor: pointer; transition: 0.2s; display: flex; align-items: center; gap: 10px; font-size: 0.9rem; width: 100%; }
-            .ide-ctx-btn:hover { background: #1a1a1a; color: #ffffff; }
-            .ide-ctx-btn.text-danger:hover { background: rgba(255,0,0,0.1); }
-            
-            #ide-media-viewer { background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px); background-size: 20px 20px; }
+            .ide-activity-bar {
+              width: 50px;
+              background-color: #000000;
+              border-right: 1px solid #1a1a1a;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              padding-top: 12px;
+              flex-shrink: 0;
+              z-index: 10;
+            }
+
+            .ide-activity-action {
+              width: 38px;
+              height: 38px;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              color: #888;
+              font-size: 1.3rem;
+              cursor: pointer;
+              border-radius: 8px;
+              margin-bottom: 8px;
+              transition: 0.2s;
+            }
+
+            .ide-activity-action.active,
+            .ide-activity-action:hover {
+              color: #ff0000;
+              background: rgba(255, 0, 0, 0.1);
+            }
+
+            .ide-ctx-modal {
+              position: fixed;
+              top: 50%;
+              left: 50%;
+              transform: translate(-50%, -50%);
+              background: #121212;
+              border: 1px solid #2d2d2d;
+              border-radius: 12px;
+              width: 320px;
+              box-shadow: 0 15px 40px rgba(0, 0, 0, 0.8);
+              z-index: 5000;
+              display: none;
+              flex-direction: column;
+              padding: 12px;
+            }
+
+            .ide-ctx-title {
+              color: #aaaaaa;
+              font-size: 0.85rem;
+              padding: 8px 12px;
+              font-weight: bold;
+              border-bottom: 1px solid #2d2d2d;
+              margin-bottom: 8px;
+              word-break: break-all;
+            }
+
+            .ide-ctx-btn {
+              background: transparent;
+              border: none;
+              color: #e3e3e3;
+              text-align: left;
+              padding: 10px 12px;
+              border-radius: 6px;
+              cursor: pointer;
+              transition: 0.2s;
+              display: flex;
+              align-items: center;
+              gap: 10px;
+              font-size: 0.9rem;
+              width: 100%;
+            }
+
+            .ide-ctx-btn:hover {
+              background: #1a1a1a;
+              color: #ffffff;
+            }
+
+            .ide-ctx-btn.text-danger:hover {
+              background: rgba(255, 0, 0, 0.1);
+            }
+
+            #ide-media-viewer {
+              background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+              background-size: 20px 20px;
+            }
 
             /* Main Sidebar Resizer */
             .ide-sidebar-resizer {
@@ -2981,12 +3552,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               transition: background 0.2s;
             }
 
-            .ide-sidebar-resizer:hover, .ide-sidebar-resizer.resizing {
+            .ide-sidebar-resizer:hover,
+            .ide-sidebar-resizer.resizing {
               background: #ff0000;
             }
 
             /* Compact Modern Dark Theme for Ace Editor Searchbox (Drive & IDE) */
-            .ace_editor, .ace_editor * {
+            .ace_editor,
+            .ace_editor * {
               box-sizing: content-box !important;
             }
 
@@ -3135,6 +3708,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <span id="ide-current-file">No file selected</span>
               </div>
               <div class="ide-actions">
+                <button class="ide-btn" id="ide-fullscreen-btn" title="Toggle Fullscreen IDE"><i class="bi bi-arrows-fullscreen"></i> Fullscreen</button>
                 <button class="ide-btn" id="ide-find-btn" title="Ctrl+F"><i class="bi bi-search"></i> Find</button>
                 <button class="ide-btn" id="ide-save-btn" title="Ctrl+S"><i class="bi bi-floppy"></i> Save</button>
                 <button class="ide-btn" id="ide-preview-btn"><i class="bi bi-play-fill"></i> Execute / Preview</button>
@@ -3148,9 +3722,105 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <button class="ide-ctx-btn" id="ide-btn-new-file"><i class="bi bi-file-earmark-plus"></i> New file here</button>
               <button class="ide-ctx-btn" id="ide-btn-new-folder"><i class="bi bi-folder-plus"></i> New folder here</button>
               <button class="ide-ctx-btn" id="ide-btn-rename"><i class="bi bi-pencil-square"></i> Rename</button>
+              <button class="ide-ctx-btn" id="ide-btn-download"><i class="bi bi-download"></i> Download</button>
               <button class="ide-ctx-btn text-danger" id="ide-btn-delete"><i class="bi bi-trash"></i> Delete</button>
               <hr class="border-secondary my-2 opacity-25">
+              <button class="ide-ctx-btn" id="ide-btn-upload"><i class="bi bi-upload"></i> Upload Files</button>
+              <button class="ide-ctx-btn" id="ide-btn-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+              <hr class="border-secondary my-2 opacity-25">
               <button class="ide-ctx-btn justify-content-center text-secondary fw-bold" onclick="document.getElementById('ide-ctx-modal').style.display='none'">Cancel</button>
+            </div>
+
+            <div class="ide-ctx-modal" id="ide-settings-modal" style="width: 300px;">
+              <div class="ide-ctx-title fw-bold">IDE Settings</div>
+              <div class="p-2 text-white" style="font-size: 0.85rem;">
+                <div class="mb-2">
+                  <label class="form-label mb-1">Theme</label>
+                  <select id="ide-setting-theme" class="form-select form-select-sm bg-dark text-white border-secondary">
+                    <optgroup label="Dark Themes">
+                      <option value="ace/theme/ambiance">Ambiance</option>
+                      <option value="ace/theme/chaos">Chaos</option>
+                      <option value="ace/theme/clouds_midnight">Clouds Midnight</option>
+                      <option value="ace/theme/cobalt">Cobalt</option>
+                      <option value="ace/theme/colorforth">Colorforth</option>
+                      <option value="ace/theme/dracula">Dracula</option>
+                      <option value="ace/theme/gob">Gob</option>
+                      <option value="ace/theme/gruvbox">Gruvbox</option>
+                      <option value="ace/theme/idle_fingers">idle Fingers</option>
+                      <option value="ace/theme/kr_theme">krTheme</option>
+                      <option value="ace/theme/merbivore">Merbivore</option>
+                      <option value="ace/theme/merbivore_soft">Merbivore Soft</option>
+                      <option value="ace/theme/mono_industrial">Mono Industrial</option>
+                      <option value="ace/theme/monokai">Monokai</option>
+                      <option value="ace/theme/nord_dark">Nord Dark</option>
+                      <option value="ace/theme/one_dark">One Dark</option>
+                      <option value="ace/theme/pastel_on_dark">Pastel on dark</option>
+                      <option value="ace/theme/solarized_dark">Solarized Dark</option>
+                      <option value="ace/theme/terminal">Terminal</option>
+                      <option value="ace/theme/tomorrow_night">Tomorrow Night</option>
+                      <option value="ace/theme/tomorrow_night_blue">Tomorrow Night Blue</option>
+                      <option value="ace/theme/tomorrow_night_bright">Tomorrow Night Bright</option>
+                      <option value="ace/theme/tomorrow_night_eighties" selected>Tomorrow Night 80s</option>
+                      <option value="ace/theme/twilight">Twilight</option>
+                      <option value="ace/theme/vibrant_ink">Vibrant Ink</option>
+                      <option value="ace/theme/github_dark">GitHub Dark</option>
+                    </optgroup>
+                    <optgroup label="Light Themes">
+                      <option value="ace/theme/chrome">Chrome</option>
+                      <option value="ace/theme/clouds">Clouds</option>
+                      <option value="ace/theme/crimson_editor">Crimson Editor</option>
+                      <option value="ace/theme/dawn">Dawn</option>
+                      <option value="ace/theme/dreamweaver">Dreamweaver</option>
+                      <option value="ace/theme/eclipse">Eclipse</option>
+                      <option value="ace/theme/github">GitHub</option>
+                      <option value="ace/theme/iplastic">IPlastic</option>
+                      <option value="ace/theme/solarized_light">Solarized Light</option>
+                      <option value="ace/theme/textmate">TextMate</option>
+                      <option value="ace/theme/tomorrow">Tomorrow</option>
+                      <option value="ace/theme/xcode">Xcode</option>
+                      <option value="ace/theme/kuroir">Kuroir</option>
+                      <option value="ace/theme/katzenmilch">KatzenMilch</option>
+                      <option value="ace/theme/sqlserver">SQL Server</option>
+                    </optgroup>
+                  </select>
+                </div>
+                <div class="mb-2">
+                  <label class="form-label mb-1">Indentation</label>
+                  <select id="ide-setting-indent" class="form-select form-select-sm bg-dark text-white border-secondary">
+                    <option value="2">2 Spaces</option>
+                    <option value="4">4 Spaces</option>
+                    <option value="tab">Tabs</option>
+                  </select>
+                </div>
+                <div class="mb-2">
+                  <label class="form-label mb-1 d-flex justify-content-between align-items-center">
+                    <span>Font Size</span>
+                    <span id="ide-setting-fontsize-val" class="text-info fw-bold">14px</span>
+                  </label>
+                  <div class="d-flex align-items-center gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-light border-0 px-2 py-0 fw-bold" id="ide-fontsize-minus" style="height: 28px; min-width: 32px;">-</button>
+                    <input type="range" class="form-range flex-grow-1" id="ide-setting-fontsize" min="10" max="36" step="1" value="14">
+                    <button type="button" class="btn btn-sm btn-outline-light border-0 px-2 py-0 fw-bold" id="ide-fontsize-plus" style="height: 28px; min-width: 32px;">+</button>
+                  </div>
+                </div>
+                <div class="form-check form-switch mb-2">
+                  <input class="form-check-input" type="checkbox" id="ide-setting-wrap">
+                  <label class="form-check-label">Word Wrap</label>
+                </div>
+                <div class="form-check form-switch mb-2">
+                  <input class="form-check-input" type="checkbox" id="ide-setting-autosave">
+                  <label class="form-check-label">Auto Save (Every 10s)</label>
+                </div>
+                <div class="form-check form-switch mb-2">
+                  <input class="form-check-input" type="checkbox" id="ide-setting-show_wordcount">
+                  <label class="form-check-label">Show Word Count</label>
+                </div>
+                <div class="form-check form-switch mb-3">
+                  <input class="form-check-input" type="checkbox" id="ide-setting-show_charcount">
+                  <label class="form-check-label">Show Character Count</label>
+                </div>
+                <button class="btn btn-sm btn-outline-light w-100" onclick="document.getElementById('ide-settings-modal').style.display='none'">Close</button>
+              </div>
             </div>
 
             <div class="ide-body">
@@ -3159,16 +3829,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="ide-activity-action active" id="act-explorer" title="Explorer" onclick="window.switchIdeSidebar('explorer')"><i class="bi bi-files"></i></div>
                 <div class="ide-activity-action" id="act-git" title="Drive Activity" onclick="window.switchIdeSidebar('git')"><i class="bi bi-activity"></i></div>
                 <div class="ide-activity-action" id="act-history" title="File History" onclick="window.switchIdeSidebar('history')"><i class="bi bi-clock-history"></i></div>
-                <div class="ide-activity-action mt-auto mb-2 text-info" title="Terminal" onclick="window.toggleIdeTerminal()"><i class="bi bi-terminal-fill"></i></div>
+                <div class="ide-activity-action" id="act-trash" title="Trash" onclick="window.switchIdeSidebar('trash')"><i class="bi bi-trash"></i></div>
+                <div class="ide-activity-action mt-auto mb-2" id="act-settings" title="Settings"><i class="bi bi-gear-fill"></i></div>
+                <div class="ide-activity-action mb-2 text-info" title="Terminal" onclick="window.toggleIdeTerminal()"><i class="bi bi-terminal-fill"></i></div>
                 <div class="ide-activity-action mb-3 text-success" title="Backup ZIP" onclick="window.exportWorkspace()"><i class="bi bi-file-zip-fill"></i></div>
               </div>
 
               <!-- Main Sidebar -->
               <div class="ide-sidebar" id="ide-main-sidebar">
                 <div class="ide-sidebar-resizer" id="ide-sidebar-resizer"></div>
-                <div class="ide-sidebar-header" id="ide-sidebar-title">
-                  EXPLORER
-                  <i class="bi bi-arrow-clockwise" style="cursor:pointer;" id="ide-refresh-tree" title="Refresh"></i>
+                <div class="ide-sidebar-header d-flex justify-content-between align-items-center" id="ide-sidebar-title">
+                  <span>EXPLORER</span>
+                  <div class="d-flex gap-2">
+                    <i class="bi bi-file-earmark-plus" style="cursor:pointer;" id="ide-tree-new-file" title="New File"></i>
+                    <i class="bi bi-folder-plus" style="cursor:pointer;" id="ide-tree-new-folder" title="New Folder"></i>
+                    <i class="bi bi-upload" style="cursor:pointer;" id="ide-tree-upload" title="Upload"></i>
+                    <i class="bi bi-arrow-clockwise" style="cursor:pointer;" id="ide-refresh-tree" title="Refresh"></i>
+                  </div>
                 </div>
                 
                 <div class="ide-file-tree" id="ide-file-tree">
@@ -3182,6 +3859,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="ide-file-tree d-none" id="ide-history-tree" style="padding: 12px; font-family: monospace; font-size: 0.8rem; color: #ccc;">
                   <div class="text-center mt-4 text-secondary">Select a file in Explorer to view its history.</div>
                 </div>
+
+                <div class="ide-file-tree d-none" id="ide-trash-tree" style="padding: 12px; font-family: monospace; font-size: 0.8rem; color: #ccc;">
+                  <div class="text-center mt-4 text-secondary"><i class="spinner-border spinner-border-sm"></i> Loading Trash...</div>
+                </div>
               </div>
               
               <div class="ide-editor-wrapper">
@@ -3189,15 +3870,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <!-- Dynamic Tabs -->
                 </div>
                 <div class="ide-editor-container">
-                  <div id="ide-editor" class="position-absolute w-100 h-100"></div>
-                  <div id="ide-media-viewer" class="position-absolute w-100 h-100 d-none flex-column align-items-center justify-content-center bg-dark">
-                    <div id="ide-media-content" class="shadow-lg rounded" style="max-width: 90%; max-height: 90%;"></div>
-                    <div id="ide-media-info" class="mt-3 text-secondary font-monospace small"></div>
+                  <div style="flex: 1; position: relative;">
+                    <div id="ide-editor" class="position-absolute w-100 h-100"></div>
+                    <div id="ide-media-viewer" class="position-absolute w-100 h-100 d-none flex-column align-items-center justify-content-center bg-dark">
+                      <div id="ide-media-content" class="shadow-lg rounded" style="max-width: 90%; max-height: 90%;"></div>
+                      <div id="ide-media-info" class="mt-3 text-secondary font-monospace small"></div>
+                    </div>
+                    <div id="ide-empty-state" class="position-absolute w-100 h-100 d-flex flex-column align-items-center justify-content-center text-secondary">
+                      <i class="bi bi-code-slash mb-3" style="font-size: 4rem; opacity: 0.3;"></i>
+                      <h5>PHP Music IDE</h5>
+                      <p class="small">Select a file from the explorer to begin.</p>
+                    </div>
                   </div>
-                  <div id="ide-empty-state" class="position-absolute w-100 h-100 d-flex flex-column align-items-center justify-content-center text-secondary">
-                    <i class="bi bi-code-slash mb-3" style="font-size: 4rem; opacity: 0.3;"></i>
-                    <h5>PHP Music IDE</h5>
-                    <p class="small">Select a file from the explorer to begin.</p>
+                  <div class="ide-status-bar" id="ide-status-bar" style="display: none; background-color: #1e1e1e;">
+                    <div class="ide-status-left">
+                      <span id="ide-status-file-size">0 KB</span>
+                      <span id="ide-status-word-count" style="display: none;">0 words</span>
+                      <span id="ide-status-char-count" style="display: none;">0 chars</span>
+                    </div>
+                    <div class="ide-status-right">
+                      <span id="ide-status-cursor">Ln 1, Col 1</span>
+                      <span class="ide-status-item" id="ide-status-indent">Spaces: 2</span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -3212,7 +3906,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="panel-tab" data-target="problems">PROBLEMS</div>
                   <div class="panel-tab" data-target="terminal">TERMINAL</div>
                 </div>
-                <div class="panel-actions">
+                <div class="panel-actions d-flex align-items-center gap-3">
+                  <i class="bi bi-arrow-clockwise" id="panel-reload" title="Hard Reload Preview"></i>
+                  <i class="bi bi-bug" id="panel-eruda" title="Toggle Eruda Inspect (Preview)"></i>
+                  <i class="bi bi-window-stack" id="panel-popup" title="Open in Popup Window"></i>
+                  <i class="bi bi-box-arrow-up-right" id="panel-newtab" title="Open Preview in New Tab"></i>
                   <i class="bi bi-x-circle" id="panel-clear" title="Clear Console"></i>
                   <i class="bi bi-chevron-up" id="panel-fullscreen" title="Toggle Size"></i>
                   <i class="bi bi-x" id="panel-close" title="Close Panel"></i>
@@ -3248,9 +3946,74 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const emptyState = document.getElementById('ide-empty-state');
               
               const aceEditor = ace.edit(editorDiv);
-              aceEditor.setTheme("ace/theme/tomorrow_night_eighties");
+              const savedTheme = localStorage.getItem('ide_theme') || "ace/theme/chaos";
+              const savedIndent = localStorage.getItem('ide_indent') || "2";
+              const savedWrap = localStorage.getItem('ide_wrap') === 'true';
+              const savedFontSize = localStorage.getItem('ide_fontsize') || "14";
+              
+              aceEditor.setTheme(savedTheme);
               aceEditor.session.setMode("ace/mode/php");
-              aceEditor.setOptions({ fontSize: "14px", showPrintMargin: false, enableBasicAutocompletion: true });
+              aceEditor.session.setTabSize(savedIndent === 'tab' ? 4 : parseInt(savedIndent));
+              aceEditor.session.setUseSoftTabs(savedIndent !== 'tab');
+              aceEditor.setOptions({ fontSize: savedFontSize + "px", showPrintMargin: false, enableBasicAutocompletion: true, wrap: savedWrap });
+
+              const updateIDEStatusBar = () => {
+                const pos = aceEditor.getCursorPosition();
+                document.getElementById('ide-status-cursor').innerText = `Ln ${pos.row + 1}, Col ${pos.column + 1}`;
+                document.getElementById('ide-status-indent').innerText = savedIndent === 'tab' ? 'Tabs' : `Spaces: ${savedIndent}`;
+                
+                const val = aceEditor.getValue();
+                const charCount = val.length;
+                let wordCount = 0;
+                if (charCount > 1000000) {
+                  wordCount = '~' + Math.round(charCount / 6); // Fast approximation for files >1MB to prevent typing lag
+                } else {
+                  wordCount = val.trim() ? val.trim().split(/\s+/).length : 0;
+                }
+                
+                const file = openFiles.find(f => f.path === currentPath);
+                const editorDiv = document.getElementById('ide-editor');
+                const isEditorActive = editorDiv && editorDiv.style.display !== 'none';
+                
+                const wordEl = document.getElementById('ide-status-word-count');
+                const charEl = document.getElementById('ide-status-char-count');
+                wordEl.innerText = `${wordCount} words`;
+                charEl.innerText = `${charCount} chars`;
+                
+                if (!isEditorActive) {
+                  wordEl.style.display = 'none';
+                  charEl.style.display = 'none';
+                  if (file) {
+                    let displaySize = file.formatSize;
+                    if (!displaySize && file.size && !isNaN(parseInt(file.size)) && parseInt(file.size) > 0) {
+                      const s = parseInt(file.size);
+                      if (s < 1024) displaySize = s + ' B';
+                      else if (s < 1024 * 1024) displaySize = (s / 1024).toFixed(2) + ' KB';
+                      else displaySize = (s / (1024 * 1024)).toFixed(2) + ' MB';
+                    }
+                    document.getElementById('ide-status-file-size').innerText = displaySize || 'Fetching size...';
+                  }
+                } else {
+                  // Default to false unless specifically toggled to true in settings
+                  wordEl.style.display = localStorage.getItem('ide_show_wordcount') === 'true' ? 'inline' : 'none';
+                  charEl.style.display = localStorage.getItem('ide_show_charcount') === 'true' ? 'inline' : 'none';
+                  
+                  // Dynamically calculate and display the precise file size in memory
+                  const byteSize = new Blob([val]).size;
+                  let displaySize = '';
+                  if (byteSize < 1024) {
+                    displaySize = byteSize + ' B';
+                  } else if (byteSize < 1024 * 1024) {
+                    displaySize = (byteSize / 1024).toFixed(2) + ' KB';
+                  } else {
+                    displaySize = (byteSize / (1024 * 1024)).toFixed(2) + ' MB';
+                  }
+                  document.getElementById('ide-status-file-size').innerText = displaySize;
+                }
+              };
+
+              aceEditor.session.selection.on('changeCursor', updateIDEStatusBar);
+              aceEditor.session.on('change', updateIDEStatusBar);
 
               // Hook directly into Ace Editor commands to intercept Ctrl+S reliably inside the text area
               aceEditor.commands.addCommand({
@@ -3316,7 +4079,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   if(f.isImage) icon = 'bi-image text-success';
                   if(['mp4','webm','mp3','wav','ogg'].includes(f.ext)) icon = 'bi-play-circle text-danger';
                   
-                  html += `<div class="ide-tree-item ide-file-item" data-path="${f.path}" data-name="${f.name}" data-ext="${f.ext}"><i class="bi ${icon}"></i> ${f.name}</div>`;
+                  html += `<div class="ide-tree-item ide-file-item" data-path="${f.path}" data-name="${f.name}" data-ext="${f.ext}" data-size="${f.size}" data-formatsize="${f.formatSize}"><i class="bi ${icon}"></i> ${f.name}</div>`;
                 });
                 treeEl.innerHTML = html;
                 
@@ -3333,8 +4096,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     const path = el.dataset.path;
                     const name = el.dataset.name;
                     const ext = el.dataset.ext;
-                    if (!openFiles.find(f => f.path === path)) {
-                      openFiles.push({ path, name, ext });
+                    const size = parseInt(el.dataset.size || '0');
+                    const formatSize = el.dataset.formatsize || '';
+                    
+                    const existingFile = openFiles.find(f => f.path === path);
+                    if (!existingFile) {
+                      openFiles.push({ path, name, ext, size, formatSize });
+                      localStorage.setItem('ide_open_files', JSON.stringify(openFiles));
+                    } else {
+                      // Update potentially missing cached properties automatically
+                      existingFile.size = size;
+                      existingFile.formatSize = formatSize;
                       localStorage.setItem('ide_open_files', JSON.stringify(openFiles));
                     }
                     window.ideOpenTab(path);
@@ -3368,6 +4140,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   currentFileEl.textContent = 'No file selected';
                   currentPath = '';
                   activeTabPath = '';
+                  document.getElementById('ide-status-bar').style.display = 'none';
                 }
               };
 
@@ -3385,6 +4158,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const activeEl = treeEl.querySelector(`[data-path="${safePath}"]`);
                   if(activeEl) activeEl.classList.add('active');
                 }
+                document.getElementById('ide-status-bar').style.display = 'flex';
+                setTimeout(updateIDEStatusBar, 100);
                 
                 const file = openFiles.find(f => f.path === path);
                 if (!file) return;
@@ -3399,19 +4174,76 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const streamUrl = `?access=admin&page=drive&api=true&action=stream&file=${encodeURIComponent(path)}`;
                   
                   if (file.isImage || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(file.ext)) {
-                    mediaContent.innerHTML = `<img src="${streamUrl}" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
+                    mediaContent.innerHTML = `<img src="${streamUrl}" id="ide-media-img" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
+                    document.getElementById('ide-media-img').onload = function() {
+                      const resInfo = document.getElementById('media-res-info');
+                      if(resInfo) resInfo.textContent = ` | Res: ${this.naturalWidth}x${this.naturalHeight}`;
+                    };
                   } else if (['mp4', 'webm'].includes(file.ext)) {
-                    mediaContent.innerHTML = `<video src="${streamUrl}" controls style="max-width: 100%; max-height: 100%; outline: none;"></video>`;
+                    mediaContent.innerHTML = `<video src="${streamUrl}" id="ide-media-vid" controls style="max-width: 100%; max-height: 100%; outline: none;"></video>`;
+                    document.getElementById('ide-media-vid').onloadedmetadata = function() {
+                      const resInfo = document.getElementById('media-res-info');
+                      if(resInfo) resInfo.textContent = ` | Res: ${this.videoWidth}x${this.videoHeight}`;
+                    };
                   } else {
                     mediaContent.innerHTML = `
                       <i class="bi bi-music-note-beamed text-danger mb-3" style="font-size: 4rem;"></i>
                       <audio src="${streamUrl}" controls style="width: 300px; outline: none;"></audio>
                     `;
                   }
-                  document.getElementById('ide-media-info').textContent = path;
+                  
+                  let displaySize = file.formatSize;
+                  if (!displaySize && file.size && !isNaN(parseInt(file.size)) && parseInt(file.size) > 0) {
+                    const s = parseInt(file.size);
+                    if (s < 1024) displaySize = s + ' B';
+                    else if (s < 1024 * 1024) displaySize = (s / 1024).toFixed(2) + ' KB';
+                    else displaySize = (s / (1024 * 1024)).toFixed(2) + ' MB';
+                  }
+
+                  // Auto-fetch exact physical file size from server if missing in local cache
+                  if (!displaySize || displaySize === 'Unknown') {
+                    displaySize = 'Fetching size...';
+                    fetch(`?access=admin&page=drive&api=true&action=properties&file=${encodeURIComponent(path)}`)
+                      .then(r => r.json())
+                      .then(data => {
+                        if (data && data.success && data.data && data.data.size) {
+                          file.formatSize = data.data.size;
+                          const infoEl = document.getElementById('ide-media-info');
+                          if (infoEl) {
+                            const resInfo = document.getElementById('media-res-info')?.innerHTML || '';
+                            infoEl.innerHTML = `${path} <br> Size: ${file.formatSize}<span id="media-res-info">${resInfo}</span>`;
+                          }
+                          updateIDEStatusBar();
+                          localStorage.setItem('ide_open_files', JSON.stringify(openFiles));
+                        }
+                      }).catch(() => {});
+                  }
+                  
+                  document.getElementById('ide-media-info').innerHTML = `${path} <br> Size: ${displaySize}<span id="media-res-info"></span>`;
                   termLog(`Opened media file: ${path}`);
                   fetchHistory(path, file.name);
                 } else {
+                  // Support large files (up to 100MB) with worker optimizations
+                  if (file.size > 100 * 1024 * 1024) {
+                    editorDiv.style.display = 'none';
+                    mediaViewer.classList.replace('d-none', 'd-flex');
+                    mediaContent.innerHTML = `
+                      <i class="bi bi-file-earmark-x text-secondary mb-3" style="font-size: 4rem;"></i>
+                      <h5 class="fw-bold">File Exceeds 100MB</h5>
+                      <p class="text-secondary small">This file exceeds the 100MB limit.<br>You can manage or delete it via the explorer.</p>
+                    `;
+                    document.getElementById('ide-media-info').innerHTML = `${path} <br> Size: ${file.formatSize || 'Unknown'}`;
+                    termLog(`Blocked file exceeding 100MB: ${path}`, true);
+                    return;
+                  }
+
+                  // Optimize Ace Editor performance for files larger than 2MB
+                  if (file.size > 2 * 1024 * 1024) {
+                    aceEditor.session.setUseWorker(false);
+                  } else {
+                    aceEditor.session.setUseWorker(true);
+                  }
+
                   mediaViewer.classList.replace('d-flex', 'd-none');
                   editorDiv.style.display = 'block';
                   editorDiv.style.pointerEvents = 'auto';
@@ -3434,7 +4266,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     // Automatically update preview output iframe when changing active file tab
                     const outputTab = document.querySelector('.panel-tab[data-target="output"]');
                     if (outputTab && outputTab.classList.contains('active') && bottomPanel.classList.contains('active')) {
-                      previewIframe.src = './' + currentPath;
+                      window.updateIdeOutputPreview();
                     }
                   } else {
                     termLog(`Failed to read file: ${data.error}`, true);
@@ -3442,8 +4274,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
               };
 
-              window.ideCloseTab = (path, e) => {
-                e.stopPropagation();
+              tabsContainer.addEventListener('auxclick', (e) => {
+                if (e.button === 1) { // Middle mouse button
+                  const tab = e.target.closest('.ide-tab');
+                  if (tab && tab.dataset.path) {
+                    e.preventDefault();
+                    window.ideCloseTab(tab.dataset.path, e);
+                  }
+                }
+              });
+              tabsContainer.addEventListener('mousedown', (e) => {
+                if (e.button === 1) e.preventDefault(); // Prevent browser autoscroll icon
+              });
+
+              window.ideCloseTab = async (path, e) => {
+                if (e && e.stopPropagation) e.stopPropagation();
+                const isAutosaveOn = localStorage.getItem('ide_autosave') !== 'false';
+                if (isAutosaveOn && path === currentPath) {
+                  const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath}"] .tab-title`);
+                  if (activeTab && activeTab.innerText.endsWith(' *')) {
+                    await window.saveCurrentFile(true);
+                  }
+                }
                 const idx = openFiles.findIndex(f => f.path === path);
                 openFiles = openFiles.filter(f => f.path !== path);
                 localStorage.setItem('ide_open_files', JSON.stringify(openFiles));
@@ -3552,7 +4404,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     // Auto-refresh preview if output tab is open
                     const outputTab = document.querySelector('.panel-tab[data-target="output"]');
                     if (outputTab && outputTab.classList.contains('active') && bottomPanel.classList.contains('active')) {
-                      previewIframe.src = './' + currentPath;
+                      window.updateIdeOutputPreview();
                     }
                     setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('text-success'); }, 2000);
                   }
@@ -3564,8 +4416,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
               };
 
-              // Automatic saving every 10 seconds if editor has changes to prevent data loss safely
+              // Automatic saving every 10 seconds if enabled and editor has changes
               setInterval(() => {
+                const isAutosaveOn = localStorage.getItem('ide_autosave') !== 'false';
+                if (!isAutosaveOn) return;
                 const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath}"] .tab-title`);
                 if (currentPath && activeTab && activeTab.innerText.endsWith(' *')) {
                   const file = openFiles.find(f => f.path === currentPath);
@@ -3584,9 +4438,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 document.getElementById('ide-ctx-path').value = path || '';
                 document.getElementById('ide-ctx-is-folder').value = isFolder ? '1' : '0';
                 
+                const isRoot = path === '';
                 // Hide file/folder creation options if the clicked item is a file
                 document.getElementById('ide-btn-new-file').style.display = isFolder ? 'flex' : 'none';
                 document.getElementById('ide-btn-new-folder').style.display = isFolder ? 'flex' : 'none';
+                
+                // Hide destructive actions on the Root Workspace block to prevent crashes
+                document.getElementById('ide-btn-rename').style.display = isRoot ? 'none' : 'flex';
+                document.getElementById('ide-btn-delete').style.display = isRoot ? 'none' : 'flex';
+                const dlBtn = document.getElementById('ide-btn-download');
+                if (dlBtn) dlBtn.style.display = isRoot ? 'none' : 'flex';
                 
                 modal.style.display = 'flex';
               };
@@ -3598,6 +4459,54 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   body: JSON.stringify(body)
                 });
                 return res.json();
+              };
+
+              const handleUploadClick = (targetPath) => {
+                const fileInput = document.createElement('input');
+                fileInput.type = 'file';
+                fileInput.multiple = true;
+                fileInput.onchange = async (e) => {
+                  if (e.target.files.length > 0) {
+                    const fd = new FormData();
+                    fd.append('action', 'upload');
+                    for (let i=0; i<e.target.files.length; i++) {
+                      fd.append('files[]', e.target.files[i]);
+                      fd.append('paths[]', (targetPath ? targetPath + '/' : '') + e.target.files[i].name);
+                    }
+                    const res = await fetch(`?access=admin&page=drive&api=true`, { method: 'POST', body: fd }).then(r=>r.json());
+                    if (res.success) loadTree(targetPath); else alert(res.error || 'Upload failed');
+                  }
+                };
+                fileInput.click();
+              };
+
+              document.getElementById('ide-tree-new-file').onclick = async () => {
+                const name = prompt('Enter new file name:');
+                if(name) {
+                  const res = await driveFetch('add_file', { action: 'add_file', name: name });
+                  if(res.success) loadTree(); else alert(res.error);
+                }
+              };
+
+              document.getElementById('ide-tree-new-folder').onclick = async () => {
+                const name = prompt('Enter new folder name:');
+                if(name) {
+                  const res = await driveFetch('add_folder', { action: 'add_folder', name: name });
+                  if(res.success) loadTree(); else alert(res.error);
+                }
+              };
+
+              document.getElementById('ide-tree-upload').onclick = () => handleUploadClick('');
+
+              document.getElementById('ide-btn-download').onclick = () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                const isFolder = document.getElementById('ide-ctx-is-folder').value === '1';
+                if(isFolder) {
+                  window.location.href = `?access=admin&page=drive&batch=selected&items=${encodeURIComponent(path)}`;
+                } else {
+                  window.location.href = `?access=admin&page=drive&download=${encodeURIComponent(path)}`;
+                }
+                document.getElementById('ide-ctx-modal').style.display = 'none';
               };
 
               document.getElementById('ide-btn-new-file').onclick = async () => {
@@ -3645,6 +4554,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   } else alert(res.error);
                 }
                 document.getElementById('ide-ctx-modal').style.display = 'none';
+              };
+
+              document.getElementById('ide-file-tree').addEventListener('contextmenu', (e) => {
+                if (e.target.id === 'ide-file-tree') {
+                  e.preventDefault();
+                  window.showIdeContextMenu('', 'Workspace', true);
+                }
+              });
+
+              document.getElementById('ide-btn-upload').onclick = () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                handleUploadClick(path);
+              };
+
+              document.getElementById('ide-btn-refresh').onclick = () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                loadTree(path);
               };
 
               document.getElementById('ide-btn-delete').onclick = async () => {
@@ -3695,17 +4623,43 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 document.getElementById('ide-file-tree').classList.add('d-none');
                 document.getElementById('ide-git-tree').classList.add('d-none');
                 document.getElementById('ide-history-tree').classList.add('d-none');
+                document.getElementById('ide-trash-tree').classList.add('d-none');
                 
                 if(view === 'explorer') {
-                  document.getElementById('ide-sidebar-title').innerText = 'EXPLORER';
+                  document.getElementById('ide-sidebar-title').innerHTML = '<span>EXPLORER</span><div class="d-flex gap-2"><i class="bi bi-file-earmark-plus" style="cursor:pointer;" id="ide-tree-new-file" title="New File"></i><i class="bi bi-folder-plus" style="cursor:pointer;" id="ide-tree-new-folder" title="New Folder"></i><i class="bi bi-upload" style="cursor:pointer;" id="ide-tree-upload" title="Upload"></i><i class="bi bi-arrow-clockwise" style="cursor:pointer;" id="ide-refresh-tree" title="Refresh"></i></div>';
                   document.getElementById('ide-file-tree').classList.remove('d-none');
+                  
+                  const btnNewFile = document.getElementById('ide-tree-new-file');
+                  if (btnNewFile) btnNewFile.onclick = async () => {
+                    const name = prompt('Enter new file name:');
+                    if(name) {
+                      const res = await driveFetch('add_file', { action: 'add_file', name: name });
+                      if(res.success) loadTree(); else alert(res.error);
+                    }
+                  };
+                  const btnNewFolder = document.getElementById('ide-tree-new-folder');
+                  if (btnNewFolder) btnNewFolder.onclick = async () => {
+                    const name = prompt('Enter new folder name:');
+                    if(name) {
+                      const res = await driveFetch('add_folder', { action: 'add_folder', name: name });
+                      if(res.success) loadTree(); else alert(res.error);
+                    }
+                  };
+                  const btnUpload = document.getElementById('ide-tree-upload');
+                  if (btnUpload) btnUpload.onclick = () => handleUploadClick('');
+                  const btnRefresh = document.getElementById('ide-refresh-tree');
+                  if (btnRefresh) btnRefresh.onclick = () => loadTree();
                 } else if(view === 'git') {
-                  document.getElementById('ide-sidebar-title').innerText = 'DRIVE ACTIVITY';
+                  document.getElementById('ide-sidebar-title').innerHTML = '<span>DRIVE ACTIVITY</span>';
                   document.getElementById('ide-git-tree').classList.remove('d-none');
                   window.fetchGitLog();
                 } else if(view === 'history') {
-                  document.getElementById('ide-sidebar-title').innerText = 'FILE HISTORY';
+                  document.getElementById('ide-sidebar-title').innerHTML = '<span>FILE HISTORY</span>';
                   document.getElementById('ide-history-tree').classList.remove('d-none');
+                } else if(view === 'trash') {
+                  document.getElementById('ide-sidebar-title').innerHTML = '<span>TRASH</span><div class="d-flex gap-2"><i class="bi bi-trash3-fill text-danger" style="cursor:pointer;" onclick="window.emptyIdeTrash()" title="Empty Trash"></i><i class="bi bi-arrow-clockwise" style="cursor:pointer;" onclick="window.fetchIdeTrash()" title="Refresh"></i></div>';
+                  document.getElementById('ide-trash-tree').classList.remove('d-none');
+                  window.fetchIdeTrash();
                 }
                 setTimeout(() => aceEditor.resize(true), 50);
               };
@@ -3744,6 +4698,76 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   }
                 } catch (e) {
                   gitPane.innerHTML = '<div class="text-danger p-2">Error communicating with server.</div>';
+                }
+              };
+
+              window.fetchIdeTrash = async () => {
+                const trashPane = document.getElementById('ide-trash-tree');
+                if(!trashPane) return;
+                trashPane.innerHTML = '<div class="text-center mt-4 text-secondary"><i class="spinner-border spinner-border-sm"></i> Loading Trash...</div>';
+                try {
+                  const res = await fetch(`?access=admin&page=drive&api=true&action=list_trash`).then(r => r.json());
+                  if(res && res.success) {
+                    if (!res.trash || res.trash.length === 0) {
+                      trashPane.innerHTML = '<div class="text-secondary p-2 text-center mt-4"><i class="bi bi-trash fs-1 d-block mb-2 opacity-50"></i>Trash is empty.</div>';
+                    } else {
+                      let html = '';
+                      res.trash.forEach(item => {
+                        html += `
+                          <div class="d-flex flex-column bg-dark p-2 rounded mb-2 border border-secondary" style="font-size: 0.8rem;">
+                            <div class="fw-bold text-white text-truncate mb-1" title="${item.name}">${item.name}</div>
+                            <div class="text-secondary small mb-1">From: ${item.original_parent || 'root'}</div>
+                            <div class="text-secondary small mb-2">${item.deleted_at}</div>
+                            <div class="d-flex justify-content-between gap-1">
+                              <button class="btn btn-sm btn-outline-info py-0 px-2 fw-bold" style="font-size: 0.75rem;" onclick="window.restoreIdeTrash('${item.uniq}')"><i class="bi bi-arrow-counterclockwise"></i> Restore</button>
+                              <button class="btn btn-sm btn-outline-danger py-0 px-2 fw-bold" style="font-size: 0.75rem;" onclick="window.deletePermIdeTrash('${item.uniq}')"><i class="bi bi-trash"></i> Delete</button>
+                            </div>
+                          </div>
+                        `;
+                      });
+                      trashPane.innerHTML = html;
+                    }
+                  } else {
+                    trashPane.innerHTML = '<div class="text-danger p-2">Failed to load trash.</div>';
+                  }
+                } catch(e) {
+                  trashPane.innerHTML = '<div class="text-danger p-2">Error connecting to server.</div>';
+                }
+              };
+
+              window.restoreIdeTrash = async (uniq) => {
+                termLog(`Restoring item from trash...`);
+                const res = await driveFetch('restore_trash', { action: 'restore_trash', items: [uniq] });
+                if (res && res.success) {
+                  termLog(`Item restored successfully.`);
+                  window.fetchIdeTrash();
+                  loadTree();
+                } else {
+                  termLog(`Restore failed: ${res ? res.error : 'Unknown error'}`, true);
+                }
+              };
+
+              window.deletePermIdeTrash = async (uniq) => {
+                if (!confirm('Permanently delete this item? This action is irreversible.')) return;
+                termLog(`Permanently deleting item...`);
+                const res = await driveFetch('delete_perm', { action: 'delete_perm', items: [uniq] });
+                if (res && res.success) {
+                  termLog(`Item permanently deleted.`);
+                  window.fetchIdeTrash();
+                } else {
+                  termLog(`Delete failed: ${res ? res.error : 'Unknown error'}`, true);
+                }
+              };
+
+              window.emptyIdeTrash = async () => {
+                if (!confirm('Empty entire Trash permanently? All items in Trash will be lost forever.')) return;
+                termLog(`Emptying entire Trash...`);
+                const res = await driveFetch('empty_trash', { action: 'empty_trash' });
+                if (res && res.success) {
+                  termLog(`Trash emptied successfully.`);
+                  window.fetchIdeTrash();
+                } else {
+                  termLog(`Empty trash failed: ${res ? res.error : 'Unknown error'}`, true);
                 }
               };
 
@@ -3908,15 +4932,53 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }, true);
               })();
 
+              window.updateIdeOutputPreview = () => {
+                if (!previewIframe) return;
+                if (!currentPath) {
+                  previewIframe.removeAttribute('src');
+                  previewIframe.srcdoc = '<!DOCTYPE html><html data-bs-theme="dark"><body style="background:#0a0a0a;color:#888;font-family:sans-serif;padding:20px;text-align:center;">No file selected for preview.</body></html>';
+                  return;
+                }
+
+                const file = openFiles.find(f => f.path === currentPath);
+                const ext = file ? file.ext.toLowerCase() : currentPath.split('.').pop().toLowerCase();
+
+                if (ext === 'md' || ext === 'markdown') {
+                  const content = aceEditor.getValue();
+                  let parsed = content;
+                  if (typeof marked !== 'undefined') {
+                    try {
+                      marked.use({ gfm: true, breaks: true });
+                      parsed = marked.parse(content);
+                    } catch(e) {}
+                  }
+                  previewIframe.removeAttribute('src');
+                  previewIframe.srcdoc = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown-dark.min.css"><style>body{background-color:#0d1117;color:#c9d1d9;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif;}.markdown-body{box-sizing:border-box;min-width:200px;max-width:980px;margin:0 auto;padding:32px;background-color:#0d1117 !important;}@media(max-width:767px){.markdown-body{padding:15px;}}</style></head><body><article class="markdown-body">${parsed}</article></body></html>`;
+                } else if (['html', 'htm', 'php'].includes(ext)) {
+                  previewIframe.removeAttribute('srcdoc');
+                  previewIframe.src = './' + currentPath + '?t=' + Date.now();
+                } else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) {
+                  const streamUrl = `?access=admin&page=drive&api=true&action=stream&file=${encodeURIComponent(currentPath)}`;
+                  previewIframe.removeAttribute('src');
+                  previewIframe.srcdoc = `<!DOCTYPE html><html><body style="background:#0a0a0a;margin:0;display:flex;align-items:center;justify-content:center;height:100vh;"><img src="${streamUrl}" style="max-width:90%;max-height:90%;object-fit:contain;"></body></html>`;
+                } else {
+                  // Any text or code file extension (.txt, .json, .js, .css, .py, .sh, .xml, .sql, .log, etc.)
+                  const content = aceEditor.getValue();
+                  const escapeHtml = (str) => (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                  previewIframe.removeAttribute('src');
+                  previewIframe.srcdoc = `<!DOCTYPE html><html data-bs-theme="dark"><head><meta charset="utf-8"><style>body{background:#0a0a0a;color:#f8f8f2;font-family:monospace;padding:16px;margin:0;}pre{white-space:pre-wrap;word-break:break-all;margin:0;font-size:13px;line-height:1.5;}</style></head><body><pre>${escapeHtml(content)}</pre></body></html>`;
+                }
+              };
+
               document.getElementById('ide-preview-btn').addEventListener('click', () => {
                 bottomPanel.classList.add('active');
                 document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
                 document.querySelector('.panel-tab[data-target="output"]').classList.add('active');
                 document.querySelectorAll('.panel-pane').forEach(p => p.classList.remove('active'));
                 document.getElementById('pane-output').classList.add('active');
-                
+
                 termLog(`Executing preview for ${currentPath || 'index'}...`);
-                previewIframe.src = currentPath ? ('./' + currentPath) : './';
+                window.updateIdeOutputPreview();
               });
 
               // Bottom Panel Tab Switching
@@ -3937,6 +4999,153 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 bottomPanel.classList.toggle('fullscreen');
                 e.target.className = bottomPanel.classList.contains('fullscreen') ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
                 setTimeout(() => aceEditor.resize(true), 50);
+              });
+
+              const ideFullscreenBtn = document.getElementById('ide-fullscreen-btn');
+              const appContainer = document.querySelector('.app-container');
+              if (ideFullscreenBtn && appContainer) {
+                const isSavedFullscreen = localStorage.getItem('admin_ide_fullscreen') === 'true';
+                if (isSavedFullscreen) {
+                  appContainer.classList.add('ide-fullscreen');
+                  ideFullscreenBtn.innerHTML = '<i class="bi bi-fullscreen-exit"></i> Exit Fullscreen';
+                }
+                ideFullscreenBtn.addEventListener('click', () => {
+                  const isFullscreen = appContainer.classList.toggle('ide-fullscreen');
+                  localStorage.setItem('admin_ide_fullscreen', isFullscreen);
+                  if (isFullscreen) {
+                    ideFullscreenBtn.innerHTML = '<i class="bi bi-fullscreen-exit"></i> Exit Fullscreen';
+                  } else {
+                    ideFullscreenBtn.innerHTML = '<i class="bi bi-arrows-fullscreen"></i> Fullscreen';
+                  }
+                  setTimeout(() => aceEditor.resize(true), 300);
+                });
+              }
+
+              document.getElementById('act-settings').addEventListener('click', () => {
+                const modal = document.getElementById('ide-settings-modal');
+                document.getElementById('ide-setting-theme').value = localStorage.getItem('ide_theme') || "ace/theme/tomorrow_night_eighties";
+                document.getElementById('ide-setting-indent').value = localStorage.getItem('ide_indent') || "2";
+                document.getElementById('ide-setting-wrap').checked = localStorage.getItem('ide_wrap') === 'true';
+                document.getElementById('ide-setting-autosave').checked = localStorage.getItem('ide_autosave') !== 'false';
+                document.getElementById('ide-setting-show_wordcount').checked = localStorage.getItem('ide_show_wordcount') === 'true';
+                document.getElementById('ide-setting-show_charcount').checked = localStorage.getItem('ide_show_charcount') === 'true';
+
+                const currentFontSize = localStorage.getItem('ide_fontsize') || '14';
+                const fontInput = document.getElementById('ide-setting-fontsize');
+                const fontVal = document.getElementById('ide-setting-fontsize-val');
+                if (fontInput) fontInput.value = currentFontSize;
+                if (fontVal) fontVal.innerText = currentFontSize + 'px';
+
+                modal.style.display = 'flex';
+              });
+
+              const fontInput = document.getElementById('ide-setting-fontsize');
+              const fontVal = document.getElementById('ide-setting-fontsize-val');
+              const fontMinus = document.getElementById('ide-fontsize-minus');
+              const fontPlus = document.getElementById('ide-fontsize-plus');
+
+              const updateFontSize = (newSize) => {
+                const size = Math.max(10, Math.min(36, parseInt(newSize, 10)));
+                localStorage.setItem('ide_fontsize', size.toString());
+                if (fontInput) fontInput.value = size;
+                if (fontVal) fontVal.innerText = size + 'px';
+                aceEditor.setOption('fontSize', size + 'px');
+              };
+
+              if (fontInput) {
+                fontInput.addEventListener('input', (e) => updateFontSize(e.target.value));
+              }
+              if (fontMinus) {
+                fontMinus.addEventListener('click', () => {
+                  const current = parseInt(localStorage.getItem('ide_fontsize') || '14', 10);
+                  updateFontSize(current - 1);
+                });
+              }
+              if (fontPlus) {
+                fontPlus.addEventListener('click', () => {
+                  const current = parseInt(localStorage.getItem('ide_fontsize') || '14', 10);
+                  updateFontSize(current + 1);
+                });
+              }
+
+              ['theme', 'indent', 'wrap', 'autosave', 'show_wordcount', 'show_charcount'].forEach(key => {
+                document.getElementById('ide-setting-' + key).addEventListener('change', (e) => {
+                  const val = e.target.type === 'checkbox' ? e.target.checked.toString() : e.target.value;
+                  localStorage.setItem('ide_' + key, val);
+                  if (key === 'theme') aceEditor.setTheme(val);
+                  if (key === 'wrap') aceEditor.setOption('wrap', val === 'true');
+                  if (key === 'indent') {
+                    aceEditor.session.setTabSize(val === 'tab' ? 4 : parseInt(val));
+                    aceEditor.session.setUseSoftTabs(val !== 'tab');
+                    updateIDEStatusBar();
+                  }
+                  if (key === 'show_wordcount' || key === 'show_charcount') updateIDEStatusBar();
+                });
+              });
+
+              document.getElementById('panel-newtab').addEventListener('click', () => {
+                const win = window.open('about:blank', '_blank');
+                if (win) {
+                  if (previewIframe.srcdoc) {
+                    win.document.open();
+                    win.document.write(previewIframe.srcdoc);
+                    win.document.close();
+                  } else if (currentPath) {
+                    win.location.href = './' + currentPath;
+                  } else {
+                    win.location.href = './';
+                  }
+                }
+              });
+
+              document.getElementById('panel-eruda').addEventListener('click', () => {
+                // Auto-expand and switch to OUTPUT tab
+                if (!bottomPanel.classList.contains('active')) {
+                  bottomPanel.classList.add('active');
+                }
+                document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+                const outputTab = document.querySelector('.panel-tab[data-target="output"]');
+                if (outputTab) outputTab.classList.add('active');
+                document.querySelectorAll('.panel-pane').forEach(p => p.classList.remove('active'));
+                const paneOutput = document.getElementById('pane-output');
+                if (paneOutput) paneOutput.classList.add('active');
+    
+                if (!previewIframe.contentWindow) return;
+                const doc = previewIframe.contentWindow.document;
+                if (doc.getElementById('eruda')) {
+                  previewIframe.contentWindow.eruda.show();
+                  return;
+                }
+                const script = doc.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/eruda';
+                script.onload = () => {
+                  const initScript = doc.createElement('script');
+                  initScript.innerHTML = 'eruda.init(); eruda.show();';
+                  doc.body.appendChild(initScript);
+                };
+                doc.head.appendChild(script);
+              });
+    
+              document.getElementById('panel-reload')?.addEventListener('click', () => {
+                if (previewIframe) {
+                  window.updateIdeOutputPreview();
+                  termLog('Hard reloading preview...');
+                }
+              });
+
+              document.getElementById('panel-popup')?.addEventListener('click', () => {
+                const win = window.open('about:blank', 'PreviewWindow', 'width=800,height=600,resizable=yes,scrollbars=yes');
+                if (win) {
+                  if (previewIframe.srcdoc) {
+                    win.document.open();
+                    win.document.write(previewIframe.srcdoc);
+                    win.document.close();
+                  } else if (previewIframe.src && previewIframe.src !== 'about:blank') {
+                    win.location.href = previewIframe.src;
+                  } else if (currentPath) {
+                    win.location.href = './' + currentPath;
+                  }
+                }
               });
 
               document.getElementById('panel-clear').addEventListener('click', () => {
@@ -3971,7 +5180,95 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
               
               document.getElementById('ide-refresh-tree').addEventListener('click', () => loadTree());
-              
+
+              // Drag & Drop Uploads (Files & Folders) for IDE Sidebar Explorer
+              const ideSidebar = document.getElementById('ide-main-sidebar');
+              if (ideSidebar) {
+                const scanIdeDroppedItems = async (items) => {
+                  const files = [];
+                  const paths = [];
+
+                  const readAllEntries = async (dirReader) => {
+                    let allEntries = [];
+                    const read = async () => {
+                      const entries = await new Promise((resolve) => dirReader.readEntries(resolve));
+                      if (entries && entries.length > 0) {
+                        allEntries = allEntries.concat(entries);
+                        await read();
+                      }
+                    };
+                    await read();
+                    return allEntries;
+                  };
+
+                  const traverseEntry = async (entry, path = '') => {
+                    if (entry.isFile) {
+                      const file = await new Promise((resolve) => entry.file(resolve));
+                      files.push(file);
+                      paths.push(path + file.name);
+                    } else if (entry.isDirectory) {
+                      const dirReader = entry.createReader();
+                      const entries = await readAllEntries(dirReader);
+                      for (const childEntry of entries) {
+                        await traverseEntry(childEntry, path + entry.name + '/');
+                      }
+                    }
+                  };
+
+                  for (let i = 0; i < items.length; i++) {
+                    const entry = items[i].webkitGetAsEntry();
+                    if (entry) await traverseEntry(entry);
+                  }
+
+                  return { files, paths };
+                };
+
+                ideSidebar.addEventListener('dragover', (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  ideSidebar.style.outline = '2px dashed #ff0000';
+                  ideSidebar.style.outlineOffset = '-4px';
+                  ideSidebar.style.backgroundColor = 'rgba(255, 0, 0, 0.08)';
+                });
+
+                ['dragleave', 'dragend'].forEach(evt => {
+                  ideSidebar.addEventListener(evt, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    ideSidebar.style.outline = 'none';
+                    ideSidebar.style.backgroundColor = '#0a0a0a';
+                  });
+                });
+
+                ideSidebar.addEventListener('drop', async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  ideSidebar.style.outline = 'none';
+                  ideSidebar.style.backgroundColor = '#0a0a0a';
+
+                  if (e.dataTransfer.items && e.dataTransfer.items.length) {
+                    termLog('Scanning dropped items...');
+                    const { files, paths } = await scanIdeDroppedItems(e.dataTransfer.items);
+                    if (files.length > 0) {
+                      termLog(`Uploading ${files.length} file(s)/folder(s)...`);
+                      const fd = new FormData();
+                      fd.append('action', 'upload');
+                      for (let i = 0; i < files.length; i++) {
+                        fd.append('files[]', files[i]);
+                        fd.append('paths[]', paths[i]);
+                      }
+                      const res = await fetch('?access=admin&page=drive&api=true', { method: 'POST', body: fd }).then(r => r.json());
+                      if (res && res.success) {
+                        termLog(`Upload complete (${res.uploaded || files.length} files).`);
+                        loadTree();
+                      } else {
+                        termLog(`Upload failed: ${res ? res.error : 'Unknown error'}`, true);
+                      }
+                    }
+                  }
+                });
+              }
+
               // Initialization
               loadTree();
               if (openFiles.length > 0) {
@@ -4010,7 +5307,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             /* Compact Modern Dark Theme for Ace Editor Searchbox (Drive & IDE) */
-            .ace_editor, .ace_editor * {
+            .ace_editor,
+            .ace_editor * {
               box-sizing: content-box !important;
             }
 
@@ -4151,161 +5449,930 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               text-align: center;
             }
 
-            .drive-app-container * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-            .drive-app-container { font-family: var(--font-body); background-color: var(--theme-surface); color: var(--theme-on-surface); height: 100%; overflow: hidden; display: flex; flex-direction: column; width: 100%; position: relative; }
+            .drive-app-container * {
+              margin: 0;
+              padding: 0;
+              box-sizing: border-box;
+              -webkit-tap-highlight-color: transparent;
+            }
 
-            .drive-app-container .material-symbols-rounded { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; user-select: none; color: var(--theme-on-surface); }
-            .drive-app-container .icon-filled { font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+            .drive-app-container {
+              font-family: var(--font-body);
+              background-color: var(--theme-surface);
+              color: var(--theme-on-surface);
+              height: 100%;
+              overflow: hidden;
+              display: flex;
+              flex-direction: column;
+              width: 100%;
+              position: relative;
+            }
 
-            .drive-app-container .drive-header { height: 64px; display: flex; align-items: center; padding: 0 16px; gap: 12px; background-color: var(--theme-surface); flex-shrink: 0; border-bottom: 1px solid var(--theme-outline-variant); }
-            .drive-app-container .drive-menu-btn { display: flex; }
-            .drive-app-container .logo-container { display: flex; align-items: center; gap: 8px; width: auto; cursor: pointer; flex-shrink: 0; }
-            .drive-app-container .logo-img { width: 36px; height: 36px; border-radius: 8px; background: #ff0000; color: #ffffff; display: flex; align-items: center; justify-content: center; }
-            .drive-app-container .logo-img .material-symbols-rounded { color: #ffffff; }
-            .drive-app-container .logo-text { font-family: var(--font-title); font-size: 20px; font-weight: 700; color: var(--theme-on-surface); }
+            .drive-app-container .material-symbols-rounded {
+              font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+              user-select: none;
+              color: var(--theme-on-surface);
+            }
 
-            .drive-app-container .search-bar { flex: 1; max-width: 600px; height: 44px; background-color: var(--theme-surface-container-high); border-radius: 22px; display: flex; align-items: center; padding: 0 16px; gap: 10px; transition: background-color var(--transition); margin: 0 12px; border: 1px solid var(--theme-outline-variant); }
-            .drive-app-container .search-bar:focus-within { background-color: var(--theme-surface-container-low); border-color: #ff3333; }
-            .drive-app-container .search-bar input { flex: 1; border: none; background: none; outline: none; font-size: 15px; color: var(--theme-on-surface); font-family: var(--font-body); width: 100%; }
-            .drive-app-container .search-bar input::placeholder { color: var(--theme-on-surface-variant); }
-            .drive-app-container .search-icon { color: var(--theme-on-surface-variant); }
+            .drive-app-container .icon-filled {
+              font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            }
 
-            .drive-app-container .header-actions { display: flex; gap: 4px; align-items: center; margin-left: auto; }
-            .drive-app-container .icon-btn { width: 40px; height: 40px; border-radius: 50%; border: none; background: transparent; color: var(--theme-on-surface-variant); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background-color var(--transition); position: relative; }
-            .drive-app-container .icon-btn:hover { background-color: var(--theme-surface-container-high); }
-            .drive-app-container .icon-btn.active { background-color: #ff0000; color: #ffffff; }
-            .drive-app-container .icon-btn .material-symbols-rounded { color: var(--theme-on-surface-variant); }
-            .drive-app-container .icon-btn:hover .material-symbols-rounded { color: var(--theme-on-surface); }
+            .drive-app-container .drive-header {
+              height: 64px;
+              display: flex;
+              align-items: center;
+              padding: 0 16px;
+              gap: 12px;
+              background-color: var(--theme-surface);
+              flex-shrink: 0;
+              border-bottom: 1px solid var(--theme-outline-variant);
+            }
 
-            .drive-app-container .main-wrapper { display: flex; flex: 1; overflow: hidden; position: relative; }
+            .drive-app-container .drive-menu-btn {
+              display: flex;
+            }
 
-            .drive-app-container .sidebar-drive { width: 240px; display: flex; flex-direction: column; padding: 16px 12px; gap: 16px; flex-shrink: 0; background: var(--theme-surface); z-index: 100; transition: width 0.3s ease, padding 0.3s ease, left 0.3s ease; border-right: 1px solid var(--theme-outline-variant); overflow: hidden; white-space: nowrap; }
-            @media (min-width: 769px) { .drive-app-container .sidebar-drive.collapsed { width: 0; padding-left: 0; padding-right: 0; border-right-color: transparent; } }
-            .drive-app-container .sidebar-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 99; display: none; opacity: 0; transition: opacity 0.3s; }
+            .drive-app-container .logo-container {
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              width: auto;
+              cursor: pointer;
+              flex-shrink: 0;
+            }
 
-            .drive-app-container .fab { height: 52px; border-radius: 16px; background-color: #ff0000; color: #ffffff; border: none; display: inline-flex; align-items: center; padding: 0 20px 0 16px; gap: 12px; font-family: var(--font-title); font-size: 14px; font-weight: 700; cursor: pointer; box-shadow: 0 4px 12px rgba(255,0,0,0.3); transition: transform var(--transition), background-color var(--transition); width: fit-content; }
-            .drive-app-container .fab:hover { transform: scale(1.03); background-color: #ff1a1a; }
-            .drive-app-container .fab .material-symbols-rounded { color: #ffffff; }
+            .drive-app-container .logo-img {
+              width: 36px;
+              height: 36px;
+              border-radius: 8px;
+              background: #ff0000;
+              color: #ffffff;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+            }
 
-            .drive-app-container .nav-list { display: flex; flex-direction: column; gap: 4px; }
-            .drive-app-container .nav-item-drive { display: flex; align-items: center; gap: 12px; height: 44px; padding: 0 16px; border-radius: 22px; color: var(--theme-on-surface-variant); cursor: pointer; font-size: 14px; font-weight: 500; transition: background-color var(--transition); text-decoration: none; }
-            .drive-app-container .nav-item-drive:hover { background-color: var(--theme-surface-container-low); color: var(--theme-on-surface); }
-            .drive-app-container .nav-item-drive.active { background-color: #ff0000; color: #ffffff; font-weight: 700; }
-            .drive-app-container .nav-item-drive .material-symbols-rounded { color: var(--theme-on-surface-variant); }
-            .drive-app-container .nav-item-drive.active .material-symbols-rounded { color: #ffffff; font-variation-settings: 'FILL' 1; }
+            .drive-app-container .logo-img .material-symbols-rounded {
+              color: #ffffff;
+            }
 
-            .drive-app-container .content-area-drive { flex: 1; display: flex; flex-direction: column; background-color: var(--theme-surface); margin: 0; overflow: hidden; position: relative; }
-            .drive-app-container .content-header-drive { height: 52px; display: flex; align-items: center; padding: 0 20px; border-bottom: 1px solid var(--theme-outline-variant); justify-content: space-between; }
-            .drive-app-container .breadcrumbs { display: flex; align-items: center; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); gap: 4px; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
-            .drive-app-container .breadcrumb-item { cursor: pointer; border-radius: 8px; padding: 4px 8px; transition: background-color var(--transition); color: var(--theme-on-surface); }
-            .drive-app-container .breadcrumb-item:hover { background-color: var(--theme-surface-container); }
-            .drive-app-container .breadcrumb-sep { color: var(--theme-on-surface-variant); font-size: 18px; }
+            .drive-app-container .logo-text {
+              font-family: var(--font-title);
+              font-size: 20px;
+              font-weight: 700;
+              color: var(--theme-on-surface);
+            }
 
-            .drive-app-container .chips-container { display: flex; gap: 8px; padding: 12px 20px; overflow-x: auto; scrollbar-width: none; flex-shrink: 0; }
-            .drive-app-container .chip { border: 1px solid var(--theme-outline-variant); padding: 6px 16px; border-radius: 16px; font-size: 13px; cursor: pointer; background: transparent; transition: background var(--transition); display: flex; align-items: center; gap: 6px; color: var(--theme-on-surface); }
-            .drive-app-container .chip.active { background: #ff0000; color: #ffffff; border-color: transparent; font-weight: 700; }
-            .drive-app-container .chip .material-symbols-rounded { color: inherit; }
+            .drive-app-container .search-bar {
+              flex: 1;
+              max-width: 600px;
+              height: 44px;
+              background-color: var(--theme-surface-container-high);
+              border-radius: 22px;
+              display: flex;
+              align-items: center;
+              padding: 0 16px;
+              gap: 10px;
+              transition: background-color var(--transition);
+              margin: 0 12px;
+              border: 1px solid var(--theme-outline-variant);
+            }
 
-            .drive-app-container .recents-container { margin-bottom: 16px; flex-shrink: 0; }
-            .drive-app-container .recents-tray { display: flex; gap: 12px; overflow-x: auto; padding: 8px 0; scrollbar-width: none; }
-            .drive-app-container .recent-card { width: 140px; background: var(--theme-surface-container-low); border-radius: 12px; padding: 12px; flex-shrink: 0; cursor: pointer; user-select: none; border: 1px solid var(--theme-outline-variant); transition: background var(--transition); color: var(--theme-on-surface); }
-            .drive-app-container .recent-card:hover { background: var(--theme-surface-container-high); border-color: #ff3333; }
-            .drive-app-container .recent-card .material-symbols-rounded { color: #ff3333; }
-            .drive-app-container .recent-name { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 8px; }
+            .drive-app-container .search-bar:focus-within {
+              background-color: var(--theme-surface-container-low);
+              border-color: #ff3333;
+            }
+
+            .drive-app-container .search-bar input {
+              flex: 1;
+              border: none;
+              background: none;
+              outline: none;
+              font-size: 15px;
+              color: var(--theme-on-surface);
+              font-family: var(--font-body);
+              width: 100%;
+            }
+
+            .drive-app-container .search-bar input::placeholder {
+              color: var(--theme-on-surface-variant);
+            }
+
+            .drive-app-container .search-icon {
+              color: var(--theme-on-surface-variant);
+            }
+
+            .drive-app-container .header-actions {
+              display: flex;
+              gap: 4px;
+              align-items: center;
+              margin-left: auto;
+            }
+
+            .drive-app-container .icon-btn {
+              width: 40px;
+              height: 40px;
+              border-radius: 50%;
+              border: none;
+              background: transparent;
+              color: var(--theme-on-surface-variant);
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              cursor: pointer;
+              transition: background-color var(--transition);
+              position: relative;
+            }
+
+            .drive-app-container .icon-btn:hover {
+              background-color: var(--theme-surface-container-high);
+            }
+
+            .drive-app-container .icon-btn.active {
+              background-color: #ff0000;
+              color: #ffffff;
+            }
+
+            .drive-app-container .icon-btn .material-symbols-rounded {
+              color: var(--theme-on-surface-variant);
+            }
+
+            .drive-app-container .icon-btn:hover .material-symbols-rounded {
+              color: var(--theme-on-surface);
+            }
+
+            .drive-app-container .main-wrapper {
+              display: flex;
+              flex: 1;
+              overflow: hidden;
+              position: relative;
+            }
+
+            .drive-app-container .sidebar-drive {
+              width: 240px;
+              display: flex;
+              flex-direction: column;
+              padding: 16px 12px;
+              gap: 16px;
+              flex-shrink: 0;
+              background: var(--theme-surface);
+              z-index: 100;
+              transition: width 0.3s ease, padding 0.3s ease, left 0.3s ease;
+              border-right: 1px solid var(--theme-outline-variant);
+              overflow: hidden;
+              white-space: nowrap;
+            }
+
+            @media (min-width: 769px) {
+              .drive-app-container .sidebar-drive.collapsed {
+                width: 0;
+                padding-left: 0;
+                padding-right: 0;
+                border-right-color: transparent;
+              }
+            }
+
+            .drive-app-container .sidebar-overlay {
+              position: fixed;
+              inset: 0;
+              background: rgba(0, 0, 0, 0.6);
+              z-index: 99;
+              display: none;
+              opacity: 0;
+              transition: opacity 0.3s;
+            }
+
+            .drive-app-container .fab {
+              height: 52px;
+              border-radius: 16px;
+              background-color: #ff0000;
+              color: #ffffff;
+              border: none;
+              display: inline-flex;
+              align-items: center;
+              padding: 0 20px 0 16px;
+              gap: 12px;
+              font-family: var(--font-title);
+              font-size: 14px;
+              font-weight: 700;
+              cursor: pointer;
+              box-shadow: 0 4px 12px rgba(255, 0, 0, 0.3);
+              transition: transform var(--transition), background-color var(--transition);
+              width: fit-content;
+            }
+
+            .drive-app-container .fab:hover {
+              transform: scale(1.03);
+              background-color: #ff1a1a;
+            }
+
+            .drive-app-container .fab .material-symbols-rounded {
+              color: #ffffff;
+            }
+
+            .drive-app-container .nav-list {
+              display: flex;
+              flex-direction: column;
+              gap: 4px;
+            }
+
+            .drive-app-container .nav-item-drive {
+              display: flex;
+              align-items: center;
+              gap: 12px;
+              height: 44px;
+              padding: 0 16px;
+              border-radius: 22px;
+              color: var(--theme-on-surface-variant);
+              cursor: pointer;
+              font-size: 14px;
+              font-weight: 500;
+              transition: background-color var(--transition);
+              text-decoration: none;
+            }
+
+            .drive-app-container .nav-item-drive:hover {
+              background-color: var(--theme-surface-container-low);
+              color: var(--theme-on-surface);
+            }
+
+            .drive-app-container .nav-item-drive.active {
+              background-color: #ff0000;
+              color: #ffffff;
+              font-weight: 700;
+            }
+
+            .drive-app-container .nav-item-drive .material-symbols-rounded {
+              color: var(--theme-on-surface-variant);
+            }
+
+            .drive-app-container .nav-item-drive.active .material-symbols-rounded {
+              color: #ffffff;
+              font-variation-settings: 'FILL' 1;
+            }
+
+            .drive-app-container .content-area-drive {
+              flex: 1;
+              display: flex;
+              flex-direction: column;
+              background-color: var(--theme-surface);
+              margin: 0;
+              overflow: hidden;
+              position: relative;
+            }
+
+            .drive-app-container .content-header-drive {
+              height: 52px;
+              display: flex;
+              align-items: center;
+              padding: 0 20px;
+              border-bottom: 1px solid var(--theme-outline-variant);
+              justify-content: space-between;
+            }
+
+            .drive-app-container .breadcrumbs {
+              display: flex;
+              align-items: center;
+              font-family: var(--font-title);
+              font-size: 18px;
+              color: var(--theme-on-surface);
+              gap: 4px;
+              overflow-x: auto;
+              white-space: nowrap;
+              scrollbar-width: none;
+            }
+
+            .drive-app-container .breadcrumb-item {
+              cursor: pointer;
+              border-radius: 8px;
+              padding: 4px 8px;
+              transition: background-color var(--transition);
+              color: var(--theme-on-surface);
+            }
+
+            .drive-app-container .breadcrumb-item:hover {
+              background-color: var(--theme-surface-container);
+            }
+
+            .drive-app-container .breadcrumb-sep {
+              color: var(--theme-on-surface-variant);
+              font-size: 18px;
+            }
+
+            .drive-app-container .chips-container {
+              display: flex;
+              gap: 8px;
+              padding: 12px 20px;
+              overflow-x: auto;
+              scrollbar-width: none;
+              flex-shrink: 0;
+            }
+
+            .drive-app-container .chip {
+              border: 1px solid var(--theme-outline-variant);
+              padding: 6px 16px;
+              border-radius: 16px;
+              font-size: 13px;
+              cursor: pointer;
+              background: transparent;
+              transition: background var(--transition);
+              display: flex;
+              align-items: center;
+              gap: 6px;
+              color: var(--theme-on-surface);
+            }
+
+            .drive-app-container .chip.active {
+              background: #ff0000;
+              color: #ffffff;
+              border-color: transparent;
+              font-weight: 700;
+            }
+
+            .drive-app-container .chip .material-symbols-rounded {
+              color: inherit;
+            }
+
+            .drive-app-container .recents-container {
+              margin-bottom: 16px;
+              flex-shrink: 0;
+            }
+
+            .drive-app-container .recents-tray {
+              display: flex;
+              gap: 12px;
+              overflow-x: auto;
+              padding: 8px 0;
+              scrollbar-width: none;
+            }
+
+            .drive-app-container .recent-card {
+              width: 140px;
+              background: var(--theme-surface-container-low);
+              border-radius: 12px;
+              padding: 12px;
+              flex-shrink: 0;
+              cursor: pointer;
+              user-select: none;
+              border: 1px solid var(--theme-outline-variant);
+              transition: background var(--transition);
+              color: var(--theme-on-surface);
+            }
+
+            .drive-app-container .recent-card:hover {
+              background: var(--theme-surface-container-high);
+              border-color: #ff3333;
+            }
+
+            .drive-app-container .recent-card .material-symbols-rounded {
+              color: #ff3333;
+            }
+
+            .drive-app-container .recent-name {
+              font-size: 12px;
+              font-weight: 500;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              margin-top: 8px;
+            }
 
             /* Mobile Bottom Area Padding Fix */
-            .drive-app-container .file-list-container { flex: 1; overflow-y: auto; padding: 0 20px calc(180px + env(safe-area-inset-bottom, 20px)); position: relative; }
-            .drive-app-container .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--theme-on-surface-variant); margin: 16px 0 12px 4px; }
+            .drive-app-container .file-list-container {
+              flex: 1;
+              overflow-y: auto;
+              padding: 0 20px calc(180px + env(safe-area-inset-bottom, 20px));
+              position: relative;
+            }
 
-            .drive-app-container .grid-view { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
-            .drive-app-container .list-view { display: flex; flex-direction: column; gap: 4px; }
+            .drive-app-container .section-title {
+              font-size: 13px;
+              font-weight: 700;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+              color: var(--theme-on-surface-variant);
+              margin: 16px 0 12px 4px;
+            }
 
-            .drive-app-container .item-card { background-color: var(--theme-surface-container-low); border-radius: 12px; border: 1px solid var(--theme-outline-variant); cursor: pointer; user-select: none; transition: background-color var(--transition), border-color var(--transition); display: flex; flex-direction: column; position: relative; overflow: hidden; color: var(--theme-on-surface); }
-            .drive-app-container .item-card:hover { background-color: var(--theme-surface-container-high); border-color: #ff3333; }
-            .drive-app-container .item-card.selected { background-color: rgba(255, 0, 0, 0.2); border-color: #ff0000; color: #ffffff; }
+            .drive-app-container .grid-view {
+              display: grid;
+              grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+              gap: 12px;
+            }
 
-            .drive-app-container .card-checkbox { position: absolute; top: 8px; left: 8px; width: 24px; height: 24px; color: var(--theme-on-surface-variant); z-index: 10; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity var(--transition); }
-            .drive-app-container .item-card:hover .card-checkbox, .drive-app-container .item-card.selected .card-checkbox { opacity: 1; }
-            .drive-app-container .item-card.selected .card-checkbox { color: #ff0000; font-variation-settings: 'FILL' 1; }
-            .drive-app-container .card-checkbox .material-symbols-rounded { color: inherit; }
+            .drive-app-container .list-view {
+              display: flex;
+              flex-direction: column;
+              gap: 4px;
+            }
 
-            .drive-app-container .card-star { position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; color: var(--theme-on-surface-variant); z-index: 10; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity var(--transition); }
-            .drive-app-container .item-card:hover .card-star, .drive-app-container .item-card.starred .card-star { opacity: 1; }
-            .drive-app-container .item-card.starred .card-star { color: #f5b041; font-variation-settings: 'FILL' 1; }
-            .drive-app-container .card-star .material-symbols-rounded { color: inherit; }
+            .drive-app-container .item-card {
+              background-color: var(--theme-surface-container-low);
+              border-radius: 12px;
+              border: 1px solid var(--theme-outline-variant);
+              cursor: pointer;
+              user-select: none;
+              transition: background-color var(--transition), border-color var(--transition);
+              display: flex;
+              flex-direction: column;
+              position: relative;
+              overflow: hidden;
+              color: var(--theme-on-surface);
+            }
 
-            .drive-app-container .grid-view .item-card { height: 60px; padding: 0 36px; flex-direction: row; align-items: center; gap: 10px; }
-            .drive-app-container .grid-view .file-card { height: 180px; flex-direction: column; align-items: stretch; gap: 0; padding: 0; }
-            .drive-app-container .grid-view .file-card .file-preview { flex: 1; background-color: #000000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
-            .drive-app-container .grid-view .file-card .file-preview img { width: 100%; height: 100%; object-fit: cover; }
-            .drive-app-container .grid-view .file-card .file-preview .material-symbols-rounded { font-size: 56px; color: #ff3333; }
-            .drive-app-container .grid-view .file-card .file-info-bar { height: 50px; display: flex; align-items: center; padding: 0 36px; gap: 10px; border-top: 1px solid var(--theme-outline-variant); }
+            .drive-app-container .item-card:hover {
+              background-color: var(--theme-surface-container-high);
+              border-color: #ff3333;
+            }
 
-            .drive-app-container .list-view .item-card { height: 46px; border-radius: 8px; border: 1px solid transparent; flex-direction: row; align-items: center; padding: 0 36px; gap: 12px; background: transparent; }
-            .drive-app-container .list-view .item-card:hover { background-color: var(--theme-surface-container-low); border-color: var(--theme-outline-variant); }
-            .drive-app-container .list-view .item-card.selected { background-color: rgba(255, 0, 0, 0.2); border-color: #ff0000; }
+            .drive-app-container .item-card.selected {
+              background-color: rgba(255, 0, 0, 0.2);
+              border-color: #ff0000;
+              color: #ffffff;
+            }
 
-            .drive-app-container .item-icon { color: #ff3333; display: flex; align-items: center; justify-content: center; }
-            .drive-app-container .folder-icon { color: #ff3333; font-variation-settings: 'FILL' 1; }
-            .drive-app-container .item-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; font-weight: 500; }
-            .drive-app-container .item-meta { display: none; font-size: 12px; color: var(--theme-on-surface-variant); width: 100px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-            .drive-app-container .list-view .item-meta { display: block; }
+            .drive-app-container .card-checkbox {
+              position: absolute;
+              top: 8px;
+              left: 8px;
+              width: 24px;
+              height: 24px;
+              color: var(--theme-on-surface-variant);
+              z-index: 10;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              opacity: 0;
+              transition: opacity var(--transition);
+            }
 
-            .drive-app-container .context-menu, .drive-app-container .floating-menu, .drive-app-container .sort-menu { position: fixed; background-color: var(--theme-surface-container-high); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); padding: 8px 0; z-index: 1000; min-width: 200px; display: none; flex-direction: column; border: 1px solid var(--theme-outline-variant); }
-            .drive-app-container .menu-item { display: flex; align-items: center; gap: 12px; padding: 10px 16px; font-size: 14px; color: var(--theme-on-surface); cursor: pointer; transition: background-color var(--transition); }
-            .drive-app-container .menu-item:hover { background-color: var(--theme-surface-container); color: #ffffff; }
-            .drive-app-container .menu-item .material-symbols-rounded { font-size: 20px; color: var(--theme-on-surface-variant); }
-            .drive-app-container .menu-item:hover .material-symbols-rounded { color: #ff3333; }
-            .drive-app-container .menu-item.active { background-color: #ff0000; color: #ffffff; }
-            .drive-app-container .menu-divider { height: 1px; background-color: var(--theme-outline-variant); margin: 4px 0; }
+            .drive-app-container .item-card:hover .card-checkbox,
+            .drive-app-container .item-card.selected .card-checkbox {
+              opacity: 1;
+            }
 
-            .drive-app-container .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 2000; display: none; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
-            .drive-app-container .modal-drive { background-color: var(--theme-surface-container); border-radius: 20px; width: 90%; max-width: 400px; padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.5); border: 1px solid var(--theme-outline-variant); }
-            .drive-app-container .modal-title-drive { font-family: var(--font-title); font-size: 20px; font-weight: 700; color: var(--theme-on-surface); }
-            .drive-app-container .modal-input-drive { background-color: var(--theme-surface-container-high); border: 1px solid var(--theme-outline); border-radius: 8px; padding: 12px 16px; font-size: 15px; color: var(--theme-on-surface); outline: none; border-bottom: 2px solid #ff0000; width: 100%; }
+            .drive-app-container .item-card.selected .card-checkbox {
+              color: #ff0000;
+              font-variation-settings: 'FILL' 1;
+            }
 
-            .drive-app-container .btn-drive { padding: 0 20px; height: 38px; border-radius: 19px; font-weight: 600; font-size: 14px; cursor: pointer; border: none; transition: background-color var(--transition); display: inline-flex; align-items: center; gap: 8px; }
-            .drive-app-container .btn-text-drive { background: transparent; color: #ff3333; }
-            .drive-app-container .btn-text-drive:hover { background-color: rgba(255,0,0,0.1); }
-            .drive-app-container .btn-filled-drive { background-color: #ff0000; color: #ffffff; }
+            .drive-app-container .card-checkbox .material-symbols-rounded {
+              color: inherit;
+            }
 
-            .drive-app-container .editor-overlay-drive { position: fixed; inset: 0; background-color: var(--theme-surface); z-index: 3000; display: none; flex-direction: column; }
-            .drive-app-container .editor-header-drive { height: 60px; display: flex; align-items: center; padding: 0 16px; gap: 16px; border-bottom: 1px solid var(--theme-outline-variant); background-color: var(--theme-surface-container-low); flex-shrink: 0; }
-            .drive-app-container .editor-title-drive { flex: 1; font-family: var(--font-title); font-size: 18px; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-            .drive-app-container .versions-list { max-height: 250px; overflow-y: auto; background: var(--theme-surface-container-high); border-radius: 8px; padding: 4px; }
-            .drive-app-container .version-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid var(--theme-outline-variant); }
-            .drive-app-container .version-item:last-child { border-bottom: none; }
+            .drive-app-container .card-star {
+              position: absolute;
+              top: 8px;
+              right: 8px;
+              width: 24px;
+              height: 24px;
+              color: var(--theme-on-surface-variant);
+              z-index: 10;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              opacity: 0;
+              transition: opacity var(--transition);
+            }
 
-            .drive-app-container .snackbar-container-drive { position: fixed; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); z-index: 4000; display: flex; flex-direction: column; gap: 8px; align-items: center; }
-            .drive-app-container .snackbar-drive { background-color: var(--theme-on-surface); color: var(--theme-surface); padding: 12px 20px; border-radius: 8px; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: space-between; min-width: 280px; max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); opacity: 0; margin-bottom: -20px; transition: opacity 0.3s, margin-bottom 0.3s; }
-            .drive-app-container .snackbar-drive.show { opacity: 1; margin-bottom: 0; }
+            .drive-app-container .item-card:hover .card-star,
+            .drive-app-container .item-card.starred .card-star {
+              opacity: 1;
+            }
 
-            .drive-app-container .properties-pane { width: 300px; background-color: var(--theme-surface); border-left: 1px solid var(--theme-outline-variant); flex-direction: column; display: none; color: var(--theme-on-surface); }
-            .drive-app-container .properties-header { height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--theme-outline-variant); }
-            .drive-app-container .properties-content { padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
-            .drive-app-container .prop-row { display: flex; flex-direction: column; gap: 4px; }
-            .drive-app-container .prop-label { font-size: 12px; color: var(--theme-on-surface-variant); }
-            .drive-app-container .prop-val { font-size: 14px; color: var(--theme-on-surface); word-break: break-all; }
+            .drive-app-container .item-card.starred .card-star {
+              color: #f5b041;
+              font-variation-settings: 'FILL' 1;
+            }
 
-            .drive-app-container .hidden { display: none !important; }
+            .drive-app-container .card-star .material-symbols-rounded {
+              color: inherit;
+            }
 
-            .drive-app-container .mobile-only { display: none; }
+            .drive-app-container .grid-view .item-card {
+              height: 60px;
+              padding: 0 36px;
+              flex-direction: row;
+              align-items: center;
+              gap: 10px;
+            }
+
+            .drive-app-container .grid-view .file-card {
+              height: 180px;
+              flex-direction: column;
+              align-items: stretch;
+              gap: 0;
+              padding: 0;
+            }
+
+            .drive-app-container .grid-view .file-card .file-preview {
+              flex: 1;
+              background-color: #000000;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              overflow: hidden;
+              position: relative;
+            }
+
+            .drive-app-container .grid-view .file-card .file-preview img {
+              width: 100%;
+              height: 100%;
+              object-fit: cover;
+            }
+
+            .drive-app-container .grid-view .file-card .file-preview .material-symbols-rounded {
+              font-size: 56px;
+              color: #ff3333;
+            }
+
+            .drive-app-container .grid-view .file-card .file-info-bar {
+              height: 50px;
+              display: flex;
+              align-items: center;
+              padding: 0 36px;
+              gap: 10px;
+              border-top: 1px solid var(--theme-outline-variant);
+            }
+
+            .drive-app-container .list-view .item-card {
+              height: 46px;
+              border-radius: 8px;
+              border: 1px solid transparent;
+              flex-direction: row;
+              align-items: center;
+              padding: 0 36px;
+              gap: 12px;
+              background: transparent;
+            }
+
+            .drive-app-container .list-view .item-card:hover {
+              background-color: var(--theme-surface-container-low);
+              border-color: var(--theme-outline-variant);
+            }
+
+            .drive-app-container .list-view .item-card.selected {
+              background-color: rgba(255, 0, 0, 0.2);
+              border-color: #ff0000;
+            }
+
+            .drive-app-container .item-icon {
+              color: #ff3333;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+            }
+
+            .drive-app-container .folder-icon {
+              color: #ff3333;
+              font-variation-settings: 'FILL' 1;
+            }
+
+            .drive-app-container .item-name {
+              flex: 1;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              font-size: 14px;
+              font-weight: 500;
+            }
+
+            .drive-app-container .item-meta {
+              display: none;
+              font-size: 12px;
+              color: var(--theme-on-surface-variant);
+              width: 100px;
+              text-align: right;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+
+            .drive-app-container .list-view .item-meta {
+              display: block;
+            }
+
+            .drive-app-container .context-menu,
+            .drive-app-container .floating-menu,
+            .drive-app-container .sort-menu {
+              position: fixed;
+              background-color: var(--theme-surface-container-high);
+              border-radius: 12px;
+              box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+              padding: 8px 0;
+              z-index: 1000;
+              min-width: 200px;
+              display: none;
+              flex-direction: column;
+              border: 1px solid var(--theme-outline-variant);
+            }
+
+            .drive-app-container .menu-item {
+              display: flex;
+              align-items: center;
+              gap: 12px;
+              padding: 10px 16px;
+              font-size: 14px;
+              color: var(--theme-on-surface);
+              cursor: pointer;
+              transition: background-color var(--transition);
+            }
+
+            .drive-app-container .menu-item:hover {
+              background-color: var(--theme-surface-container);
+              color: #ffffff;
+            }
+
+            .drive-app-container .menu-item .material-symbols-rounded {
+              font-size: 20px;
+              color: var(--theme-on-surface-variant);
+            }
+
+            .drive-app-container .menu-item:hover .material-symbols-rounded {
+              color: #ff3333;
+            }
+
+            .drive-app-container .menu-item.active {
+              background-color: #ff0000;
+              color: #ffffff;
+            }
+
+            .drive-app-container .menu-divider {
+              height: 1px;
+              background-color: var(--theme-outline-variant);
+              margin: 4px 0;
+            }
+
+            .drive-app-container .modal-overlay {
+              position: fixed;
+              inset: 0;
+              background: rgba(0, 0, 0, 0.7);
+              z-index: 2000;
+              display: none;
+              align-items: center;
+              justify-content: center;
+              backdrop-filter: blur(2px);
+            }
+
+            .drive-app-container .modal-drive {
+              background-color: var(--theme-surface-container);
+              border-radius: 20px;
+              width: 90%;
+              max-width: 400px;
+              padding: 24px;
+              display: flex;
+              flex-direction: column;
+              gap: 16px;
+              box-shadow: 0 24px 38px 3px rgba(0, 0, 0, 0.5);
+              border: 1px solid var(--theme-outline-variant);
+            }
+
+            .drive-app-container .modal-title-drive {
+              font-family: var(--font-title);
+              font-size: 20px;
+              font-weight: 700;
+              color: var(--theme-on-surface);
+            }
+
+            .drive-app-container .modal-input-drive {
+              background-color: var(--theme-surface-container-high);
+              border: 1px solid var(--theme-outline);
+              border-radius: 8px;
+              padding: 12px 16px;
+              font-size: 15px;
+              color: var(--theme-on-surface);
+              outline: none;
+              border-bottom: 2px solid #ff0000;
+              width: 100%;
+            }
+
+            .drive-app-container .btn-drive {
+              padding: 0 20px;
+              height: 38px;
+              border-radius: 19px;
+              font-weight: 600;
+              font-size: 14px;
+              cursor: pointer;
+              border: none;
+              transition: background-color var(--transition);
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+            }
+
+            .drive-app-container .btn-text-drive {
+              background: transparent;
+              color: #ff3333;
+            }
+
+            .drive-app-container .btn-text-drive:hover {
+              background-color: rgba(255, 0, 0, 0.1);
+            }
+
+            .drive-app-container .btn-filled-drive {
+              background-color: #ff0000;
+              color: #ffffff;
+            }
+
+            .drive-app-container .editor-overlay-drive {
+              position: fixed;
+              inset: 0;
+              background-color: var(--theme-surface);
+              z-index: 3000;
+              display: none;
+              flex-direction: column;
+            }
+
+            .drive-app-container .editor-header-drive {
+              height: 60px;
+              display: flex;
+              align-items: center;
+              padding: 0 16px;
+              gap: 16px;
+              border-bottom: 1px solid var(--theme-outline-variant);
+              background-color: var(--theme-surface-container-low);
+              flex-shrink: 0;
+            }
+
+            .drive-app-container .editor-title-drive {
+              flex: 1;
+              font-family: var(--font-title);
+              font-size: 18px;
+              color: var(--theme-on-surface);
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+
+            .drive-app-container .versions-list {
+              max-height: 250px;
+              overflow-y: auto;
+              background: var(--theme-surface-container-high);
+              border-radius: 8px;
+              padding: 4px;
+            }
+
+            .drive-app-container .version-item {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              padding: 10px;
+              border-bottom: 1px solid var(--theme-outline-variant);
+            }
+
+            .drive-app-container .version-item:last-child {
+              border-bottom: none;
+            }
+
+            .drive-app-container .snackbar-container-drive {
+              position: fixed;
+              bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+              left: 50%;
+              transform: translateX(-50%);
+              z-index: 4000;
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+              align-items: center;
+            }
+
+            .drive-app-container .snackbar-drive {
+              background-color: var(--theme-on-surface);
+              color: var(--theme-surface);
+              padding: 12px 20px;
+              border-radius: 8px;
+              font-size: 14px;
+              font-weight: 500;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              min-width: 280px;
+              max-width: 400px;
+              box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+              opacity: 0;
+              margin-bottom: -20px;
+              transition: opacity 0.3s, margin-bottom 0.3s;
+            }
+
+            .drive-app-container .snackbar-drive.show {
+              opacity: 1;
+              margin-bottom: 0;
+            }
+
+            .drive-app-container .properties-pane {
+              width: 300px;
+              background-color: var(--theme-surface);
+              border-left: 1px solid var(--theme-outline-variant);
+              flex-direction: column;
+              display: none;
+              color: var(--theme-on-surface);
+            }
+
+            .drive-app-container .properties-header {
+              height: 52px;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0 16px;
+              border-bottom: 1px solid var(--theme-outline-variant);
+            }
+
+            .drive-app-container .properties-content {
+              padding: 16px;
+              overflow-y: auto;
+              display: flex;
+              flex-direction: column;
+              gap: 16px;
+            }
+
+            .drive-app-container .prop-row {
+              display: flex;
+              flex-direction: column;
+              gap: 4px;
+            }
+
+            .drive-app-container .prop-label {
+              font-size: 12px;
+              color: var(--theme-on-surface-variant);
+            }
+
+            .drive-app-container .prop-val {
+              font-size: 14px;
+              color: var(--theme-on-surface);
+              word-break: break-all;
+            }
+
+            .drive-app-container .hidden {
+              display: none !important;
+            }
+
+            .drive-app-container .mobile-only {
+              display: none;
+            }
 
             @media (max-width: 768px) {
-              .drive-app-container .mobile-only { display: flex; }
-              .drive-app-container .grid-view { grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important; }
-              .drive-app-container .grid-view .item-card { height: 50px; padding: 0 12px !important; }
-              .drive-app-container .grid-view .file-card { height: 160px; padding: 0 !important; }
-              .drive-app-container .grid-view .file-card .file-info-bar { padding: 0 10px !important; gap: 6px !important; }
-              .drive-app-container .properties-pane { position: fixed; top: 0; bottom: 0; left: 0; right: 0; width: 100% !important; height: 100% !important; z-index: 3100 !important; border: none; }
-              .drive-app-container .grid-view { grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important; }
-              .drive-app-container .grid-view .item-card { height: 50px; padding: 0 16px; }
-              .drive-app-container .grid-view .file-card { height: 160px; }
-              .drive-app-container .search-bar { display: none; }
+              .drive-app-container .mobile-only {
+                display: flex;
+              }
+
+              .drive-app-container .grid-view {
+                grid-template-columns: repeat(2, 1fr) !important;
+                gap: 8px !important;
+              }
+
+              .drive-app-container .grid-view .item-card {
+                height: 50px;
+                padding: 0 12px !important;
+              }
+
+              .drive-app-container .grid-view .file-card {
+                height: 160px;
+                padding: 0 !important;
+              }
+
+              .drive-app-container .grid-view .file-card .file-info-bar {
+                padding: 0 10px !important;
+                gap: 6px !important;
+              }
+
+              .drive-app-container .properties-pane {
+                position: fixed;
+                top: 0;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                width: 100% !important;
+                height: 100% !important;
+                z-index: 3100 !important;
+                border: none;
+              }
+
+              .drive-app-container .grid-view {
+                grid-template-columns: repeat(2, 1fr) !important;
+                gap: 8px !important;
+              }
+
+              .drive-app-container .grid-view .item-card {
+                height: 50px;
+                padding: 0 16px;
+              }
+
+              .drive-app-container .grid-view .file-card {
+                height: 160px;
+              }
+
+              .drive-app-container .search-bar {
+                display: none;
+              }
+
               .drive-app-container .search-bar.mobile-active {
                 display: flex;
                 position: absolute;
-                left: 0; right: 0; top: 0; bottom: 0;
+                left: 0;
+                right: 0;
+                top: 0;
+                bottom: 0;
                 height: 64px;
                 margin: 0;
                 border-radius: 0;
@@ -4315,15 +6382,53 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 max-width: 100%;
                 border: none;
               }
-              .drive-app-container .search-bar.mobile-active #searchIcon { display: none; }
-              .drive-app-container .search-bar.mobile-active #closeSearchBtn { display: flex; }
 
-              .drive-app-container .sidebar-drive { position: fixed; left: -280px; top: 0; bottom: 0; width: 280px; padding-top: 64px; }
-              .drive-app-container .sidebar-drive.open { left: 0; }
-              .drive-app-container .sidebar-overlay.open { display: block; opacity: 1; }
-              .drive-app-container .content-area-drive { margin: 0; border-radius: 0; }
-              .drive-app-container .fab { position: fixed; bottom: calc(28px + env(safe-area-inset-bottom, 20px)) !important; right: 20px; z-index: 90; width: 52px; height: 52px; padding: 0; justify-content: center; border-radius: 26px; }
-              .drive-app-container .fab .text { display: none; }
+              .drive-app-container .search-bar.mobile-active #searchIcon {
+                display: none;
+              }
+
+              .drive-app-container .search-bar.mobile-active #closeSearchBtn {
+                display: flex;
+              }
+
+              .drive-app-container .sidebar-drive {
+                position: fixed;
+                left: -280px;
+                top: 0;
+                bottom: 0;
+                width: 280px;
+                padding-top: 64px;
+              }
+
+              .drive-app-container .sidebar-drive.open {
+                left: 0;
+              }
+
+              .drive-app-container .sidebar-overlay.open {
+                display: block;
+                opacity: 1;
+              }
+
+              .drive-app-container .content-area-drive {
+                margin: 0;
+                border-radius: 0;
+              }
+
+              .drive-app-container .fab {
+                position: fixed;
+                bottom: calc(28px + env(safe-area-inset-bottom, 20px)) !important;
+                right: 20px;
+                z-index: 90;
+                width: 52px;
+                height: 52px;
+                padding: 0;
+                justify-content: center;
+                border-radius: 26px;
+              }
+
+              .drive-app-container .fab .text {
+                display: none;
+              }
             }
           </style>
 
@@ -4636,7 +6741,44 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
 
                 const dropZone = document.getElementById('dropZone');
-                dropZone.addEventListener('dragover', (e) => { 
+
+                // Right click and touch-hold handlers for empty drive space
+                dropZone.addEventListener('contextmenu', (e) => {
+                  if (!e.target.closest('.item-card') && !e.target.closest('.chip') && !e.target.closest('.header-actions') && !e.target.closest('.breadcrumb-item') && !e.target.closest('.recent-card')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.clearSelection(null, true);
+                    this.showRootContextMenu(e);
+                  }
+                });
+                
+                let dzTouchTimer;
+                let dzIsLongPress = false;
+                let dzStartX = 0, dzStartY = 0;
+                
+                dropZone.addEventListener('touchstart', (e) => {
+                  if (e.target.closest('.item-card') || e.target.closest('.header-actions') || e.target.closest('.chip')) return;
+                  dzIsLongPress = false;
+                  dzStartX = e.touches[0].clientX;
+                  dzStartY = e.touches[0].clientY;
+                  dzTouchTimer = setTimeout(() => {
+                    dzIsLongPress = true;
+                    if (navigator.vibrate) navigator.vibrate([50]);
+                    this.clearSelection(null, true);
+                    this.showRootContextMenu({
+                      clientX: dzStartX,
+                      clientY: dzStartY
+                    });
+                  }, 600);
+                }, { passive: true });
+                dropZone.addEventListener('touchmove', (e) => {
+                  if (Math.abs(e.touches[0].clientX - dzStartX) > 10 || Math.abs(e.touches[0].clientY - dzStartY) > 10) {
+                    clearTimeout(dzTouchTimer);
+                  }
+                }, { passive: true });
+                dropZone.addEventListener('touchend', () => clearTimeout(dzTouchTimer));
+
+                dropZone.addEventListener('dragover', (e) => {
                   if (window.innerWidth <= 768) return;
                   e.preventDefault(); 
                   dropZone.classList.add('drag-over'); 
@@ -5380,6 +7522,40 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.render();
               }
 
+              showRootContextMenu(e) {
+                const menu = document.getElementById('contextMenu');
+                menu.innerHTML = '';
+                
+                const addMenuItem = (icon, text, action) => {
+                  const div = document.createElement('div');
+                  div.className = 'menu-item';
+                  div.innerHTML = `<span class="material-symbols-rounded">${icon}</span>${text}`;
+                  div.onclick = (ev) => { ev.stopPropagation(); menu.style.display = 'none'; action(); };
+                  menu.appendChild(div);
+                };
+
+                addMenuItem('create_new_folder', 'New folder', () => this.showModal('addFolder'));
+                addMenuItem('note_add', 'New file', () => this.showModal('addFile'));
+                addMenuItem('upload_file', 'File upload', () => document.getElementById('fileUploadInput').click());
+                addMenuItem('drive_folder_upload', 'Folder upload', () => document.getElementById('folderUploadInput').click());
+                const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
+                addMenuItem('refresh', 'Refresh List', () => this.loadDirectory(this.currentPath));
+                
+                menu.style.display = 'flex';
+                
+                let x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
+                let y = e.clientY || (e.touches && e.touches[0].clientY) || 0;
+                const rect = menu.getBoundingClientRect();
+                
+                if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+                if (x < 8) x = 8;
+                if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
+                if (y < 8) y = 8;
+                
+                menu.style.left = `${x}px`;
+                menu.style.top = `${y}px`;
+              }
+
               showContextMenu(e, item, isFolder) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -5894,7 +8070,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     desktopContainer.appendChild(editorDiv);
 
                     this.editor = ace.edit("aceEditorInstance");
-                    this.editor.setTheme("ace/theme/tomorrow_night_eighties");
+                    this.editor.setTheme("ace/theme/chaos");
                     
                     let modelist = ace.require("ace/ext/modelist");
                     let aceMode = modelist.getModeForPath(item.name).mode;
@@ -6622,6 +8798,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         }
       }
     </script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   </body>
 </html>
 <?php
