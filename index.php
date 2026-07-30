@@ -387,7 +387,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '7.5');
+define('APP_VERSION', '7.6');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -578,19 +578,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     function generateUniqueFileName($dir, $filename) {
       $baseName = pathinfo($filename, PATHINFO_FILENAME);
       $extension = pathinfo($filename, PATHINFO_EXTENSION);
+      $extPart = $extension ? '.' . $extension : '';
       $counter = 1;
-      while (file_exists($dir . '/' . $baseName . '_' . $counter . '.' . $extension)) {
+      while (file_exists($dir . '/' . $baseName . '_(' . $counter . ')' . $extPart)) {
         $counter++;
       }
-      return $baseName . '_' . $counter . '.' . $extension;
+      return $baseName . '_(' . $counter . ')' . $extPart;
     }
 
     function generateUniqueFolderName($dir, $foldername) {
       $counter = 1;
-      while (is_dir($dir . '/' . $foldername . '_' . $counter)) {
+      while (is_dir($dir . '/' . $foldername . '_(' . $counter . ')')) {
         $counter++;
       }
-      return $foldername . '_' . $counter;
+      return $foldername . '_(' . $counter . ')';
     }
 
     function recursiveCopy($src, $dst) {
@@ -715,7 +716,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           header("Content-Range: bytes $start-$end/$size");
           exit;
         }
-        if ($range == '-') {
+        if ($range[0] == '-') {
           $c_start = $size - substr($range, 1);
         } else {
           $range = explode('-', $range);
@@ -874,6 +875,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           $input = json_decode(file_get_contents('php://input'), true) ?? $_POST;
           $postAction = $input['action'] ?? $_POST['action'] ?? '';
+
+          // STRICT CSRF PROTECTION FOR DRIVE AND IDE API
+          $client_csrf = $input['csrf_token'] ?? $_POST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+          if (empty($client_csrf) || !hash_equals($_SESSION['admin_csrf_token'], $client_csrf)) {
+            throw new Exception("Security Violation: CSRF token missing or invalid.");
+          }
 
           switch ($postAction) {
             case 'add_file':
@@ -1151,20 +1158,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             case 'move_items':
               $items = $input['items'] ?? [];
               $target = $input['target'] ?? '';
-              $override = !empty($input['override']);
               $targetDir = rtrim($baseDir . '/' . $target, '/');
               if (!isValidPath($baseDir, $targetDir)) throw new Exception('Invalid target');
               
+              clearstatcache();
               foreach ($items as $item) {
                 $src = $baseDir . '/' . $item;
                 if (!isValidPath($baseDir, $src) || !file_exists($src)) continue;
-                $dest = $targetDir . '/' . basename($item);
                 
-                if (file_exists($dest) && !$override) {
-                  throw new Exception('CONFLICT|' . basename($item));
+                // Prevent infinite recursion (e.g. copying folder into itself)
+                if (is_dir($src) && strpos($targetDir . '/', $src . '/') === 0) {
+                  throw new Exception("Cannot copy or move a folder into its own subfolder.");
                 }
-                if (file_exists($dest) && $override) {
-                  save_file_version($dest);
+
+                $destName = basename($item);
+                $dest = $targetDir . '/' . $destName;
+                
+                // Automatically rename if file/folder exists
+                if (file_exists($dest)) {
+                  if (is_dir($src)) {
+                    $destName = generateUniqueFolderName($targetDir, $destName);
+                  } else {
+                    $destName = generateUniqueFileName($targetDir, $destName);
+                  }
+                  $dest = $targetDir . '/' . $destName;
                 }
                 
                 if ($postAction === 'move_items') {
@@ -1205,15 +1222,121 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
               break;
 
-            case 'terminal_cmd':
-              $cmd = $input['cmd'] ?? '';
-              $output = [];
-              if (preg_match('/^(git|ls|pwd|whoami|echo|php -v|cat|top)/i', $cmd)) {
-                exec($cmd . ' 2>&1', $output);
-                echo json_encode(['success' => true, 'output' => htmlspecialchars(implode("\n", $output))]);
+            case 'toggle_cli':
+              if ($is_super_admin) {
+                $disable = !empty($input['disable']);
+                $db = get_db();
+                $stmt = $db->prepare("SELECT settings FROM users WHERE id = ?");
+                $stmt->execute([$_SESSION['admin_id'] ?? 0]);
+                $settings = json_decode($stmt->fetchColumn() ?: '{}', true) ?? [];
+                $settings['disable_ide_cli'] = $disable;
+                $db->prepare("UPDATE users SET settings = ? WHERE id = ?")->execute([json_encode($settings), $_SESSION['admin_id'] ?? 0]);
+                echo json_encode(['success' => true]);
               } else {
-                echo json_encode(['success' => false, 'output' => "Command restricted. Only safe commands allowed (git, ls, pwd, php -v, etc)."]);
+                echo json_encode(['success' => false, 'error' => 'Permission denied']);
               }
+              break;
+
+            case 'terminal_cmd':
+              // Check if CLI is disabled
+              $db = get_db();
+              $stmt = $db->prepare("SELECT settings FROM users WHERE id = ?");
+              $stmt->execute([$_SESSION['admin_id'] ?? 0]);
+              $admin_settings = json_decode($stmt->fetchColumn() ?: '{}', true) ?? [];
+              if (!empty($admin_settings['disable_ide_cli'])) {
+                echo json_encode(['success' => false, 'output' => "CLI access has been disabled by the Administrator."]);
+                break;
+              }
+
+              $cmd = trim($input['cmd'] ?? '');
+              $path = rtrim($absPath ?? MUSIC_DIR, '/');
+
+              // Strict validation & sanitization
+              if (preg_match('/[;&`\n$]/', $cmd) || strpos($cmd, '>') !== false || strpos($cmd, '<') !== false || preg_match('/(rm\s+-rf|curl|wget|nc|bash|sh|mkfifo|su|sudo)\b/i', $cmd)) {
+                echo json_encode(['success' => false, 'output' => "Command restricted. Destructive and chaining commands are forbidden for security."]);
+                break;
+              }
+
+              // Built-in proper CLI cd command support via scoping mechanism
+              if (strpos($cmd, 'cd ') === 0) {
+                echo json_encode(['success' => true, 'output' => "Directory changes are scoped to the UI explorer module."]);
+                break;
+              }
+
+              // Built-in PHP Emulators for common commands on restricted hosts (e.g. Free Hosting / rf.gd)
+              $lowerCmd = strtolower($cmd);
+              if ($lowerCmd === 'php -v' || $lowerCmd === 'php --version') {
+                echo json_encode(['success' => true, 'output' => "PHP " . PHP_VERSION . " (" . PHP_SAPI . ")\nCopyright (c) The PHP Group\nBuilt on " . PHP_OS]);
+                break;
+              }
+              if ($lowerCmd === 'pwd') {
+                echo json_encode(['success' => true, 'output' => $path]);
+                break;
+              }
+              if ($lowerCmd === 'whoami') {
+                echo json_encode(['success' => true, 'output' => $_SESSION['admin_email'] ?? 'musiclibrary']);
+                break;
+              }
+              if ($lowerCmd === 'date') {
+                echo json_encode(['success' => true, 'output' => date('D M j H:i:s T Y')]);
+                break;
+              }
+              if ($lowerCmd === 'ls' || $lowerCmd === 'dir' || strpos($lowerCmd, 'ls ') === 0) {
+                $dirTarget = $path;
+                if (strpos($lowerCmd, 'ls ') === 0) {
+                  $sub = trim(substr($cmd, 3));
+                  if ($sub && is_dir($path . '/' . $sub)) $dirTarget = $path . '/' . $sub;
+                }
+                $files = array_diff(scandir($dirTarget), ['.', '..']);
+                $out = [];
+                foreach ($files as $f) {
+                  $isD = is_dir($dirTarget . '/' . $f);
+                  $out[] = $isD ? $f . '/' : $f;
+                }
+                echo json_encode(['success' => true, 'output' => implode("\n", $out)]);
+                break;
+              }
+
+              $output = "";
+              $fullCmd = "cd " . escapeshellarg($path) . " && " . $cmd . " 2>&1";
+
+              // Try proc_open first
+              if (function_exists('proc_open')) {
+                $descriptorspec = [
+                  0 => ["pipe", "r"],
+                  1 => ["pipe", "w"],
+                  2 => ["pipe", "w"]
+                ];
+                $process = @proc_open($fullCmd, $descriptorspec, $pipes);
+                if (is_resource($process)) {
+                  @fclose($pipes[0]);
+                  $stdout = @stream_get_contents($pipes[1]);
+                  @fclose($pipes[1]);
+                  $stderr = @stream_get_contents($pipes[2]);
+                  @fclose($pipes[2]);
+                  @proc_close($process);
+                  $output = trim($stdout . "\n" . $stderr);
+                }
+              }
+
+              // Fallbacks if proc_open failed or is disabled
+              if ($output === "" && function_exists('shell_exec')) {
+                $output = @shell_exec($fullCmd);
+              }
+              if (empty($output) && function_exists('exec')) {
+                @exec($fullCmd, $outArr);
+                $output = implode("\n", $outArr);
+              }
+              if (empty($output) && function_exists('system')) {
+                @system($fullCmd, $retval);
+                if ($retval !== 0) $output = "Command failed with status " . $retval;
+              }
+
+              if ($output === null || $output === false || $output === "") {
+                 $output = "Command execution failed or shell functions are disabled on this host.";
+              }
+
+              echo json_encode(['success' => true, 'output' => htmlspecialchars(trim($output))]);
               break;
 
             case 'git_history':
@@ -1234,20 +1357,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $folders = [];
               $files = [];
               if ($q !== '') {
-                $iter = new RecursiveIteratorIterator(
-                  new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS),
-                  RecursiveIteratorIterator::SELF_FIRST
-                );
+                $dir = new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS);
+                $filter = new RecursiveCallbackFilterIterator($dir, function ($current) {
+                  $exclude = ['.git', 'getid3', '.drive_trash_bin', '.drive_thumbnails', '.file_version', '.tmp_db', 'covers'];
+                  if ($current->isDir() && in_array($current->getFilename(), $exclude)) return false;
+                  return true;
+                });
+                $iter = new RecursiveIteratorIterator($filter, RecursiveIteratorIterator::SELF_FIRST);
                 foreach ($iter as $item) {
-                  $pathName = $item->getPathname();
-                  if (strpos($pathName, '.drive_trash_bin') !== false || strpos($pathName, '.drive_thumbnails') !== false || strpos($pathName, '.file_version') !== false) {
-                    continue;
-                  }
                   $filename = $item->getFilename();
                   if (stripos($filename, $q) !== false) {
-                    $rel = ltrim(str_replace($baseDir, '', $pathName), '/');
-                    $rel = str_replace('\\', '/', $rel);
-                    $stat = stat($pathName);
+                    $rel = ltrim(str_replace($baseDir, '', $item->getPathname()), '/');
+                    $stat = stat($item->getPathname());
                     $starred = in_array($rel, $starredPaths);
                     if ($item->isDir()) {
                       $folders[] = [
@@ -1494,49 +1615,86 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $file = $_GET['file'] ?? '';
               $full = $baseDir . '/' . $file;
               if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) throw new Exception('Invalid file');
-              echo json_encode(['success' => true, 'content' => file_get_contents($full)]);
+              echo json_encode(['success' => true, 'content' => file_get_contents($full)], JSON_INVALID_UTF8_SUBSTITUTE);
               break;
 
             case 'properties':
-              $file = $_GET['file'] ?? '';
-              $full = $baseDir . '/' . $file;
-              if (!isValidPath($baseDir, $full) || !file_exists($full)) throw new Exception('Invalid item');
-              $stat = stat($full);
-              $is_dir = is_dir($full);
-              $size = $stat['size'];
-              $typeStr = $is_dir ? 'Folder' : 'File (' . strtoupper(pathinfo($file, PATHINFO_EXTENSION)) . ')';
-              $contentStr = '';
+              $fileParam = $_GET['file'] ?? '';
+              $files = array_filter(explode('|', $fileParam));
+              if (empty($files)) throw new Exception('Invalid item');
               
-              if ($is_dir) {
+              if (count($files) === 1) {
+                $file = $files[0];
+                $full = $baseDir . '/' . $file;
+                if (!isValidPath($baseDir, $full) || !file_exists($full)) throw new Exception('Invalid item');
+                $stat = stat($full);
+                $is_dir = is_dir($full);
+                $size = $stat['size'];
+                $typeStr = $is_dir ? 'Folder' : 'File (' . strtoupper(pathinfo($file, PATHINFO_EXTENSION)) . ')';
+                $contentStr = '';
+                
+                if ($is_dir) {
+                  $total_files = 0;
+                  $total_folders = 0;
+                  $total_size = 0;
+                  $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+                  foreach ($iter as $f) {
+                    if ($f->isDir()) {
+                      $total_folders++;
+                    } else {
+                      $total_files++;
+                      $total_size += $f->getSize();
+                    }
+                  }
+                  $size = $total_size;
+                  $contentStr = $total_files . ' files, ' . $total_folders . ' folders';
+                }
+
+                echo json_encode([
+                  'success' => true,
+                  'data' => [
+                    'name' => basename($file),
+                    'type' => $typeStr,
+                    'size' => formatBytes($size),
+                    'contents' => $contentStr,
+                    'modified' => date("Y-m-d H:i:s", $stat['mtime']),
+                    'created' => date("Y-m-d H:i:s", $stat['ctime']),
+                    'permissions' => substr(sprintf('%o', fileperms($full)), -4)
+                  ]
+                ]);
+              } else {
+                $total_size = 0;
                 $total_files = 0;
                 $total_folders = 0;
-                $total_size = 0;
-                // Calculate folder bulk size and recursive contents
-                $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
-                foreach ($iter as $f) {
-                  if ($f->isDir()) {
-                    $total_folders++;
-                  } else {
-                    $total_files++;
-                    $total_size += $f->getSize();
-                  }
+                foreach ($files as $f) {
+                   $full = $baseDir . '/' . $f;
+                   if (isValidPath($baseDir, $full) && file_exists($full)) {
+                      if (is_dir($full)) {
+                         $total_folders++;
+                         $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+                         foreach ($iter as $item) {
+                           if ($item->isDir()) $total_folders++;
+                           else { $total_files++; $total_size += $item->getSize(); }
+                         }
+                      } else {
+                         $total_files++;
+                         $total_size += filesize($full);
+                      }
+                   }
                 }
-                $size = $total_size;
-                $contentStr = $total_files . ' files, ' . $total_folders . ' folders';
+                echo json_encode([
+                  'success' => true,
+                  'data' => [
+                    'name' => count($files) . ' items selected',
+                    'type' => 'Multiple Selection',
+                    'size' => formatBytes($total_size),
+                    'contents' => $total_files . ' files, ' . $total_folders . ' folders',
+                    'modified' => '-',
+                    'created' => '-',
+                    'permissions' => '-'
+                  ]
+                ]);
               }
-
-              echo json_encode([
-                'success' => true,
-                'data' => [
-                  'name' => basename($file),
-                  'type' => $typeStr,
-                  'size' => formatBytes($size),
-                  'contents' => $contentStr,
-                  'modified' => date("Y-m-d H:i:s", $stat['mtime']),
-                  'created' => date("Y-m-d H:i:s", $stat['ctime']),
-                  'permissions' => substr(sprintf('%o', fileperms($full)), -4)
-                ]
-              ]);
               break;
 
             default:
@@ -1896,6 +2054,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-modelist.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-language_tools.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/diff_match_patch/20121119/diff_match_patch.js"></script>
     <style>
       :root {
         --ytm-bg: #030303;
@@ -1910,6 +2069,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         background-color: var(--ytm-bg);
         color: var(--ytm-primary-text);
         font-family: 'Roboto', sans-serif;
+      }
+
+      /* Beautiful Scrollbar for Admin Panel */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: var(--ytm-surface);
+      }
+      ::-webkit-scrollbar-thumb {
+        background: var(--ytm-surface-2);
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #555;
+      }
+
+      /* Disable text selection during drag operations */
+      .ide-file-tree {
+        user-select: none;
+        -webkit-user-select: none;
       }
 
       .app-container {
@@ -3228,7 +3409,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               color: #ffffff;
             }
 
-            .ide-tree-item.active {
+            .ide-tree-item.active,
+            .ide-tree-item.selected {
               background-color: rgba(255, 0, 0, 0.2);
               color: #ffffff;
               border-left: 3px solid #ff0000;
@@ -3240,6 +3422,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               display: flex;
               flex-direction: column;
               min-width: 0;
+              position: relative;
             }
 
             .ide-tabs {
@@ -3352,13 +3535,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             .ide-bottom-panel.fullscreen {
               position: absolute;
-              top: 48px;
-              left: 300px;
+              top: 0;
+              left: 0;
               right: 0;
               bottom: 0;
               height: auto !important;
               z-index: 100;
-              border-left: 1px solid #2d2d2d;
+              border-left: none;
             }
 
             .ide-panel-resizer {
@@ -3722,8 +3905,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <button class="ide-ctx-btn" id="ide-btn-new-file"><i class="bi bi-file-earmark-plus"></i> New file here</button>
               <button class="ide-ctx-btn" id="ide-btn-new-folder"><i class="bi bi-folder-plus"></i> New folder here</button>
               <button class="ide-ctx-btn" id="ide-btn-rename"><i class="bi bi-pencil-square"></i> Rename</button>
+              <button class="ide-ctx-btn" id="ide-btn-copy"><i class="bi bi-copy"></i> Copy</button>
+              <button class="ide-ctx-btn" id="ide-btn-cut"><i class="bi bi-scissors"></i> Cut</button>
+              <button class="ide-ctx-btn" id="ide-btn-paste" style="display: none;"><i class="bi bi-clipboard"></i> Paste Here</button>
+              <button class="ide-ctx-btn" id="ide-btn-properties"><i class="bi bi-info-circle"></i> Properties</button>
               <button class="ide-ctx-btn" id="ide-btn-download"><i class="bi bi-download"></i> Download</button>
-              <button class="ide-ctx-btn text-danger" id="ide-btn-delete"><i class="bi bi-trash"></i> Delete</button>
+              <button class="ide-ctx-btn" id="ide-btn-zip"><i class="bi bi-file-zip"></i> Zip Items</button>
+              <button class="ide-ctx-btn" id="ide-btn-unzip"><i class="bi bi-file-zip"></i> Extract Zip</button>
+              <button class="ide-ctx-btn text-danger" id="ide-btn-delete"><i class="bi bi-trash2"></i> Delete</button>
               <hr class="border-secondary my-2 opacity-25">
               <button class="ide-ctx-btn" id="ide-btn-upload"><i class="bi bi-upload"></i> Upload Files</button>
               <button class="ide-ctx-btn" id="ide-btn-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
@@ -3731,95 +3920,173 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <button class="ide-ctx-btn justify-content-center text-secondary fw-bold" onclick="document.getElementById('ide-ctx-modal').style.display='none'">Cancel</button>
             </div>
 
-            <div class="ide-ctx-modal" id="ide-settings-modal" style="width: 300px;">
-              <div class="ide-ctx-title fw-bold">IDE Settings</div>
-              <div class="p-2 text-white" style="font-size: 0.85rem;">
-                <div class="mb-2">
-                  <label class="form-label mb-1">Theme</label>
-                  <select id="ide-setting-theme" class="form-select form-select-sm bg-dark text-white border-secondary">
-                    <optgroup label="Dark Themes">
-                      <option value="ace/theme/ambiance">Ambiance</option>
-                      <option value="ace/theme/chaos">Chaos</option>
-                      <option value="ace/theme/clouds_midnight">Clouds Midnight</option>
-                      <option value="ace/theme/cobalt">Cobalt</option>
-                      <option value="ace/theme/colorforth">Colorforth</option>
-                      <option value="ace/theme/dracula">Dracula</option>
-                      <option value="ace/theme/gob">Gob</option>
-                      <option value="ace/theme/gruvbox">Gruvbox</option>
-                      <option value="ace/theme/idle_fingers">idle Fingers</option>
-                      <option value="ace/theme/kr_theme">krTheme</option>
-                      <option value="ace/theme/merbivore">Merbivore</option>
-                      <option value="ace/theme/merbivore_soft">Merbivore Soft</option>
-                      <option value="ace/theme/mono_industrial">Mono Industrial</option>
-                      <option value="ace/theme/monokai">Monokai</option>
-                      <option value="ace/theme/nord_dark">Nord Dark</option>
-                      <option value="ace/theme/one_dark">One Dark</option>
-                      <option value="ace/theme/pastel_on_dark">Pastel on dark</option>
-                      <option value="ace/theme/solarized_dark">Solarized Dark</option>
-                      <option value="ace/theme/terminal">Terminal</option>
-                      <option value="ace/theme/tomorrow_night">Tomorrow Night</option>
-                      <option value="ace/theme/tomorrow_night_blue">Tomorrow Night Blue</option>
-                      <option value="ace/theme/tomorrow_night_bright">Tomorrow Night Bright</option>
-                      <option value="ace/theme/tomorrow_night_eighties" selected>Tomorrow Night 80s</option>
-                      <option value="ace/theme/twilight">Twilight</option>
-                      <option value="ace/theme/vibrant_ink">Vibrant Ink</option>
-                      <option value="ace/theme/github_dark">GitHub Dark</option>
-                    </optgroup>
-                    <optgroup label="Light Themes">
-                      <option value="ace/theme/chrome">Chrome</option>
-                      <option value="ace/theme/clouds">Clouds</option>
-                      <option value="ace/theme/crimson_editor">Crimson Editor</option>
-                      <option value="ace/theme/dawn">Dawn</option>
-                      <option value="ace/theme/dreamweaver">Dreamweaver</option>
-                      <option value="ace/theme/eclipse">Eclipse</option>
-                      <option value="ace/theme/github">GitHub</option>
-                      <option value="ace/theme/iplastic">IPlastic</option>
-                      <option value="ace/theme/solarized_light">Solarized Light</option>
-                      <option value="ace/theme/textmate">TextMate</option>
-                      <option value="ace/theme/tomorrow">Tomorrow</option>
-                      <option value="ace/theme/xcode">Xcode</option>
-                      <option value="ace/theme/kuroir">Kuroir</option>
-                      <option value="ace/theme/katzenmilch">KatzenMilch</option>
-                      <option value="ace/theme/sqlserver">SQL Server</option>
-                    </optgroup>
-                  </select>
-                </div>
-                <div class="mb-2">
-                  <label class="form-label mb-1">Indentation</label>
-                  <select id="ide-setting-indent" class="form-select form-select-sm bg-dark text-white border-secondary">
-                    <option value="2">2 Spaces</option>
-                    <option value="4">4 Spaces</option>
-                    <option value="tab">Tabs</option>
-                  </select>
-                </div>
-                <div class="mb-2">
-                  <label class="form-label mb-1 d-flex justify-content-between align-items-center">
-                    <span>Font Size</span>
-                    <span id="ide-setting-fontsize-val" class="text-info fw-bold">14px</span>
-                  </label>
-                  <div class="d-flex align-items-center gap-2">
-                    <button type="button" class="btn btn-sm btn-outline-light border-0 px-2 py-0 fw-bold" id="ide-fontsize-minus" style="height: 28px; min-width: 32px;">-</button>
-                    <input type="range" class="form-range flex-grow-1" id="ide-setting-fontsize" min="10" max="36" step="1" value="14">
-                    <button type="button" class="btn btn-sm btn-outline-light border-0 px-2 py-0 fw-bold" id="ide-fontsize-plus" style="height: 28px; min-width: 32px;">+</button>
+            <div class="modal fade" id="ide-settings-modal" tabindex="-1">
+              <div class="modal-dialog modal-dialog-centered modal-sm">
+                <div class="modal-content border-danger shadow-lg" style="background-color: #0a0a0a;">
+                  <div class="modal-header border-bottom border-danger">
+                    <h5 class="modal-title text-white fw-bold"><i class="bi bi-gear-fill text-danger me-2"></i>IDE Settings</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body text-white" style="font-size: 0.85rem;">
+                    <div class="mb-3">
+                      <label class="form-label fw-bold text-danger mb-1">THEME</label>
+                      <select id="ide-setting-theme" class="form-select form-select-sm bg-dark text-white border-secondary">
+                        <optgroup label="Dark Themes">
+                          <option value="ace/theme/ambiance">Ambiance</option>
+                          <option value="ace/theme/chaos">Chaos</option>
+                          <option value="ace/theme/clouds_midnight">Clouds Midnight</option>
+                          <option value="ace/theme/cobalt">Cobalt</option>
+                          <option value="ace/theme/colorforth">Colorforth</option>
+                          <option value="ace/theme/dracula">Dracula</option>
+                          <option value="ace/theme/gob">Gob</option>
+                          <option value="ace/theme/gruvbox">Gruvbox</option>
+                          <option value="ace/theme/idle_fingers">idle Fingers</option>
+                          <option value="ace/theme/kr_theme">krTheme</option>
+                          <option value="ace/theme/merbivore">Merbivore</option>
+                          <option value="ace/theme/merbivore_soft">Merbivore Soft</option>
+                          <option value="ace/theme/mono_industrial">Mono Industrial</option>
+                          <option value="ace/theme/monokai">Monokai</option>
+                          <option value="ace/theme/nord_dark">Nord Dark</option>
+                          <option value="ace/theme/one_dark">One Dark</option>
+                          <option value="ace/theme/pastel_on_dark">Pastel on dark</option>
+                          <option value="ace/theme/solarized_dark">Solarized Dark</option>
+                          <option value="ace/theme/terminal">Terminal</option>
+                          <option value="ace/theme/tomorrow_night">Tomorrow Night</option>
+                          <option value="ace/theme/tomorrow_night_blue">Tomorrow Night Blue</option>
+                          <option value="ace/theme/tomorrow_night_bright">Tomorrow Night Bright</option>
+                          <option value="ace/theme/tomorrow_night_eighties" selected>Tomorrow Night 80s</option>
+                          <option value="ace/theme/twilight">Twilight</option>
+                          <option value="ace/theme/vibrant_ink">Vibrant Ink</option>
+                          <option value="ace/theme/github_dark">GitHub Dark</option>
+                        </optgroup>
+                        <optgroup label="Light Themes">
+                          <option value="ace/theme/chrome">Chrome</option>
+                          <option value="ace/theme/clouds">Clouds</option>
+                          <option value="ace/theme/crimson_editor">Crimson Editor</option>
+                          <option value="ace/theme/dawn">Dawn</option>
+                          <option value="ace/theme/dreamweaver">Dreamweaver</option>
+                          <option value="ace/theme/eclipse">Eclipse</option>
+                          <option value="ace/theme/github">GitHub</option>
+                          <option value="ace/theme/iplastic">IPlastic</option>
+                          <option value="ace/theme/solarized_light">Solarized Light</option>
+                          <option value="ace/theme/textmate">TextMate</option>
+                          <option value="ace/theme/tomorrow">Tomorrow</option>
+                          <option value="ace/theme/xcode">Xcode</option>
+                          <option value="ace/theme/kuroir">Kuroir</option>
+                          <option value="ace/theme/katzenmilch">KatzenMilch</option>
+                          <option value="ace/theme/sqlserver">SQL Server</option>
+                        </optgroup>
+                      </select>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label fw-bold text-danger mb-1">INDENTATION</label>
+                      <select id="ide-setting-indent" class="form-select form-select-sm bg-dark text-white border-secondary">
+                        <option value="2">2 Spaces</option>
+                        <option value="4">4 Spaces</option>
+                        <option value="tab">Tabs</option>
+                      </select>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label d-flex justify-content-between align-items-center fw-bold text-danger mb-1">
+                        <span>FONT SIZE</span>
+                        <span id="ide-setting-fontsize-val" class="text-white">14px</span>
+                      </label>
+                      <div class="d-flex align-items-center gap-2">
+                        <button type="button" class="btn btn-sm btn-outline-danger border-0 px-2 py-0 fw-bold" id="ide-fontsize-minus" style="height: 28px; min-width: 32px;">-</button>
+                        <input type="range" class="form-range flex-grow-1" id="ide-setting-fontsize" min="10" max="36" step="1" value="14">
+                        <button type="button" class="btn btn-sm btn-outline-danger border-0 px-2 py-0 fw-bold" id="ide-fontsize-plus" style="height: 28px; min-width: 32px;">+</button>
+                      </div>
+                    </div>
+                    <div class="form-check form-switch mb-2">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" id="ide-setting-wrap">
+                      <label class="form-check-label">Word Wrap</label>
+                    </div>
+                    <div class="form-check form-switch mb-2">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" id="ide-setting-autosave">
+                      <label class="form-check-label">Auto Save (Every 10s)</label>
+                    </div>
+                    <div class="form-check form-switch mb-2">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" id="ide-setting-show_wordcount">
+                      <label class="form-check-label">Show Word Count</label>
+                    </div>
+                    <div class="form-check form-switch mb-3">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" id="ide-setting-show_charcount">
+                      <label class="form-check-label">Show Character Count</label>
+                    </div>
+                    <?php if (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true): ?>
+                    <hr class="border-danger opacity-50">
+                    <div class="form-check form-switch mb-2">
+                      <input class="form-check-input bg-dark border-danger" type="checkbox" id="ide-setting-disable-cli">
+                      <label class="form-check-label text-danger fw-bold">Disable Terminal / CLI</label>
+                    </div>
+                    <?php endif; ?>
+                  </div>
+                  <div class="modal-footer border-top border-danger">
+                    <button class="btn btn-danger w-100 fw-bold" data-bs-dismiss="modal">Close</button>
                   </div>
                 </div>
-                <div class="form-check form-switch mb-2">
-                  <input class="form-check-input" type="checkbox" id="ide-setting-wrap">
-                  <label class="form-check-label">Word Wrap</label>
+              </div>
+            </div>
+
+            <!-- IDE Rename Modal -->
+            <div class="modal fade" id="ide-rename-modal" tabindex="-1">
+              <div class="modal-dialog modal-dialog-centered modal-sm">
+                <div class="modal-content border-danger shadow-lg" style="background-color: #0a0a0a;">
+                  <div class="modal-header border-bottom border-danger">
+                    <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-danger me-2"></i>Rename</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body text-white">
+                    <div class="mb-3">
+                      <label class="form-label text-danger fw-bold small">NEW NAME</label>
+                      <input type="text" id="ide-rename-input" class="form-control bg-dark text-white border-secondary">
+                    </div>
+                  </div>
+                  <div class="modal-footer border-top border-danger">
+                    <button type="button" class="btn btn-outline-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-danger btn-sm fw-bold" id="ide-rename-submit">Rename</button>
+                  </div>
                 </div>
-                <div class="form-check form-switch mb-2">
-                  <input class="form-check-input" type="checkbox" id="ide-setting-autosave">
-                  <label class="form-check-label">Auto Save (Every 10s)</label>
+              </div>
+            </div>
+
+            <!-- IDE Diff Modal -->
+            <div class="modal fade" id="ide-diff-modal" tabindex="-1">
+              <div class="modal-dialog modal-dialog-centered modal-xl modal-dialog-scrollable">
+                <div class="modal-content border-secondary shadow-lg" style="background-color: #0a0a0a;">
+                  <div class="modal-header border-bottom border-secondary">
+                    <h5 class="modal-title text-white fw-bold"><i class="bi bi-file-diff text-info me-2"></i><span id="ide-diff-title">File Diff</span></h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body text-white font-monospace p-3" id="ide-diff-body" style="font-size: 0.85rem; line-height: 1.6; white-space: pre-wrap; word-break: break-all; background-color: #121212; min-height: 300px;">
+                    <div class="text-center py-5"><div class="spinner-border text-info"></div></div>
+                  </div>
+                  <div class="modal-footer border-top border-secondary py-2">
+                    <div class="d-flex align-items-center gap-3 me-auto small font-monospace">
+                      <span class="badge bg-danger bg-opacity-25 text-danger border border-danger px-2 py-1"><del style="text-decoration:none;">Deleted / Old</del></span>
+                      <span class="badge bg-success bg-opacity-25 text-success border border-success px-2 py-1"><ins style="text-decoration:none;">Added / New</ins></span>
+                    </div>
+                    <button type="button" class="btn btn-outline-light btn-sm fw-bold" data-bs-dismiss="modal">Close</button>
+                  </div>
                 </div>
-                <div class="form-check form-switch mb-2">
-                  <input class="form-check-input" type="checkbox" id="ide-setting-show_wordcount">
-                  <label class="form-check-label">Show Word Count</label>
+              </div>
+            </div>
+
+            <!-- IDE Properties Modal -->
+            <div class="modal fade" id="ide-properties-modal" tabindex="-1">
+              <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content border-danger shadow-lg" style="background-color: #0a0a0a;">
+                  <div class="modal-header border-bottom border-danger">
+                    <h5 class="modal-title text-white fw-bold"><i class="bi bi-info-circle-fill text-danger me-2"></i>Item Properties</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body text-white" id="ide-properties-body">
+                    <div class="text-center py-3"><div class="spinner-border text-danger"></div></div>
+                  </div>
+                  <div class="modal-footer border-top border-danger">
+                    <button type="button" class="btn btn-danger btn-sm fw-bold" data-bs-dismiss="modal">Close</button>
+                  </div>
                 </div>
-                <div class="form-check form-switch mb-3">
-                  <input class="form-check-input" type="checkbox" id="ide-setting-show_charcount">
-                  <label class="form-check-label">Show Character Count</label>
-                </div>
-                <button class="btn btn-sm btn-outline-light w-100" onclick="document.getElementById('ide-settings-modal').style.display='none'">Close</button>
               </div>
             </div>
 
@@ -3829,10 +4096,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="ide-activity-action active" id="act-explorer" title="Explorer" onclick="window.switchIdeSidebar('explorer')"><i class="bi bi-files"></i></div>
                 <div class="ide-activity-action" id="act-git" title="Drive Activity" onclick="window.switchIdeSidebar('git')"><i class="bi bi-activity"></i></div>
                 <div class="ide-activity-action" id="act-history" title="File History" onclick="window.switchIdeSidebar('history')"><i class="bi bi-clock-history"></i></div>
-                <div class="ide-activity-action" id="act-trash" title="Trash" onclick="window.switchIdeSidebar('trash')"><i class="bi bi-trash"></i></div>
-                <div class="ide-activity-action mt-auto mb-2" id="act-settings" title="Settings"><i class="bi bi-gear-fill"></i></div>
-                <div class="ide-activity-action mb-2 text-info" title="Terminal" onclick="window.toggleIdeTerminal()"><i class="bi bi-terminal-fill"></i></div>
-                <div class="ide-activity-action mb-3 text-success" title="Backup ZIP" onclick="window.exportWorkspace()"><i class="bi bi-file-zip-fill"></i></div>
+                <div class="ide-activity-action" id="act-trash" title="Trash" onclick="window.switchIdeSidebar('trash')"><i class="bi bi-trash2"></i></div>
+                <div class="ide-activity-action mt-auto mb-2" id="act-settings" title="Settings"><i class="bi bi-sliders"></i></div>
+                <div class="ide-activity-action mb-2" title="Terminal" onclick="window.toggleIdeTerminal()"><i class="bi bi-terminal"></i></div>
+                <div class="ide-activity-action mb-3" title="Backup ZIP" onclick="window.exportWorkspace()"><i class="bi bi-file-zip"></i></div>
               </div>
 
               <!-- Main Sidebar -->
@@ -3841,10 +4108,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="ide-sidebar-header d-flex justify-content-between align-items-center" id="ide-sidebar-title">
                   <span>EXPLORER</span>
                   <div class="d-flex gap-2">
+                    <i class="bi bi-search" style="cursor:pointer;" id="ide-tree-search" title="Search Files"></i>
                     <i class="bi bi-file-earmark-plus" style="cursor:pointer;" id="ide-tree-new-file" title="New File"></i>
                     <i class="bi bi-folder-plus" style="cursor:pointer;" id="ide-tree-new-folder" title="New Folder"></i>
                     <i class="bi bi-upload" style="cursor:pointer;" id="ide-tree-upload" title="Upload"></i>
                     <i class="bi bi-arrow-clockwise" style="cursor:pointer;" id="ide-refresh-tree" title="Refresh"></i>
+                  </div>
+                </div>
+                <div id="ide-sidebar-search-container" class="p-2 d-none border-bottom" style="border-color: #1a1a1a;">
+                  <input type="text" id="ide-sidebar-search-input" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="Search files...">
+                </div>
+                
+                <div id="ide-sidebar-clipboard-container" class="p-2 d-none border-bottom" style="border-color: #1a1a1a; background-color: rgba(255, 0, 0, 0.05);">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-danger fw-bold" style="font-size: 0.75rem; text-transform: uppercase;" id="ide-clipboard-status">0 items copied</span>
+                    <button class="btn btn-sm btn-link text-secondary py-0 px-2 m-0" id="ide-btn-cancel-clipboard"><i class="bi bi-x-lg"></i></button>
+                  </div>
+                  <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-secondary w-100 fw-bold" id="ide-btn-clipboard-new-folder" title="New Folder Here"><i class="bi bi-folder-plus"></i> Folder</button>
+                    <button class="btn btn-sm btn-danger w-100 fw-bold" id="ide-btn-clipboard-paste" title="Paste Here"><i class="bi bi-clipboard"></i> Paste</button>
                   </div>
                 </div>
                 
@@ -3894,49 +4176,48 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     </div>
                   </div>
                 </div>
-              </div>
-            </div>
-            
-            <!-- Bottom Terminal / Output Panel -->
-            <div class="ide-bottom-panel" id="ide-bottom-panel">
-              <div class="ide-panel-resizer" id="ide-panel-resizer"></div>
-              <div class="panel-header">
-                <div class="panel-tabs">
-                  <div class="panel-tab active" data-target="output">OUTPUT</div>
-                  <div class="panel-tab" data-target="problems">PROBLEMS</div>
-                  <div class="panel-tab" data-target="terminal">TERMINAL</div>
-                </div>
-                <div class="panel-actions d-flex align-items-center gap-3">
-                  <i class="bi bi-arrow-clockwise" id="panel-reload" title="Hard Reload Preview"></i>
-                  <i class="bi bi-bug" id="panel-eruda" title="Toggle Eruda Inspect (Preview)"></i>
-                  <i class="bi bi-window-stack" id="panel-popup" title="Open in Popup Window"></i>
-                  <i class="bi bi-box-arrow-up-right" id="panel-newtab" title="Open Preview in New Tab"></i>
-                  <i class="bi bi-x-circle" id="panel-clear" title="Clear Console"></i>
-                  <i class="bi bi-chevron-up" id="panel-fullscreen" title="Toggle Size"></i>
-                  <i class="bi bi-x" id="panel-close" title="Close Panel"></i>
-                </div>
-              </div>
-              <div class="panel-content-area">
-                <div class="panel-pane active" id="pane-output">
-                  <iframe id="ide-preview-iframe" class="w-100 h-100 border-0 bg-white" src="about:blank"></iframe>
-                </div>
-                <div class="panel-pane" id="pane-terminal">
-                  <div class="text-success">PHP Music Console v1.0.0</div>
-                  <div class="text-secondary mt-1">Terminal environment linked to server.</div>
-                  <div id="terminal-logs" class="mt-2" style="white-space: pre-wrap; font-family: monospace;"></div>
-                  <div class="d-flex align-items-center mt-2">
-                    <span class="text-success me-2"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'admin@server'); ?>:~$</span>
-                    <input type="text" id="ide-terminal-input" class="bg-transparent border-0 text-light flex-grow-1 outline-none shadow-none" style="outline:none; font-family: monospace;" placeholder="Type a command (e.g. ls, pwd)...">
+
+              <!-- Bottom Terminal / Output Panel -->
+              <div class="ide-bottom-panel" id="ide-bottom-panel">
+                <div class="ide-panel-resizer" id="ide-panel-resizer"></div>
+                <div class="panel-header">
+                  <div class="panel-tabs">
+                    <div class="panel-tab active" data-target="output">OUTPUT</div>
+                    <div class="panel-tab" data-target="problems">PROBLEMS</div>
+                    <div class="panel-tab" data-target="terminal">TERMINAL</div>
+                  </div>
+                  <div class="panel-actions d-flex align-items-center gap-3">
+                    <i class="bi bi-arrow-clockwise" id="panel-reload" title="Hard Reload Preview"></i>
+                    <i class="bi bi-bug" id="panel-eruda" title="Toggle Eruda Inspect (Preview)"></i>
+                    <i class="bi bi-window-stack" id="panel-popup" title="Open in Popup Window"></i>
+                    <i class="bi bi-box-arrow-up-right" id="panel-newtab" title="Open Preview in New Tab"></i>
+                    <i class="bi bi-x-circle" id="panel-clear" title="Clear Console"></i>
+                    <i class="bi bi-chevron-up" id="panel-fullscreen" title="Toggle Size"></i>
+                    <i class="bi bi-x" id="panel-close" title="Close Panel"></i>
                   </div>
                 </div>
-                <div class="panel-pane" id="pane-problems">
-                  <div class="text-secondary">No problems have been detected in the workspace.</div>
+                <div class="panel-content-area">
+                  <div class="panel-pane active" id="pane-output">
+                    <iframe id="ide-preview-iframe" class="w-100 h-100 border-0 bg-white" src="about:blank"></iframe>
+                  </div>
+                  <div class="panel-pane" id="pane-terminal">
+                    <div class="text-success">PHP Music Console v1.0.0</div>
+                    <div class="text-secondary mt-1">Terminal environment linked to server.</div>
+                    <div id="terminal-logs" class="mt-2" style="white-space: pre-wrap; font-family: monospace;"></div>
+                    <div class="d-flex align-items-center mt-2">
+                      <span class="text-success me-2"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'admin@server'); ?>:~$</span>
+                      <input type="text" id="ide-terminal-input" class="bg-transparent border-0 text-light flex-grow-1 outline-none shadow-none" style="outline:none; font-family: monospace;" placeholder="Type a command (e.g. ls, pwd)...">
+                    </div>
+                  </div>
+                  <div class="panel-pane" id="pane-problems">
+                    <div class="text-secondary">No problems have been detected in the workspace.</div>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-          
-         <script>
+              
+          <script>
             (function initIDE() {
               const editorDiv = document.getElementById('ide-editor');
               if (!editorDiv) return; // Only run on IDE page
@@ -3965,8 +4246,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const val = aceEditor.getValue();
                 const charCount = val.length;
                 let wordCount = 0;
-                if (charCount > 1000000) {
-                  wordCount = '~' + Math.round(charCount / 6); // Fast approximation for files >1MB to prevent typing lag
+                if (charCount > 100000) {
+                  wordCount = '~' + Math.round(charCount / 6); // Fast approximation for large files to prevent UI freeze
                 } else {
                   wordCount = val.trim() ? val.trim().split(/\s+/).length : 0;
                 }
@@ -4044,8 +4325,31 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               let currentPath = '';
               let openFiles = JSON.parse(localStorage.getItem('ide_open_files') || '[]');
               let activeTabPath = localStorage.getItem('ide_active_tab') || '';
+
+              window.ideSelectedItems = new Set();
+              let isIdeSelecting = false;
+              let ideSelectionBox = null;
+              let ideSelectStartX = 0, ideSelectStartY = 0;
+              let baseIdeSelected = new Set();
+
+              window.updateIdeSelectionUI = () => {
+                const treeEl = document.getElementById('ide-file-tree');
+                if (treeEl) {
+                  treeEl.querySelectorAll('.ide-tree-item').forEach(el => {
+                    // Wipe any stale inline styles from previous buggy clicks
+                    el.style.backgroundColor = '';
+                    el.style.color = '';
+                    
+                    if (window.ideSelectedItems.has(el.dataset.path)) {
+                      el.classList.add('selected');
+                    } else {
+                      el.classList.remove('selected');
+                    }
+                  });
+                }
+              };
               
-              const mediaExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'mp4', 'webm', 'mp3', 'wav', 'ogg'];
+              const mediaExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'mp4', 'webm', 'mp3', 'wav', 'ogg', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'rtf', 'odt', 'ods', 'odp', 'csv'];
 
               const termLog = (msg, isError = false) => {
                 const logs = document.getElementById('terminal-logs');
@@ -4053,6 +4357,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               };
 
               const loadTree = async (path = '') => {
+                window.currentIdeTreePath = path;
                 try {
                   const res = await fetch(`?access=admin&page=drive&api=true&action=list&path=${encodeURIComponent(path)}`);
                   const data = await res.json();
@@ -4084,7 +4389,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 treeEl.innerHTML = html;
                 
                 treeEl.querySelectorAll('.ide-folder-toggle').forEach(el => {
-                  el.addEventListener('click', () => loadTree(el.dataset.path));
+                  el.addEventListener('click', (e) => {
+                    if (typeof window.ideHasDragged !== 'undefined' && window.ideHasDragged) return;
+                    if (e.ctrlKey || e.shiftKey || e.metaKey) return;
+                    loadTree(el.dataset.path);
+                  });
                   el.addEventListener('contextmenu', (e) => {
                     e.preventDefault();
                     window.showIdeContextMenu(el.dataset.path, el.dataset.name, true);
@@ -4092,7 +4401,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
                 
                 treeEl.querySelectorAll('.ide-file-item').forEach(el => {
-                  el.addEventListener('click', () => {
+                  el.addEventListener('click', (e) => {
+                    if (typeof window.ideHasDragged !== 'undefined' && window.ideHasDragged) return;
+                    if (e.ctrlKey || e.shiftKey || e.metaKey) return;
+
                     const path = el.dataset.path;
                     const name = el.dataset.name;
                     const ext = el.dataset.ext;
@@ -4123,6 +4435,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const activeEl = treeEl.querySelector(`[data-path="${activeTabPath}"]`);
                   if(activeEl) activeEl.classList.add('active');
                 }
+                window.updateIdeSelectionUI();
               };
               
               const renderTabs = () => {
@@ -4173,6 +4486,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   mediaViewer.classList.replace('d-none', 'd-flex');
                   const streamUrl = `?access=admin&page=drive&api=true&action=stream&file=${encodeURIComponent(path)}`;
                   
+                  const docExts = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'rtf', 'odt', 'ods', 'odp', 'csv'];
                   if (file.isImage || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(file.ext)) {
                     mediaContent.innerHTML = `<img src="${streamUrl}" id="ide-media-img" style="max-width: 100%; max-height: 100%; object-fit: contain;">`;
                     document.getElementById('ide-media-img').onload = function() {
@@ -4180,15 +4494,32 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       if(resInfo) resInfo.textContent = ` | Res: ${this.naturalWidth}x${this.naturalHeight}`;
                     };
                   } else if (['mp4', 'webm'].includes(file.ext)) {
-                    mediaContent.innerHTML = `<video src="${streamUrl}" id="ide-media-vid" controls style="max-width: 100%; max-height: 100%; outline: none;"></video>`;
+                    mediaContent.innerHTML = `<video src="${streamUrl}" id="ide-media-vid" controls preload="metadata" style="max-width: 100%; max-height: 100%; outline: none;"></video>`;
                     document.getElementById('ide-media-vid').onloadedmetadata = function() {
                       const resInfo = document.getElementById('media-res-info');
                       if(resInfo) resInfo.textContent = ` | Res: ${this.videoWidth}x${this.videoHeight}`;
                     };
+                  } else if (docExts.includes(file.ext)) {
+                    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+                    const absoluteStreamUrl = window.location.origin + window.location.pathname + streamUrl;
+                    let viewerSrc = streamUrl; 
+                    if (file.ext !== 'pdf') {
+                       viewerSrc = isLocalhost ? streamUrl : `https://docs.google.com/viewer?url=${encodeURIComponent(absoluteStreamUrl)}&embedded=true`;
+                    }
+                    
+                    if (isLocalhost && file.ext !== 'pdf') {
+                       mediaContent.innerHTML = `
+                          <div class="d-flex flex-column align-items-center justify-content-center text-center p-5 text-secondary">
+                             <i class="bi bi-file-earmark-x fs-1 mb-3" style="font-size: 3rem;"></i>
+                             <p>Google Docs Viewer cannot access localhost files.<br><a href="${streamUrl}" target="_blank" class="text-info fw-bold">Download file to View</a></p>
+                          </div>`;
+                    } else {
+                       mediaContent.innerHTML = `<iframe src="${viewerSrc}" style="width: 100%; height: 100%; border: none; background: #fff;"></iframe>`;
+                    }
                   } else {
                     mediaContent.innerHTML = `
                       <i class="bi bi-music-note-beamed text-danger mb-3" style="font-size: 4rem;"></i>
-                      <audio src="${streamUrl}" controls style="width: 300px; outline: none;"></audio>
+                      <audio src="${streamUrl}" controls preload="metadata" style="width: 300px; outline: none;"></audio>
                     `;
                   }
                   
@@ -4237,11 +4568,120 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     return;
                   }
 
-                  // Optimize Ace Editor performance for files larger than 2MB
-                  if (file.size > 2 * 1024 * 1024) {
+                  // Optimize Ace Editor performance for massive files
+                  let targetMode = "ace/mode/text";
+
+                  if (file.size > 5.0 * 1024 * 1024) { // > 5MB EXTREME Optimization (Hundreds of thousands of lines)
                     aceEditor.session.setUseWorker(false);
+                    targetMode = "ace/mode/text"; // Force plain text to avoid syntax regex engine freezing
+                    try {
+                      aceEditor.setOptions({
+                        enableBasicAutocompletion: false,
+                        enableLiveAutocompletion: false,
+                        enableSnippets: false,
+                        wrap: false,
+                        foldStyle: 'manual',
+                        displayIndentGuides: false,
+                        showFoldWidgets: false,
+                        animatedScroll: false,
+                        useWorker: false
+                      });
+                    } catch(e) {}
+                  } else if (file.size > 1.0 * 1024 * 1024) { // > 1MB Heavy Optimization
+                    aceEditor.session.setUseWorker(false);
+                    try {
+                      let modelist = ace.require("ace/ext/modelist");
+                      if (modelist) targetMode = modelist.getModeForPath(file.name).mode;
+                      aceEditor.setOptions({
+                        enableBasicAutocompletion: false,
+                        enableLiveAutocompletion: false,
+                        wrap: false,
+                        foldStyle: 'manual',
+                        useWorker: false
+                      });
+                    } catch(e) {}
                   } else {
                     aceEditor.session.setUseWorker(true);
+                    try {
+                      let modelist = ace.require("ace/ext/modelist");
+                      if (modelist) targetMode = modelist.getModeForPath(file.name).mode;
+                    } catch(e) {}
+                    
+                    try {
+                      aceEditor.setOptions({
+                        enableBasicAutocompletion: true,
+                        enableLiveAutocompletion: true,
+                        enableSnippets: true,
+                        wrap: localStorage.getItem('ide_wrap') === 'true'
+                      });
+                    } catch(e) {
+                      aceEditor.setOption('wrap', localStorage.getItem('ide_wrap') === 'true');
+                    }
+                    
+                    // Advanced OOP, Contextual Parsing, and Framework Autocompletion
+                    try {
+                      const langTools = ace.require("ace/ext/language_tools");
+                      if (langTools) {
+                        const advancedPhpCompleter = {
+                          getCompletions: function(editor, session, pos, prefix, callback) {
+                            let completions = [
+                              {caption: "Route::get", value: "Route::get('/${1:path}', function () {\n    return view('${2:view}');\n});", meta: "Laravel"},
+                              {caption: "Route::post", value: "Route::post('/${1:path}', [${2:Controller}::class, '${3:method}']);", meta: "Laravel"},
+                              {caption: "$this->render", value: "$this->render('${1:template.html.twig}', [\n    '${2:var}' => $${3:val},\n]);", meta: "Symfony"},
+                              {caption: "dd()", value: "dd($${1:var});", meta: "Debug"},
+                              {caption: "dump()", value: "dump($${1:var});", meta: "Debug"},
+                              {caption: "Log::info", value: "Log::info('${1:message}', ['${2:context}' => $${3:var}]);", meta: "Laravel"},
+                              
+                              // Deep PHP OOP Integration & Structural Snippets
+                              {caption: "public function", value: "public function ${1:name}() {\n    ${2}\n}", meta: "Method"},
+                              {caption: "private function", value: "private function ${1:name}() {\n    ${2}\n}", meta: "Method"},
+                              {caption: "protected function", value: "protected function ${1:name}() {\n    ${2}\n}", meta: "Method"},
+                              {caption: "public static function", value: "public static function ${1:name}() {\n    ${2}\n}", meta: "Method"},
+                              {caption: "__construct", value: "public function __construct(${1}) {\n    ${2}\n}", meta: "Magic"},
+                              {caption: "class", value: "class ${1:Name} {\n    ${2}\n}", meta: "OOP"},
+                              {caption: "interface", value: "interface ${1:Name} {\n    ${2}\n}", meta: "OOP"},
+                              {caption: "trait", value: "trait ${1:Name} {\n    ${2}\n}", meta: "OOP"},
+                              {caption: "try", value: "try {\n    ${1}\n} catch (\\Exception \\$e) {\n    ${2}\n}", meta: "PHP"}
+                            ];
+
+                            const line = session.getLine(pos.row);
+                            const linePrefix = line.slice(0, pos.column);
+                            
+                            // DYNAMIC AST SCANNER: If user types $this-> or self::, parse document for internal references
+                            if (linePrefix.match(/(?:\$this->|self::)[a-zA-Z0-9_]*$/)) {
+                              const fullText = session.getValue();
+                              
+                              // 1. Extract Local Methods
+                              const methodRegex = /function\s+([a-zA-Z0-9_]+)\s*\(/g;
+                              let m;
+                              while ((m = methodRegex.exec(fullText)) !== null) {
+                                completions.push({
+                                  caption: m[1] + '()',
+                                  value: m[1] + "(${1})",
+                                  meta: "Local Method"
+                                });
+                              }
+                              
+                              // 2. Extract Local Properties
+                              const propRegex = /(?:public|protected|private|var)\s+\$([a-zA-Z0-9_]+)/g;
+                              let p;
+                              while ((p = propRegex.exec(fullText)) !== null) {
+                                completions.push({
+                                  caption: p[1],
+                                  value: p[1],
+                                  meta: "Local Property"
+                                });
+                              }
+                            }
+
+                            callback(null, completions);
+                          }
+                        };
+                        
+                        // Enforce clean state: Clear stale completers to prevent duplicate stacking when switching files
+                        langTools.setCompleters([langTools.snippetCompleter, langTools.textCompleter, langTools.keyWordCompleter, advancedPhpCompleter]);
+                      }
+                    } catch(e) {}
                   }
 
                   mediaViewer.classList.replace('d-flex', 'd-none');
@@ -4249,18 +4689,45 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   editorDiv.style.pointerEvents = 'auto';
                   termLog(`Fetching text buffer: ${path}`);
                   
-                  const res = await fetch(`?access=admin&page=drive&api=true&action=read&file=${encodeURIComponent(path)}`);
-                  const data = await res.json();
-                  if(data && data.success) {
-                    aceEditor.setValue(data.content, -1);
-                    let modelist = ace.require("ace/ext/modelist");
-                    let mode = modelist.getModeForPath(file.name).mode;
-                    aceEditor.session.setMode(mode);
+                  let data;
+                  try {
+                    const res = await fetch(`?access=admin&page=drive&api=true&action=read&file=${encodeURIComponent(path)}&t=${Date.now()}`);
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    data = await res.json();
+                  } catch (fetchErr) {
+                    termLog(`Network Error reading file: ${fetchErr.message}`, true);
+                    return;
+                  }
+                  
+                  if (data && data.success) {
+                    // Prevent race condition: If the user switched tabs during the fetch, discard this stale buffer.
+                    if (path !== activeTabPath) {
+                      termLog(`Discarded stale buffer for ${path} (Switched tabs).`);
+                      return;
+                    }
+                    
+                    const safeContent = data.content || '';
+                    window.isIdeLoadingFile = true;
+                    
+                    if (file.size > 5.0 * 1024 * 1024) {
+                      // EXTREME PERFORMANCE BYPASS: Suspend AST history rendering
+                      aceEditor.session.setValue(safeContent);
+                    } else {
+                      aceEditor.setValue(safeContent, -1);
+                    }
+                    
+                    try {
+                      const um = aceEditor.session.getUndoManager();
+                      if (um) um.markClean();
+                    } catch(e) {}
+                    window.isIdeLoadingFile = false;
+
+                    aceEditor.session.setMode(targetMode);
                     setTimeout(() => {
                       aceEditor.resize(true);
                       aceEditor.clearSelection();
                     }, 100);
-                    termLog(`Loaded ${data.content.length} bytes.`);
+                    termLog(`Loaded ${safeContent.length} bytes.`);
                     fetchHistory(path, file.name);
                     
                     // Automatically update preview output iframe when changing active file tab
@@ -4289,13 +4756,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               window.ideCloseTab = async (path, e) => {
                 if (e && e.stopPropagation) e.stopPropagation();
+                
+                const targetTabTitle = document.querySelector(`.ide-tab[data-path="${path.replace(/"/g, '\\"')}"] .tab-title`);
+                const isDirty = targetTabTitle && targetTabTitle.innerText.endsWith(' *');
                 const isAutosaveOn = localStorage.getItem('ide_autosave') !== 'false';
-                if (isAutosaveOn && path === currentPath) {
-                  const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath}"] .tab-title`);
-                  if (activeTab && activeTab.innerText.endsWith(' *')) {
+                
+                if (isDirty) {
+                  if (isAutosaveOn && path === currentPath) {
                     await window.saveCurrentFile(true);
+                  } else if (!confirm(`You have unsaved changes in this file. Do you really want to close it and lose your changes?`)) {
+                    return;
                   }
                 }
+                
                 const idx = openFiles.findIndex(f => f.path === path);
                 openFiles = openFiles.filter(f => f.path !== path);
                 localStorage.setItem('ide_open_files', JSON.stringify(openFiles));
@@ -4318,50 +4791,106 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const fetchHistory = async (path, name) => {
                 const histPane = document.getElementById('ide-history-tree');
                 if(!histPane) return;
-                const res = await fetch(`?access=admin&page=drive&api=true&action=get_versions`, {
-                  method: 'POST',
-                  headers: {'Content-Type': 'application/json'},
-                  body: JSON.stringify({ file: path })
-                });
-                const data = await res.json();
-                if (data && data.success && data.versions.length > 0) {
-                  histPane.innerHTML = `<div class="mb-3 text-white fw-bold">History: ${name}</div>` + 
+                const data = await driveFetch('get_versions', { action: 'get_versions', file: path }, path);
+                if (data && data.success && data.versions && data.versions.length > 0) {
+                  histPane.innerHTML = `<div class="mb-3 text-white fw-bold d-flex align-items-center justify-content-between" style="font-size: 0.82rem;"><span class="text-truncate me-2"><i class="bi bi-clock-history text-danger me-1"></i> ${name}</span><span class="badge bg-dark border border-secondary text-secondary">${data.versions.length}</span></div>` + 
                     data.versions.map(v => `
-                      <div class="d-flex flex-column bg-dark p-2 rounded mb-2 border border-secondary">
-                        <span class="text-info mb-1">${new Date(v.mtime * 1000).toLocaleString()}</span>
-                        <div class="d-flex justify-content-between align-items-center">
-                          <span class="text-secondary">${v.size}</span>
-                          <button class="btn btn-sm btn-outline-warning py-0" onclick="window.ideRestoreVersion('${path}', '${v.name}')">Restore</button>
+                      <div class="p-2 rounded-3 mb-2 shadow-sm" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                          <span class="text-white fw-medium small d-flex align-items-center gap-1" style="font-size: 0.75rem;">
+                            <i class="bi bi-clock text-secondary"></i> ${new Date(v.mtime * 1000).toLocaleString([], {month:'numeric', day:'numeric', year:'2-digit', hour:'2-digit', minute:'2-digit'})}
+                          </span>
+                          <span class="badge bg-black text-secondary border border-secondary" style="font-size: 0.68rem;">${v.size}</span>
+                        </div>
+                        <div class="d-flex gap-1">
+                          <button class="btn btn-sm btn-outline-info flex-grow-1 py-1 px-2 fw-semibold d-flex align-items-center justify-content-center gap-1" style="font-size: 0.75rem;" onclick="window.ideDiffVersion('${path}', '${v.name}')"><i class="bi bi-file-diff"></i> Diff</button>
+                          <button class="btn btn-sm btn-outline-warning flex-grow-1 py-1 px-2 fw-semibold d-flex align-items-center justify-content-center gap-1" style="font-size: 0.75rem;" onclick="window.ideRestoreVersion('${path}', '${v.name}')"><i class="bi bi-arrow-counterclockwise"></i> Restore</button>
                         </div>
                       </div>
                     `).join('');
                 } else {
-                  histPane.innerHTML = `<div class="text-secondary">No version history found for ${name}.</div>`;
+                  histPane.innerHTML = `<div class="text-secondary small p-2"><i class="bi bi-info-circle me-1"></i> No version history found for ${name}.</div>`;
+                }
+              };
+
+              window.ideDiffVersion = async (path, versionName) => {
+                const diffModalEl = document.getElementById('ide-diff-modal');
+                const diffBody = document.getElementById('ide-diff-body');
+                const diffTitle = document.getElementById('ide-diff-title');
+                if (!diffModalEl || !diffBody) return;
+
+                const fileName = path.split('/').pop();
+                if (diffTitle) diffTitle.textContent = `Diff: ${fileName} (Old vs Current)`;
+                diffBody.innerHTML = '<div class="text-center py-5"><div class="spinner-border text-info" role="status"></div><div class="text-secondary mt-2 small font-monospace">Computing diff changes...</div></div>';
+                
+                const modal = bootstrap.Modal.getOrCreateInstance(diffModalEl);
+                modal.show();
+
+                try {
+                  const currentRes = await fetch(`?access=admin&page=drive&api=true&action=read&file=${encodeURIComponent(path)}&t=${Date.now()}`);
+                  const currentData = await currentRes.json();
+                  
+                  const oldRes = await fetch(`?access=admin&page=drive&api=true&action=read&file=${encodeURIComponent('.file_version/' + fileName + '/' + versionName)}&t=${Date.now()}`);
+                  const oldData = await oldRes.json();
+                  
+                  if (currentData && currentData.success && oldData && oldData.success) {
+                    if (typeof diff_match_patch !== 'undefined') {
+                      const dmp = new diff_match_patch();
+                      const diffs = dmp.diff_main(oldData.content || '', currentData.content || '');
+                      dmp.diff_cleanupSemantic(diffs);
+                      
+                      const escapeHTML = str => (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                      
+                      let diffHtml = '';
+                      diffs.forEach(diff => {
+                        const op = diff[0];
+                        const text = escapeHTML(diff[1]);
+                        if (op === 1) { // Added
+                          diffHtml += `<ins style="background: rgba(34, 197, 94, 0.25); color: #86efac; text-decoration: none; padding: 1px 3px; border-radius: 2px;">${text}</ins>`;
+                        } else if (op === -1) { // Removed
+                          diffHtml += `<del style="background: rgba(239, 68, 68, 0.25); color: #fca5a5; text-decoration: none; padding: 1px 3px; border-radius: 2px;">${text}</del>`;
+                        } else {
+                          diffHtml += text;
+                        }
+                      });
+                      
+                      diffBody.innerHTML = diffHtml || '<span class="text-secondary">Files are identical. No differences found.</span>';
+                    } else {
+                      diffBody.innerHTML = '<div class="alert alert-danger m-0">Diff match patch library is not loaded.</div>';
+                    }
+                  } else {
+                    diffBody.innerHTML = `<div class="alert alert-danger m-0">Failed to read version contents.</div>`;
+                  }
+                } catch (e) {
+                  diffBody.innerHTML = `<div class="alert alert-danger m-0">Error calculating diff: ${e.message}</div>`;
                 }
               };
 
               window.ideRestoreVersion = async (path, versionName) => {
                 if(!confirm(`Restore version ${versionName}? Current state will be backed up.`)) return;
                 termLog(`Restoring version ${versionName} for ${path}...`);
-                const res = await fetch(`?access=admin&page=drive&api=true&action=restore_version`, {
-                  method: 'POST',
-                  headers: {'Content-Type':'application/json'},
-                  body: JSON.stringify({ file: path, version_name: versionName })
-                });
-                const data = await res.json();
+                const data = await driveFetch('restore_version', { action: 'restore_version', file: path, version_name: versionName }, path);
                 if (data && data.success) {
                   termLog(`Restore successful. Reloading buffer.`);
                   window.ideOpenTab(path); // Reload
                 } else {
-                  termLog(`Restore failed: ${data.error}`, true);
+                  termLog(`Restore failed: ${data ? data.error : 'Unknown error'}`, true);
                 }
               };
               
               // Mark File as Unsaved visually using Ace Editor's logic hooks
               aceEditor.on("change", () => {
-                const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath}"] .tab-title`);
-                if (activeTab && !activeTab.innerText.endsWith(' *')) {
-                  activeTab.innerText += ' *';
+                if (window.isIdeLoadingFile) return;
+                const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath.replace(/"/g, '\\"')}"] .tab-title`);
+                if (activeTab) {
+                  const um = aceEditor.session.getUndoManager();
+                  const isClean = um ? um.isClean() : false;
+                  
+                  if (!isClean && !activeTab.innerText.endsWith(' *')) {
+                    activeTab.innerText += ' *';
+                  } else if (isClean && activeTab.innerText.endsWith(' *')) {
+                    activeTab.innerText = activeTab.innerText.replace(/\s*\*\s*$/, '');
+                  }
                 }
               });
               
@@ -4381,18 +4910,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if(!silent) btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
                 
                 const content = aceEditor.getValue();
-                const res = await fetch(`?access=admin&page=drive&api=true&action=write`, {
-                  method: 'POST',
-                  headers: {'Content-Type':'application/json'},
-                  // The backend strictly requires the 'action' key inside the JSON body payload to process the stream
-                  body: JSON.stringify({ action: 'write', file: currentPath, content: content })
-                });
-                const data = await res.json();
-                if(data && data.success) {
+                const data = await driveFetch('write', { action: 'write', file: currentPath, content: content }, currentPath);
+
+                if (data && data.success) {
+                  try {
+                    const um = aceEditor.session.getUndoManager();
+                    if (um) um.markClean();
+                  } catch(e) {}
+
                   // Remove Save Indicator (*) from visually active tab
-                  const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath}"] .tab-title`);
-                  if (activeTab && activeTab.innerText.endsWith(' *')) {
-                    activeTab.innerText = activeTab.innerText.slice(0, -2);
+                  const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath.replace(/"/g, '\\"')}"] .tab-title`);
+                  if (activeTab) {
+                    activeTab.innerText = activeTab.innerText.replace(/\s*\*\s*$/, '');
                   }
                   
                   if(!silent) {
@@ -4411,10 +4940,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 } else {
                   if(!silent) {
                     btn.innerHTML = orig;
-                    termLog(`Save failed: ${data.error}`, true);
+                    termLog(`Save failed: ${data ? data.error : 'Unknown error'}`, true);
                   }
                 }
               };
+
+              window.addEventListener('beforeunload', (e) => {
+                const dirtyTabs = document.querySelectorAll('.ide-tab .tab-title');
+                let hasDirty = false;
+                dirtyTabs.forEach(tab => {
+                  if (tab.innerText.endsWith(' *')) hasDirty = true;
+                });
+                if (hasDirty) {
+                  e.preventDefault();
+                  e.returnValue = '';
+                  return '';
+                }
+              });
 
               // Automatic saving every 10 seconds if enabled and editor has changes
               setInterval(() => {
@@ -4434,31 +4976,140 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               // Custom Context Modal & Sidebar Interactivity Definitions
               window.showIdeContextMenu = (path, name, isFolder) => {
                 const modal = document.getElementById('ide-ctx-modal');
-                document.getElementById('ide-ctx-title').innerText = name || '/ (Root)';
-                document.getElementById('ide-ctx-path').value = path || '';
-                document.getElementById('ide-ctx-is-folder').value = isFolder ? '1' : '0';
                 
-                const isRoot = path === '';
-                // Hide file/folder creation options if the clicked item is a file
-                document.getElementById('ide-btn-new-file').style.display = isFolder ? 'flex' : 'none';
-                document.getElementById('ide-btn-new-folder').style.display = isFolder ? 'flex' : 'none';
-                
-                // Hide destructive actions on the Root Workspace block to prevent crashes
-                document.getElementById('ide-btn-rename').style.display = isRoot ? 'none' : 'flex';
-                document.getElementById('ide-btn-delete').style.display = isRoot ? 'none' : 'flex';
-                const dlBtn = document.getElementById('ide-btn-download');
-                if (dlBtn) dlBtn.style.display = isRoot ? 'none' : 'flex';
+                if (path && !window.ideSelectedItems.has(path)) {
+                  window.ideSelectedItems.clear();
+                  window.ideSelectedItems.add(path);
+                  window.updateIdeSelectionUI();
+                }
+
+                const multiCount = window.ideSelectedItems.size;
+
+                if (multiCount > 1) {
+                  document.getElementById('ide-ctx-title').innerText = `${multiCount} items selected`;
+                  document.getElementById('ide-ctx-path').value = Array.from(window.ideSelectedItems).join('|');
+                  document.getElementById('ide-ctx-is-folder').value = '0'; 
+                  
+                  document.getElementById('ide-btn-new-file').style.display = 'none';
+                  document.getElementById('ide-btn-new-folder').style.display = 'none';
+                  document.getElementById('ide-btn-rename').style.display = 'none';
+                  const copyBtn = document.getElementById('ide-btn-copy');
+                  if (copyBtn) copyBtn.style.display = 'flex';
+                  const cutBtn = document.getElementById('ide-btn-cut');
+                  if (cutBtn) cutBtn.style.display = 'flex';
+                  const pasteBtn = document.getElementById('ide-btn-paste');
+                  if (pasteBtn) pasteBtn.style.display = 'none';
+                  const propBtn = document.getElementById('ide-btn-properties');
+                  if (propBtn) propBtn.style.display = 'flex';
+                  document.getElementById('ide-btn-delete').style.display = 'flex';
+                  const dlBtn = document.getElementById('ide-btn-download');
+                  if (dlBtn) dlBtn.style.display = 'flex';
+                  const zipBtn = document.getElementById('ide-btn-zip');
+                  if (zipBtn) zipBtn.style.display = 'flex';
+                  const unzipBtn = document.getElementById('ide-btn-unzip');
+                  if (unzipBtn) unzipBtn.style.display = 'none';
+                } else {
+                  document.getElementById('ide-ctx-title').innerText = name || '/ (Root)';
+                  document.getElementById('ide-ctx-path').value = path || '';
+                  document.getElementById('ide-ctx-is-folder').value = isFolder ? '1' : '0';
+                  
+                  const isRoot = path === '';
+                  document.getElementById('ide-btn-new-file').style.display = isFolder ? 'flex' : 'none';
+                  document.getElementById('ide-btn-new-folder').style.display = isFolder ? 'flex' : 'none';
+                  document.getElementById('ide-btn-rename').style.display = isRoot ? 'none' : 'flex';
+                  const copyBtn = document.getElementById('ide-btn-copy');
+                  if (copyBtn) copyBtn.style.display = isRoot ? 'none' : 'flex';
+                  const cutBtn = document.getElementById('ide-btn-cut');
+                  if (cutBtn) cutBtn.style.display = isRoot ? 'none' : 'flex';
+                  const pasteBtn = document.getElementById('ide-btn-paste');
+                  if (pasteBtn) pasteBtn.style.display = (isFolder && window.ideClipboard && window.ideClipboard.items && window.ideClipboard.items.length > 0) ? 'flex' : 'none';
+                  const propBtn = document.getElementById('ide-btn-properties');
+                  if (propBtn) propBtn.style.display = isRoot ? 'none' : 'flex';
+                  document.getElementById('ide-btn-delete').style.display = isRoot ? 'none' : 'flex';
+                  const dlBtn = document.getElementById('ide-btn-download');
+                  if (dlBtn) dlBtn.style.display = isRoot ? 'none' : 'flex';
+                  const zipBtn = document.getElementById('ide-btn-zip');
+                  if (zipBtn) zipBtn.style.display = isRoot ? 'none' : 'flex';
+                  const unzipBtn = document.getElementById('ide-btn-unzip');
+                  if (unzipBtn) unzipBtn.style.display = (!isFolder && path.endsWith('.zip')) ? 'flex' : 'none';
+                }
                 
                 modal.style.display = 'flex';
               };
 
-              const driveFetch = async (action, body) => {
-                const res = await fetch(`?access=admin&page=drive&api=true&action=${action}`, {
-                  method: 'POST',
-                  headers: {'Content-Type': 'application/json'},
-                  body: JSON.stringify(body)
-                });
-                return res.json();
+              const driveFetch = async (action, body, reqPath = '') => {
+                try {
+                  body.csrf_token = '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>';
+                  const res = await fetch(`?access=admin&page=drive&api=true&action=${action}&path=${encodeURIComponent(reqPath)}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': body.csrf_token},
+                    body: JSON.stringify(body)
+                  });
+                  if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+                  return await res.json();
+                } catch (e) {
+                  termLog(`API Error (${action}): ${e.message}`, true);
+                  return { success: false, error: e.message };
+                }
+              };
+
+              window.ideChunkedUpload = async (filesList, pathsList, targetPath = '') => {
+                if (filesList.length === 0) return;
+                termLog(`Starting chunked upload for ${filesList.length} file(s)...`);
+                const csrfToken = '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>';
+                let totalUploaded = 0;
+
+                for (let i = 0; i < filesList.length; i++) {
+                  const file = filesList[i];
+                  const chunkSize = 5 * 1024 * 1024; // 5MB safe chunks
+                  const totalChunks = Math.ceil(file.size / chunkSize) || 1;
+                  const fileId = 'ide_up_' + Math.random().toString(36).substring(2, 9);
+                  const rawRelPath = pathsList[i] || file.name;
+                  const fullPath = targetPath ? (targetPath + '/' + rawRelPath) : rawRelPath;
+                  
+                  let success = true;
+                  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                    const start = chunkIndex * chunkSize;
+                    const end = Math.min(start + chunkSize, file.size);
+                    const chunkBlob = file.slice(start, end);
+                    
+                    const fd = new FormData();
+                    fd.append('action', 'upload');
+                    fd.append('csrf_token', csrfToken);
+                    fd.append('files[]', chunkBlob, file.name);
+                    fd.append('paths[]', fullPath);
+                    fd.append('chunk', chunkIndex);
+                    fd.append('chunks', totalChunks);
+                    fd.append('file_id', fileId);
+
+                    try {
+                      const res = await fetch(`?access=admin&page=drive&api=true`, { method: 'POST', body: fd }).then(r => r.json());
+                      if (!res.success && res.error && res.error.startsWith('CONFLICT|')) {
+                        fd.append('override', '1');
+                        const resRetry = await fetch(`?access=admin&page=drive&api=true`, { method: 'POST', body: fd }).then(r => r.json());
+                        if (!resRetry.success) throw new Error(resRetry.error);
+                      } else if (!res.success) {
+                        throw new Error(res.error);
+                      }
+                      const progress = Math.round(((chunkIndex + 1) / totalChunks) * 100);
+                      if (totalChunks > 1 && (progress % 25 === 0 || progress === 100)) {
+                        termLog(`[${file.name}] Uploading... ${progress}%`);
+                      }
+                    } catch (err) {
+                      termLog(`[${file.name}] Upload failed: ${err.message}`, true);
+                      success = false;
+                      break;
+                    }
+                  }
+                  if (success) {
+                    if (totalChunks <= 1) termLog(`[${file.name}] Uploaded successfully.`);
+                    else termLog(`[${file.name}] Stitching complete.`);
+                    totalUploaded++;
+                  }
+                }
+                if (totalUploaded > 0) {
+                  loadTree(targetPath);
+                }
               };
 
               const handleUploadClick = (targetPath) => {
@@ -4467,14 +5118,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 fileInput.multiple = true;
                 fileInput.onchange = async (e) => {
                   if (e.target.files.length > 0) {
-                    const fd = new FormData();
-                    fd.append('action', 'upload');
-                    for (let i=0; i<e.target.files.length; i++) {
-                      fd.append('files[]', e.target.files[i]);
-                      fd.append('paths[]', (targetPath ? targetPath + '/' : '') + e.target.files[i].name);
-                    }
-                    const res = await fetch(`?access=admin&page=drive&api=true`, { method: 'POST', body: fd }).then(r=>r.json());
-                    if (res.success) loadTree(targetPath); else alert(res.error || 'Upload failed');
+                    const filesArr = Array.from(e.target.files);
+                    const pathsArr = filesArr.map(f => f.name);
+                    await window.ideChunkedUpload(filesArr, pathsArr, targetPath);
                   }
                 };
                 fileInput.click();
@@ -4498,49 +5144,412 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               document.getElementById('ide-tree-upload').onclick = () => handleUploadClick('');
 
-              document.getElementById('ide-btn-download').onclick = () => {
-                const path = document.getElementById('ide-ctx-path').value;
-                const isFolder = document.getElementById('ide-ctx-is-folder').value === '1';
-                if(isFolder) {
-                  window.location.href = `?access=admin&page=drive&batch=selected&items=${encodeURIComponent(path)}`;
-                } else {
-                  window.location.href = `?access=admin&page=drive&download=${encodeURIComponent(path)}`;
+              document.getElementById('ide-btn-zip').onclick = async () => {
+                const pathStr = document.getElementById('ide-ctx-path').value;
+                const paths = pathStr.split('|').filter(p => p);
+                if (paths.length > 0) {
+                  const parentPath = paths[0].includes('/') ? paths[0].substring(0, paths[0].lastIndexOf('/')) : '';
+                  const btn = document.getElementById('ide-btn-zip');
+                  const origHtml = btn.innerHTML;
+                  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Zipping...';
+                  btn.style.pointerEvents = 'none';
+                  termLog(`Zipping ${paths.length} item(s)...`);
+                  
+                  const res = await driveFetch('zip_items', { action: 'zip_items', items: paths }, parentPath);
+                  
+                  btn.innerHTML = origHtml;
+                  btn.style.pointerEvents = 'auto';
+                  if (res.success) { loadTree(parentPath); termLog('Zip successful.'); }
+                  else alert(res.error);
                 }
                 document.getElementById('ide-ctx-modal').style.display = 'none';
+                window.ideSelectedItems.clear();
+                window.updateIdeSelectionUI();
+              };
+
+              document.getElementById('ide-btn-unzip').onclick = async () => {
+                const pathStr = document.getElementById('ide-ctx-path').value;
+                if (pathStr && pathStr.endsWith('.zip')) {
+                  const parentPath = pathStr.includes('/') ? pathStr.substring(0, pathStr.lastIndexOf('/')) : '';
+                  const btn = document.getElementById('ide-btn-unzip');
+                  const origHtml = btn.innerHTML;
+                  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Extracting...';
+                  btn.style.pointerEvents = 'none';
+                  termLog(`Extracting ${pathStr}...`);
+                  
+                  const res = await driveFetch('unzip', { action: 'unzip', item: pathStr }, parentPath);
+                  
+                  btn.innerHTML = origHtml;
+                  btn.style.pointerEvents = 'auto';
+                  if (res.success) { loadTree(parentPath); termLog('Extraction successful.'); }
+                  else alert(res.error);
+                } else {
+                  alert('Please select a single .zip file to extract.');
+                }
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                window.ideSelectedItems.clear();
+                window.updateIdeSelectionUI();
+              };
+
+              document.getElementById('ide-btn-download').onclick = () => {
+                const pathStr = document.getElementById('ide-ctx-path').value;
+                const paths = pathStr.split('|');
+                const isFolder = document.getElementById('ide-ctx-is-folder').value === '1';
+                
+                if (paths.length > 1) {
+                  window.location.href = `?access=admin&page=drive&batch=selected&items=${encodeURIComponent(paths.join(','))}`;
+                } else if (isFolder) {
+                  window.location.href = `?access=admin&page=drive&batch=selected&items=${encodeURIComponent(paths[0])}`;
+                } else {
+                  window.location.href = `?access=admin&page=drive&download=${encodeURIComponent(paths[0])}`;
+                }
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                window.ideSelectedItems.clear();
+                window.updateIdeSelectionUI();
               };
 
               document.getElementById('ide-btn-new-file').onclick = async () => {
                 const path = document.getElementById('ide-ctx-path').value;
+                const isFolder = document.getElementById('ide-ctx-is-folder').value === '1';
+                const parentPath = isFolder ? path : (path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '');
+                
                 const name = prompt('Enter new file name:');
                 if(name) {
-                  const targetPath = (path ? path + '/' : '');
-                  const res = await driveFetch('add_file', { action: 'add_file', name: targetPath + name });
-                  if(res.success) loadTree(); else alert(res.error);
+                  const targetPath = (parentPath ? parentPath + '/' : '');
+                  const res = await driveFetch('add_file', { action: 'add_file', name: targetPath + name }, parentPath);
+                  if(res.success) loadTree(parentPath); else alert(res.error);
                 }
                 document.getElementById('ide-ctx-modal').style.display = 'none';
               };
 
               document.getElementById('ide-btn-new-folder').onclick = async () => {
                 const path = document.getElementById('ide-ctx-path').value;
+                const isFolder = document.getElementById('ide-ctx-is-folder').value === '1';
+                const parentPath = isFolder ? path : (path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '');
+                
                 const name = prompt('Enter new folder name:');
                 if(name) {
-                  const targetPath = (path ? path + '/' : '');
-                  const res = await driveFetch('add_folder', { action: 'add_folder', name: targetPath + name });
-                  if(res.success) loadTree(); else alert(res.error);
+                  const targetPath = (parentPath ? parentPath + '/' : '');
+                  const res = await driveFetch('add_folder', { action: 'add_folder', name: targetPath + name }, parentPath);
+                  if(res.success) loadTree(parentPath); else alert(res.error);
                 }
                 document.getElementById('ide-ctx-modal').style.display = 'none';
               };
 
-              document.getElementById('ide-btn-rename').onclick = async () => {
+              const treeContainer = document.getElementById('ide-file-tree');
+              
+              treeContainer.addEventListener('contextmenu', (e) => {
+                if (e.target.id === 'ide-file-tree') {
+                  e.preventDefault();
+                  window.showIdeContextMenu('', 'Workspace', true);
+                }
+              });
+              
+              window.ideHasDragged = false;
+              
+              // Box Multi-Select Logic
+              treeContainer.addEventListener('mousedown', (e) => {
+                if (e.button !== 0) return; // Only process left-click drags
+                const item = e.target.closest('.ide-tree-item');
+                
+                isIdeSelecting = true;
+                window.ideHasDragged = false;
+                ideSelectStartX = e.clientX;
+                ideSelectStartY = e.clientY;
+                
+                if (e.ctrlKey || e.metaKey) {
+                  if (item && item.dataset.path) {
+                    if (window.ideSelectedItems.has(item.dataset.path)) {
+                      window.ideSelectedItems.delete(item.dataset.path);
+                    } else {
+                      window.ideSelectedItems.add(item.dataset.path);
+                    }
+                    window.updateIdeSelectionUI();
+                  }
+                } else if (e.shiftKey) {
+                  // Standard multi-select behavior skips shift for now
+                  if (item && item.dataset.path) {
+                    window.ideSelectedItems.add(item.dataset.path);
+                    window.updateIdeSelectionUI();
+                  }
+                } else {
+                  if (!item || !window.ideSelectedItems.has(item.dataset.path)) {
+                    window.ideSelectedItems.clear();
+                    if (item && item.dataset.path) window.ideSelectedItems.add(item.dataset.path);
+                    window.updateIdeSelectionUI();
+                  }
+                }
+                
+                baseIdeSelected = new Set(window.ideSelectedItems);
+                
+                ideSelectionBox = document.createElement('div');
+                ideSelectionBox.style.position = 'fixed';
+                ideSelectionBox.style.border = '1px solid #ff0000';
+                ideSelectionBox.style.backgroundColor = 'rgba(255, 0, 0, 0.15)';
+                ideSelectionBox.style.zIndex = '9999';
+                ideSelectionBox.style.pointerEvents = 'none';
+                ideSelectionBox.style.display = 'none'; 
+                ideSelectionBox.className = 'ide-selection-box';
+                document.body.appendChild(ideSelectionBox);
+              });
+
+              document.addEventListener('mousemove', (e) => {
+                if (!isIdeSelecting || !ideSelectionBox) return;
+                
+                const currentX = e.clientX;
+                const currentY = e.clientY;
+                const width = Math.abs(currentX - ideSelectStartX);
+                const height = Math.abs(currentY - ideSelectStartY);
+                
+                if (width > 5 || height > 5) {
+                  ideSelectionBox.style.display = 'block';
+                  window.ideHasDragged = true;
+                } else {
+                  return;
+                }
+                
+                const left = Math.min(ideSelectStartX, currentX);
+                const top = Math.min(ideSelectStartY, currentY);
+                
+                ideSelectionBox.style.left = left + 'px';
+                ideSelectionBox.style.top = top + 'px';
+                ideSelectionBox.style.width = width + 'px';
+                ideSelectionBox.style.height = height + 'px';
+                
+                window.ideSelectedItems = new Set(baseIdeSelected);
+                document.querySelectorAll('.ide-tree-item').forEach(el => {
+                  const rect = el.getBoundingClientRect();
+                  const intersect = !(rect.right < left || 
+                                      rect.left > left + width || 
+                                      rect.bottom < top || 
+                                      rect.top > top + height);
+                  
+                  if (intersect && el.dataset.path) {
+                    window.ideSelectedItems.add(el.dataset.path);
+                  }
+                });
+                
+                window.updateIdeSelectionUI();
+              });
+
+              const stopIdeSelection = (e) => {
+                if (isIdeSelecting) {
+                  isIdeSelecting = false;
+                  if (ideSelectionBox) {
+                    ideSelectionBox.remove();
+                    ideSelectionBox = null;
+                  }
+                  document.querySelectorAll('.ide-selection-box').forEach(box => box.remove());
+
+                  // If it was just a regular click without dragging, enforce single selection
+                  if (!window.ideHasDragged && e && e.target) {
+                    const item = e.target.closest('.ide-tree-item');
+                    if (item && item.dataset.path && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+                      window.ideSelectedItems.clear();
+                      window.ideSelectedItems.add(item.dataset.path);
+                      window.updateIdeSelectionUI();
+                    }
+                  }
+                }
+              };
+
+              document.addEventListener('mouseup', stopIdeSelection);
+              document.addEventListener('mouseleave', stopIdeSelection);
+
+              document.getElementById('ide-btn-upload').onclick = () => {
                 const path = document.getElementById('ide-ctx-path').value;
-                const name = prompt('Enter new name:');
-                if(name && path) {
-                  const res = await driveFetch('rename', { action: 'rename', old: path, new: name });
-                  if(res.success) {
-                    // Update active open tabs immediately
+                const isFolder = document.getElementById('ide-ctx-is-folder').value === '1';
+                const parentPath = isFolder ? path : (path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '');
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                handleUploadClick(parentPath);
+              };
+
+              document.getElementById('ide-btn-refresh').onclick = () => {
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                loadTree(window.currentIdeTreePath || '');
+              };
+
+              document.getElementById('ide-btn-delete').onclick = async () => {
+                const pathStr = document.getElementById('ide-ctx-path').value;
+                const paths = pathStr.split('|').filter(p => p);
+                if (paths.length > 0) {
+                  const msg = paths.length === 1 ? `Are you sure you want to move "${paths[0]}" to trash?` : `Are you sure you want to move ${paths.length} item(s) to trash?`;
+                  if (confirm(msg)) {
+                    const parentPath = paths[0].includes('/') ? paths[0].substring(0, paths[0].lastIndexOf('/')) : '';
+                    const res = await driveFetch('trash', { action: 'trash', items: paths });
+                    if (res.success) {
+                      paths.forEach(p => {
+                        const openFileIdx = openFiles.findIndex(f => f.path === p);
+                        if (openFileIdx !== -1) {
+                          window.ideCloseTab(p, {stopPropagation:()=>{}});
+                        }
+                      });
+                      window.ideSelectedItems.clear();
+                      window.updateIdeSelectionUI();
+                      loadTree(parentPath); 
+                    } else alert(res.error);
+                  }
+                }
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+              };
+
+              document.getElementById('ide-btn-properties').onclick = async () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                
+                const propModalEl = document.getElementById('ide-properties-modal');
+                const propBody = document.getElementById('ide-properties-body');
+                propBody.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-danger"></div></div>';
+                
+                const modal = bootstrap.Modal.getOrCreateInstance(propModalEl);
+                modal.show();
+
+                try {
+                  const res = await fetch(`?access=admin&page=drive&api=true&action=properties&file=${encodeURIComponent(path)}`).then(r => r.json());
+                  if (res && res.success && res.data) {
+                    const p = res.data;
+                    propBody.innerHTML = `
+                      <div class="d-flex flex-column gap-2" style="font-size: 0.9rem;">
+                        <div><strong class="text-danger">Name:</strong> ${p.name}</div>
+                        <div><strong class="text-danger">Type:</strong> ${p.type}</div>
+                        <div><strong class="text-danger">Size:</strong> ${p.size}</div>
+                        ${p.contents ? `<div><strong class="text-danger">Contents:</strong> ${p.contents}</div>` : ''}
+                        <div><strong class="text-danger">Modified:</strong> ${p.modified}</div>
+                        <div><strong class="text-danger">Created:</strong> ${p.created}</div>
+                        <div><strong class="text-danger">Permissions:</strong> ${p.permissions}</div>
+                      </div>
+                    `;
+                  } else {
+                    propBody.innerHTML = `<div class="alert alert-danger py-2 mb-0">${res.error || 'Failed to retrieve properties.'}</div>`;
+                  }
+                } catch (e) {
+                  propBody.innerHTML = `<div class="alert alert-danger py-2 mb-0">Network error fetching properties.</div>`;
+                }
+              };
+
+              let currentRenameTarget = { path: '', parentPath: '', oldName: '' };
+
+              window.updateIdeClipboardUI = () => {
+                const container = document.getElementById('ide-sidebar-clipboard-container');
+                const status = document.getElementById('ide-clipboard-status');
+                if (window.ideClipboard && window.ideClipboard.items && window.ideClipboard.items.length > 0) {
+                  const actionText = window.ideClipboard.action === 'move_items' ? 'Cut' : 'Copied';
+                  status.innerText = `${window.ideClipboard.items.length} item(s) ${actionText}`;
+                  container.classList.remove('d-none');
+                } else {
+                  container.classList.add('d-none');
+                }
+              };
+
+              const doIdePaste = async (targetPath) => {
+                if (window.ideClipboard && window.ideClipboard.items.length > 0) {
+                  const action = window.ideClipboard.action;
+                  termLog(`Pasting ${window.ideClipboard.items.length} item(s) into ${targetPath || 'root'}...`);
+                  
+                  let res = await driveFetch(action, { action: action, items: window.ideClipboard.items, target: targetPath }, targetPath);
+                  
+                  if (res.success) {
+                    window.ideClipboard = null; 
+                    window.updateIdeClipboardUI();
+                    loadTree(targetPath);
+                    termLog('Paste successful.');
+                  } else if (res.error) {
+                    alert(res.error);
+                  }
+                }
+              };
+
+              const clipboardPasteBtn = document.getElementById('ide-btn-clipboard-paste');
+              if (clipboardPasteBtn) {
+                clipboardPasteBtn.onclick = () => { doIdePaste(window.currentIdeTreePath || ''); };
+              }
+              
+              const clipboardCancelBtn = document.getElementById('ide-btn-cancel-clipboard');
+              if (clipboardCancelBtn) {
+                clipboardCancelBtn.onclick = () => {
+                   window.ideClipboard = null;
+                   window.updateIdeClipboardUI();
+                };
+              }
+
+              const clipboardNewFolderBtn = document.getElementById('ide-btn-clipboard-new-folder');
+              if (clipboardNewFolderBtn) {
+                clipboardNewFolderBtn.onclick = async () => {
+                  const parentPath = window.currentIdeTreePath || '';
+                  const name = prompt('Enter new folder name:');
+                  if(name) {
+                    const targetPath = (parentPath ? parentPath + '/' : '');
+                    const res = await driveFetch('add_folder', { action: 'add_folder', name: targetPath + name }, parentPath);
+                    if(res.success) loadTree(parentPath); else alert(res.error);
+                  }
+                };
+              }
+
+              document.getElementById('ide-btn-copy').onclick = () => {
+                const pathStr = document.getElementById('ide-ctx-path').value;
+                const paths = pathStr.split('|').filter(p => p);
+                window.ideClipboard = { action: 'copy_items', items: paths };
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                termLog(`Copied ${paths.length} item(s) to clipboard.`);
+                window.updateIdeClipboardUI();
+                window.ideSelectedItems.clear();
+                window.updateIdeSelectionUI();
+              };
+
+              document.getElementById('ide-btn-cut').onclick = () => {
+                const pathStr = document.getElementById('ide-ctx-path').value;
+                const paths = pathStr.split('|').filter(p => p);
+                window.ideClipboard = { action: 'move_items', items: paths };
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                termLog(`Cut ${paths.length} item(s) to clipboard.`);
+                window.updateIdeClipboardUI();
+                window.ideSelectedItems.clear();
+                window.updateIdeSelectionUI();
+              };
+
+              document.getElementById('ide-btn-paste').onclick = () => {
+                const targetPath = document.getElementById('ide-ctx-path').value;
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                doIdePaste(targetPath);
+              };
+
+              document.getElementById('ide-btn-rename').onclick = () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                if (!path) return;
+
+                const oldName = path.includes('/') ? path.substring(path.lastIndexOf('/') + 1) : path;
+                const parentPath = path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '';
+                currentRenameTarget = { path, parentPath, oldName };
+
+                const renameInput = document.getElementById('ide-rename-input');
+                renameInput.value = oldName;
+
+                const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('ide-rename-modal'));
+                modal.show();
+                setTimeout(() => {
+                  renameInput.focus();
+                  renameInput.select();
+                }, 150);
+              };
+
+              const handleRenameSubmit = async () => {
+                const name = document.getElementById('ide-rename-input').value.trim();
+                const { path, parentPath, oldName } = currentRenameTarget;
+
+                if (name && name !== oldName && path) {
+                  const submitBtn = document.getElementById('ide-rename-submit');
+                  submitBtn.disabled = true;
+                  submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+
+                  const res = await driveFetch('rename', { action: 'rename', old: path, new: name }, parentPath);
+                  submitBtn.disabled = false;
+                  submitBtn.innerText = 'Rename';
+
+                  if (res.success) {
                     const openFile = openFiles.find(f => f.path === path);
                     if (openFile) {
-                      const newPath = path.substring(0, path.lastIndexOf('/') + 1) + name;
+                      const newPath = parentPath ? parentPath + '/' + name : name;
                       openFile.path = newPath;
                       openFile.name = name;
                       openFile.ext = name.split('.').pop().toLowerCase();
@@ -4550,46 +5559,24 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       localStorage.setItem('ide_active_tab', activeTabPath);
                       renderTabs();
                     }
-                    loadTree(); 
-                  } else alert(res.error);
+                    loadTree(parentPath);
+                    bootstrap.Modal.getInstance(document.getElementById('ide-rename-modal')).hide();
+                  } else {
+                    alert(res.error || 'Rename failed.');
+                  }
+                } else if (name === oldName) {
+                  bootstrap.Modal.getInstance(document.getElementById('ide-rename-modal')).hide();
                 }
-                document.getElementById('ide-ctx-modal').style.display = 'none';
               };
 
-              document.getElementById('ide-file-tree').addEventListener('contextmenu', (e) => {
-                if (e.target.id === 'ide-file-tree') {
+              document.getElementById('ide-rename-submit').onclick = handleRenameSubmit;
+
+              document.getElementById('ide-rename-input').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
                   e.preventDefault();
-                  window.showIdeContextMenu('', 'Workspace', true);
+                  handleRenameSubmit();
                 }
               });
-
-              document.getElementById('ide-btn-upload').onclick = () => {
-                const path = document.getElementById('ide-ctx-path').value;
-                document.getElementById('ide-ctx-modal').style.display = 'none';
-                handleUploadClick(path);
-              };
-
-              document.getElementById('ide-btn-refresh').onclick = () => {
-                const path = document.getElementById('ide-ctx-path').value;
-                document.getElementById('ide-ctx-modal').style.display = 'none';
-                loadTree(path);
-              };
-
-              document.getElementById('ide-btn-delete').onclick = async () => {
-                const path = document.getElementById('ide-ctx-path').value;
-                if(path && confirm('Are you sure you want to move this to trash?')) {
-                  const res = await driveFetch('trash', { action: 'trash', items: [path] });
-                  if(res.success) {
-                    // If the deleted file was open in a tab, destroy the tab safely
-                    const openFileIdx = openFiles.findIndex(f => f.path === path);
-                    if (openFileIdx !== -1) {
-                      window.ideCloseTab(path, {stopPropagation:()=>{}});
-                    }
-                    loadTree(); 
-                  } else alert(res.error);
-                }
-                document.getElementById('ide-ctx-modal').style.display = 'none';
-              };
 
               window.toggleIdeTerminal = () => {
                 const bp = document.getElementById('ide-bottom-panel');
@@ -4626,42 +5613,83 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 document.getElementById('ide-trash-tree').classList.add('d-none');
                 
                 if(view === 'explorer') {
-                  document.getElementById('ide-sidebar-title').innerHTML = '<span>EXPLORER</span><div class="d-flex gap-2"><i class="bi bi-file-earmark-plus" style="cursor:pointer;" id="ide-tree-new-file" title="New File"></i><i class="bi bi-folder-plus" style="cursor:pointer;" id="ide-tree-new-folder" title="New Folder"></i><i class="bi bi-upload" style="cursor:pointer;" id="ide-tree-upload" title="Upload"></i><i class="bi bi-arrow-clockwise" style="cursor:pointer;" id="ide-refresh-tree" title="Refresh"></i></div>';
+                  document.getElementById('ide-sidebar-title').innerHTML = '<span>EXPLORER</span><div class="d-flex gap-2"><i class="bi bi-search" style="cursor:pointer;" id="ide-tree-search" title="Search Files"></i><i class="bi bi-file-earmark-plus" style="cursor:pointer;" id="ide-tree-new-file" title="New File"></i><i class="bi bi-folder-plus" style="cursor:pointer;" id="ide-tree-new-folder" title="New Folder"></i><i class="bi bi-upload" style="cursor:pointer;" id="ide-tree-upload" title="Upload"></i><i class="bi bi-arrow-clockwise" style="cursor:pointer;" id="ide-refresh-tree" title="Refresh"></i></div>';
                   document.getElementById('ide-file-tree').classList.remove('d-none');
                   
+                  const btnSearch = document.getElementById('ide-tree-search');
+                  if (btnSearch) btnSearch.onclick = () => {
+                    const ideSearchContainer = document.getElementById('ide-sidebar-search-container');
+                    const ideSearchInput = document.getElementById('ide-sidebar-search-input');
+                    ideSearchContainer.classList.toggle('d-none');
+                    if (!ideSearchContainer.classList.contains('d-none')) {
+                      ideSearchInput.focus();
+                    } else {
+                      ideSearchInput.value = '';
+                      ideSearchInput.dispatchEvent(new Event('input'));
+                    }
+                  };
+
                   const btnNewFile = document.getElementById('ide-tree-new-file');
                   if (btnNewFile) btnNewFile.onclick = async () => {
                     const name = prompt('Enter new file name:');
                     if(name) {
-                      const res = await driveFetch('add_file', { action: 'add_file', name: name });
-                      if(res.success) loadTree(); else alert(res.error);
+                      const cp = window.currentIdeTreePath || '';
+                      const targetName = cp ? cp + '/' + name : name;
+                      const res = await driveFetch('add_file', { action: 'add_file', name: targetName }, cp);
+                      if(res.success) loadTree(cp); else alert(res.error);
                     }
                   };
                   const btnNewFolder = document.getElementById('ide-tree-new-folder');
                   if (btnNewFolder) btnNewFolder.onclick = async () => {
                     const name = prompt('Enter new folder name:');
                     if(name) {
-                      const res = await driveFetch('add_folder', { action: 'add_folder', name: name });
-                      if(res.success) loadTree(); else alert(res.error);
+                      const cp = window.currentIdeTreePath || '';
+                      const targetName = cp ? cp + '/' + name : name;
+                      const res = await driveFetch('add_folder', { action: 'add_folder', name: targetName }, cp);
+                      if(res.success) loadTree(cp); else alert(res.error);
                     }
                   };
                   const btnUpload = document.getElementById('ide-tree-upload');
-                  if (btnUpload) btnUpload.onclick = () => handleUploadClick('');
+                  if (btnUpload) btnUpload.onclick = () => handleUploadClick(window.currentIdeTreePath || '');
                   const btnRefresh = document.getElementById('ide-refresh-tree');
-                  if (btnRefresh) btnRefresh.onclick = () => loadTree();
+                  if (btnRefresh) btnRefresh.onclick = () => loadTree(window.currentIdeTreePath || '');
                 } else if(view === 'git') {
-                  document.getElementById('ide-sidebar-title').innerHTML = '<span>DRIVE ACTIVITY</span>';
+                  document.getElementById('ide-sidebar-title').innerHTML = '<span>GIT / ACTIVITY</span><div class="d-flex gap-2"><i class="bi bi-cloud-arrow-down" style="cursor:pointer;" onclick="window.gitAction(\'pull\')" title="Git Pull"></i><i class="bi bi-cloud-arrow-up" style="cursor:pointer;" onclick="window.gitAction(\'push\')" title="Git Push"></i><i class="bi bi-check2-circle" style="cursor:pointer;" onclick="window.gitAction(\'commit\')" title="Git Commit"></i></div>';
                   document.getElementById('ide-git-tree').classList.remove('d-none');
                   window.fetchGitLog();
                 } else if(view === 'history') {
                   document.getElementById('ide-sidebar-title').innerHTML = '<span>FILE HISTORY</span>';
                   document.getElementById('ide-history-tree').classList.remove('d-none');
                 } else if(view === 'trash') {
-                  document.getElementById('ide-sidebar-title').innerHTML = '<span>TRASH</span><div class="d-flex gap-2"><i class="bi bi-trash3-fill text-danger" style="cursor:pointer;" onclick="window.emptyIdeTrash()" title="Empty Trash"></i><i class="bi bi-arrow-clockwise" style="cursor:pointer;" onclick="window.fetchIdeTrash()" title="Refresh"></i></div>';
+                  document.getElementById('ide-sidebar-title').innerHTML = '<span>TRASH</span><div class="d-flex gap-2"><i class="bi bi-trash23-fill text-danger" style="cursor:pointer;" onclick="window.emptyIdeTrash()" title="Empty Trash"></i><i class="bi bi-arrow-clockwise" style="cursor:pointer;" onclick="window.fetchIdeTrash()" title="Refresh"></i></div>';
                   document.getElementById('ide-trash-tree').classList.remove('d-none');
                   window.fetchIdeTrash();
                 }
                 setTimeout(() => aceEditor.resize(true), 50);
+              };
+
+              window.gitAction = async (action) => {
+                let cmd = '';
+                if (action === 'pull') cmd = 'git pull origin main';
+                if (action === 'push') cmd = 'git push origin main';
+                if (action === 'commit') {
+                  const msg = prompt("Enter commit message:");
+                  if (!msg) return;
+                  cmd = `git add . && git commit -m "${msg.replace(/"/g, '\\"')}"`;
+                }
+                
+                termLog(`Executing: ${cmd}`);
+                try {
+                  const res = await driveFetch('terminal_cmd', { action: 'terminal_cmd', cmd });
+                  if (res && res.success) {
+                    termLog(res.output);
+                    window.fetchGitLog();
+                  } else {
+                    termLog(`<span class="text-danger">${res.output || 'Command failed'}</span>`);
+                  }
+                } catch (e) {
+                  termLog(`<span class="text-danger">Error executing git command.</span>`);
+                }
               };
 
               window.fetchGitLog = async () => {
@@ -4669,13 +5697,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if(!gitPane) return;
                 gitPane.innerHTML = '<div class="text-center mt-4 text-secondary"><i class="spinner-border spinner-border-sm"></i> Loading Activity...</div>';
                 try {
-                  const res = await fetch(`?access=admin&page=drive&api=true&action=activity`).then(r => r.json());
-                  if(res && res.success) {
-                    if (Object.keys(res.activity).length === 0) {
-                      gitPane.innerHTML = '<div class="text-secondary p-2">No activity found.</div>';
+                  const resActivity = await fetch(`?access=admin&page=drive&api=true&action=activity`).then(r => r.json());
+                  const resGit = await fetch(`?access=admin&page=drive&api=true&action=git_history`).then(r => r.json());
+                  
+                  let html = '';
+                  
+                  if (resGit && resGit.success && resGit.history) {
+                    html += `<div class="mb-2 text-warning fw-bold border-bottom border-secondary pb-1">Git Repository History</div>`;
+                    html += `<div class="mb-3 p-2 bg-dark rounded border border-secondary" style="font-family: monospace; white-space: pre-wrap; font-size: 0.75rem; color: #ccc;">${resGit.history}</div>`;
+                  }
+                  
+                  if(resActivity && resActivity.success) {
+                    if (Object.keys(resActivity.activity).length === 0) {
+                      html += '<div class="text-secondary p-2">No drive activity found.</div>';
                     } else {
-                      let html = '';
-                      for (const [group, items] of Object.entries(res.activity)) {
+                      for (const [group, items] of Object.entries(resActivity.activity)) {
                         html += `<div class="mb-2 text-white fw-bold border-bottom border-secondary pb-1">${group}</div>`;
                         items.forEach(item => {
                           const date = new Date(item.mtime * 1000);
@@ -4691,11 +5727,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                           `;
                         });
                       }
-                      gitPane.innerHTML = html;
                     }
                   } else {
-                    gitPane.innerHTML = '<div class="text-danger p-2">Failed to fetch drive activity.</div>';
+                    html += '<div class="text-danger p-2">Failed to fetch drive activity.</div>';
                   }
+                  gitPane.innerHTML = html;
                 } catch (e) {
                   gitPane.innerHTML = '<div class="text-danger p-2">Error communicating with server.</div>';
                 }
@@ -4709,7 +5745,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const res = await fetch(`?access=admin&page=drive&api=true&action=list_trash`).then(r => r.json());
                   if(res && res.success) {
                     if (!res.trash || res.trash.length === 0) {
-                      trashPane.innerHTML = '<div class="text-secondary p-2 text-center mt-4"><i class="bi bi-trash fs-1 d-block mb-2 opacity-50"></i>Trash is empty.</div>';
+                      trashPane.innerHTML = '<div class="text-secondary p-2 text-center mt-4"><i class="bi bi-trash2 fs-1 d-block mb-2 opacity-50"></i>Trash is empty.</div>';
                     } else {
                       let html = '';
                       res.trash.forEach(item => {
@@ -4720,7 +5756,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                             <div class="text-secondary small mb-2">${item.deleted_at}</div>
                             <div class="d-flex justify-content-between gap-1">
                               <button class="btn btn-sm btn-outline-info py-0 px-2 fw-bold" style="font-size: 0.75rem;" onclick="window.restoreIdeTrash('${item.uniq}')"><i class="bi bi-arrow-counterclockwise"></i> Restore</button>
-                              <button class="btn btn-sm btn-outline-danger py-0 px-2 fw-bold" style="font-size: 0.75rem;" onclick="window.deletePermIdeTrash('${item.uniq}')"><i class="bi bi-trash"></i> Delete</button>
+                              <button class="btn btn-sm btn-outline-danger py-0 px-2 fw-bold" style="font-size: 0.75rem;" onclick="window.deletePermIdeTrash('${item.uniq}')"><i class="bi bi-trash2"></i> Delete</button>
                             </div>
                           </div>
                         `;
@@ -4954,9 +5990,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   }
                   previewIframe.removeAttribute('src');
                   previewIframe.srcdoc = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown-dark.min.css"><style>body{background-color:#0d1117;color:#c9d1d9;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif;}.markdown-body{box-sizing:border-box;min-width:200px;max-width:980px;margin:0 auto;padding:32px;background-color:#0d1117 !important;}@media(max-width:767px){.markdown-body{padding:15px;}}</style></head><body><article class="markdown-body">${parsed}</article></body></html>`;
-                } else if (['html', 'htm', 'php'].includes(ext)) {
+                  } else if (['html', 'htm', 'php'].includes(ext)) {
                   previewIframe.removeAttribute('srcdoc');
-                  previewIframe.src = './' + currentPath + '?t=' + Date.now();
+                  previewIframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-same-origin allow-popups');
+                  previewIframe.src = './' + currentPath + '?XDEBUG_SESSION_START=IDE&t=' + Date.now();
                 } else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) {
                   const streamUrl = `?access=admin&page=drive&api=true&action=stream&file=${encodeURIComponent(currentPath)}`;
                   previewIframe.removeAttribute('src');
@@ -5022,13 +6059,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               document.getElementById('act-settings').addEventListener('click', () => {
-                const modal = document.getElementById('ide-settings-modal');
+                const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('ide-settings-modal'));
                 document.getElementById('ide-setting-theme').value = localStorage.getItem('ide_theme') || "ace/theme/tomorrow_night_eighties";
                 document.getElementById('ide-setting-indent').value = localStorage.getItem('ide_indent') || "2";
                 document.getElementById('ide-setting-wrap').checked = localStorage.getItem('ide_wrap') === 'true';
                 document.getElementById('ide-setting-autosave').checked = localStorage.getItem('ide_autosave') !== 'false';
                 document.getElementById('ide-setting-show_wordcount').checked = localStorage.getItem('ide_show_wordcount') === 'true';
                 document.getElementById('ide-setting-show_charcount').checked = localStorage.getItem('ide_show_charcount') === 'true';
+                
+                const cliToggle = document.getElementById('ide-setting-disable-cli');
+                if (cliToggle) {
+                   cliToggle.checked = localStorage.getItem('ide_disable_cli') === 'true';
+                }
 
                 const currentFontSize = localStorage.getItem('ide_fontsize') || '14';
                 const fontInput = document.getElementById('ide-setting-fontsize');
@@ -5036,7 +6078,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (fontInput) fontInput.value = currentFontSize;
                 if (fontVal) fontVal.innerText = currentFontSize + 'px';
 
-                modal.style.display = 'flex';
+                modal.show();
               });
 
               const fontInput = document.getElementById('ide-setting-fontsize');
@@ -5066,6 +6108,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const current = parseInt(localStorage.getItem('ide_fontsize') || '14', 10);
                   updateFontSize(current + 1);
                 });
+              }
+
+              const cliToggle = document.getElementById('ide-setting-disable-cli');
+              if (cliToggle) {
+                 cliToggle.addEventListener('change', async (e) => {
+                    localStorage.setItem('ide_disable_cli', e.target.checked.toString());
+                    await driveFetch('toggle_cli', { disable: e.target.checked });
+                 });
               }
 
               ['theme', 'indent', 'wrap', 'autosave', 'show_wordcount', 'show_charcount'].forEach(key => {
@@ -5180,6 +6230,57 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
               
               document.getElementById('ide-refresh-tree').addEventListener('click', () => loadTree());
+              
+              const ideSearchInput = document.getElementById('ide-sidebar-search-input');
+              const ideSearchContainer = document.getElementById('ide-sidebar-search-container');
+              
+              document.getElementById('ide-tree-search').addEventListener('click', () => {
+                ideSearchContainer.classList.toggle('d-none');
+                if (!ideSearchContainer.classList.contains('d-none')) {
+                  ideSearchInput.focus();
+                } else {
+                  ideSearchInput.value = '';
+                  ideSearchInput.dispatchEvent(new Event('input'));
+                }
+              });
+              
+              let ideSearchTimeout = null;
+              ideSearchInput.addEventListener('input', (e) => {
+                const q = e.target.value.trim();
+                clearTimeout(ideSearchTimeout);
+                if (q === '') {
+                  loadTree();
+                  return;
+                }
+                
+                ideSearchTimeout = setTimeout(async () => {
+                  const treeEl = document.getElementById('ide-file-tree');
+                  if (!treeEl) return;
+                  treeEl.innerHTML = '<div class="text-center mt-4 text-secondary"><i class="spinner-border spinner-border-sm"></i> Searching entire workspace...</div>';
+                  
+                  try {
+                    const res = await fetch(`?access=admin&page=drive&api=true&action=search_drive&q=${encodeURIComponent(q)}`);
+                    if (!res.ok) throw new Error('Network error');
+                    const data = await res.json();
+                    
+                    if (data && data.success) {
+                      if (data.folders.length === 0 && data.files.length === 0) {
+                        treeEl.innerHTML = '<div class="text-secondary p-2 text-center mt-3">No files found matching your search.</div>';
+                        return;
+                      }
+                      
+                      // Convert file/folder names to their full relative path so they can be identified
+                      data.folders.forEach(f => f.name = f.path);
+                      data.files.forEach(f => f.name = f.path);
+                      renderTree(data, ''); 
+                    } else {
+                      treeEl.innerHTML = `<div class="text-danger p-2 text-center">Search failed: ${data.error || 'Unknown error'}</div>`;
+                    }
+                  } catch (err) {
+                    treeEl.innerHTML = '<div class="text-danger p-2 text-center">Search connection error.</div>';
+                  }
+                }, 400);
+              });
 
               // Drag & Drop Uploads (Files & Folders) for IDE Sidebar Explorer
               const ideSidebar = document.getElementById('ide-main-sidebar');
@@ -5250,20 +6351,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     termLog('Scanning dropped items...');
                     const { files, paths } = await scanIdeDroppedItems(e.dataTransfer.items);
                     if (files.length > 0) {
-                      termLog(`Uploading ${files.length} file(s)/folder(s)...`);
-                      const fd = new FormData();
-                      fd.append('action', 'upload');
-                      for (let i = 0; i < files.length; i++) {
-                        fd.append('files[]', files[i]);
-                        fd.append('paths[]', paths[i]);
-                      }
-                      const res = await fetch('?access=admin&page=drive&api=true', { method: 'POST', body: fd }).then(r => r.json());
-                      if (res && res.success) {
-                        termLog(`Upload complete (${res.uploaded || files.length} files).`);
-                        loadTree();
-                      } else {
-                        termLog(`Upload failed: ${res ? res.error : 'Unknown error'}`, true);
-                      }
+                      await window.ideChunkedUpload(files, paths, window.currentIdeTreePath || '');
                     }
                   }
                 });
@@ -6837,10 +7925,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const options = { method };
                 
                 if (body) {
+                  const csrfToken = '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>';
                   if (body instanceof FormData) {
+                    body.append('csrf_token', csrfToken);
                     options.body = body;
                   } else {
-                    options.headers = { 'Content-Type': 'application/json' };
+                    body.csrf_token = csrfToken;
+                    options.headers = { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrfToken };
                     options.body = JSON.stringify(body);
                   }
                 }
@@ -7814,7 +8905,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               async archiveItems() {
                 const items = Array.from(this.selectedItems);
                 if (items.length === 0) return;
-                this.showToast('Creating Zip Archive...');
+                this.showToast('Creating Zip Archive... This may take a while.', 'info');
                 const res = await this.fetchAPI('zip_items', 'POST', { action: 'zip_items', items });
                 if (res) {
                   this.showToast('Archive created successfully');
@@ -7895,7 +8986,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               async extractZip(path) {
-                this.showToast('Extracting ZIP...');
+                this.showToast('Extracting ZIP... This may take a while.', 'info');
                 const res = await this.fetchAPI('unzip', 'POST', { action: 'unzip', item: path });
                 if (res) {
                   this.showToast('ZIP extracted successfully!');
@@ -8001,17 +9092,32 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const mediaContent = document.getElementById('mediaModalContent');
                   const mediaContainer = document.getElementById('mediaModalContainer');
                   
-                  if (item.ext === 'pdf') {
+                  const docExts = ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'rtf', 'odt', 'ods', 'odp', 'csv', 'pages', 'numbers', 'key'];
+                  if (item.ext === 'pdf' || docExts.includes(item.ext)) {
                     mediaContainer.style.maxWidth = '1000px';
                     mediaContainer.style.width = '95%';
                     mediaContainer.style.padding = '0';
+                    
+                    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+                    const absoluteStreamUrl = window.location.origin + window.location.pathname + streamUrl;
+                    let viewerSrc = streamUrl; 
+                    if (item.ext !== 'pdf') {
+                       viewerSrc = isLocalhost ? streamUrl : `https://docs.google.com/viewer?url=${encodeURIComponent(absoluteStreamUrl)}&embedded=true`;
+                    }
+                    
                     mediaContent.innerHTML = `
                       <div style="width: 100%; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
                         <div style="padding: 12px 16px; background: var(--theme-surface-container-high); border-bottom: 1px solid var(--theme-outline-variant); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;">
                           <span style="font-family: var(--font-title); font-size: 14px; font-weight: 500; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 12px;">${item.name}</span>
-                          <button class="btn btn-filled" style="height: 32px; padding: 0 16px; font-size: 12px; flex-shrink: 0; background-color: var(--theme-primary); color: var(--theme-on-primary); border-radius: 16px; border: none; cursor: pointer;" onclick="window.open('${streamUrl}', '_blank')">Open / Download Native</button>
+                          <button class="btn btn-filled" style="height: 32px; padding: 0 16px; font-size: 12px; flex-shrink: 0; background-color: var(--theme-primary); color: var(--theme-on-primary); border-radius: 16px; border: none; cursor: pointer;" onclick="window.open('${streamUrl}', '_blank')">Download</button>
                         </div>
-                        <iframe src="${streamUrl}" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>
+                        ${isLocalhost && item.ext !== 'pdf' ? 
+                          `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 h-100 text-secondary">
+                              <i class="bi bi-file-earmark-x" style="font-size: 4rem; margin-bottom: 1rem;"></i>
+                              <p>Google Docs Viewer cannot access localhost files.<br><a href="${streamUrl}" target="_blank" class="text-info fw-bold">Download file to View</a></p>
+                           </div>` 
+                          : `<iframe src="${viewerSrc}" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>`
+                        }
                       </div>`;
                   } else if (['mp4','webm'].includes(item.ext)) {
                     mediaContainer.style.maxWidth = '550px';
@@ -8266,6 +9372,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                   const formData = new FormData();
                   formData.append('action', 'upload');
+                  formData.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>');
                   formData.append('files[]', chunkBlob, nextItem.file.name);
                   formData.append('paths[]', nextItem.path || '');
                   formData.append('chunk', chunkIndex);
@@ -8624,7 +9731,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                             </button>
                             
                             <button type="submit" name="permanent_delete_user" class="dropdown-item d-flex align-items-center gap-3 text-danger fw-bold" onclick="return confirm('Permanently delete this user and ALL their data (music, posts, files)? This action cannot be undone.');">
-                              <i class="bi bi-trash3-fill"></i> Permanent Delete
+                              <i class="bi bi-trash23-fill"></i> Permanent Delete
                             </button>
                           <?php endif; ?>
                           <li><hr class="dropdown-divider border-secondary opacity-50"></li>
@@ -8759,7 +9866,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               return `
                 <div class="p-3 mb-3 rounded position-relative" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);" id="admin-rh-score-${s.id}">
-                  <button class="btn btn-sm btn-outline-danger border-0 position-absolute top-0 end-0 m-2" onclick="deleteRhythmScore(${s.id})" title="Delete Score"><i class="bi bi-trash"></i></button>
+                  <button class="btn btn-sm btn-outline-danger border-0 position-absolute top-0 end-0 m-2" onclick="deleteRhythmScore(${s.id})" title="Delete Score"><i class="bi bi-trash2"></i></button>
                   <div class="d-flex justify-content-between align-items-start mb-2 pe-4">
                     <div>
                       <div class="fw-bold fs-6 text-white">${s.title} <span class="text-secondary small fw-normal">by ${s.artist}</span></div>
@@ -25645,7 +26752,7 @@ function perform_cover_scan($db) {
           <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="multi-add-favorite-btn"><i class="bi bi-heart-fill fs-5 text-danger"></i> Add to Favorites</button></li>
           <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="multi-offline-btn"><i class="bi bi-cloud-arrow-down-fill fs-5 text-info"></i> Re-cache / Offline</button></li>
           <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
-          <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger" id="multi-remove-btn"><i class="bi bi-trash-fill fs-5"></i> Remove</button></li>
+          <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger" id="multi-remove-btn"><i class="bi bi-trash2-fill fs-5"></i> Remove</button></li>
         </ul>
       </div>
     </div>
@@ -26122,7 +27229,7 @@ function perform_cover_scan($db) {
               <div class="editor-dropdown-item text-info fw-bold" id="editorMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</div>
               <div class="editor-dropdown-item" id="editorMarkdownHelpBtn" data-bs-toggle="modal" data-bs-target="#markdown-info-modal"><i class="bi bi-info-circle"></i> Guide</div>
               <div class="editor-dropdown-item" id="editorDownloadModalBtn" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Note...</div>
-              <div class="editor-dropdown-item text-danger" id="editorDeleteBtn"><i class="bi bi-trash"></i> Delete</div>
+              <div class="editor-dropdown-item text-danger" id="editorDeleteBtn"><i class="bi bi-trash2"></i> Delete</div>
             </div>
           </div>
         </div>
@@ -26224,7 +27331,7 @@ function perform_cover_scan($db) {
               <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" data-bs-toggle="modal" data-bs-target="#markdown-info-modal" style="cursor: pointer;"><i class="bi bi-info-circle"></i> Guide</div>
               <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" data-bs-toggle="modal" data-bs-target="#download-note-modal" style="cursor: pointer;"><i class="bi bi-download"></i> Download Blog...</div>
               <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorViewBtn" style="cursor: pointer;"><i class="bi bi-box-arrow-up-right text-info"></i> View Blog</div>
-              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger" id="blogEditorDeleteBtn" style="cursor: pointer;"><i class="bi bi-trash"></i> Delete</div>
+              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger" id="blogEditorDeleteBtn" style="cursor: pointer;"><i class="bi bi-trash2"></i> Delete</div>
             </div>
           </div>
         </div>
@@ -26328,7 +27435,7 @@ function perform_cover_scan($db) {
               <div class="editor-dropdown-item" id="taskEditorCopyBtn"><i class="bi bi-copy"></i> Copy Content</div>
               <div class="editor-dropdown-item text-info fw-bold" id="taskMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</div>
               <div class="editor-dropdown-item" id="taskEditorDownloadModalBtn" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Task List...</div>
-              <div class="editor-dropdown-item text-danger" id="taskEditorDeleteBtn"><i class="bi bi-trash"></i> Delete List</div>
+              <div class="editor-dropdown-item text-danger" id="taskEditorDeleteBtn"><i class="bi bi-trash2"></i> Delete List</div>
             </div>
           </div>
         </div>
@@ -26389,7 +27496,7 @@ function perform_cover_scan($db) {
       </div>
       <div class="d-flex gap-2">
         <button class="note-icon-btn" id="bulkDownloadNotesBtn" title="Download ZIP"><i class="bi bi-download fs-5"></i></button>
-        <button class="note-icon-btn text-danger" id="bulkDeleteNotesBtn" title="Delete Selected"><i class="bi bi-trash fs-5"></i></button>
+        <button class="note-icon-btn text-danger" id="bulkDeleteNotesBtn" title="Delete Selected"><i class="bi bi-trash2 fs-5"></i></button>
         <button class="note-icon-btn" id="cancelSelectNotesBtn" title="Cancel"><i class="bi bi-x-lg fs-5"></i></button>
       </div>
     </div>
@@ -26401,7 +27508,7 @@ function perform_cover_scan($db) {
       </div>
       <div class="d-flex gap-2">
         <button class="note-icon-btn" id="bulkDownloadBlogsBtn" title="Download ZIP"><i class="bi bi-download fs-5"></i></button>
-        <button class="note-icon-btn text-danger" id="bulkDeleteBlogsBtn" title="Delete Selected"><i class="bi bi-trash fs-5"></i></button>
+        <button class="note-icon-btn text-danger" id="bulkDeleteBlogsBtn" title="Delete Selected"><i class="bi bi-trash2 fs-5"></i></button>
         <button class="note-icon-btn" id="cancelSelectBlogsBtn" title="Cancel"><i class="bi bi-x-lg fs-5"></i></button>
       </div>
     </div>
@@ -27059,7 +28166,7 @@ function perform_cover_scan($db) {
       <div class="modal-dialog modal-dialog-centered modal-sm">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px;">
           <div class="modal-body p-4 text-center">
-            <i class="bi bi-trash-fill text-danger mb-3" style="font-size: 3rem; display: block;"></i>
+            <i class="bi bi-trash2-fill text-danger mb-3" style="font-size: 3rem; display: block;"></i>
             <h5 class="text-white mb-2 fw-bold">Delete Message?</h5>
             <p class="text-secondary small mb-4">Are you sure you want to permanently delete this message? This action cannot be undone.</p>
             <input type="hidden" id="delete-chat-msg-id">
@@ -27671,7 +28778,7 @@ function perform_cover_scan($db) {
               <h6 class="text-white small fw-bold mb-3 text-uppercase" style="letter-spacing: 1px;"><i class="bi bi-shield-lock text-warning me-1"></i> OWNER CONTROLS</h6>
               <div class="d-flex gap-2 mb-3">
                 <button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold rounded-pill" id="group-btn-edit"><i class="bi bi-pencil-square"></i> Edit</button>
-                <button class="btn btn-sm btn-outline-danger flex-grow-1 fw-bold rounded-pill" id="group-btn-delete"><i class="bi bi-trash"></i> Delete</button>
+                <button class="btn btn-sm btn-outline-danger flex-grow-1 fw-bold rounded-pill" id="group-btn-delete"><i class="bi bi-trash2"></i> Delete</button>
               </div>
               <hr class="border-secondary my-3 opacity-50">
               <label class="form-label text-secondary small fw-bold mb-2" style="letter-spacing: 1px;">GENERATE INVITE LINK</label>
@@ -32541,7 +33648,7 @@ SOFTWARE.</div>
                                   ? `
                               <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
                               <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.editChatMsg(${m.id}, '${safeContent}')"><i class="bi bi-pencil text-secondary fs-5"></i> Edit</button></li>
-                              <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger fw-bold" onclick="window.delChatMsg(${m.id})"><i class="bi bi-trash text-danger fs-5"></i> Delete</button></li>
+                              <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger fw-bold" onclick="window.delChatMsg(${m.id})"><i class="bi bi-trash2 text-danger fs-5"></i> Delete</button></li>
                               `
                                   : ""
                               }
@@ -38005,7 +39112,7 @@ SOFTWARE.</div>
                         <div class="card bg-dark border-secondary text-white p-3 shadow-sm hover-bg-dark" style="border-radius: 12px;">
                           <div class="d-flex justify-content-between align-items-center mb-3">
                             <h5 class="fw-bold m-0"><i class="bi bi-terminal text-info me-2"></i>${escapeHTML(api.name)}</h5>
-                            <button class="btn btn-sm btn-outline-danger delete-api-btn" data-id="${api.id}"><i class="bi bi-trash"></i></button>
+                            <button class="btn btn-sm btn-outline-danger delete-api-btn" data-id="${api.id}"><i class="bi bi-trash2"></i></button>
                           </div>
                           <div class="d-flex flex-column gap-2 small text-secondary">
                             <div><strong>Status:</strong> <span class="badge ${api.status === "active" ? "bg-success" : api.status === "pending" ? "bg-info text-dark" : "bg-danger"}">${api.status.toUpperCase()}</span></div>
@@ -38209,7 +39316,7 @@ SOFTWARE.</div>
                                       <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                       <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                         <li><button class="dropdown-item edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                        <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                                        <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash2"></i> Delete</button></li>
                                       </ul>
                                     </div>`
                                         : ""
@@ -38311,7 +39418,7 @@ SOFTWARE.</div>
                                             <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                             <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                               <li><button class="dropdown-item edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                              <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                                              <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash2"></i> Delete</button></li>
                                             </ul>
                                           </div>
                                         `
@@ -40029,7 +41136,7 @@ SOFTWARE.</div>
                                 </div>
                                 <div class="d-flex align-items-center gap-2">
                                   <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(s.created_at)}</small>
-                                  ${s.user_id == currentUser.id ? `<button class="btn btn-sm btn-link text-danger p-0" onclick="window.deleteStatus(${s.id})"><i class="bi bi-trash"></i></button>` : ""}
+                                  ${s.user_id == currentUser.id ? `<button class="btn btn-sm btn-link text-danger p-0" onclick="window.deleteStatus(${s.id})"><i class="bi bi-trash2"></i></button>` : ""}
                                 </div>
                               </div>
                               ${s.content ? `<div class="text-light mt-1" style="font-size: 1rem; white-space: pre-wrap;">${parseUserText(s.content)}</div>` : ""}
@@ -40514,7 +41621,7 @@ SOFTWARE.</div>
                                   <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="import-offline-btn"><i class="bi bi-box-arrow-in-down fs-5 text-info"></i> Import Library</button></li>
                                   <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="export-offline-btn"><i class="bi bi-box-arrow-up fs-5 text-info"></i> Export Library</button></li>
                                   <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
-                                  <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger fw-bold" id="remove-all-offline-btn"><i class="bi bi-trash-fill fs-5"></i> Clear Offline Cache</button></li>
+                                  <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger fw-bold" id="remove-all-offline-btn"><i class="bi bi-trash2-fill fs-5"></i> Clear Offline Cache</button></li>
                                 </ul>
                               </div>
                             </div>
@@ -40578,7 +41685,7 @@ SOFTWARE.</div>
                               </div>
                             </div>
                             <div class="d-flex gap-2 flex-wrap">
-                            <button class="btn btn-outline-danger rounded-pill px-4 fw-medium shadow-sm" id="clear-favorites-btn"><i class="bi bi-trash-fill me-1"></i> Clear All</button>
+                            <button class="btn btn-outline-danger rounded-pill px-4 fw-medium shadow-sm" id="clear-favorites-btn"><i class="bi bi-trash2-fill me-1"></i> Clear All</button>
                             <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-favorites-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</button>
                             <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-favorites-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
                           </div>
@@ -40656,7 +41763,7 @@ SOFTWARE.</div>
                             </div>
                             <div class="d-flex gap-2">
                               <button class="btn btn-sm btn-outline-danger rounded-pill px-3 fw-bold" id="clear-history-btn" title="Clear History">
-                                <i class="bi bi-trash"></i> Clear History
+                                <i class="bi bi-trash2"></i> Clear History
                               </button>
                             </div>
                           </div>
@@ -41278,7 +42385,7 @@ SOFTWARE.</div>
                                     <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                     <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                       <li><button class="dropdown-item edit-phpboard-btn" data-id="${t.id}" data-type="thread" data-content="${encodeURIComponent(t.comment)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                      <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash"></i> Delete</button></li>
+                                      <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash2"></i> Delete</button></li>
                                     </ul>
                                   </div>
                                 `
@@ -41286,7 +42393,7 @@ SOFTWARE.</div>
                                   <div class="custom-opt-dropdown">
                                     <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                     <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                      <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash"></i> Delete (Anon)</button></li>
+                                      <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash2"></i> Delete (Anon)</button></li>
                                     </ul>
                                   </div>
                                 `
@@ -41346,7 +42453,7 @@ SOFTWARE.</div>
                                               <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                               <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                                 <li><button class="dropdown-item edit-phpboard-btn" data-id="${r.id}" data-type="reply" data-content="${encodeURIComponent(r.comment)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                                <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash"></i> Delete</button></li>
+                                                <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash2"></i> Delete</button></li>
                                               </ul>
                                             </div>
                                           `
@@ -41354,7 +42461,7 @@ SOFTWARE.</div>
                                             <div class="custom-opt-dropdown">
                                               <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                               <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                                <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash"></i> Delete (Anon)</button></li>
+                                                <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash2"></i> Delete (Anon)</button></li>
                                               </ul>
                                             </div>
                                           `
@@ -41459,7 +42566,7 @@ SOFTWARE.</div>
                                       <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                       <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                         <li><button class="dropdown-item edit-phpboard-btn" data-id="${t.id}" data-type="thread" data-content="${encodeURIComponent(t.comment)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                        <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash"></i> Delete</button></li>
+                                        <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash2"></i> Delete</button></li>
                                       </ul>
                                     </div>
                                   `
@@ -41467,7 +42574,7 @@ SOFTWARE.</div>
                                     <div class="custom-opt-dropdown">
                                       <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                       <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                        <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash"></i> Delete (Anon)</button></li>
+                                        <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash2"></i> Delete (Anon)</button></li>
                                       </ul>
                                     </div>
                                   `
@@ -41680,7 +42787,7 @@ SOFTWARE.</div>
                                         <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                         <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                           <li><button class="dropdown-item edit-phpboard-btn" data-id="${r.id}" data-type="reply" data-content="${encodeURIComponent(r.comment)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                          <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash"></i> Delete</button></li>
+                                          <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash2"></i> Delete</button></li>
                                         </ul>
                                       </div>
                                     `
@@ -41688,7 +42795,7 @@ SOFTWARE.</div>
                                       <div class="custom-opt-dropdown">
                                         <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                         <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                          <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash"></i> Delete (Anon)</button></li>
+                                          <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash2"></i> Delete (Anon)</button></li>
                                         </ul>
                                       </div>
                                     `
@@ -42331,7 +43438,7 @@ SOFTWARE.</div>
                                     <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                     <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                       <li><button class="dropdown-item edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                      <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                                      <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash2"></i> Delete</button></li>
                                     </ul>
                                   </div>`
                                       : ""
@@ -42434,7 +43541,7 @@ SOFTWARE.</div>
                                           <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                           <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                             <li><button class="dropdown-item edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                            <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                                            <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash2"></i> Delete</button></li>
                                           </ul>
                                         </div>
                                       `
@@ -42583,7 +43690,7 @@ SOFTWARE.</div>
                           <div class="card bg-dark border-secondary text-white p-3 shadow-sm hover-bg-dark" style="border-radius: 12px;">
                             <div class="d-flex justify-content-between align-items-center mb-3">
                               <h5 class="fw-bold m-0"><i class="bi bi-terminal text-info me-2"></i>${escapeHTML(api.name)}</h5>
-                              <button class="btn btn-sm btn-outline-danger delete-api-btn" data-id="${api.id}"><i class="bi bi-trash"></i></button>
+                              <button class="btn btn-sm btn-outline-danger delete-api-btn" data-id="${api.id}"><i class="bi bi-trash2"></i></button>
                             </div>
                             <div class="d-flex flex-column gap-2 small text-secondary">
                               <div><strong>Status:</strong> <span class="badge ${api.status === "active" ? "bg-success" : api.status === "pending" ? "bg-info text-dark" : "bg-danger"}">${api.status.toUpperCase()}</span></div>
@@ -42662,7 +43769,7 @@ SOFTWARE.</div>
                           <div class="card bg-dark border-secondary text-white p-3 shadow-sm hover-bg-dark" style="border-radius: 12px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
                             <div class="d-flex justify-content-between align-items-center mb-3">
                               <h5 class="fw-bold m-0"><i class="bi bi-briefcase text-info me-2"></i>${escapeHTML(p.name)}</h5>
-                              ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-outline-danger delete-project-btn" data-id="${p.id}"><i class="bi bi-trash"></i></button>` : `<div class="d-flex align-items-center gap-2"><span class="badge bg-secondary">Shared with you</span> <button class="btn btn-sm btn-outline-warning leave-project-btn" data-id="${p.id}" title="Leave Project"><i class="bi bi-box-arrow-left"></i></button></div>`}
+                              ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-outline-danger delete-project-btn" data-id="${p.id}"><i class="bi bi-trash2"></i></button>` : `<div class="d-flex align-items-center gap-2"><span class="badge bg-secondary">Shared with you</span> <button class="btn btn-sm btn-outline-warning leave-project-btn" data-id="${p.id}" title="Leave Project"><i class="bi bi-box-arrow-left"></i></button></div>`}
                             </div>
                             <div class="d-flex gap-4 small text-secondary">
                               <span><i class="bi bi-person-fill"></i> Owner: ${escapeHTML(p.owner_name)}</span>
@@ -44001,7 +45108,7 @@ SOFTWARE.</div>
             menuItems += `<li class="context-menu-item" data-action="edit_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-description="${escapeHTML(description)}" data-is-private="${isPrivate}"><i class="bi bi-pencil-fill"></i> Edit Playlist</li>`;
             menuItems += `<li class="context-menu-item" data-action="share_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}"><i class="bi bi-share-fill"></i> Share Playlist</li>`;
             menuItems += `<li class="context-menu-item" data-action="export_playlist" data-public-id="${publicId}"><i class="bi bi-box-arrow-up"></i> Export Playlist</li>`;
-            menuItems += `<li class="context-menu-item text-danger" data-action="delete_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}"><i class="bi bi-trash-fill"></i> Delete Playlist</li>`;
+            menuItems += `<li class="context-menu-item text-danger" data-action="delete_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}"><i class="bi bi-trash2-fill"></i> Delete Playlist</li>`;
           } else {
             // User is just a collaborator
             menuItems += `<li class="context-menu-item" data-action="share_playlist" data-public-id="${publicId}" data-name="${escapeHTML(name)}"><i class="bi bi-share-fill"></i> Share Playlist</li>`;
@@ -44155,7 +45262,7 @@ SOFTWARE.</div>
             ) {
               menuItems += `<hr class="dropdown-divider bg-secondary mx-2 my-1">`;
               menuItems += `<li class="context-menu-item" data-action="edit_metadata" data-id="${songId}" data-title="${encodeURIComponent(title || "")}" data-album="${encodeURIComponent(album || "")}" data-genre="${encodeURIComponent(genre || "")}"><i class="bi bi-pencil-fill"></i> Edit Info</li>`;
-              menuItems += `<li class="context-menu-item text-danger" data-action="delete_song" data-id="${songId}"><i class="bi bi-trash-fill"></i> Delete Song</li>`;
+              menuItems += `<li class="context-menu-item text-danger" data-action="delete_song" data-id="${songId}"><i class="bi bi-trash2-fill"></i> Delete Song</li>`;
             }
           }
     
@@ -45814,7 +46921,7 @@ SOFTWARE.</div>
                                 <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                 <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                   <li><button class="dropdown-item edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                  <li><button class="dropdown-item text-danger delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                                  <li><button class="dropdown-item text-danger delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
                                 </ul>
                               </div>
                             `
@@ -45899,7 +47006,7 @@ SOFTWARE.</div>
                                 <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                 <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                   <li><button class="dropdown-item edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                  <li><button class="dropdown-item text-danger delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                                  <li><button class="dropdown-item text-danger delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
                                 </ul>
                               </div>
                             `
@@ -46600,7 +47707,7 @@ SOFTWARE.</div>
                       <span class="text-white fw-medium">${escapeHTML(c.name)}</span>
                       <div class="d-flex gap-2">
                         <button class="note-icon-btn edit-cat-btn" data-id="${c.id}" data-name="${escapeHTML(c.name)}" data-type="${type}"><i class="bi bi-pencil"></i></button>
-                        <button class="note-icon-btn text-danger del-cat-btn" data-id="${c.id}" data-type="${type}"><i class="bi bi-trash"></i></button>
+                        <button class="note-icon-btn text-danger del-cat-btn" data-id="${c.id}" data-type="${type}"><i class="bi bi-trash2"></i></button>
                       </div>
                     </div>
                     `,
@@ -47498,7 +48605,7 @@ SOFTWARE.</div>
                 showToast("Failed to clear offline library.", "error");
                 removeAllOfflineBtn.disabled = false;
                 removeAllOfflineBtn.innerHTML =
-                  '<i class="bi bi-trash-fill me-1"></i> Remove All';
+                  '<i class="bi bi-trash2-fill me-1"></i> Remove All';
               }
             });
             return;
@@ -47560,7 +48667,7 @@ SOFTWARE.</div>
                   showToast("Failed to clear favorites.", "error");
                   clearFavoritesBtn.disabled = false;
                   clearFavoritesBtn.innerHTML =
-                    '<i class="bi bi-trash-fill me-1"></i> Clear All';
+                    '<i class="bi bi-trash2-fill me-1"></i> Clear All';
                 }
               });
             }
@@ -55381,7 +56488,7 @@ SOFTWARE.</div>
                                 <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                 <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                   <li><button class="dropdown-item edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                  <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                                  <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
                                 </ul>
                               </div>
                             `
@@ -55480,7 +56587,7 @@ SOFTWARE.</div>
                                 <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
                                 <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
                                   <li><button class="dropdown-item edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                  <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash"></i> Delete</button></li>
+                                  <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
                                 </ul>
                               </div>
                             `
