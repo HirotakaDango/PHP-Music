@@ -387,7 +387,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '7.7');
+define('APP_VERSION', '7.8');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -946,10 +946,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 $targetDir = dirname($dest);
                 if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
 
-                if ($chunk === 0 && file_exists($dest) && !$override) {
-                  echo json_encode(['success' => false, 'error' => 'CONFLICT|' . basename($dest)]);
-                  exit;
-                }
                 if ($chunk === 0 && file_exists($dest) && $override) {
                   save_file_version($dest);
                 }
@@ -963,14 +959,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     fclose($out);
                   }
                   if ($chunk == $chunks - 1) {
-                    rename($tempDest, $dest);
+                    $finalDest = $dest;
+                    if (file_exists($finalDest) && !$override) {
+                      $finalDest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($finalDest));
+                    }
+                    rename($tempDest, $finalDest);
                     $uploaded++;
-                    logDriveActivity(basename($dest), ltrim(str_replace($baseDir, '', $dest), '/'), 'uploaded');
+                    logDriveActivity(basename($finalDest), ltrim(str_replace($baseDir, '', $finalDest), '/'), 'uploaded');
                   }
                 } else {
-                  if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $dest)) {
+                  $finalDest = $dest;
+                  if (file_exists($finalDest) && !$override) {
+                    $finalDest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($finalDest));
+                  }
+                  if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $finalDest)) {
                     $uploaded++;
-                    logDriveActivity(basename($dest), ltrim(str_replace($baseDir, '', $dest), '/'), 'uploaded');
+                    logDriveActivity(basename($finalDest), ltrim(str_replace($baseDir, '', $finalDest), '/'), 'uploaded');
                   }
                 }
               }
@@ -983,7 +987,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $name = basename(parse_url($url, PHP_URL_PATH));
               if (!$name) $name = 'downloaded_file_' . time();
               $target = $absPath . '/' . $name;
-              if (file_exists($target) && !$override) throw new Exception('CONFLICT|' . $name);
+              if (file_exists($target) && !$override) {
+                $name = generateUniqueFileName($absPath, $name);
+                $target = $absPath . '/' . $name;
+              }
               if (file_exists($target) && $override) save_file_version($target);
               file_put_contents($target, file_get_contents($url));
               logDriveActivity($name, ltrim(str_replace($baseDir, '', $target), '/'), 'uploaded via url');
@@ -995,8 +1002,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               if (empty($items)) throw new Exception('No items selected');
               $zipName = (count($items) === 1) ? basename($items[0]) . '.zip' : 'Archive_' . date('Ymd_His') . '.zip';
               $target = $absPath . '/' . $zipName;
-              if (file_exists($target) && empty($input['override'])) throw new Exception('CONFLICT|' . $zipName);
-              if (file_exists($target)) save_file_version($target);
+              if (file_exists($target) && empty($input['override'])) {
+                $zipName = generateUniqueFileName($absPath, $zipName);
+                $target = $absPath . '/' . $zipName;
+              }
+              if (file_exists($target) && !empty($input['override'])) save_file_version($target);
               
               $zip = new ZipArchive();
               if ($zip->open($target, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {
@@ -1249,7 +1259,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 $folderName = pathinfo($src, PATHINFO_FILENAME);
                 $parentDir = dirname($src);
                 $extractTarget = $parentDir . '/' . $folderName;
-                if (file_exists($extractTarget) && empty($input['override'])) throw new Exception('CONFLICT|' . $folderName);
+                if (file_exists($extractTarget) && empty($input['override'])) {
+                  $folderName = generateUniqueFolderName($parentDir, $folderName);
+                  $extractTarget = $parentDir . '/' . $folderName;
+                }
                 if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
                 $zip->extractTo($extractTarget);
                 $zip->close();
@@ -1850,6 +1863,24 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    if (isset($_POST['save_admin_permissions']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $target_user_id = (int)$_POST['user_id'];
+      $permissions = isset($_POST['permissions']) ? $_POST['permissions'] : [];
+      
+      $stmt = $db->prepare("SELECT settings FROM users WHERE id = ?");
+      $stmt->execute([$target_user_id]);
+      $settings = json_decode($stmt->fetchColumn() ?: '{}', true) ?? [];
+      
+      $settings['admin_permissions'] = $permissions;
+      
+      $db->prepare("UPDATE users SET settings = ? WHERE id = ?")->execute([json_encode($settings), $target_user_id]);
+      log_admin_activity($db, $_SESSION['admin_email'], 'Updated Admin Access Permissions', $target_user_id);
+      $_SESSION['admin_flash_msg'] = "Permissions updated successfully.";
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
     if (isset($_POST['toggle_admin']) && isset($_POST['user_id'])) {
       $db = get_db();
       $user_id = (int)$_POST['user_id'];
@@ -2097,6 +2128,45 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   }
   
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
+
+  // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
+  $current_admin_permissions = ['users', 'logs', 'reports', 'appeals', 'drive', 'ide', 'api', 'playground']; // Default to all if missing
+  $is_super_admin_check = false;
+  
+  if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
+    $db_fw = get_db();
+    $stmt_fw = $db_fw->prepare("SELECT email, settings FROM users WHERE id = ?");
+    $stmt_fw->execute([$_SESSION['admin_id']]);
+    $adm_row = $stmt_fw->fetch();
+    if ($adm_row) {
+      if (strtolower(trim($adm_row['email'])) === 'musiclibrary@mail.com') {
+        $is_super_admin_check = true;
+      } else {
+        $adm_settings = json_decode($adm_row['settings'] ?: '{}', true) ?? [];
+        if (isset($adm_settings['admin_permissions'])) {
+          $current_admin_permissions = $adm_settings['admin_permissions'];
+        }
+      }
+    }
+  }
+
+  $req_page = $_GET['page'] ?? 'users';
+  if (empty($req_page)) $req_page = 'users';
+
+  // Strict page enforcement and redirection engine
+  if ($is_admin_logged_in && !$is_super_admin_check && !isset($_POST['admin_email'])) {
+    if (!in_array($req_page, $current_admin_permissions)) {
+      $first_allowed = !empty($current_admin_permissions) ? $current_admin_permissions[0] : '';
+      if ($first_allowed) {
+        $redirect_url = "?access=admin" . ($first_allowed === 'users' ? '' : "&page=" . $first_allowed);
+        $_SESSION['admin_flash_msg'] = "Access Denied. Redirected to your first allowed page.";
+        header("Location: $redirect_url");
+        exit;
+      } else {
+        die("Access Denied: You have no administrative permissions assigned to view any pages.");
+      }
+    }
+  }
 ?>
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
@@ -2316,35 +2386,36 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
       .user-list-header {
         display: grid;
-        grid-template-columns: 60px 40px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 80px 60px;
+        grid-template-columns: 40px 50px 40px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 80px 60px;
         align-items: center;
         gap: 1rem;
-        padding: 0 1rem;
-        font-weight: 600;
+        padding: 0 1rem 0.5rem 1rem;
+        font-weight: 700;
         color: var(--ytm-secondary-text);
         font-size: 0.85rem;
         text-transform: uppercase;
         letter-spacing: 1px;
+        border-bottom: 2px solid var(--ytm-surface-2);
       }
 
       .user-item {
         display: grid;
-        grid-template-columns: 60px 40px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 80px 60px;
+        grid-template-columns: 40px 50px 40px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 80px 60px;
         align-items: center;
         gap: 1rem;
-        padding: 1rem;
+        padding: 0.85rem 1rem;
         background-color: var(--ytm-surface);
         border: 1px solid var(--ytm-surface-2);
         border-radius: 12px;
-        transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+        transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
         color: var(--ytm-primary-text);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
       }
-
+      
       .user-item:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+        transform: translateY(-2px);
+        box-shadow: 0 8px 15px rgba(0,0,0,0.3);
         border-color: #555;
-        background-color: #181818;
       }
 
       .user-item .badge {
@@ -2357,6 +2428,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         font-size: 0.85rem;
         border: 1px solid #555;
         border-radius: 10px;
+        z-index: 1060;
       }
 
       .user-item .dropdown-item {
@@ -2490,6 +2562,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           gap: 0.75rem 0.75rem;
         }
 
+        .user-item-edit-desktop,
         .user-item-id,
         .user-item-email-desktop,
         .user-item-artist-desktop,
@@ -2777,14 +2850,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </div>
           
           <div class="mb-4 mt-3 d-flex flex-column">
+            <?php if ($is_super_admin_check || in_array('users', $current_admin_permissions)): ?>
             <a href="?access=admin" class="nav-link <?php echo (empty($_GET['page']) || $_GET['page'] === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('logs', $current_admin_permissions)): ?>
             <a href="?access=admin&page=logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('reports', $current_admin_permissions)): ?>
             <a href="?access=admin&page=reports" class="nav-link <?php echo (($_GET['page'] ?? '') === 'reports') ? 'active' : ''; ?>"><i class="bi bi-shield-fill-exclamation"></i><span>Profile Reports</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('appeals', $current_admin_permissions)): ?>
             <a href="?access=admin&page=appeals" class="nav-link <?php echo (($_GET['page'] ?? '') === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('drive', $current_admin_permissions)): ?>
             <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Drive Manager</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('ide', $current_admin_permissions)): ?>
             <a href="?access=admin&page=ide" class="nav-link <?php echo (($_GET['page'] ?? '') === 'ide') ? 'active' : ''; ?>"><i class="bi bi-code-slash"></i><span>PHPEditor (IDE)</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('api', $current_admin_permissions)): ?>
             <a href="?access=admin&page=api" class="nav-link <?php echo (($_GET['page'] ?? '') === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('playground', $current_admin_permissions)): ?>
             <a href="./#playground" target="_blank" class="nav-link"><i class="bi bi-window-stack"></i><span>API Playground</span></a>
+            <?php endif; ?>
           </div>
           
           <div class="mt-auto d-flex flex-column pb-3">
@@ -3640,14 +3729,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               background: #121212;
               border-bottom: 1px solid #2d2d2d;
               padding: 0 16px;
-              height: 35px;
+              height: 35px !important;
+              min-height: 35px;
               flex-shrink: 0;
+              overflow-x: auto;
+              overflow-y: hidden;
+              scrollbar-width: none;
+            }
+            .panel-header::-webkit-scrollbar {
+              display: none;
             }
   
             .panel-tabs {
               display: flex;
+              align-items: center;
               height: 100%;
               gap: 16px;
+              flex-wrap: nowrap;
             }
   
             .panel-tab {
@@ -3688,7 +3786,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
             .panel-content-area {
               flex: 1;
-              overflow: auto;
+              display: flex;
+              flex-direction: column;
+              min-height: 0;
               background: #0a0a0a;
               color: #e3e3e3;
               font-family: monospace;
@@ -3699,12 +3799,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
             .panel-pane {
               display: none;
-              height: 100%;
+              flex: 1;
               width: 100%;
+              min-height: 0;
             }
   
             .panel-pane.active {
-              display: block;
+              display: flex;
+              flex-direction: column;
             }
   
             .ide-activity-bar {
@@ -3717,6 +3819,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               padding-top: 12px;
               flex-shrink: 0;
               z-index: 10;
+              overflow-y: auto;
+              scrollbar-width: none;
+            }
+            .ide-activity-bar::-webkit-scrollbar {
+              display: none;
             }
   
             .ide-activity-action {
@@ -4043,6 +4150,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <div class="ide-ctx-title">Editor Actions</div>
               <button class="ide-ctx-btn" id="ide-editor-cmd-palette"><i class="bi bi-command"></i> Command Palette (F1)</button>
               <hr class="border-secondary my-2 opacity-25">
+              <button class="ide-ctx-btn" id="ide-editor-cut"><i class="bi bi-scissors"></i> Cut</button>
               <button class="ide-ctx-btn" id="ide-editor-copy"><i class="bi bi-copy"></i> Copy</button>
               <button class="ide-ctx-btn" id="ide-editor-paste"><i class="bi bi-clipboard"></i> Paste</button>
               <button class="ide-ctx-btn" id="ide-editor-select-all"><i class="bi bi-textarea-t"></i> Select All</button>
@@ -4072,6 +4180,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <button class="ide-ctx-btn text-danger" id="ide-btn-delete"><i class="bi bi-trash2"></i> Delete</button>
               <hr class="border-secondary my-2 opacity-25">
               <button class="ide-ctx-btn" id="ide-btn-upload"><i class="bi bi-upload"></i> Upload Files</button>
+              <button class="ide-ctx-btn" id="ide-btn-upload-folder"><i class="bi bi-folder-symlink"></i> Upload Folder</button>
+              <button class="ide-ctx-btn" id="ide-btn-upload-url"><i class="bi bi-link"></i> Upload via URL</button>
               <button class="ide-ctx-btn" id="ide-btn-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
               <hr class="border-secondary my-2 opacity-25">
               <button class="ide-ctx-btn justify-content-center text-secondary fw-bold" onclick="document.getElementById('ide-ctx-modal').style.display='none'">Cancel</button>
@@ -4234,6 +4344,29 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </div>
               </div>
             </div>
+
+            <!-- IDE Upload URL Modal -->
+            <div class="modal fade" id="ide-upload-url-modal" tabindex="-1">
+              <div class="modal-dialog modal-dialog-centered modal-sm">
+                <div class="modal-content border-danger shadow-lg" style="background-color: #0a0a0a;">
+                  <div class="modal-header border-bottom border-danger">
+                    <h5 class="modal-title text-white fw-bold"><i class="bi bi-link text-danger me-2"></i>Upload via URL</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body text-white">
+                    <input type="hidden" id="ide-upload-url-path">
+                    <div class="mb-3">
+                      <label class="form-label text-danger fw-bold small">FILE URL</label>
+                      <input type="url" id="ide-upload-url-input" class="form-control bg-dark text-white border-secondary" placeholder="https://example.com/file.zip">
+                    </div>
+                  </div>
+                  <div class="modal-footer border-top border-danger">
+                    <button type="button" class="btn btn-outline-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-danger btn-sm fw-bold" id="ide-upload-url-submit">Download</button>
+                  </div>
+                </div>
+              </div>
+            </div>
   
             <!-- IDE Diff Modal -->
             <div class="modal fade" id="ide-diff-modal" tabindex="-1">
@@ -4292,11 +4425,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="ide-sidebar-resizer" id="ide-sidebar-resizer"></div>
                 <div class="ide-sidebar-header d-flex justify-content-between align-items-center" id="ide-sidebar-title">
                   <span>EXPLORER</span>
-                  <div class="d-flex gap-2">
+                  <div class="d-flex gap-2 align-items-center">
                     <i class="bi bi-search" style="cursor:pointer;" id="ide-tree-search" title="Search Files"></i>
                     <i class="bi bi-file-earmark-plus" style="cursor:pointer;" id="ide-tree-new-file" title="New File"></i>
                     <i class="bi bi-folder-plus" style="cursor:pointer;" id="ide-tree-new-folder" title="New Folder"></i>
-                    <i class="bi bi-upload" style="cursor:pointer;" id="ide-tree-upload" title="Upload"></i>
+                    <div class="dropdown d-flex align-items-center">
+                      <i class="bi bi-upload" style="cursor:pointer;" data-bs-toggle="dropdown" aria-expanded="false" title="Upload"></i>
+                      <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary" style="font-size: 0.85rem; min-width: 150px; z-index: 1060;">
+                        <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" id="ide-tree-upload"><i class="bi bi-file-earmark-arrow-up"></i> Upload Files</div></li>
+                        <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" id="ide-tree-upload-folder"><i class="bi bi-folder-symlink"></i> Upload Folder</div></li>
+                        <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" id="ide-tree-upload-url"><i class="bi bi-link"></i> Upload via URL</div></li>
+                      </ul>
+                    </div>
                     <i class="bi bi-arrow-clockwise" style="cursor:pointer;" id="ide-refresh-tree" title="Refresh"></i>
                   </div>
                 </div>
@@ -4336,66 +4476,88 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="ide-tabs" id="ide-tabs-container">
                   <!-- Dynamic Tabs -->
                 </div>
-                <div class="ide-editor-container">
-                  <div style="flex: 1; position: relative;">
-                    <div id="ide-editor" class="position-absolute w-100 h-100"></div>
-                    <div id="ide-media-viewer" class="position-absolute w-100 h-100 d-none flex-column align-items-center justify-content-center bg-dark">
-                      <div id="ide-media-content" class="shadow-lg rounded" style="max-width: 90%; max-height: 90%;"></div>
-                      <div id="ide-media-info" class="mt-3 text-secondary font-monospace small"></div>
+                <div id="ide-split-container" style="flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative;">
+                  <div class="ide-editor-container" style="flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column;">
+                    <div style="flex: 1; position: relative;">
+                      <div id="ide-editor" class="position-absolute w-100 h-100"></div>
+                      <div id="ide-media-viewer" class="position-absolute w-100 h-100 d-none flex-column align-items-center justify-content-center bg-dark">
+                        <div id="ide-media-content" class="shadow-lg rounded" style="max-width: 90%; max-height: 90%;"></div>
+                        <div id="ide-media-info" class="mt-3 text-secondary font-monospace small"></div>
+                      </div>
+                      <div id="ide-empty-state" class="position-absolute w-100 h-100 d-flex flex-column align-items-center justify-content-center text-secondary">
+                        <i class="bi bi-code-slash mb-3" style="font-size: 4rem; opacity: 0.3;"></i>
+                        <h5>PHP Music IDE</h5>
+                        <p class="small">Select a file from the explorer to begin.</p>
+                      </div>
                     </div>
-                    <div id="ide-empty-state" class="position-absolute w-100 h-100 d-flex flex-column align-items-center justify-content-center text-secondary">
-                      <i class="bi bi-code-slash mb-3" style="font-size: 4rem; opacity: 0.3;"></i>
-                      <h5>PHP Music IDE</h5>
-                      <p class="small">Select a file from the explorer to begin.</p>
+                    <div class="ide-status-bar" id="ide-status-bar" style="display: none; background-color: #1e1e1e;">
+                      <div class="ide-status-left">
+                        <span id="ide-status-file-size">0 KB</span>
+                        <span id="ide-status-word-count" style="display: none;">0 words</span>
+                        <span id="ide-status-char-count" style="display: none;">0 chars</span>
+                      </div>
+                      <div class="ide-status-right">
+                        <span id="ide-status-cursor">Ln 1, Col 1</span>
+                        <span class="ide-status-item" id="ide-status-indent">Spaces: 2</span>
+                      </div>
                     </div>
                   </div>
-                  <div class="ide-status-bar" id="ide-status-bar" style="display: none; background-color: #1e1e1e;">
-                    <div class="ide-status-left">
-                      <span id="ide-status-file-size">0 KB</span>
-                      <span id="ide-status-word-count" style="display: none;">0 words</span>
-                      <span id="ide-status-char-count" style="display: none;">0 chars</span>
-                    </div>
-                    <div class="ide-status-right">
-                      <span id="ide-status-cursor">Ln 1, Col 1</span>
-                      <span class="ide-status-item" id="ide-status-indent">Spaces: 2</span>
-                    </div>
-                  </div>
-                </div>
   
-              <!-- Bottom Terminal / Output Panel -->
-              <div class="ide-bottom-panel" id="ide-bottom-panel">
-                <div class="ide-panel-resizer" id="ide-panel-resizer"></div>
-                <div class="panel-header">
-                  <div class="panel-tabs">
-                    <div class="panel-tab active" data-target="output">OUTPUT</div>
-                    <div class="panel-tab" data-target="problems">PROBLEMS</div>
-                    <div class="panel-tab" data-target="terminal">TERMINAL</div>
-                  </div>
-                  <div class="panel-actions d-flex align-items-center gap-3">
-                    <i class="bi bi-arrow-clockwise" id="panel-reload" title="Hard Reload Preview"></i>
-                    <i class="bi bi-bug" id="panel-eruda" title="Toggle Eruda Inspect (Preview)"></i>
-                    <i class="bi bi-window-stack" id="panel-popup" title="Open in Popup Window"></i>
-                    <i class="bi bi-box-arrow-up-right" id="panel-newtab" title="Open Preview in New Tab"></i>
-                    <i class="bi bi-x-circle" id="panel-clear" title="Clear Console"></i>
-                    <i class="bi bi-chevron-up" id="panel-fullscreen" title="Toggle Size"></i>
-                    <i class="bi bi-x" id="panel-close" title="Close Panel"></i>
-                  </div>
-                </div>
-                <div class="panel-content-area">
-                  <div class="panel-pane active" id="pane-output">
-                    <iframe id="ide-preview-iframe" class="w-100 h-100 border-0 bg-white" src="about:blank"></iframe>
-                  </div>
-                  <div class="panel-pane" id="pane-terminal">
-                    <div class="text-success">PHP Music Console v1.0.0</div>
-                    <div class="text-secondary mt-1">Terminal environment linked to server.</div>
-                    <div id="terminal-logs" class="mt-2" style="white-space: pre-wrap; font-family: monospace;"></div>
-                    <div class="d-flex align-items-center mt-2">
-                      <span class="text-success me-2"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'admin@server'); ?>:~$</span>
-                      <input type="text" id="ide-terminal-input" class="bg-transparent border-0 text-light flex-grow-1 outline-none shadow-none" style="outline:none; font-family: monospace;" placeholder="Type a command (e.g. ls, pwd)...">
+                  <!-- Bottom Terminal / Output Panel -->
+                  <div class="ide-bottom-panel" id="ide-bottom-panel">
+                    <div class="ide-panel-resizer" id="ide-panel-resizer"></div>
+                    <div class="panel-header d-flex align-items-center justify-content-between gap-2">
+                      <div class="panel-tabs d-flex align-items-center gap-3 h-100">
+                        <div class="panel-tab active" data-target="output">OUTPUT</div>
+                        <div class="panel-tab" data-target="problems">PROBLEMS</div>
+                        <div class="panel-tab" data-target="terminal">TERMINAL</div>
+                      </div>
+                      <div class="panel-actions d-flex align-items-center gap-2 ms-auto h-100">
+                        <i class="bi bi-layout-split" id="panel-layout-toggle" style="cursor: pointer;" title="Toggle Layout (Rows/Columns)"></i>
+                        
+                        <div class="d-none d-lg-flex align-items-center gap-3 ms-1">
+                          <i class="bi bi-lightning-charge" id="panel-live-toggle" style="cursor: pointer;" title="Toggle Live Preview"></i>
+                          <i class="bi bi-arrow-clockwise" id="panel-reload" style="cursor: pointer;" title="Hard Reload Preview"></i>
+                          <i class="bi bi-bug" id="panel-eruda" style="cursor: pointer;" title="Toggle Eruda Inspect"></i>
+                          <i class="bi bi-window-stack" id="panel-popup" style="cursor: pointer;" title="Open in Popup Window"></i>
+                          <i class="bi bi-box-arrow-up-right" id="panel-newtab" style="cursor: pointer;" title="Open Preview in New Tab"></i>
+                          <i class="bi bi-x-circle" id="panel-clear" style="cursor: pointer;" title="Clear Console"></i>
+                        </div>
+
+                        <div class="dropdown d-lg-none d-flex align-items-center ms-1">
+                          <i class="bi bi-three-dots-vertical" data-bs-toggle="dropdown" style="cursor: pointer;" title="More Options"></i>
+                          <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary" style="background-color: var(--ytm-surface-2); min-width: 180px; z-index: 9999;">
+                            <li><button class="dropdown-item text-white d-flex align-items-center gap-2" id="panel-live-toggle-m"><i class="bi bi-lightning-charge"></i> Live Preview</button></li>
+                            <li><button class="dropdown-item text-white d-flex align-items-center gap-2" id="panel-reload-m"><i class="bi bi-arrow-clockwise"></i> Hard Reload</button></li>
+                            <li><button class="dropdown-item text-white d-flex align-items-center gap-2" id="panel-eruda-m"><i class="bi bi-bug"></i> Inspect</button></li>
+                            <li><button class="dropdown-item text-white d-flex align-items-center gap-2" id="panel-popup-m"><i class="bi bi-window-stack"></i> Popup Window</button></li>
+                            <li><button class="dropdown-item text-white d-flex align-items-center gap-2" id="panel-newtab-m"><i class="bi bi-box-arrow-up-right"></i> New Tab</button></li>
+                            <li><hr class="dropdown-divider border-secondary opacity-50"></li>
+                            <li><button class="dropdown-item text-danger d-flex align-items-center gap-2" id="panel-clear-m"><i class="bi bi-x-circle"></i> Clear Console</button></li>
+                          </ul>
+                        </div>
+
+                        <i class="bi bi-chevron-up ms-2" id="panel-fullscreen" style="cursor: pointer;" title="Toggle Size"></i>
+                        <i class="bi bi-x fs-5 ms-1" id="panel-close" style="cursor: pointer;" title="Close Panel"></i>
+                      </div>
                     </div>
-                  </div>
-                  <div class="panel-pane" id="pane-problems">
-                    <div class="text-secondary">No problems have been detected in the workspace.</div>
+                    <div class="panel-content-area" style="flex: 1; min-height: 0; display: flex; flex-direction: column; background: #0a0a0a; color: #e3e3e3; font-family: monospace; font-size: 0.85rem; padding: 12px; position: relative; overflow: hidden;">
+                      <div class="panel-pane active" id="pane-output" style="height: 100%; width: 100%; min-height: 0; flex: 1; flex-direction: column;">
+                        <iframe id="ide-preview-iframe" class="w-100 h-100 border-0" style="background-color: #ffffff;" src="about:blank"></iframe>
+                      </div>
+                      <div class="panel-pane" id="pane-terminal" style="height: 100%; width: 100%; min-height: 0; flex: 1; flex-direction: column;">
+                        <div class="text-success fw-bold flex-shrink-0">PHP Music Console v1.0.0</div>
+                        <div class="text-secondary mt-1 flex-shrink-0" style="font-size: 0.8rem;">Terminal environment linked to server.</div>
+                        <div id="terminal-logs" class="mt-2 flex-grow-1" style="white-space: pre-wrap; font-family: monospace; overflow-y: auto; word-break: break-all; min-height: 0; padding-right: 4px;"></div>
+                        <div class="d-flex align-items-center mt-2 flex-shrink-0 pt-2 border-top border-secondary border-opacity-25">
+                          <span class="text-success me-2 fw-bold flex-shrink-0"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'admin@server'); ?>:~$</span>
+                          <input type="text" id="ide-terminal-input" class="bg-transparent border-0 text-light flex-grow-1 outline-none shadow-none" style="outline:none; font-family: monospace;" placeholder="Type a command (e.g. ls, pwd, php -v)...">
+                        </div>
+                      </div>
+                      <div class="panel-pane" id="pane-problems" style="height: 100%; width: 100%; min-height: 0; flex: 1; flex-direction: column;">
+                        <div class="text-secondary flex-shrink-0">No problems have been detected in the workspace.</div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -4534,6 +4696,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               document.getElementById('ide-editor-cmd-palette')?.addEventListener('click', () => {
                 editorCtxModal.style.display = 'none';
                 triggerCommandPalette(aceEditor);
+              });
+              document.getElementById('ide-editor-cut')?.addEventListener('click', () => {
+                editorCtxModal.style.display = 'none';
+                const text = aceEditor.getCopyText();
+                if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text);
+                else document.execCommand('copy');
+                aceEditor.session.replace(aceEditor.getSelectionRange(), '');
               });
               document.getElementById('ide-editor-copy')?.addEventListener('click', () => {
                 editorCtxModal.style.display = 'none';
@@ -5010,60 +5179,73 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
               }
   
-              const updateIDEStatusBar = () => {
+              const updateIDECursor = () => {
                 const pos = aceEditor.getCursorPosition();
                 document.getElementById('ide-status-cursor').innerText = `Ln ${pos.row + 1}, Col ${pos.column + 1}`;
                 document.getElementById('ide-status-indent').innerText = savedIndent === 'tab' ? 'Tabs' : `Spaces: ${savedIndent}`;
-  
-                const val = aceEditor.getValue();
-                const charCount = val.length;
-                let wordCount = 0;
-                if (charCount > 100000) {
-                  wordCount = '~' + Math.round(charCount / 6);
-                } else {
-                  wordCount = val.trim() ? val.trim().split(/\s+/).length : 0;
-                }
-  
-                const file = openFiles.find(f => f.path === currentPath);
-                const isEditorActive = editorDiv && editorDiv.style.display !== 'none';
-  
-                const wordEl = document.getElementById('ide-status-word-count');
-                const charEl = document.getElementById('ide-status-char-count');
-                wordEl.innerText = `${wordCount} words`;
-                charEl.innerText = `${charCount} chars`;
-  
-                if (!isEditorActive) {
-                  wordEl.style.display = 'none';
-                  charEl.style.display = 'none';
-                  if (file) {
-                    let displaySize = file.formatSize;
-                    if (!displaySize && file.size && !isNaN(parseInt(file.size)) && parseInt(file.size) > 0) {
-                      const s = parseInt(file.size);
-                      if (s < 1024) displaySize = s + ' B';
-                      else if (s < 1024 * 1024) displaySize = (s / 1024).toFixed(2) + ' KB';
-                      else displaySize = (s / (1024 * 1024)).toFixed(2) + ' MB';
-                    }
-                    document.getElementById('ide-status-file-size').innerText = displaySize || 'Fetching size...';
-                  }
-                } else {
-                  wordEl.style.display = localStorage.getItem('ide_show_wordcount') === 'true' ? 'inline' : 'none';
-                  charEl.style.display = localStorage.getItem('ide_show_charcount') === 'true' ? 'inline' : 'none';
-  
-                  const byteSize = new Blob([val]).size;
-                  let displaySize = '';
-                  if (byteSize < 1024) {
-                    displaySize = byteSize + ' B';
-                  } else if (byteSize < 1024 * 1024) {
-                    displaySize = (byteSize / 1024).toFixed(2) + ' KB';
+              };
+
+              let ideContentStatsDebounce = null;
+              const updateIDEContentStats = () => {
+                clearTimeout(ideContentStatsDebounce);
+                ideContentStatsDebounce = setTimeout(() => {
+                  const val = aceEditor.getValue();
+                  const charCount = val.length;
+                  let wordCount = 0;
+                  if (charCount > 100000) {
+                    wordCount = '~' + Math.round(charCount / 6);
                   } else {
-                    displaySize = (byteSize / (1024 * 1024)).toFixed(2) + ' MB';
+                    wordCount = val.trim() ? val.trim().split(/\s+/).length : 0;
                   }
-                  document.getElementById('ide-status-file-size').innerText = displaySize;
-                }
+  
+                  const file = openFiles.find(f => f.path === currentPath);
+                  const isEditorActive = editorDiv && editorDiv.style.display !== 'none';
+  
+                  const wordEl = document.getElementById('ide-status-word-count');
+                  const charEl = document.getElementById('ide-status-char-count');
+                  if (wordEl) wordEl.innerText = `${wordCount} words`;
+                  if (charEl) charEl.innerText = `${charCount} chars`;
+  
+                  if (!isEditorActive) {
+                    if (wordEl) wordEl.style.display = 'none';
+                    if (charEl) charEl.style.display = 'none';
+                    if (file) {
+                      let displaySize = file.formatSize;
+                      if (!displaySize && file.size && !isNaN(parseInt(file.size)) && parseInt(file.size) > 0) {
+                        const s = parseInt(file.size);
+                        if (s < 1024) displaySize = s + ' B';
+                        else if (s < 1024 * 1024) displaySize = (s / 1024).toFixed(2) + ' KB';
+                        else displaySize = (s / (1024 * 1024)).toFixed(2) + ' MB';
+                      }
+                      const sizeEl = document.getElementById('ide-status-file-size');
+                      if (sizeEl) sizeEl.innerText = displaySize || 'Fetching size...';
+                    }
+                  } else {
+                    if (wordEl) wordEl.style.display = localStorage.getItem('ide_show_wordcount') === 'true' ? 'inline' : 'none';
+                    if (charEl) charEl.style.display = localStorage.getItem('ide_show_charcount') === 'true' ? 'inline' : 'none';
+  
+                    const byteSize = new Blob([val]).size;
+                    let displaySize = '';
+                    if (byteSize < 1024) {
+                      displaySize = byteSize + ' B';
+                    } else if (byteSize < 1024 * 1024) {
+                      displaySize = (byteSize / 1024).toFixed(2) + ' KB';
+                    } else {
+                      displaySize = (byteSize / (1024 * 1024)).toFixed(2) + ' MB';
+                    }
+                    const sizeEl = document.getElementById('ide-status-file-size');
+                    if (sizeEl) sizeEl.innerText = displaySize;
+                  }
+                }, 150); // 150ms debounce ensures zero lag during bulk indent shifts
+              };
+
+              const updateIDEStatusBar = () => {
+                updateIDECursor();
+                updateIDEContentStats();
               };
   
-              aceEditor.session.selection.on('changeCursor', updateIDEStatusBar);
-              aceEditor.session.on('change', updateIDEStatusBar);
+              aceEditor.session.selection.on('changeCursor', updateIDECursor);
+              aceEditor.session.on('change', updateIDEContentStats);
   
               aceEditor.commands.addCommand({
                 name: 'save',
@@ -5101,7 +5283,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
               const termLog = (msg, isError = false) => {
                 const logs = document.getElementById('terminal-logs');
-                if (logs) logs.innerHTML += `<div class="${isError ? 'text-danger' : 'text-light'}">${msg}</div>`;
+                if (logs) {
+                  logs.insertAdjacentHTML('beforeend', `<div class="${isError ? 'text-danger' : 'text-light'}">${msg}</div>`);
+                  logs.scrollTop = logs.scrollHeight;
+                }
               };
   
               const loadTree = async (path = '') => {
@@ -5202,6 +5387,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   activeTabPath = '';
                   document.title = 'PHPEditor - Admin Panel';
                   document.getElementById('ide-status-bar').style.display = 'none';
+                  const miniPlayerBtn = document.getElementById('ide-mini-player-btn');
+                  if (miniPlayerBtn) miniPlayerBtn.style.display = 'none';
                 }
               };
   
@@ -5219,7 +5406,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const miniPlayerBtn = document.getElementById('ide-mini-player-btn');
   
                 if (miniPlayerBtn) {
-                  miniPlayerBtn.style.display = 'inline-flex';
+                  miniPlayerBtn.style.display = isMediaTab ? 'inline-flex' : 'none';
                 }
   
                 if (treeEl) {
@@ -5506,6 +5693,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
               };
   
+              let livePreviewDebounce = null;
+              window.isLivePreview = false;
               aceEditor.on("change", () => {
                 if (window.isIdeLoadingFile) return;
                 const activeTab = document.querySelector(`.ide-tab[data-path="${currentPath.replace(/"/g, '\\"')}"] .tab-title`);
@@ -5518,6 +5707,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   } else if (isClean && activeTab.innerText.endsWith(' *')) {
                     activeTab.innerText = activeTab.innerText.replace(/\s*\*\s*$/, '');
                   }
+                }
+
+                if (window.isLivePreview) {
+                  clearTimeout(livePreviewDebounce);
+                  livePreviewDebounce = setTimeout(() => {
+                    const outputTab = document.querySelector('.panel-tab[data-target="output"]');
+                    if (outputTab && outputTab.classList.contains('active') && bottomPanel.classList.contains('active')) {
+                      const file = openFiles.find(f => f.path === currentPath);
+                      const ext = file ? file.ext.toLowerCase() : currentPath.split('.').pop().toLowerCase();
+                      
+                      // Perform instantaneous DOM rendering for safe HTML/Markdown code
+                      if (ext !== 'php') {
+                        window.updateIdeOutputPreview();
+                      } else {
+                        // For PHP files, we must write securely to disk to let the backend interpret it
+                        window.saveCurrentFile(true);
+                      }
+                    }
+                  }, 800);
                 }
               });
   
@@ -5763,6 +5971,43 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
               });
 
+              const handleIdeUploadUrlSubmit = async () => {
+                const url = document.getElementById('ide-upload-url-input').value.trim();
+                const targetPath = document.getElementById('ide-upload-url-path').value;
+                
+                if (url) {
+                  const submitBtn = document.getElementById('ide-upload-url-submit');
+                  submitBtn.disabled = true;
+                  submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+                  
+                  termLog(`Downloading file from URL...`);
+                  startIdeSimulatedProgress();
+                  
+                  const res = await driveFetch('upload_url', { action: 'upload_url', url: url }, targetPath);
+                  
+                  finishIdeSimulatedProgress();
+                  submitBtn.disabled = false;
+                  submitBtn.innerText = 'Download';
+                  
+                  if (res.success) {
+                    termLog(`Downloaded URL successfully.`);
+                    loadTree(targetPath);
+                    bootstrap.Modal.getInstance(document.getElementById('ide-upload-url-modal')).hide();
+                  } else {
+                    termLog(`Download failed: ${res.error}`, true);
+                    alert(res.error);
+                  }
+                }
+              };
+
+              document.getElementById('ide-upload-url-submit').onclick = handleIdeUploadUrlSubmit;
+              document.getElementById('ide-upload-url-input').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleIdeUploadUrlSubmit();
+                }
+              });
+
               const driveFetch = async (action, body, reqPath = '') => {
                 try {
                   body.csrf_token = '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>';
@@ -5846,20 +6091,57 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 setTimeout(() => updateIdeProgress(0, false), 1000);
               };
   
-              const handleUploadClick = (targetPath) => {
+              const handleUploadClick = (targetPath, isFolder = false) => {
                 const fileInput = document.createElement('input');
                 fileInput.type = 'file';
                 fileInput.multiple = true;
+                if (isFolder) {
+                  fileInput.setAttribute('webkitdirectory', '');
+                  fileInput.setAttribute('directory', '');
+                }
                 fileInput.onchange = async (e) => {
                   if (e.target.files.length > 0) {
                     const filesArr = Array.from(e.target.files);
-                    const pathsArr = filesArr.map(f => f.name);
+                    let pathsArr = filesArr.map(f => f.webkitRelativePath || f.name);
+                    
+                    if (isFolder && pathsArr.length > 0 && pathsArr[0].includes('/')) {
+                       const rootFolderName = pathsArr[0].split('/')[0];
+                       const listRes = await fetch(`?access=admin&page=drive&api=true&action=list&path=${encodeURIComponent(targetPath)}`).then(r => r.json()).catch(() => null);
+                       if (listRes && listRes.success && listRes.folders) {
+                          const existingFolders = listRes.folders.map(f => f.name);
+                          if (existingFolders.includes(rootFolderName)) {
+                             let counter = 1;
+                             let newRoot = `${rootFolderName}_(${counter})`;
+                             while(existingFolders.includes(newRoot)) {
+                                counter++;
+                                newRoot = `${rootFolderName}_(${counter})`;
+                             }
+                             pathsArr = pathsArr.map(p => {
+                                const parts = p.split('/');
+                                parts[0] = newRoot;
+                                return parts.join('/');
+                             });
+                             termLog(`Folder renamed to ${newRoot} to avoid collision.`);
+                          }
+                       }
+                    }
                     await window.ideChunkedUpload(filesArr, pathsArr, targetPath);
                   }
                 };
                 fileInput.click();
               };
   
+              const handleUploadUrlClick = async (targetPath) => {
+                const modalEl = document.getElementById('ide-upload-url-modal');
+                const inputEl = document.getElementById('ide-upload-url-input');
+                document.getElementById('ide-upload-url-path').value = targetPath;
+                inputEl.value = '';
+                
+                const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+                modal.show();
+                setTimeout(() => inputEl.focus(), 150);
+              };
+
               document.getElementById('ide-tree-new-file').onclick = () => {
                 openIdeNewItemModal('file', window.currentIdeTreePath || '');
               };
@@ -5868,7 +6150,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 openIdeNewItemModal('folder', window.currentIdeTreePath || '');
               };
   
-              document.getElementById('ide-tree-upload').onclick = () => handleUploadClick('');
+              document.getElementById('ide-tree-upload').onclick = () => handleUploadClick('', false);
+              document.getElementById('ide-tree-upload-folder').onclick = () => handleUploadClick('', true);
+              document.getElementById('ide-tree-upload-url').onclick = () => handleUploadUrlClick('');
   
               document.getElementById('ide-btn-zip').onclick = async () => {
                 const pathStr = document.getElementById('ide-ctx-path').value;
@@ -6086,9 +6370,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const isFolder = document.getElementById('ide-ctx-is-folder').value === '1';
                 const parentPath = isFolder ? path : (path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '');
                 document.getElementById('ide-ctx-modal').style.display = 'none';
-                handleUploadClick(parentPath);
+                handleUploadClick(parentPath, false);
+              };
+
+              document.getElementById('ide-btn-upload-folder').onclick = () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                const isFolder = document.getElementById('ide-ctx-is-folder').value === '1';
+                const parentPath = isFolder ? path : (path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '');
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                handleUploadClick(parentPath, true);
               };
   
+              document.getElementById('ide-btn-upload-url').onclick = () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                const isFolder = document.getElementById('ide-ctx-is-folder').value === '1';
+                const parentPath = isFolder ? path : (path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '');
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                handleUploadUrlClick(parentPath);
+              };
+
               document.getElementById('ide-btn-refresh').onclick = () => {
                 document.getElementById('ide-ctx-modal').style.display = 'none';
                 loadTree(window.currentIdeTreePath || '');
@@ -6332,8 +6632,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 document.getElementById('ide-history-tree').classList.add('d-none');
                 document.getElementById('ide-trash-tree').classList.add('d-none');
   
-                if(view === 'explorer') {
-                  document.getElementById('ide-sidebar-title').innerHTML = '<span>EXPLORER</span><div class="d-flex gap-2"><i class="bi bi-search" style="cursor:pointer;" id="ide-tree-search" title="Search Files"></i><i class="bi bi-file-earmark-plus" style="cursor:pointer;" id="ide-tree-new-file" title="New File"></i><i class="bi bi-folder-plus" style="cursor:pointer;" id="ide-tree-new-folder" title="New Folder"></i><i class="bi bi-upload" style="cursor:pointer;" id="ide-tree-upload" title="Upload"></i><i class="bi bi-arrow-clockwise" style="cursor:pointer;" id="ide-refresh-tree" title="Refresh"></i></div>';
+                if (view === 'explorer') {
+                  document.getElementById('ide-sidebar-title').innerHTML = '<span>EXPLORER</span><div class="d-flex gap-2 align-items-center"><i class="bi bi-search" style="cursor:pointer;" id="ide-tree-search" title="Search Files"></i><i class="bi bi-file-earmark-plus" style="cursor:pointer;" id="ide-tree-new-file" title="New File"></i><i class="bi bi-folder-plus" style="cursor:pointer;" id="ide-tree-new-folder" title="New Folder"></i><div class="dropdown d-flex align-items-center"><i class="bi bi-upload" style="cursor:pointer;" data-bs-toggle="dropdown" aria-expanded="false" title="Upload"></i><ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary" style="font-size: 0.85rem; min-width: 150px; z-index: 1060;"><li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" id="ide-tree-upload"><i class="bi bi-file-earmark-arrow-up"></i> Upload Files</div></li><li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" id="ide-tree-upload-folder"><i class="bi bi-folder-symlink"></i> Upload Folder</div></li><li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" id="ide-tree-upload-url"><i class="bi bi-link"></i> Upload via URL</div></li></ul></div><i class="bi bi-arrow-clockwise" style="cursor:pointer;" id="ide-refresh-tree" title="Refresh"></i></div>';
                   document.getElementById('ide-file-tree').classList.remove('d-none');
   
                   const btnSearch = document.getElementById('ide-tree-search');
@@ -6360,7 +6660,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     openIdeNewItemModal('folder', cp);
                   };
                   const btnUpload = document.getElementById('ide-tree-upload');
-                  if (btnUpload) btnUpload.onclick = () => handleUploadClick(window.currentIdeTreePath || '');
+                  if (btnUpload) btnUpload.onclick = () => handleUploadClick(window.currentIdeTreePath || '', false);
+                  const btnUploadFolder = document.getElementById('ide-tree-upload-folder');
+                  if (btnUploadFolder) btnUploadFolder.onclick = () => handleUploadClick(window.currentIdeTreePath || '', true);
+                  const btnUploadUrl = document.getElementById('ide-tree-upload-url');
+                  if (btnUploadUrl) btnUploadUrl.onclick = () => handleUploadUrlClick(window.currentIdeTreePath || '');
                   const btnRefresh = document.getElementById('ide-refresh-tree');
                   if (btnRefresh) btnRefresh.onclick = () => loadTree(window.currentIdeTreePath || '');
                 } else if(view === 'git') {
@@ -6371,7 +6675,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   document.getElementById('ide-sidebar-title').innerHTML = '<span>FILE HISTORY</span>';
                   document.getElementById('ide-history-tree').classList.remove('d-none');
                 } else if(view === 'trash') {
-                  document.getElementById('ide-sidebar-title').innerHTML = '<span>TRASH</span><div class="d-flex gap-2"><i class="bi bi-trash23-fill text-danger" style="cursor:pointer;" onclick="window.emptyIdeTrash()" title="Empty Trash"></i><i class="bi bi-arrow-clockwise" style="cursor:pointer;" onclick="window.fetchIdeTrash()" title="Refresh"></i></div>';
+                  document.getElementById('ide-sidebar-title').innerHTML = '<span>TRASH</span><div class="d-flex gap-2"><i class="bi bi-trash2-fill text-danger" style="cursor:pointer;" onclick="window.emptyIdeTrash()" title="Empty Trash"></i><i class="bi bi-arrow-clockwise" style="cursor:pointer;" onclick="window.fetchIdeTrash()" title="Refresh"></i></div>';
                   document.getElementById('ide-trash-tree').classList.remove('d-none');
                   window.fetchIdeTrash();
                 }
@@ -6520,29 +6824,49 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const sidebarResizer = document.getElementById('ide-sidebar-resizer');
               const mainSidebar = document.getElementById('ide-main-sidebar');
               let isResizingSidebar = false;
+              let sidebarRaf = null;
+              
               if (sidebarResizer) {
-                sidebarResizer.addEventListener('mousedown', (e) => {
+                const startSidebarResize = (e) => {
                   isResizingSidebar = true;
                   sidebarResizer.classList.add('resizing');
                   document.body.style.cursor = 'col-resize';
-                  e.preventDefault();
-                });
-                document.addEventListener('mousemove', (e) => {
+                  const iframe = document.getElementById('ide-preview-iframe');
+                  if (iframe) iframe.style.pointerEvents = 'none';
+                  if (e.cancelable) e.preventDefault();
+                };
+                
+                const moveSidebarResize = (e) => {
                   if (!isResizingSidebar) return;
-                  const newW = e.clientX - mainSidebar.getBoundingClientRect().left;
-                  if (newW > 150 && newW < 600) {
-                    mainSidebar.style.width = newW + 'px';
-                    aceEditor.resize(true);
-                  }
-                });
-                document.addEventListener('mouseup', () => {
+                  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                  
+                  if (sidebarRaf) cancelAnimationFrame(sidebarRaf);
+                  sidebarRaf = requestAnimationFrame(() => {
+                    const newW = clientX - mainSidebar.getBoundingClientRect().left;
+                    if (newW > 150 && newW < 600) {
+                      mainSidebar.style.width = newW + 'px';
+                      aceEditor.resize(); // Fast resize without deep recalculation
+                    }
+                  });
+                };
+
+                const stopSidebarResize = () => {
                   if (isResizingSidebar) {
                     isResizingSidebar = false;
                     sidebarResizer.classList.remove('resizing');
                     document.body.style.cursor = 'default';
+                    const iframe = document.getElementById('ide-preview-iframe');
+                    if (iframe) iframe.style.pointerEvents = 'auto';
                     aceEditor.resize(true);
                   }
-                });
+                };
+
+                sidebarResizer.addEventListener('mousedown', startSidebarResize);
+                sidebarResizer.addEventListener('touchstart', startSidebarResize, { passive: false });
+                document.addEventListener('mousemove', moveSidebarResize);
+                document.addEventListener('touchmove', moveSidebarResize, { passive: false });
+                document.addEventListener('mouseup', stopSidebarResize);
+                document.addEventListener('touchend', stopSidebarResize);
               }
   
               window.exportWorkspace = async () => {
@@ -6553,34 +6877,121 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
               const resizer = document.getElementById('ide-panel-resizer');
               let isResizing = false;
+              let panelRaf = null;
+              window.isColumnsLayout = localStorage.getItem('ide_panel_layout') === 'columns';
   
               if(resizer) {
-                resizer.addEventListener('mousedown', (e) => {
+                const startPanelResize = (e) => {
                   isResizing = true;
                   resizer.classList.add('resizing');
-                  document.body.style.cursor = 'ns-resize';
-                  e.preventDefault();
-                });
-  
-                document.addEventListener('mousemove', (e) => {
+                  document.body.style.cursor = window.isColumnsLayout ? 'ew-resize' : 'ns-resize';
+                  const iframe = document.getElementById('ide-preview-iframe');
+                  if (iframe) iframe.style.pointerEvents = 'none';
+                  if (e.cancelable) e.preventDefault();
+                };
+
+                const movePanelResize = (e) => {
                   if (!isResizing) return;
-                  const containerH = document.querySelector('.ide-body').offsetHeight;
-                  const newH = document.body.clientHeight - e.clientY;
-                  if (newH > 35 && newH < containerH - 50) {
-                    bottomPanel.style.height = newH + 'px';
-                    aceEditor.resize(true);
-                  }
-                });
-  
-                document.addEventListener('mouseup', () => {
-                  if(isResizing) {
+                  const bottomPanel = document.getElementById('ide-bottom-panel');
+                  const splitContainer = document.getElementById('ide-split-container');
+                  if (!bottomPanel || !splitContainer) return;
+                  
+                  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                  
+                  if (panelRaf) cancelAnimationFrame(panelRaf);
+                  panelRaf = requestAnimationFrame(() => {
+                    const rect = splitContainer.getBoundingClientRect();
+                    
+                    if (window.isColumnsLayout) {
+                      const newW = rect.right - clientX;
+                      if (newW > 150 && newW < rect.width - 150) {
+                        bottomPanel.style.width = newW + 'px';
+                        aceEditor.resize(); // Fast resize without deep recalculation
+                      }
+                    } else {
+                      const newH = rect.bottom - clientY;
+                      if (newH > 35 && newH < rect.height - 50) {
+                        bottomPanel.style.height = newH + 'px';
+                        aceEditor.resize(); // Fast resize without deep recalculation
+                      }
+                    }
+                  });
+                };
+
+                const stopPanelResize = () => {
+                  if (isResizing) {
                     isResizing = false;
                     resizer.classList.remove('resizing');
                     document.body.style.cursor = 'default';
+                    const iframe = document.getElementById('ide-preview-iframe');
+                    if (iframe) iframe.style.pointerEvents = 'auto';
                     aceEditor.resize(true);
                   }
-                });
+                };
+
+                resizer.addEventListener('mousedown', startPanelResize);
+                resizer.addEventListener('touchstart', startPanelResize, { passive: false });
+                document.addEventListener('mousemove', movePanelResize);
+                document.addEventListener('touchmove', movePanelResize, { passive: false });
+                document.addEventListener('mouseup', stopPanelResize);
+                document.addEventListener('touchend', stopPanelResize);
               }
+
+              const applyPanelLayout = (isColumns) => {
+                const splitContainer = document.getElementById('ide-split-container');
+                const bp = document.getElementById('ide-bottom-panel');
+                const res = document.getElementById('ide-panel-resizer');
+                const toggleBtn = document.getElementById('panel-layout-toggle');
+                
+                if (isColumns) {
+                  splitContainer.style.flexDirection = 'row';
+                  bp.style.height = '100%';
+                  bp.style.width = '50%'; 
+                  bp.style.borderLeft = '1px solid #2d2d2d';
+                  bp.style.borderTop = 'none';
+                  res.style.width = '4px';
+                  res.style.height = '100%';
+                  res.style.position = 'absolute';
+                  res.style.left = '0';
+                  res.style.top = '0';
+                  res.style.cursor = 'ew-resize';
+                  if (toggleBtn) toggleBtn.className = 'bi bi-layout-split text-info';
+                } else {
+                  splitContainer.style.flexDirection = 'column';
+                  bp.style.width = '100%';
+                  bp.style.height = '50%';
+                  bp.style.borderLeft = 'none';
+                  bp.style.borderTop = '1px solid #2d2d2d';
+                  res.style.height = '4px';
+                  res.style.width = '100%';
+                  res.style.position = 'static';
+                  res.style.cursor = 'ns-resize';
+                  if (toggleBtn) toggleBtn.className = 'bi bi-layout-split';
+                }
+                setTimeout(() => aceEditor.resize(true), 50);
+              };
+
+              document.getElementById('panel-layout-toggle')?.addEventListener('click', () => {
+                window.isColumnsLayout = !window.isColumnsLayout;
+                localStorage.setItem('ide_panel_layout', window.isColumnsLayout ? 'columns' : 'rows');
+                applyPanelLayout(window.isColumnsLayout);
+              });
+              
+              if (window.isColumnsLayout) applyPanelLayout(true);
+
+              document.querySelectorAll('#panel-live-toggle, #panel-live-toggle-m').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                  window.isLivePreview = !window.isLivePreview;
+                  const icon = e.currentTarget.querySelector('i') || e.currentTarget;
+                  if (window.isLivePreview) {
+                    icon.className = 'bi bi-lightning-charge-fill text-warning';
+                    window.updateIdeOutputPreview();
+                  } else {
+                    icon.className = 'bi bi-lightning-charge';
+                  }
+                });
+              });
   
               if (window.ideKeydownHandler) {
                 document.removeEventListener('keydown', window.ideKeydownHandler);
@@ -6842,72 +7253,81 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
               });
   
-              document.getElementById('panel-newtab').addEventListener('click', () => {
-                const win = window.open('about:blank', '_blank');
-                if (win) {
-                  if (previewIframe.srcdoc) {
-                    win.document.open();
-                    win.document.write(previewIframe.srcdoc);
-                    win.document.close();
-                  } else if (currentPath) {
-                    win.location.href = './' + currentPath;
-                  } else {
-                    win.location.href = './';
+              document.querySelectorAll('#panel-newtab, #panel-newtab-m').forEach(btn => {
+                btn.addEventListener('click', () => {
+                  const win = window.open('about:blank', '_blank');
+                  if (win) {
+                    if (previewIframe.srcdoc) {
+                      win.document.open();
+                      win.document.write(previewIframe.srcdoc);
+                      win.document.close();
+                    } else if (currentPath) {
+                      win.location.href = './' + currentPath;
+                    } else {
+                      win.location.href = './';
+                    }
                   }
-                }
+                });
               });
   
-              document.getElementById('panel-eruda').addEventListener('click', () => {
-                if (!bottomPanel.classList.contains('active')) {
-                  bottomPanel.classList.add('active');
-                }
-                document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
-                const outputTab = document.querySelector('.panel-tab[data-target="output"]');
-                if (outputTab) outputTab.classList.add('active');
-                document.querySelectorAll('.panel-pane').forEach(p => p.classList.remove('active'));
-                const paneOutput = document.getElementById('pane-output');
-                if (paneOutput) paneOutput.classList.add('active');
-  
-                if (!previewIframe.contentWindow) return;
-                const doc = previewIframe.contentWindow.document;
-                if (doc.getElementById('eruda')) {
-                  previewIframe.contentWindow.eruda.show();
-                  return;
-                }
-                const script = doc.createElement('script');
-                script.src = 'https://cdn.jsdelivr.net/npm/eruda';
-                script.onload = () => {
-                  const initScript = doc.createElement('script');
-                  initScript.innerHTML = 'eruda.init(); eruda.show();';
-                  doc.body.appendChild(initScript);
-                };
-                doc.head.appendChild(script);
-              });
-  
-              document.getElementById('panel-reload')?.addEventListener('click', () => {
-                if (previewIframe) {
-                  window.updateIdeOutputPreview();
-                  termLog('Hard reloading preview...');
-                }
-              });
-  
-              document.getElementById('panel-popup')?.addEventListener('click', () => {
-                const win = window.open('about:blank', 'PreviewWindow', 'width=800,height=600,resizable=yes,scrollbars=yes');
-                if (win) {
-                  if (previewIframe.srcdoc) {
-                    win.document.open();
-                    win.document.write(previewIframe.srcdoc);
-                    win.document.close();
-                  } else if (previewIframe.src && previewIframe.src !== 'about:blank') {
-                    win.location.href = previewIframe.src;
-                  } else if (currentPath) {
-                    win.location.href = './' + currentPath;
+              document.querySelectorAll('#panel-eruda, #panel-eruda-m').forEach(btn => {
+                btn.addEventListener('click', () => {
+                  if (!bottomPanel.classList.contains('active')) {
+                    bottomPanel.classList.add('active');
                   }
-                }
+                  document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+                  const outputTab = document.querySelector('.panel-tab[data-target="output"]');
+                  if (outputTab) outputTab.classList.add('active');
+                  document.querySelectorAll('.panel-pane').forEach(p => p.classList.remove('active'));
+                  const paneOutput = document.getElementById('pane-output');
+                  if (paneOutput) paneOutput.classList.add('active');
+                  if (!previewIframe.contentWindow) return;
+                  const doc = previewIframe.contentWindow.document;
+                  if (doc.getElementById('eruda')) {
+                    previewIframe.contentWindow.eruda.show();
+                    return;
+                  }
+                  const script = doc.createElement('script');
+                  script.src = 'https://cdn.jsdelivr.net/npm/eruda';
+                  script.onload = () => {
+                    const initScript = doc.createElement('script');
+                    initScript.innerHTML = 'eruda.init(); eruda.show();';
+                    doc.body.appendChild(initScript);
+                  };
+                  doc.head.appendChild(script);
+                });
               });
   
-              document.getElementById('panel-clear').addEventListener('click', () => {
-                document.getElementById('terminal-logs').innerHTML = '';
+              document.querySelectorAll('#panel-reload, #panel-reload-m').forEach(btn => {
+                btn.addEventListener('click', () => {
+                  if (previewIframe) {
+                    window.updateIdeOutputPreview();
+                    termLog('Hard reloading preview...');
+                  }
+                });
+              });
+  
+              document.querySelectorAll('#panel-popup, #panel-popup-m').forEach(btn => {
+                btn.addEventListener('click', () => {
+                  const win = window.open('about:blank', 'PreviewWindow', 'width=800,height=600,resizable=yes,scrollbars=yes');
+                  if (win) {
+                    if (previewIframe.srcdoc) {
+                      win.document.open();
+                      win.document.write(previewIframe.srcdoc);
+                      win.document.close();
+                    } else if (previewIframe.src && previewIframe.src !== 'about:blank') {
+                      win.location.href = previewIframe.src;
+                    } else if (currentPath) {
+                      win.location.href = './' + currentPath;
+                    }
+                  }
+                });
+              });
+  
+              document.querySelectorAll('#panel-clear, #panel-clear-m').forEach(btn => {
+                btn.addEventListener('click', () => {
+                  document.getElementById('terminal-logs').innerHTML = '';
+                });
               });
   
               const termInput = document.getElementById('ide-terminal-input');
@@ -6925,9 +7345,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       try {
                         const res = await driveFetch('terminal_cmd', { action: 'terminal_cmd', cmd });
                         if (res && res.success) {
-                          if (res.output) termLog(res.output);
+                          termLog(res.output !== undefined && res.output !== null ? res.output : '');
                         } else {
-                          termLog(`<span class="text-danger">${res.output || 'Command failed'}</span>`);
+                          termLog(`<span class="text-danger">${res?.error || res?.output || 'Command failed'}</span>`);
                         }
                       } catch (err) {
                         termLog(`<span class="text-danger">Failed to execute command.</span>`);
@@ -7260,6 +7680,63 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               flex-direction: column;
               width: 100%;
               position: relative;
+              user-select: none;
+              -webkit-user-select: none;
+            }
+
+            .drive-app-container .icon-folder { color: #ff3333 !important; }
+            .drive-app-container .icon-zip { color: #f97316 !important; }
+            .drive-app-container .icon-image { color: #10b981 !important; }
+            .drive-app-container .icon-code { color: #3b82f6 !important; }
+            .drive-app-container .icon-media { color: #ef4444 !important; }
+            .drive-app-container .icon-doc { color: #a855f7 !important; }
+
+            .drive-app-container .list-view {
+              display: flex;
+              flex-direction: column;
+              gap: 6px;
+            }
+
+            .drive-app-container .list-view .item-card {
+              height: auto;
+              min-height: 52px;
+              border-radius: 10px;
+              border: 1px solid var(--theme-outline-variant);
+              background-color: var(--theme-surface-container-low);
+              flex-direction: row;
+              align-items: center;
+              padding: 8px 40px;
+              gap: 12px;
+            }
+
+            .drive-app-container .list-view .item-card:hover {
+              background-color: var(--theme-surface-container-high);
+              border-color: #ff3333;
+            }
+
+            .drive-app-container .list-view .item-details {
+              display: flex;
+              flex-direction: column;
+              min-width: 0;
+              flex: 1;
+            }
+
+            .drive-app-container .list-view .item-name {
+              font-size: 14px;
+              font-weight: 500;
+              color: var(--theme-on-surface);
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+
+            .drive-app-container .list-view .item-sub-meta {
+              font-size: 11px;
+              color: var(--theme-on-surface-variant);
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              margin-top: 2px;
             }
 
             .drive-app-container .material-symbols-rounded {
@@ -7399,6 +7876,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .drive-app-container .main-wrapper {
               display: flex;
               flex: 1;
+              min-height: 0;
               overflow: hidden;
               position: relative;
             }
@@ -7508,6 +7986,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             .drive-app-container .content-area-drive {
               flex: 1;
+              min-height: 0;
               display: flex;
               flex-direction: column;
               background-color: var(--theme-surface);
@@ -7543,10 +8022,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               padding: 4px 8px;
               transition: background-color var(--transition);
               color: var(--theme-on-surface);
-            }
-
-            .drive-app-container .breadcrumb-item:hover {
-              background-color: var(--theme-surface-container);
             }
 
             .drive-app-container .breadcrumb-sep {
@@ -7635,8 +8110,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             /* Mobile Bottom Area Padding Fix */
             .drive-app-container .file-list-container {
               flex: 1;
+              min-height: 0;
               overflow-y: auto;
-              padding: 0 20px calc(180px + env(safe-area-inset-bottom, 20px));
+              -webkit-overflow-scrolling: touch;
+              padding: 12px 20px calc(100px + env(safe-area-inset-bottom, 20px)) 20px;
               position: relative;
             }
 
@@ -7969,24 +8446,41 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               color: #ffffff;
             }
 
+            /* Lock Body Overflow when Drive Editor is Active */
+            body.drive-editor-open {
+              overflow: hidden !important;
+              touch-action: none;
+            }
+
             .drive-app-container .editor-overlay-drive {
-              position: fixed;
-              inset: 0;
-              background-color: var(--theme-surface);
-              z-index: 3000;
+              position: fixed !important;
+              top: 0 !important;
+              left: 0 !important;
+              right: 0 !important;
+              bottom: 0 !important;
+              width: 100vw !important;
+              height: 100dvh !important;
+              max-height: 100dvh !important;
+              background-color: var(--theme-surface) !important;
+              z-index: 3000 !important;
               display: none;
-              flex-direction: column;
+              flex-direction: column !important;
+              overflow: hidden !important;
             }
 
             .drive-app-container .editor-header-drive {
-              height: 60px;
+              height: 60px !important;
+              min-height: 60px !important;
+              max-height: 60px !important;
+              flex: 0 0 60px !important;
               display: flex;
               align-items: center;
               padding: 0 16px;
-              gap: 16px;
+              gap: 12px;
               border-bottom: 1px solid var(--theme-outline-variant);
               background-color: var(--theme-surface-container-low);
-              flex-shrink: 0;
+              box-sizing: border-box;
+              z-index: 10;
             }
 
             .drive-app-container .editor-title-drive {
@@ -7997,6 +8491,57 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               white-space: nowrap;
               overflow: hidden;
               text-overflow: ellipsis;
+            }
+
+            /* Strict Editor Body Containment */
+            .editor-body-wrapper {
+              flex: 1 1 auto !important;
+              min-height: 0 !important;
+              height: calc(100dvh - 60px) !important;
+              max-height: calc(100dvh - 60px) !important;
+              width: 100% !important;
+              position: relative !important;
+              overflow: hidden !important;
+              display: flex;
+              flex-direction: column;
+            }
+
+            #desktopEditorContainer {
+              flex: 1 1 100% !important;
+              min-height: 0 !important;
+              height: 100% !important;
+              max-height: 100% !important;
+              width: 100% !important;
+              position: relative !important;
+              overflow: hidden !important;
+            }
+
+            #aceEditorInstance {
+              position: absolute !important;
+              top: 0 !important;
+              left: 0 !important;
+              right: 0 !important;
+              bottom: 0 !important;
+              width: 100% !important;
+              height: 100% !important;
+              margin: 0 !important;
+            }
+
+            /* Ace Editor Gutter & Line Numbers Alignment Fix */
+            .ace_editor {
+              font-family: 'Consolas', 'Monaco', 'Courier New', monospace !important;
+              font-size: 14px !important;
+              line-height: 1.5 !important;
+            }
+
+            .ace_gutter {
+              background-color: var(--theme-surface-container-low) !important;
+              color: var(--theme-on-surface-variant) !important;
+            }
+
+            .ace_gutter-cell {
+              padding-left: 8px !important;
+              padding-right: 8px !important;
             }
 
             .drive-app-container .versions-list {
@@ -8078,6 +8623,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               display: flex;
               flex-direction: column;
               gap: 16px;
+              flex: 1;
+              min-height: 0;
             }
 
             .drive-app-container .prop-row {
@@ -8370,6 +8917,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             <!-- Dedicated Image Preview Overlay (Auto-fits Image Scale) -->
             <div class="modal-overlay" id="imageOverlay" style="z-index: 3500; display: none;" onclick="if (event.target===this) driveApp.closeImage()">
+              <button id="drive-image-prev-btn" class="icon-btn" style="position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 3510; color: #fff; background: rgba(0,0,0,0.5); display: none;"><span class="material-symbols-rounded">chevron_left</span></button>
+              <button id="drive-image-next-btn" class="icon-btn" style="position: absolute; right: 16px; top: 50%; transform: translateY(-50%); z-index: 3510; color: #fff; background: rgba(0,0,0,0.5); display: none;"><span class="material-symbols-rounded">chevron_right</span></button>
               <div style="max-width: 95%; max-height: 95%; width: auto; background: transparent; box-shadow: none; padding: 0; display: flex; align-items: center; justify-content: center; position: relative;">
                 <button class="icon-btn" onclick="driveApp.closeImage()" style="position: absolute; top: -16px; right: -16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.5);"><span class="material-symbols-rounded">close</span></button>
                 <div id="imageModalContent" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; max-height: 90vh;"></div>
@@ -8378,6 +8927,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             <!-- Structured Media Preview Overlay (Spacious Modal Container) -->
             <div class="modal-overlay" id="mediaOverlay" style="z-index: 3500; display: none;" onclick="if (event.target===this) driveApp.closeMedia()">
+              <button id="drive-media-prev-btn" class="icon-btn" style="position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 3510; color: #fff; background: rgba(0,0,0,0.5); display: none;"><span class="material-symbols-rounded">chevron_left</span></button>
+              <button id="drive-media-next-btn" class="icon-btn" style="position: absolute; right: 16px; top: 50%; transform: translateY(-50%); z-index: 3510; color: #fff; background: rgba(0,0,0,0.5); display: none;"><span class="material-symbols-rounded">chevron_right</span></button>
               <div class="modal-drive" id="mediaModalContainer" style="max-width: 550px; width: 90%; position: relative; background: var(--theme-surface-container); border-radius: 20px; padding: 24px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.5); border: 1px solid var(--theme-outline-variant); display: flex; flex-direction: column;">
                 <button class="icon-btn" onclick="driveApp.closeMedia()" style="position: absolute; top: 16px; right: 16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.5);"><span class="material-symbols-rounded">close</span></button>
                 <div id="mediaModalContent" style="width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; max-height: 80vh;"></div>
@@ -8388,23 +8939,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <div class="editor-header-drive">
                 <button class="icon-btn" onclick="driveApp.closeEditor()"><span class="material-symbols-rounded">arrow_back</span></button>
                 <div class="editor-title-drive" id="editorTitle">filename.txt</div>
-                <div class="header-actions" id="editorActions">
-                  <button class="icon-btn" onclick="driveApp.toggleEditorWrap()" id="editorWrapBtn" title="Toggle Word Wrap"><span class="material-symbols-rounded">wrap_text</span></button>
-                  <button class="icon-btn" onclick="driveApp.editorFind()" title="Find and Replace"><span class="material-symbols-rounded">search</span></button>
-                  <button class="icon-btn" onclick="driveApp.editorUndo()" title="Undo"><span class="material-symbols-rounded">undo</span></button>
-                  <button class="icon-btn" onclick="driveApp.editorRedo()" title="Redo"><span class="material-symbols-rounded">redo</span></button>
+                <div class="header-actions d-flex align-items-center gap-2" id="editorActions">
                   <button class="btn-drive btn-filled-drive" onclick="driveApp.saveFile()">
                     <span class="material-symbols-rounded" style="font-size:18px;">save</span>
                     <span>Save</span>
                   </button>
+                  <div class="dropdown">
+                    <button class="icon-btn" data-bs-toggle="dropdown" aria-expanded="false" title="More Options">
+                      <span class="material-symbols-rounded">more_vert</span>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary p-2" style="font-size: 0.85rem; min-width: 180px; z-index: 3100;">
+                      <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" onclick="driveApp.toggleEditorWrap()" id="editorWrapBtn"><span class="material-symbols-rounded" style="font-size: 18px;">wrap_text</span> Toggle Word Wrap</div></li>
+                      <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" onclick="driveApp.editorFind()"><span class="material-symbols-rounded" style="font-size: 18px;">search</span> Find & Replace</div></li>
+                      <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" onclick="driveApp.editorUndo()"><span class="material-symbols-rounded" style="font-size: 18px;">undo</span> Undo</div></li>
+                      <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" onclick="driveApp.editorRedo()"><span class="material-symbols-rounded" style="font-size: 18px;">redo</span> Redo</div></li>
+                    </ul>
+                  </div>
                 </div>
               </div>
-              <div style="flex:1; overflow:hidden; display:flex; flex-direction:column;">
-                <div id="desktopEditorContainer" style="flex: 1; display: none; position: relative; min-height: 0;">
+              <div class="editor-body-wrapper">
+                <div id="desktopEditorContainer">
                   <!-- Ace Editor Instance Mount Point -->
                 </div>
-                <div id="mobileEditorContainer" style="flex: 1; display: none; flex-direction: column;">
-                  <textarea style="flex:1; border:none; outline:none; background:transparent; padding:16px 16px 120px 16px; font-family:monospace; font-size:16px; color:var(--theme-on-surface); resize:none; width:100%; line-height:1.5; height:100%;" id="mobileTextarea" spellcheck="false"></textarea>
+                <div id="mobileEditorContainer" style="flex: 1; min-height: 0; width: 100%; height: 100%; display: none; flex-direction: column;">
+                  <textarea style="flex:1; border:none; outline:none; background:transparent; padding:16px; font-family:monospace; font-size:16px; color:var(--theme-on-surface); resize:none; width:100%; line-height:1.5; height:100%; box-sizing:border-box;" id="mobileTextarea" spellcheck="false"></textarea>
                 </div>
               </div>
             </div>
@@ -8586,8 +9144,39 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   
                   if (e.dataTransfer.items && e.dataTransfer.items.length) {
                     this.showToast('Scanning dropped items...');
-                    const { files, paths } = await this.scanDroppedItems(e.dataTransfer.items);
+                    let { files, paths } = await this.scanDroppedItems(e.dataTransfer.items);
                     if (files.length > 0) {
+                      const listRes = await this.fetchAPI('list');
+                      const existingFolders = (listRes && listRes.success && listRes.folders) ? listRes.folders.map(f => f.name) : [];
+                      
+                      const renamedRoots = {};
+                      paths = paths.map(p => {
+                         if (p.includes('/')) {
+                            const root = p.split('/')[0];
+                            if (!renamedRoots[root] && existingFolders.includes(root)) {
+                               let counter = 1;
+                               let newRoot = `${root}_(${counter})`;
+                               while(existingFolders.includes(newRoot)) {
+                                  counter++;
+                                  newRoot = `${root}_(${counter})`;
+                               }
+                               renamedRoots[root] = newRoot;
+                               existingFolders.push(newRoot); 
+                            }
+                            if (renamedRoots[root]) {
+                               const parts = p.split('/');
+                               parts[0] = renamedRoots[root];
+                               return parts.join('/');
+                            }
+                         }
+                         return p;
+                      });
+                      
+                      const renamedKeys = Object.keys(renamedRoots);
+                      if (renamedKeys.length > 0) {
+                         this.showToast(`Renamed ${renamedKeys.length} folder(s) to avoid collision.`);
+                      }
+
                       this.uploadFiles(files, paths);
                     }
                   } else if (e.dataTransfer.files.length) {
@@ -8965,26 +9554,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (item.uniq) el.dataset.uniq = item.uniq;
                 
                 let icon = isFolder ? 'folder' : 'description';
+                let iconColorClass = isFolder ? 'icon-folder' : 'icon-doc';
                 if (!isFolder) {
-                  if (item.ext === 'zip') icon = 'folder_zip';
-                  if (['js','json','ts'].includes(item.ext)) icon = 'javascript';
-                  if (['html','xml'].includes(item.ext)) icon = 'html';
-                  if (['css','scss'].includes(item.ext)) icon = 'css';
-                  if (['php'].includes(item.ext)) icon = 'php';
-                  if (item.isImage) icon = 'image';
-                  if (item.ext === 'pdf') icon = 'picture_as_pdf';
-                  if (['mp4','webm'].includes(item.ext)) icon = 'movie';
-                  if (['mp3','wav','ogg'].includes(item.ext)) icon = 'audiotrack';
+                  if (item.ext === 'zip') { icon = 'folder_zip'; iconColorClass = 'icon-zip'; }
+                  else if (['js','json','ts','php','html','css','xml','md'].includes(item.ext)) { icon = 'code'; iconColorClass = 'icon-code'; }
+                  else if (item.isImage) { icon = 'image'; iconColorClass = 'icon-image'; }
+                  else if (['mp4','webm','mov'].includes(item.ext)) { icon = 'movie'; iconColorClass = 'icon-media'; }
+                  else if (['mp3','wav','ogg','flac','m4a'].includes(item.ext)) { icon = 'audiotrack'; iconColorClass = 'icon-media'; }
+                  else if (['pdf','doc','docx','xls','xlsx','ppt','pptx','txt'].includes(item.ext)) { icon = 'article'; iconColorClass = 'icon-doc'; }
                 }
 
                 const checkboxHtml = `<div class="card-checkbox" onclick="driveApp.toggleSelect(event, '${item.path}')"><span class="material-symbols-rounded">check_circle</span></div>`;
                 const starHtml = `<div class="card-star" onclick="driveApp.toggleStar(event, '${item.path}')"><span class="material-symbols-rounded">star</span></div>`;
-                const fIconClass = isFolder ? 'folder-icon' : '';
                 const nameWithHighlight = this.highlightMatch(item.name);
 
                 if (this.viewMode === 'grid') {
                   el.className = `item-card file-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
-                  let previewHtml = `<span class="material-symbols-rounded">${icon}</span>`;
+                  let previewHtml = `<span class="material-symbols-rounded ${iconColorClass}">${icon}</span>`;
                   if (!isFolder && item.isImage) {
                     const streamUrl = `${this.apiPrefix}api=true&action=thumb&file=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
                     previewHtml = `<img src="${streamUrl}" loading="lazy" alt="${item.name}">`;
@@ -8993,20 +9579,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     ${checkboxHtml}
                     <div class="file-preview">${previewHtml}</div>
                     <div class="file-info-bar">
-                      <div class="item-icon ${fIconClass}"><span class="material-symbols-rounded">${icon}</span></div>
+                      <div class="item-icon ${iconColorClass}"><span class="material-symbols-rounded">${icon}</span></div>
                       <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
                     </div>
                     ${starHtml}
                   `;
                 } else {
                   el.className = `item-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
-                  const date = new Date(item.mtime * 1000).toLocaleDateString();
+                  const date = new Date(item.mtime * 1000).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+                  const metaStr = isFolder ? `${date}` : `${item.formatSize} • ${date}`;
                   el.innerHTML = `
                     ${checkboxHtml}
-                    <div class="item-icon ${fIconClass}"><span class="material-symbols-rounded">${icon}</span></div>
-                    <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
-                    <div class="item-meta">${date}</div>
-                    <div class="item-meta">${isFolder ? '-' : item.formatSize}</div>
+                    <div class="item-icon ${iconColorClass}"><span class="material-symbols-rounded">${icon}</span></div>
+                    <div class="item-details">
+                      <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
+                      <div class="item-sub-meta">${metaStr}</div>
+                    </div>
                     ${starHtml}
                   `;
                 }
@@ -9021,6 +9609,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   if (p) card.classList.toggle('selected', this.selectedItems.has(p));
                 });
                 document.getElementById('multiSelectActions').style.display = this.selectedItems.size > 0 ? 'flex' : 'none';
+                if (this.isPropertiesOpen) {
+                  if (this.selectedItems.size > 0) {
+                    this.loadProperties([...this.selectedItems].join('|'));
+                  } else {
+                    this.renderPropertiesEmpty();
+                  }
+                }
               }
 
               toggleSelect(e, path) {
@@ -9124,7 +9719,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.viewMode = this.viewMode === 'grid' ? 'list' : 'grid';
                 localStorage.setItem('drive_viewMode', this.viewMode);
                 this.updateViewIcon();
-                this.render();
+                if (this.currentViewMode === 'trash') {
+                  this.loadDirectory(this.currentPath);
+                } else {
+                  this.render();
+                }
               }
 
               updateViewIcon() {
@@ -9156,8 +9755,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (this.isPropertiesOpen) {
                   this.isActivityOpen = false;
                   document.getElementById('activityPane').style.display = 'none';
-                  if (this.selectedItems.size === 1) {
-                    this.loadProperties([...this.selectedItems][0]);
+                  if (this.selectedItems.size > 0) {
+                    this.loadProperties([...this.selectedItems].join('|'));
                   } else {
                     this.renderPropertiesEmpty();
                   }
@@ -9339,10 +9938,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 };
 
                 addMenuItem('create_new_folder', 'New folder', () => this.showModal('addFolder'));
-                addMenuItem('note_add', 'New file', () => this.showModal('addFile'));
-                addMenuItem('upload_file', 'File upload', () => document.getElementById('fileUploadInput').click());
-                addMenuItem('drive_folder_upload', 'Folder upload', () => document.getElementById('folderUploadInput').click());
-                const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
+              addMenuItem('note_add', 'New file', () => this.showModal('addFile'));
+              addMenuItem('upload_file', 'File upload', () => document.getElementById('fileUploadInput').click());
+              addMenuItem('drive_folder_upload', 'Folder upload', () => document.getElementById('folderUploadInput').click());
+              addMenuItem('link', 'Download File by URL', () => this.showModal('uploadUrl'));
+              const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
                 addMenuItem('refresh', 'Refresh List', () => this.loadDirectory(this.currentPath));
                 
                 menu.style.display = 'flex';
@@ -9423,6 +10023,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 } else {
                   addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
                   addMenuItem('folder_zip', 'Archive to Zip', () => this.archiveItems());
+                  addMenuItem('info', 'Properties', () => {
+                    this.isPropertiesOpen = false;
+                    this.toggleProperties();
+                  });
                   const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
                 }
                 
@@ -9724,12 +10328,31 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 e.target.value = '';
               }
 
-              handleFolderSelect(e) {
+              async handleFolderSelect(e) {
                 if (e.target.files.length) {
-                  const files = e.target.files;
-                  const paths = [];
-                  for (let i = 0; i < files.length; i++) {
-                    paths.push(files[i].webkitRelativePath || '');
+                  const files = Array.from(e.target.files);
+                  let paths = files.map(f => f.webkitRelativePath || f.name);
+                  
+                  if (paths.length > 0 && paths[0].includes('/')) {
+                     const rootFolderName = paths[0].split('/')[0];
+                     const listRes = await this.fetchAPI('list');
+                     if (listRes && listRes.success && listRes.folders) {
+                        const existingFolders = listRes.folders.map(f => f.name);
+                        if (existingFolders.includes(rootFolderName)) {
+                           let counter = 1;
+                           let newRoot = `${rootFolderName}_(${counter})`;
+                           while(existingFolders.includes(newRoot)) {
+                              counter++;
+                              newRoot = `${rootFolderName}_(${counter})`;
+                           }
+                           paths = paths.map(p => {
+                              const parts = p.split('/');
+                              parts[0] = newRoot;
+                              return parts.join('/');
+                           });
+                           this.showToast(`Folder renamed to ${newRoot} to avoid collision.`);
+                        }
+                     }
                   }
                   this.uploadFiles(files, paths);
                 }
@@ -9797,13 +10420,31 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 
                 const streamUrl = `${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`;
 
+                const mediaExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'mp4', 'webm', 'mp3', 'wav', 'ogg', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'rtf', 'odt', 'ods', 'odp', 'csv'];
+                const mediaFiles = this.filteredFiles.filter(f => mediaExts.includes(f.ext.toLowerCase()) || f.isImage);
+                const currentIndex = mediaFiles.findIndex(f => f.path === item.path);
+
+                const setupNav = (prevBtnId, nextBtnId) => {
+                  const pBtn = document.getElementById(prevBtnId);
+                  const nBtn = document.getElementById(nextBtnId);
+                  if (pBtn && nBtn) {
+                    pBtn.style.display = currentIndex > 0 ? 'flex' : 'none';
+                    pBtn.onclick = (e) => { e.stopPropagation(); this.openPreviewOrEditor(mediaFiles[currentIndex - 1]); };
+                    
+                    nBtn.style.display = (currentIndex !== -1 && currentIndex < mediaFiles.length - 1) ? 'flex' : 'none';
+                    nBtn.onclick = (e) => { e.stopPropagation(); this.openPreviewOrEditor(mediaFiles[currentIndex + 1]); };
+                  }
+                };
+
                 document.title = `${item.name} - Admin Panel`;
                 if (item.isImage) {
+                  setupNav('drive-image-prev-btn', 'drive-image-next-btn');
                   const imageOverlay = document.getElementById('imageOverlay');
                   const imageContent = document.getElementById('imageModalContent');
                   imageOverlay.style.display = 'flex';
                   imageContent.innerHTML = `<img src="${streamUrl}" style="max-width: 100%; max-height: 85vh; object-fit: contain; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">`;
                 } else if (['mp4','webm','mp3','wav','ogg','pdf'].includes(item.ext)) {
+                  setupNav('drive-media-prev-btn', 'drive-media-next-btn');
                   const mediaOverlay = document.getElementById('mediaOverlay');
                   const mediaContent = document.getElementById('mediaModalContent');
                   const mediaContainer = document.getElementById('mediaModalContainer');
@@ -9839,7 +10480,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     mediaContainer.style.maxWidth = '550px';
                     mediaContainer.style.width = '90%';
                     mediaContainer.style.padding = '24px';
-                    mediaContent.innerHTML = `<video controls autoplay preload="metadata" style="width: 100%; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); background: #000;"><source src="${streamUrl}" type="video/${item.ext}"></video>`;
+                    mediaContent.innerHTML = `<video controls autoplay preload="metadata" style="width: 100%; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); background: #000;" onended="const nBtn=document.getElementById('drive-media-next-btn'); if(nBtn && nBtn.style.display!=='none') nBtn.click();"><source src="${streamUrl}" type="video/${item.ext}"></video>`;
                   } else if (['mp3','wav','ogg'].includes(item.ext)) {
                     mediaContainer.style.maxWidth = '550px';
                     mediaContainer.style.width = '90%';
@@ -9848,19 +10489,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <div style="display: flex; flex-direction: column; align-items: center; gap: 24px; width: 100%;">
                         <div style="width: 120px; height: 120px; border-radius: 24px; background: var(--theme-primary-container); color: var(--theme-on-primary-container); display: flex; align-items: center; justify-content: center;"><span class="material-symbols-rounded" style="font-size: 64px; color: var(--theme-primary);">audiotrack</span></div>
                         <div style="font-family: var(--font-title); font-size: 16px; color: var(--theme-on-surface); text-align: center; word-break: break-all; max-width: 300px;">${item.name}</div>
-                        <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
+                        <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;" onended="const nBtn=document.getElementById('drive-media-next-btn'); if(nBtn && nBtn.style.display!=='none') nBtn.click();"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
                       </div>`;
                   }
                   mediaOverlay.style.display = 'flex';
                 } else {
-                  const overlay = document.getElementById('editorOverlay');
-                  const actions = document.getElementById('editorActions');
-                  const desktopContainer = document.getElementById('desktopEditorContainer');
-                  const mobileContainer = document.getElementById('mobileEditorContainer');
-                  
-                  document.getElementById('editorTitle').textContent = item.name;
-                  document.title = `${item.name} - Editor - Admin Panel`;
-                  overlay.style.display = 'flex';
+                  document.body.classList.add('drive-editor-open');
+                const overlay = document.getElementById('editorOverlay');
+                const actions = document.getElementById('editorActions');
+                const desktopContainer = document.getElementById('desktopEditorContainer');
+                const mobileContainer = document.getElementById('mobileEditorContainer');
+                
+                document.getElementById('editorTitle').textContent = item.name;
+                document.title = `${item.name} - Admin Panel`;
+                overlay.style.display = 'flex';
                   
                   desktopContainer.style.display = 'none';
                   mobileContainer.style.display = 'none';
@@ -9994,6 +10636,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               closeEditor() {
+                document.body.classList.remove('drive-editor-open');
                 document.getElementById('editorOverlay').style.display = 'none';
                 this.currentEditFile = null;
                 if (this.editor) {
@@ -10515,7 +11158,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <div class="content-area-wrapper">
             <div class="user-list">
               <div class="user-list-header">
-                <div>ID</div><div>Pic</div><div>Email</div><div>Artist</div><div>Status</div><div>Last Up</div><div>Count</div><div>Action</div>
+                <div><i class="bi bi-pencil-square"></i></div><div>ID</div><div>Pic</div><div>Email</div><div>Artist</div><div>Status</div><div>Last Up</div><div>Count</div><div>Action</div>
               </div>
               <?php
                 $db = get_db();
@@ -10556,7 +11199,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 ];
                 $admin_order_by = $admin_sort_map[$sort_admin] ?? 'ORDER BY id DESC';
                 
-                $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned, is_admin, reset_requested, rhythm_strikes FROM users $where $admin_order_by LIMIT ? OFFSET ?";
+                $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned, is_admin, reset_requested, rhythm_strikes, settings FROM users $where $admin_order_by LIMIT ? OFFSET ?";
                 $stmt = $db->prepare($sql);
                 $param_index = 1;
                 if ($search !== '') {
@@ -10570,12 +11213,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 
                 $users = $stmt->fetchAll();
                 foreach ($users as $user):
+                  $user_payload = $user;
+                  $user_payload['csrf_token'] = $_SESSION['admin_csrf_token'];
+                  $user_payload['current_page'] = $page;
+                  $user_payload['current_search'] = $search;
+                  $user_payload['current_sort'] = $sort_admin;
+                  $json_data = htmlspecialchars(json_encode($user_payload), ENT_QUOTES, 'UTF-8');
               ?>
               <div class="user-item">
+                <div class="user-item-edit-desktop">
+                  <button class="btn btn-sm border-0 btn-outline-secondary rounded-circle" title="Edit Properties" onclick="openUserModal(this)" data-user="<?php echo $json_data; ?>">
+                    <i class="bi bi-pencil-fill"></i>
+                  </button>
+                </div>
                 <div class="user-item-id"><?php echo htmlspecialchars($user['id']); ?></div>
-                <div class="user-item-avatar"><img src="?access=api&action=get_profile_picture&id=<?php echo $user['id']; ?>&v=<?php echo time(); ?>" class="rounded-circle shadow-sm" style="width: 32px; height: 32px; object-fit: cover; border: 1px solid var(--ytm-surface-2);"></div>
-                <div class="user-item-email-desktop text-truncate"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
-                <div class="user-item-artist-desktop text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
+                <div class="user-item-avatar"><img src="?access=api&action=get_profile_picture&id=<?php echo $user['id']; ?>&v=<?php echo time(); ?>" class="rounded-circle shadow-sm" style="width: 36px; height: 36px; object-fit: cover; border: 1px solid var(--ytm-surface-2);"></div>
+                <div class="user-item-email-desktop text-truncate text-secondary"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
+                <div class="user-item-artist-desktop text-truncate fw-bold text-white"><?php echo htmlspecialchars($user['artist']); ?></div>
                 <div class="user-item-verified-desktop d-flex flex-wrap gap-1">
                   <?php if ($user['reset_requested'] == 1): ?>
                     <span class="badge bg-warning text-dark"><i class="bi bi-key-fill"></i> RESET REQ</span>
@@ -10603,12 +11257,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="user-item-count-desktop text-secondary small fw-bold"><?php echo htmlspecialchars($user['daily_upload_count'] ?? '0'); ?></div>
                 <div class="user-item-main">
                   <div class="user-id-mobile">ID: <?php echo htmlspecialchars($user['id']); ?></div>
-                  <div class="user-email text-truncate fw-bold"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
-                  <div class="user-artist text-truncate"><?php echo htmlspecialchars($user['artist']); ?></div>
+                  <div class="user-artist text-truncate fw-bold text-white"><?php echo htmlspecialchars($user['artist']); ?></div>
+                  <div class="user-email text-truncate text-secondary"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
                 </div>
-                <div class="user-item-action d-flex justify-content-end">
+                <div class="user-item-action d-flex justify-content-end gap-2">
+                  <button class="btn btn-sm border-0 btn-outline-info rounded-circle d-lg-none" title="Edit Properties" onclick="openUserModal(this)" data-user="<?php echo $json_data; ?>">
+                    <i class="bi bi-pencil-fill"></i>
+                  </button>
                   <div class="dropdown">
-                    <button class="btn btn-sm btn-outline-secondary border-0 rounded-circle d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" aria-expanded="false" style="width: 36px; height: 36px;">
+                    <button class="btn btn-sm border-0 btn-outline-secondary border-0 rounded-circle d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" aria-expanded="false" style="width: 36px; height: 36px;">
                       <i class="bi bi-three-dots-vertical fs-6"></i>
                     </button>
                     <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary">
@@ -10632,6 +11289,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                               <?php echo $user['is_admin'] == 1 ? 'Revoke Admin Status' : 'Make Administrator'; ?>
                             </button>
                             
+                            <?php if ($user['is_admin'] == 1): ?>
+                              <?php
+                                $u_settings = json_decode($user['settings'] ?: '{}', true) ?? [];
+                                $u_perms = $u_settings['admin_permissions'] ?? ['users', 'logs', 'reports', 'appeals', 'drive', 'ide', 'api', 'playground'];
+                                $perms_json = htmlspecialchars(json_encode($u_perms), ENT_QUOTES, 'UTF-8');
+                              ?>
+                              <button type="button" class="dropdown-item d-flex align-items-center gap-3 text-success fw-bold" onclick="openPermissionsModal(<?php echo $user['id']; ?>, '<?php echo addslashes(htmlspecialchars($user['artist'], ENT_QUOTES)); ?>', '<?php echo $perms_json; ?>')">
+                                <i class="bi bi-ui-checks"></i> Manage Permissions
+                              </button>
+                            <?php endif; ?>
+                            
                             <button type="submit" name="toggle_ban" class="dropdown-item d-flex align-items-center gap-3 text-white">
                               <i class="bi bi-slash-circle" style="color: orange;"></i> 
                               <?php echo $user['banned'] ? 'Unban User' : 'Ban User'; ?>
@@ -10650,11 +11318,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                             
                             <li><hr class="dropdown-divider border-secondary opacity-50"></li>
                             <button type="submit" name="soft_delete_user" class="dropdown-item d-flex align-items-center gap-3 text-warning fw-bold" onclick="return confirm('Soft delete this user? Their account will be anonymized and locked, but their uploaded music and posts will remain.');">
-                              <i class="bi bi-person-x-fill"></i> Soft Delete User
+                              <i class="bi bi-person-fill-x"></i> Soft Delete User
                             </button>
                             
                             <button type="submit" name="permanent_delete_user" class="dropdown-item d-flex align-items-center gap-3 text-danger fw-bold" onclick="return confirm('Permanently delete this user and ALL their data (music, posts, files)? This action cannot be undone.');">
-                              <i class="bi bi-trash23-fill"></i> Permanent Delete
+                              <i class="bi bi-trash2-fill"></i> Permanent Delete
                             </button>
                           <?php endif; ?>
                           <li><hr class="dropdown-divider border-secondary opacity-50"></li>
@@ -10683,6 +11351,121 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </div>
               <?php endforeach; ?>
             </div>
+            
+            <div class="modal fade" id="user-details-modal" tabindex="-1">
+              <div class="modal-dialog modal-dialog-centered modal-lg">
+                <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
+                  <div class="modal-header border-0 pb-3" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+                    <h5 class="modal-title text-white fw-bold"><i class="bi bi-person-lines-fill text-info me-2"></i> User Properties & Preferences</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body p-4" id="user-details-modal-body">
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <script>
+              function openUserModal(btn) {
+                const userData = JSON.parse(btn.getAttribute('data-user'));
+                const modalBody = document.getElementById('user-details-modal-body');
+                
+                let u_perms = ['users', 'logs', 'reports', 'appeals', 'drive', 'ide', 'api', 'playground'];
+                try {
+                  const settings = JSON.parse(userData.settings || '{}');
+                  if (settings.admin_permissions) u_perms = settings.admin_permissions;
+                } catch(e) {}
+                const permsJson = JSON.stringify(u_perms).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                
+                const isSuperAdmin = userData.email && userData.email.toLowerCase() === 'musiclibrary@mail.com';
+                
+                let actionsHtml = `
+                  <form method="POST" action="?access=admin&page=${userData.current_page}&search=${encodeURIComponent(userData.current_search)}&sort=${encodeURIComponent(userData.current_sort)}">
+                    <input type="hidden" name="csrf_token" value="${userData.csrf_token}">
+                    <input type="hidden" name="user_id" value="${userData.id}">
+                    
+                    <div class="d-flex flex-column gap-2 mt-3">
+                      <button type="submit" name="generate_reset_link" class="btn border-0 btn-outline-info text-start fw-bold d-flex align-items-center gap-2">
+                        <i class="bi bi-envelope-check"></i> Generate Reset Link
+                      </button>
+                      
+                      <button type="submit" name="toggle_verify" class="btn border-0 btn-outline-success text-start fw-bold d-flex align-items-center gap-2">
+                        <i class="bi bi-patch-check"></i> ${userData.verified === 'yes' ? 'Revoke Verification' : (userData.verified === 'pending' ? 'Approve Upload Request' : 'Verify User')}
+                      </button>
+                `;
+                
+                if (!isSuperAdmin) {
+                  actionsHtml += `
+                      <button type="submit" name="toggle_admin" class="btn border-0 btn-outline-warning text-start fw-bold d-flex align-items-center gap-2">
+                        <i class="bi bi-shield-lock"></i> ${userData.is_admin == 1 ? 'Revoke Admin Status' : 'Make Administrator'}
+                      </button>
+                  `;
+                  
+                  if (userData.is_admin == 1) {
+                    actionsHtml += `
+                      <button type="button" class="btn border-0 btn-outline-light text-start fw-bold d-flex align-items-center gap-2" onclick="bootstrap.Modal.getInstance(document.getElementById('user-details-modal')).hide(); openPermissionsModal(${userData.id}, '${userData.artist.replace(/'/g, "\\'")}', '${permsJson}')">
+                        <i class="bi bi-ui-checks"></i> Manage Permissions
+                      </button>
+                    `;
+                  }
+                  
+                  actionsHtml += `
+                      <button type="submit" name="toggle_ban" class="btn border-0 btn-outline-danger text-start fw-bold d-flex align-items-center gap-2">
+                        <i class="bi bi-slash-circle"></i> ${userData.banned ? 'Unban User' : 'Ban User'}
+                      </button>
+                      
+                      <hr class="border-secondary opacity-50 my-2">
+                      <button type="submit" name="soft_delete_user" class="btn border-0 btn-outline-warning text-start fw-bold d-flex align-items-center gap-2" onclick="return confirm('Soft delete this user? Their account will be anonymized and locked, but their uploaded music and posts will remain.');">
+                        <i class="bi bi-person-fill-x"></i> Soft Delete User
+                      </button>
+                      
+                      <button type="submit" name="permanent_delete_user" class="btn border-0 btn-outline-danger text-start fw-bold d-flex align-items-center gap-2" onclick="return confirm('Permanently delete this user and ALL their data (music, posts, files)? This action cannot be undone.');">
+                        <i class="bi bi-trash2-fill"></i> Permanent Delete
+                      </button>
+                  `;
+                }
+                
+                actionsHtml += `
+                    </div>
+                  </form>
+                `;
+
+                const badgeHtml = userData.banned ? '<span class="badge bg-danger">Banned</span>' : '<span class="badge bg-success">Active</span>';
+                const adminBadge = userData.is_admin == 1 ? '<span class="badge bg-primary">Admin</span>' : '';
+                const verifyBadge = userData.verified === 'yes' ? '<span class="badge bg-success">Verified</span>' : (userData.verified === 'pending' ? '<span class="badge bg-info text-dark">Pending</span>' : '<span class="badge bg-secondary">Unverified</span>');
+
+                modalBody.innerHTML = `
+                  <div class="row g-4">
+                    <div class="col-md-5 text-center border-end border-secondary">
+                      <img src="?access=api&action=get_profile_picture&id=${userData.id}&v=${Date.now()}" class="rounded-circle shadow-lg mb-3" style="width: 120px; height: 120px; object-fit: cover; border: 4px solid var(--ytm-surface-2);">
+                      <h4 class="text-white fw-bold mb-1 text-truncate">${userData.artist}</h4>
+                      <p class="text-secondary small mb-3">${userData.email || 'Anonymous'}</p>
+                      
+                      <div class="d-flex flex-wrap justify-content-center gap-2 mb-3">
+                        ${badgeHtml} ${adminBadge} ${verifyBadge}
+                      </div>
+                      
+                      <div class="bg-dark rounded p-3 text-start border border-secondary">
+                        <div class="small text-secondary mb-2">User ID: <strong class="text-white float-end">${userData.id}</strong></div>
+                        <div class="small text-secondary mb-2">Uploads: <strong class="text-white float-end">${userData.daily_upload_count}</strong></div>
+                        <div class="small text-secondary mb-1">Last Upload: <strong class="text-white float-end">${userData.last_upload_date || 'Never'}</strong></div>
+                      </div>
+                      
+                      <button type="button" class="btn btn-dark w-100 fw-bold mt-3 border-secondary" onclick="bootstrap.Modal.getInstance(document.getElementById('user-details-modal')).hide(); viewRhythmHistory(${userData.id}, '${userData.artist.replace(/'/g, "\\'")}');">
+                        <i class="bi bi-controller text-info"></i> View Rhythm History
+                      </button>
+                    </div>
+                    
+                    <div class="col-md-7">
+                      <h6 class="text-secondary fw-bold text-uppercase" style="letter-spacing: 1px;">Actions & Properties</h6>
+                      ${actionsHtml}
+                    </div>
+                  </div>
+                `;
+                
+                new bootstrap.Modal(document.getElementById('user-details-modal')).show();
+              }
+            </script>
             <?php if ($total_pages > 1): ?>
             <nav class="mt-4" aria-label="User pagination">
               <ul class="pagination justify-content-center">
@@ -10712,6 +11495,80 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       </main>
     </div>
     <?php endif; ?>
+    <div class="modal fade" id="admin-permissions-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-ui-checks text-success me-2"></i>Access Permissions</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-light p-4">
+            <p class="text-secondary small mb-4">Grant or revoke access to specific admin areas for <strong class="text-white" id="perm-user-name"></strong>.</p>
+            <form method="POST" action="">
+              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>">
+              <input type="hidden" name="user_id" id="perm-user-id" value="">
+              
+              <div class="row g-3 mb-4">
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="users" id="perm-users">
+                    <label class="form-check-label text-white fw-medium" for="perm-users">User Management</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="logs" id="perm-logs">
+                    <label class="form-check-label text-white fw-medium" for="perm-logs">Activity Logs</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="reports" id="perm-reports">
+                    <label class="form-check-label text-white fw-medium" for="perm-reports">Profile Reports</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="appeals" id="perm-appeals">
+                    <label class="form-check-label text-white fw-medium" for="perm-appeals">Ban Appeals</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="drive" id="perm-drive">
+                    <label class="form-check-label text-white fw-medium" for="perm-drive">Drive Manager</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="ide" id="perm-ide">
+                    <label class="form-check-label text-white fw-medium" for="perm-ide">PHPEditor (IDE)</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="api" id="perm-api">
+                    <label class="form-check-label text-white fw-medium" for="perm-api">API Keys</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="playground" id="perm-playground">
+                    <label class="form-check-label text-white fw-medium" for="perm-playground">API Playground</label>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="d-flex justify-content-end gap-2">
+                <button type="button" class="btn btn-outline-light rounded-pill px-4 fw-bold" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" name="save_admin_permissions" class="btn btn-success text-dark fw-bold rounded-pill px-4">Save Permissions</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="admin-rhythm-history-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
@@ -10726,6 +11583,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       </div>
     </div>
     <script>
+      function openPermissionsModal(id, name, permsJson) {
+        document.getElementById('perm-user-id').value = id;
+        document.getElementById('perm-user-name').textContent = name;
+        
+        const checkboxes = document.querySelectorAll('#admin-permissions-modal input[type="checkbox"]');
+        checkboxes.forEach(cb => cb.checked = false); // Clear previous states
+        
+        if (permsJson) {
+          try {
+            const perms = JSON.parse(permsJson);
+            checkboxes.forEach(cb => {
+              if (perms.includes(cb.value)) cb.checked = true;
+            });
+          } catch(e) {}
+        }
+        
+        new bootstrap.Modal(document.getElementById('admin-permissions-modal')).show();
+      }
+
       let currentRhUserId = null;
       let currentRhPage = 1;
       
@@ -26680,7 +27556,7 @@ function perform_cover_scan($db) {
               <span>Clear Cookies</span>
             </a>
             <a href="#" class="nav-link" id="clear-session-btn">
-              <i class="bi bi-person-x-fill"></i>
+              <i class="bi bi-person-fill-x"></i>
               <span>Clear Session</span>
             </a>
             <a href="#" class="nav-link" id="fullscreen-btn">
@@ -39280,7 +40156,7 @@ SOFTWARE.</div>
                           </div>
                         </div>
                         <div class="d-flex gap-2 flex-wrap">
-                          <button class="btn btn-outline-danger rounded-pill px-4 fw-medium shadow-sm" id="unfollow-all-btn"><i class="bi bi-person-x-fill me-1"></i> Unfollow All</button>
+                          <button class="btn btn-outline-danger rounded-pill px-4 fw-medium shadow-sm" id="unfollow-all-btn"><i class="bi bi-person-fill-x me-1"></i> Unfollow All</button>
                           <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-following-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</button>
                           <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-following-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
                         </div>
@@ -49923,7 +50799,7 @@ SOFTWARE.</div>
                   showToast("Failed to unfollow all.", "error");
                   unfollowAllBtn.disabled = false;
                   unfollowAllBtn.innerHTML =
-                    '<i class="bi bi-person-x-fill me-1"></i> Unfollow All';
+                    '<i class="bi bi-person-fill-x me-1"></i> Unfollow All';
                 }
               });
             }
@@ -66106,7 +66982,7 @@ SOFTWARE.</div>
             // Render History list for this artist's personal plays
             const histContainer = document.getElementById("rg-list-artist-history");
             if (!isUser) {
-              histContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-person-x-fill d-block fs-1 mb-2"></i>Only registered artist user accounts have an active play history.</div>`;
+              histContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-person-fill-x d-block fs-1 mb-2"></i>Only registered artist user accounts have an active play history.</div>`;
             } else if (artistScores.length === 0) {
               histContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-controller d-block fs-1 mb-2"></i>This user hasn't played any tracks yet.</div>`;
             } else {
@@ -66247,7 +67123,7 @@ SOFTWARE.</div>
                 "rg-list-artist-following",
               );
               if (folContainer) {
-                folContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-person-x-fill d-block fs-1 mb-2"></i>Only registered users can follow others.</div>`;
+                folContainer.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-person-fill-x d-block fs-1 mb-2"></i>Only registered users can follow others.</div>`;
               }
             }
     
