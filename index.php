@@ -5304,6 +5304,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 let html = '';
                 if(basePath) {
                   const parent = basePath.split('/').slice(0,-1).join('/');
+                  html += `<div class="ide-tree-item ide-folder-toggle" data-path=""><i class="bi bi-hdd-fill text-danger"></i> Root (/)</div>`;
                   html += `<div class="ide-tree-item ide-folder-toggle" data-path="${parent}"><i class="bi bi-arrow-90deg-up text-warning"></i> Back (..)</div>`;
                 }
                 data.folders.forEach(f => {
