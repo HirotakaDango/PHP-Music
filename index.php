@@ -387,7 +387,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '7.8');
+define('APP_VERSION', '7.9');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -2130,7 +2130,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['users', 'logs', 'reports', 'appeals', 'drive', 'ide', 'api', 'playground']; // Default to all if missing
+  $current_admin_permissions = ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -2171,14 +2171,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
   <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Admin Panel - PHP Music</title>
     <link rel="icon" id="app-favicon" type="image/svg+xml" href="?action=get_app_icon" />
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&amp;family=Roboto:wght@400;500;700&amp;display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ace.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-searchbox.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-modelist.min.js"></script>
@@ -2865,6 +2865,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php if ($is_super_admin_check || in_array('drive', $current_admin_permissions)): ?>
             <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Drive Manager</span></a>
             <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('dbmanager', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=dbmanager" class="nav-link <?php echo (($_GET['page'] ?? '') === 'dbmanager') ? 'active' : ''; ?>"><i class="bi bi-database-fill-gear"></i><span>PHPDBManager</span></a>
+            <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('ide', $current_admin_permissions)): ?>
             <a href="?access=admin&page=ide" class="nav-link <?php echo (($_GET['page'] ?? '') === 'ide') ? 'active' : ''; ?>"><i class="bi bi-code-slash"></i><span>PHPEditor (IDE)</span></a>
             <?php endif; ?>
@@ -3436,6 +3439,1753 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
             <iframe src="./" onload="document.getElementById('manage-iframe-spinner').style.display='none';" style="width: 117.647%; height: 117.647%; border: none; transform: scale(0.85); transform-origin: top left; position: absolute; top: 0; left: 0; display: block; z-index: 5;"></iframe>
           </div>
+        <?php elseif (($_GET['page'] ?? '') === 'dbmanager'): ?>
+          <?php
+          define('SM_DB_DIR', MUSIC_DIR);
+          define('SM_VERSION', '2.0.1');
+          define('SM_MAX_BLOB_DISPLAY', 512);
+
+          if (!function_exists('dbm_h')) {
+            function dbm_h(string $s): string { return htmlspecialchars($s, ENT_QUOTES | ENT_HTML5, 'UTF-8'); }
+            function dbm_e(string $s): string { return dbm_h($s); }
+            function dbm_json_r(array $data, int $code = 200): never { http_response_code($code); header('Content-Type: application/json'); echo json_encode($data); exit; }
+            function dbm_redirect(string $url = ''): never { header('Location: ' . $url); exit; }
+            function dbm_self_url(array $params = []): string { return "?access=admin&page=dbmanager" . ($params ? "&" . http_build_query($params) : ""); }
+            function dbm_flash_set(string $type, string $msg): void { $_SESSION['dbm_flash'] = ['type' => $type, 'msg' => $msg]; }
+            function dbm_flash_get(): array { $f = $_SESSION['dbm_flash'] ?? []; unset($_SESSION['dbm_flash']); return $f; }
+            function dbm_is_binary(string $data): bool {
+              if (empty($data)) return false;
+              if (strpos($data, "\0") !== false) return true;
+              if (stripos(ltrim($data), '<svg') === 0) return true;
+              if (preg_match('/[\x00-\x08\x0B\x0C\x0E-\x1F]/', $data)) return true;
+              if (!mb_check_encoding($data, 'UTF-8')) return true;
+              return false;
+            }
+            function dbm_format_bytes(int $bytes): string {
+              if ($bytes < 1024) return $bytes . ' B';
+              if ($bytes < 1048576) return round($bytes / 1024, 1) . ' KB';
+              return round($bytes / 1048576, 1) . ' MB';
+            }
+            function dbm_format_value(mixed $v): string {
+              if ($v === null) return '<span class="dbm-null">NULL</span>';
+              if (is_string($v) && dbm_is_binary($v)) {
+                return '<span class="dbm-blob" style="color:#79c0ff; font-weight:bold;">[BLOB ' . dbm_format_bytes(strlen($v)) . ']</span>';
+              }
+              $str = (string)$v;
+              if (strlen($str) > 200) return dbm_e(substr($str, 0, 200)) . '<span class="dbm-truncated">…</span>';
+              return dbm_e($str);
+            }
+            function dbm_csrf_field(): string { return '<input type="hidden" name="csrf_token" value="' . dbm_e($_SESSION['admin_csrf_token']) . '">'; }
+            function dbm_csrf_require(): void {
+              if (!hash_equals($_SESSION['admin_csrf_token'], $_POST['csrf_token'] ?? '')) {
+                dbm_flash_set('error', 'Invalid CSRF token.');
+                dbm_redirect(dbm_self_url(['db' => $_GET['db'] ?? '']));
+              }
+            }
+            function dbm_list_databases(): array {
+              $dir = SM_DB_DIR; $files = [];
+              if (is_dir($dir)) {
+                foreach (scandir($dir) as $f) {
+                  if ($f === '.' || $f === '..') continue;
+                  if (preg_match('/\.(sqlite|sqlite3|db|db3|s3db|sl3)$/i', $f)) {
+                    $path = $dir . DIRECTORY_SEPARATOR . $f;
+                    if (is_file($path)) $files[] = ['name' => $f, 'path' => $path, 'size' => filesize($path)];
+                  }
+                }
+              }
+              return $files;
+            }
+            function dbm_resolve_db(string $name): string|false {
+              if (strpos($name, '/') !== false || strpos($name, '\\') !== false || strpos($name, '..') !== false) return false;
+              $path = SM_DB_DIR . DIRECTORY_SEPARATOR . $name;
+              return is_file($path) ? $path : false;
+            }
+            function dbm_create_db(string $name): string|false {
+              if (!preg_match('/^[\w\-. ]+\.(sqlite|sqlite3|db|db3)$/i', $name)) return false;
+              $path = SM_DB_DIR . DIRECTORY_SEPARATOR . basename($name);
+              if (file_exists($path)) return false;
+              try { $pdo = new PDO('sqlite:' . $path); $pdo->exec('PRAGMA journal_mode=WAL'); return $path; } catch (Exception $ex) { return false; }
+            }
+            function dbm_get_pdo(string $path): PDO {
+              $pdo = new PDO('sqlite:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_TIMEOUT => 10]);
+              $pdo->exec('PRAGMA foreign_keys = ON'); $pdo->exec('PRAGMA journal_mode = WAL');
+              return $pdo;
+            }
+            function dbm_get_tables(PDO $pdo): array {
+              return $pdo->query("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name")->fetchAll();
+            }
+            function dbm_quote_ident(string $name): string { return '"' . str_replace('"', '""', $name) . '"'; }
+            function dbm_get_table_info(PDO $pdo, string $table): array {
+              $stmt = $pdo->prepare('PRAGMA table_info(' . dbm_quote_ident($table) . ')'); $stmt->execute(); return $stmt->fetchAll();
+            }
+            function dbm_get_table_indexes(PDO $pdo, string $table): array {
+              $stmt = $pdo->prepare('PRAGMA index_list(' . dbm_quote_ident($table) . ')'); $stmt->execute();
+              $indexes = $stmt->fetchAll();
+              foreach ($indexes as &$idx) {
+                $info_stmt = $pdo->prepare('PRAGMA index_info(' . dbm_quote_ident($idx['name']) . ')'); $info_stmt->execute();
+                $idx['columns'] = array_column($info_stmt->fetchAll(), 'name');
+              }
+              return $indexes;
+            }
+            function dbm_get_foreign_keys(PDO $pdo, string $table): array {
+              $stmt = $pdo->prepare('PRAGMA foreign_key_list(' . dbm_quote_ident($table) . ')'); $stmt->execute(); return $stmt->fetchAll();
+            }
+            function dbm_get_table_sql(PDO $pdo, string $table): string {
+              $stmt = $pdo->prepare("SELECT sql FROM sqlite_master WHERE name = ?"); $stmt->execute([$table]); return $stmt->fetchColumn() ?: '';
+            }
+            function dbm_get_row_count(PDO $pdo, string $table, string $search = ''): int {
+              $where = ''; $params = [];
+              if ($search !== '') {
+                $cols = dbm_get_table_info($pdo, $table); $conds = [];
+                foreach ($cols as $col) { $conds[] = dbm_quote_ident($col['name']) . ' LIKE ?'; $params[] = '%' . $search . '%'; }
+                $where = 'WHERE ' . implode(' OR ', $conds);
+              }
+              $stmt = $pdo->prepare('SELECT COUNT(*) FROM ' . dbm_quote_ident($table) . ' ' . $where); $stmt->execute($params); return (int)$stmt->fetchColumn();
+            }
+            function dbm_get_pk_column(PDO $pdo, string $table): string|false {
+              $cols = dbm_get_table_info($pdo, $table);
+              foreach ($cols as $col) { if ($col['pk'] > 0) return $col['name']; }
+              return false;
+            }
+            function dbm_export_csv(PDO $pdo, string $table): void {
+              $cols = dbm_get_table_info($pdo, $table);
+              $stmt = $pdo->prepare('SELECT * FROM ' . dbm_quote_ident($table)); $stmt->execute();
+              header('Content-Type: text/csv; charset=UTF-8');
+              header('Content-Disposition: attachment; filename="' . rawurlencode($table) . '.csv"');
+              $out = fopen('php://output', 'w'); fputs($out, "\xEF\xBB\xBF"); fputcsv($out, array_column($cols, 'name'));
+              while ($row = $stmt->fetch()) {
+                $line = [];
+                foreach ($row as $v) {
+                  if ($v === null) $line[] = ''; elseif (dbm_is_binary($v)) $line[] = '[BLOB ' . dbm_format_bytes(strlen($v)) . ']'; else $line[] = $v;
+                }
+                fputcsv($out, $line);
+              }
+              fclose($out); exit;
+            }
+            function dbm_export_sql(PDO $pdo, string|null $table = null): void {
+              header('Content-Type: application/sql; charset=UTF-8');
+              $fname = $table ? $table . '.sql' : 'dump.sql';
+              header('Content-Disposition: attachment; filename="' . rawurlencode($fname) . '"');
+              echo "-- SQLite Manager Export\n-- Generated: " . date('Y-m-d H:i:s') . "\n\nPRAGMA foreign_keys = OFF;\nBEGIN TRANSACTION;\n\n";
+              $tables = $table ? [['name' => $table, 'type' => 'table']] : dbm_get_tables($pdo);
+              foreach ($tables as $t) {
+                $sql = dbm_get_table_sql($pdo, $t['name']);
+                if ($sql) {
+                  echo "-- " . $t['type'] . ": " . $t['name'] . "\n" . $sql . ";\n\n";
+                  if ($t['type'] === 'table') {
+                    $stmt = $pdo->prepare('SELECT * FROM ' . dbm_quote_ident($t['name'])); $stmt->execute();
+                    $colNames = array_column(dbm_get_table_info($pdo, $t['name']), 'name');
+                    while ($row = $stmt->fetch()) {
+                      $vals = [];
+                      foreach ($row as $v) {
+                        if ($v === null) $vals[] = 'NULL'; elseif (is_numeric($v)) $vals[] = $v; else $vals[] = "'" . str_replace("'", "''", $v) . "'";
+                      }
+                      echo "INSERT INTO " . dbm_quote_ident($t['name']) . " (" . implode(', ', array_map('dbm_quote_ident', $colNames)) . ") VALUES (" . implode(', ', $vals) . ");\n";
+                    }
+                    echo "\n";
+                  }
+                }
+              }
+              $stmt = $pdo->query("SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'");
+              foreach ($stmt->fetchAll() as $idx) { if ($idx['sql']) echo $idx['sql'] . ";\n"; }
+              echo "\nCOMMIT;\nPRAGMA foreign_keys = ON;\n"; exit;
+            }
+            function dbm_import_sql(PDO $pdo, string $sql): array {
+              $errors = []; $statements = []; $lines = explode("\n", $sql); $stmt = '';
+              foreach ($lines as $line) {
+                $trimmed = ltrim($line);
+                if (str_starts_with($trimmed, '--') || str_starts_with($trimmed, '//') || $trimmed === '') continue;
+                $stmt .= ' ' . rtrim($line);
+                if (str_ends_with(rtrim($line), ';')) { $statements[] = trim($stmt); $stmt = ''; }
+              }
+              if (trim($stmt) !== '') $statements[] = trim($stmt);
+              $pdo->exec('BEGIN');
+              foreach ($statements as $s) {
+                if (trim($s) === '' || trim($s) === ';') continue;
+                try { $pdo->exec($s); } catch (PDOException $e) { $errors[] = $e->getMessage() . ' (SQL: ' . substr($s, 0, 80) . '...)'; }
+              }
+              if (empty($errors)) { $pdo->exec('COMMIT'); } else { try { $pdo->exec('ROLLBACK'); } catch (Exception $ex) {} }
+              return $errors;
+            }
+          }
+
+          $dbm_action = $_REQUEST['dbm_action'] ?? '';
+          $dbName  = $_GET['db'] ?? $_POST['db'] ?? '';
+          $dbPath  = '';
+          $dbm_pdo = null;
+          $curTable = $_GET['table'] ?? '';
+
+          if ($_SERVER['REQUEST_METHOD'] === 'POST' && $dbm_action === 'create_db') {
+            dbm_csrf_require();
+            $newName = trim($_POST['db_name'] ?? '');
+            if ($newName === '') dbm_flash_set('error', 'Database name cannot be empty.');
+            else {
+              if (!str_contains($newName, '.')) $newName .= '.sqlite';
+              $created = dbm_create_db($newName);
+              if ($created === false) dbm_flash_set('error', 'Could not create database. Check name and permissions.');
+              else { dbm_flash_set('success', 'Database "' . $newName . '" created.'); dbm_redirect(dbm_self_url(['db' => basename($created)])); }
+            }
+            dbm_redirect(dbm_self_url());
+          }
+
+          if ($_SERVER['REQUEST_METHOD'] === 'POST' && $dbm_action === 'upload_db') {
+            dbm_csrf_require();
+            if (!empty($_FILES['db_file']['tmp_name'])) {
+              $orig = basename($_FILES['db_file']['name']);
+              if (!preg_match('/\.(sqlite|sqlite3|db|db3)$/i', $orig)) dbm_flash_set('error', 'Only .sqlite/.db files can be uploaded.');
+              else {
+                $dest = SM_DB_DIR . DIRECTORY_SEPARATOR . $orig;
+                if (file_exists($dest)) $dest = SM_DB_DIR . DIRECTORY_SEPARATOR . pathinfo($orig, PATHINFO_FILENAME) . '_' . time() . '.' . pathinfo($orig, PATHINFO_EXTENSION);
+                if (move_uploaded_file($_FILES['db_file']['tmp_name'], $dest)) { dbm_flash_set('success', 'Database uploaded.'); dbm_redirect(dbm_self_url(['db' => basename($dest)])); }
+                else dbm_flash_set('error', 'Upload failed.');
+              }
+            }
+            dbm_redirect(dbm_self_url());
+          }
+
+          if ($dbName !== '') {
+            $dbPath = dbm_resolve_db($dbName);
+            if ($dbPath === false) { dbm_flash_set('error', 'Database not found.'); dbm_redirect(dbm_self_url()); }
+            try { $dbm_pdo = dbm_get_pdo($dbPath); } catch (Exception $e) { dbm_flash_set('error', 'Cannot open database: ' . $e->getMessage()); dbm_redirect(dbm_self_url()); }
+          }
+
+          if ($dbm_action === 'export_csv' && $dbm_pdo && $curTable !== '') {
+            while (ob_get_level()) ob_end_clean();
+            dbm_export_csv($dbm_pdo, $curTable);
+          }
+          if ($dbm_action === 'export_sql' && $dbm_pdo) {
+            while (ob_get_level()) ob_end_clean();
+            dbm_export_sql($dbm_pdo, $curTable ?: null);
+          }
+          if ($dbm_action === 'download_db' && $dbPath) {
+            while (ob_get_level()) ob_end_clean();
+            header('Content-Type: application/octet-stream'); header('Content-Disposition: attachment; filename="' . rawurlencode(basename($dbPath)) . '"');
+            header('Content-Length: ' . filesize($dbPath)); readfile($dbPath); exit;
+          }
+          if ($dbm_action === 'blob' && $dbm_pdo && $curTable !== '' && isset($_GET['col']) && isset($_GET['rowid'])) {
+            while (ob_get_level()) ob_end_clean();
+            $col = $_GET['col']; $rowid = (int)$_GET['rowid']; $pk = dbm_get_pk_column($dbm_pdo, $curTable) ?: 'rowid';
+            $stmt = $dbm_pdo->prepare('SELECT ' . dbm_quote_ident($col) . ' FROM ' . dbm_quote_ident($curTable) . ' WHERE ' . dbm_quote_ident($pk) . ' = ?');
+            $stmt->execute([$rowid]); $data = $stmt->fetchColumn();
+            if ($data !== false) { header('Content-Type: application/octet-stream'); header('Content-Disposition: attachment; filename="blob_' . rawurlencode($curTable) . '_' . rawurlencode($col) . '_' . $rowid . '.bin"'); echo $data; }
+            exit;
+          }
+          if ($dbm_action === 'blob_view' && $dbm_pdo && $curTable !== '' && isset($_GET['col']) && isset($_GET['rowid'])) {
+            while (ob_get_level()) ob_end_clean();
+            $col = $_GET['col']; $rowid = (int)$_GET['rowid']; $pk = dbm_get_pk_column($dbm_pdo, $curTable) ?: 'rowid';
+            $stmt = $dbm_pdo->prepare('SELECT ' . dbm_quote_ident($col) . ' FROM ' . dbm_quote_ident($curTable) . ' WHERE ' . dbm_quote_ident($pk) . ' = ?');
+            $stmt->execute([$rowid]); $data = $stmt->fetchColumn();
+            if ($data !== false) {
+              $mime = 'application/octet-stream';
+              if (class_exists('finfo')) { $finfo = new finfo(FILEINFO_MIME_TYPE); $mime = $finfo->buffer($data); }
+              if (stripos(ltrim($data), '<svg') === 0) $mime = 'image/svg+xml';
+              header('Content-Type: ' . $mime); header('Content-Disposition: inline; filename="blob_' . rawurlencode($col) . '"'); echo $data;
+            }
+            exit;
+          }
+
+          if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($dbm_action) && !in_array($dbm_action, ['create_db', 'upload_db'])) {
+            dbm_csrf_require();
+            switch ($dbm_action) {
+              case 'delete_db':
+                if ($dbPath && isset($_POST['confirm_name']) && $_POST['confirm_name'] === $dbName) { unlink($dbPath); dbm_flash_set('success', 'Database "' . $dbName . '" deleted.'); dbm_redirect(dbm_self_url()); }
+                dbm_flash_set('error', 'Database name did not match.'); dbm_redirect(dbm_self_url(['db' => $dbName]));
+              case 'exec_sql':
+                $sql = trim($_POST['sql'] ?? '');
+                if ($sql && $dbm_pdo) {
+                  try {
+                    $start = microtime(true); $lower = ltrim(strtolower($sql));
+                    if (str_starts_with($lower, 'select') || str_starts_with($lower, 'pragma') || str_starts_with($lower, 'with') || str_starts_with($lower, 'explain')) {
+                      $stmt = $dbm_pdo->prepare($sql); $stmt->execute(); $rows = $stmt->fetchAll();
+                      $elapsed = round((microtime(true) - $start) * 1000, 2);
+                      $_SESSION['dbm_sql_result'] = ['rows' => $rows, 'sql' => $sql, 'time' => $elapsed, 'count' => count($rows)];
+                      dbm_flash_set('success', 'Query returned ' . count($rows) . ' row(s) in ' . $elapsed . ' ms.');
+                    } else {
+                      $affected = $dbm_pdo->exec($sql);
+                      $elapsed = round((microtime(true) - $start) * 1000, 2);
+                      $_SESSION['dbm_sql_result'] = ['rows' => null, 'sql' => $sql, 'time' => $elapsed, 'count' => $affected];
+                      dbm_flash_set('success', 'Query OK. ' . $affected . ' row(s) affected in ' . $elapsed . ' ms.');
+                    }
+                  } catch (PDOException $e) {
+                    $_SESSION['dbm_sql_result'] = ['error' => $e->getMessage(), 'sql' => $sql]; dbm_flash_set('error', 'SQL Error: ' . $e->getMessage());
+                  }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'view' => 'sql']));
+              case 'import_sql':
+                if ($dbm_pdo && !empty($_FILES['sql_file']['tmp_name'])) {
+                  $sql = file_get_contents($_FILES['sql_file']['tmp_name']);
+                  if ($sql !== false) {
+                    $errors = dbm_import_sql($dbm_pdo, $sql);
+                    if (empty($errors)) dbm_flash_set('success', 'SQL file imported successfully.');
+                    else dbm_flash_set('error', 'Import finished with ' . count($errors) . ' error(s): ' . implode('; ', array_slice($errors, 0, 3)));
+                  } else { dbm_flash_set('error', 'Could not read uploaded file.'); }
+                } elseif ($dbm_pdo && !empty($_POST['sql_text'])) {
+                  $errors = dbm_import_sql($dbm_pdo, $_POST['sql_text']);
+                  if (empty($errors)) dbm_flash_set('success', 'SQL imported successfully.');
+                  else dbm_flash_set('error', 'Import finished with ' . count($errors) . ' error(s): ' . implode('; ', array_slice($errors, 0, 3)));
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'view' => 'sql']));
+              case 'create_table':
+                if ($dbm_pdo) {
+                  $tname = trim($_POST['table_name'] ?? ''); $cols = $_POST['col_name'] ?? []; $types = $_POST['col_type'] ?? []; $pks = $_POST['col_pk'] ?? []; $nns = $_POST['col_nn'] ?? []; $uniq = $_POST['col_unique'] ?? []; $defs = $_POST['col_default'] ?? [];
+                  if ($tname === '') { dbm_flash_set('error', 'Table name required.'); break; }
+                  $colDefs = [];
+                  for ($i = 0; $i < count($cols); $i++) {
+                    $cn = trim($cols[$i]); if ($cn === '') continue;
+                    $ct = $types[$i] ?? 'TEXT'; $isPk = in_array((string)$i, $pks); $isNn = in_array((string)$i, $nns); $isUniq = in_array((string)$i, $uniq); $def = trim($defs[$i] ?? '');
+                    $def_clause = $def !== '' ? ' DEFAULT ' . $def : '';
+                    $colDefs[] = dbm_quote_ident($cn) . ' ' . $ct . ($isPk ? ' PRIMARY KEY' : '') . ((!$isPk && $isNn) ? ' NOT NULL' : '') . ((!$isPk && $isUniq) ? ' UNIQUE' : '') . $def_clause;
+                  }
+                  if (empty($colDefs)) { dbm_flash_set('error', 'At least one column required.'); break; }
+                  try { $dbm_pdo->exec('CREATE TABLE ' . dbm_quote_ident($tname) . ' (' . implode(', ', $colDefs) . ')'); dbm_flash_set('success', 'Table "' . $tname . '" created.'); dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $tname])); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'view' => 'create_table']));
+              case 'drop_table':
+                if ($dbm_pdo && $curTable !== '') { try { $dbm_pdo->exec('DROP TABLE ' . dbm_quote_ident($curTable)); dbm_flash_set('success', 'Table "' . $curTable . '" dropped.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                dbm_redirect(dbm_self_url(['db' => $dbName]));
+              case 'rename_table':
+                if ($dbm_pdo) {
+                  $targetTable = trim($_POST['target_table'] ?? $curTable);
+                  $newName = trim($_POST['new_name'] ?? '');
+                  if ($newName === '' || $targetTable === '') dbm_flash_set('error', 'New name required.');
+                  else { try { $dbm_pdo->exec('ALTER TABLE ' . dbm_quote_ident($targetTable) . ' RENAME TO ' . dbm_quote_ident($newName)); dbm_flash_set('success', 'Table renamed to "' . $newName . '".'); if ($curTable === $targetTable) dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $newName])); else dbm_redirect(dbm_self_url(['db' => $dbName])); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable]));
+              case 'drop_table':
+                if ($dbm_pdo) { 
+                  $targetTable = trim($_POST['target_table'] ?? $curTable);
+                  if ($targetTable !== '') { try { $dbm_pdo->exec('DROP TABLE ' . dbm_quote_ident($targetTable)); dbm_flash_set('success', 'Table "' . $targetTable . '" dropped.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName]));
+              case 'rename_column':
+                if ($dbm_pdo && $curTable !== '') {
+                  $oldCol = trim($_POST['old_col'] ?? '');
+                  $newCol = trim($_POST['new_col'] ?? '');
+                  if ($oldCol === '' || $newCol === '') dbm_flash_set('error', 'Old and new column names required.');
+                  else { try { $dbm_pdo->exec('ALTER TABLE ' . dbm_quote_ident($curTable) . ' RENAME COLUMN ' . dbm_quote_ident($oldCol) . ' TO ' . dbm_quote_ident($newCol)); dbm_flash_set('success', 'Column renamed to "' . $newCol . '".'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'structure']));
+              case 'drop_column':
+                if ($dbm_pdo && $curTable !== '') {
+                  $colName = trim($_POST['col_name'] ?? '');
+                  if ($colName === '') dbm_flash_set('error', 'Column name required.');
+                  else { try { $dbm_pdo->exec('ALTER TABLE ' . dbm_quote_ident($curTable) . ' DROP COLUMN ' . dbm_quote_ident($colName)); dbm_flash_set('success', 'Column "' . $colName . '" dropped.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'structure']));
+              case 'add_column':
+                if ($dbm_pdo && $curTable !== '') {
+                  $colName = trim($_POST['col_name'] ?? ''); $colType = $_POST['col_type'] ?? 'TEXT'; $colDef = trim($_POST['col_default'] ?? '');
+                  if ($colName === '') dbm_flash_set('error', 'Column name required.');
+                  else { try { $sql = 'ALTER TABLE ' . dbm_quote_ident($curTable) . ' ADD COLUMN ' . dbm_quote_ident($colName) . ' ' . $colType; if ($colDef !== '') $sql .= ' DEFAULT ' . $colDef; $dbm_pdo->exec($sql); dbm_flash_set('success', 'Column "' . $colName . '" added.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'structure']));
+              case 'create_index':
+                if ($dbm_pdo && $curTable !== '') {
+                  $idxName = trim($_POST['index_name'] ?? ''); $idxCols = $_POST['index_cols'] ?? ''; $unique = !empty($_POST['index_unique']);
+                  if ($idxName === '' || $idxCols === '') dbm_flash_set('error', 'Index name and columns required.');
+                  else { try { $u = $unique ? 'UNIQUE ' : ''; $dbm_pdo->exec('CREATE ' . $u . 'INDEX ' . dbm_quote_ident($idxName) . ' ON ' . dbm_quote_ident($curTable) . ' (' . $idxCols . ')'); dbm_flash_set('success', 'Index "' . $idxName . '" created.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'structure']));
+              case 'drop_index':
+                if ($dbm_pdo && isset($_POST['index_name'])) { try { $dbm_pdo->exec('DROP INDEX IF EXISTS ' . dbm_quote_ident($_POST['index_name'])); dbm_flash_set('success', 'Index dropped.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'structure']));
+              case 'insert_row':
+                if ($dbm_pdo && $curTable !== '') {
+                  $cols = dbm_get_table_info($dbm_pdo, $curTable); $data = $_POST['row'] ?? []; $insertCols = []; $insertVals = [];
+                  foreach ($cols as $col) {
+                    $cn = $col['name']; if (!array_key_exists($cn, $data)) continue;
+                    if ($col['pk'] && strtolower($col['type']) === 'integer' && $data[$cn] === '') continue;
+                    $insertCols[] = dbm_quote_ident($cn); $insertVals[] = $data[$cn] === '' && !isset($_POST['row_set'][$cn]) ? null : $data[$cn];
+                  }
+                  if (!empty($insertCols)) { try { $sql = 'INSERT INTO ' . dbm_quote_ident($curTable) . ' (' . implode(', ', $insertCols) . ') VALUES (' . implode(', ', array_fill(0, count($insertVals), '?')) . ')'; $stmt = $dbm_pdo->prepare($sql); $stmt->execute($insertVals); dbm_flash_set('success', 'Row inserted.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'insert'])); } }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable]));
+              case 'update_row':
+                if ($dbm_pdo && $curTable !== '') {
+                  $pkCol = dbm_get_pk_column($dbm_pdo, $curTable) ?: 'rowid'; $pkVal = $_POST['pk_val'] ?? ''; $data = $_POST['row'] ?? []; $setClauses = []; $params = [];
+                  foreach ($data as $k => $v) { 
+                    if ($v === '[BLOB_DATA]') continue; // Safety: Never overwrite existing un-editable BLOB arrays
+                    $setClauses[] = dbm_quote_ident($k) . ' = ?'; $params[] = ($v === '' && isset($_POST['row_null'][$k])) ? null : $v; 
+                  }
+                  $params[] = $pkVal;
+                  if (!empty($setClauses)) { try { $sql = 'UPDATE ' . dbm_quote_ident($curTable) . ' SET ' . implode(', ', $setClauses) . ' WHERE ' . dbm_quote_ident($pkCol) . ' = ?'; $stmt = $dbm_pdo->prepare($sql); $stmt->execute($params); dbm_flash_set('success', 'Row updated.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'page' => (int)($_POST['page'] ?? 1), 'search' => $_POST['search'] ?? '']));
+              case 'delete_row':
+                if ($dbm_pdo && $curTable !== '') {
+                  $pkCol = dbm_get_pk_column($dbm_pdo, $curTable) ?: 'rowid'; $pkVal = $_POST['pk_val'] ?? '';
+                  try { $stmt = $dbm_pdo->prepare('DELETE FROM ' . dbm_quote_ident($curTable) . ' WHERE ' . dbm_quote_ident($pkCol) . ' = ?'); $stmt->execute([$pkVal]); dbm_flash_set('success', 'Row deleted.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'page' => (int)($_POST['page'] ?? 1), 'search' => $_POST['search'] ?? '', 'limit' => (int)($_POST['limit'] ?? 25)]));
+              case 'delete_row_mass':
+                if ($dbm_pdo && $curTable !== '' && !empty($_POST['check'])) {
+                  $pkCol = dbm_get_pk_column($dbm_pdo, $curTable) ?: 'rowid';
+                  $pks = $_POST['check'];
+                  $placeholders = implode(',', array_fill(0, count($pks), '?'));
+                  try {
+                    $stmt = $dbm_pdo->prepare('DELETE FROM ' . dbm_quote_ident($curTable) . ' WHERE ' . dbm_quote_ident($pkCol) . ' IN (' . $placeholders . ')');
+                    $stmt->execute($pks);
+                    dbm_flash_set('success', count($pks) . ' row(s) deleted.');
+                  } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'page' => (int)($_POST['page'] ?? 1), 'search' => $_POST['search'] ?? '', 'limit' => (int)($_POST['limit'] ?? 25)]));
+              case 'drop_table_mass':
+                if ($dbm_pdo && !empty($_POST['check'])) {
+                  foreach($_POST['check'] as $t) {
+                    try { $dbm_pdo->exec('DROP TABLE IF EXISTS ' . dbm_quote_ident($t)); } catch(Exception $e) {}
+                  }
+                  dbm_flash_set('success', count($_POST['check']) . ' table(s) dropped.');
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName]));
+              case 'empty_table_mass':
+                if ($dbm_pdo && !empty($_POST['check'])) {
+                  foreach($_POST['check'] as $t) {
+                    try { $dbm_pdo->exec('DELETE FROM ' . dbm_quote_ident($t)); } catch(Exception $e) {}
+                  }
+                  dbm_flash_set('success', count($_POST['check']) . ' table(s) emptied.');
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName]));
+              case 'empty_table':
+                if ($dbm_pdo && $curTable !== '') { try { $dbm_pdo->exec('DELETE FROM ' . dbm_quote_ident($curTable)); dbm_flash_set('success', 'Table "' . $curTable . '" emptied.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable]));
+              case 'vacuum':
+                if ($dbm_pdo) { try { $dbm_pdo->exec('VACUUM'); dbm_flash_set('success', 'VACUUM completed.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'view' => 'maintenance']));
+              case 'integrity_check':
+                if ($dbm_pdo) { try { $stmt = $dbm_pdo->query('PRAGMA integrity_check'); $rows = $stmt->fetchAll(PDO::FETCH_COLUMN); if ($rows === ['ok']) dbm_flash_set('success', 'Integrity check passed: database is OK.'); else dbm_flash_set('error', 'Integrity check found issues: ' . implode('; ', $rows)); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'view' => 'maintenance']));
+              case 'wal_checkpoint':
+                if ($dbm_pdo) { try { $dbm_pdo->exec('PRAGMA wal_checkpoint(FULL)'); dbm_flash_set('success', 'WAL checkpoint completed.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'view' => 'maintenance']));
+              case 'analyze':
+                if ($dbm_pdo) { try { $dbm_pdo->exec('ANALYZE'); dbm_flash_set('success', 'ANALYZE completed.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'view' => 'maintenance']));
+              case 'reindex':
+                if ($dbm_pdo) { try { $dbm_pdo->exec('REINDEX'); dbm_flash_set('success', 'REINDEX completed.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'view' => 'maintenance']));
+            }
+          }
+
+          $dbm_view = $_GET['view'] ?? ($curTable !== '' ? 'browse' : 'home');
+          $dbm_page = max(1, (int)($_GET['page'] ?? 1));
+          $dbm_limit = max(1, (int)($_GET['limit'] ?? 25));
+          $dbm_search = trim($_GET['search'] ?? '');
+          $dbm_tables = $dbm_pdo ? dbm_get_tables($dbm_pdo) : [];
+          $dbm_flash = dbm_flash_get();
+          ?>
+
+          <style>
+            #dbm-app {
+              --dbm-bg: #030303;
+              --dbm-bg2: #121212;
+              --dbm-bg3: #1a1a1a;
+              --dbm-bg4: #262626;
+              --dbm-border: #333333;
+              --dbm-border2: #4d4d4d;
+              --dbm-text: #ffffff;
+              --dbm-text2: #e0e0e0;
+              --dbm-text3: #bbbbbb;
+              --dbm-accent: #ff0000;
+              --dbm-accent-hover: #cc0000;
+              --dbm-green: #3fb950;
+              --dbm-red: #f85149;
+              --dbm-yellow: #d29922;
+              --dbm-purple: #bc8cff;
+              --dbm-orange: #ffa657;
+              --dbm-radius: 8px;
+              --dbm-shadow: 0 4px 12px rgba(0,0,0,0.5);
+              display: flex;
+              height: 100vh;
+              background: var(--dbm-bg);
+              color: var(--dbm-text);
+              font-size: 14px;
+            }
+            #dbm-app a { color: #ffffff; text-decoration: none; }
+            #dbm-app a:hover { color: #ffffff; text-decoration: underline; }
+            #dbm-app code, #dbm-app pre, #dbm-app kbd { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; color: #ffffff; }
+            #dbm-app h1, #dbm-app h2, #dbm-app h3 { color: #ffffff; font-weight: 600; margin-bottom: 0; }
+            #dbm-app h1 { font-size: 1.4rem; } #dbm-app h2 { font-size: 1.15rem; } #dbm-app h3 { font-size: 1rem; }
+            
+            .dbm-sidebar { width: 260px; min-width: 260px; background: var(--dbm-bg2); border-right: 1px solid var(--dbm-border); display: flex; flex-direction: column; overflow-y: auto; }
+            .dbm-sidebar-header { padding: 1rem; border-bottom: 1px solid var(--dbm-border); display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+            .dbm-sidebar-header svg { color: var(--dbm-accent); flex-shrink: 0; }
+            .dbm-sidebar-header .dbm-title { font-weight: bold; font-size: 1rem; color: #ffffff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            .dbm-sidebar-section { padding: 0.75rem 0; }
+            .dbm-sidebar-label { padding: 0.25rem 1rem; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dbm-text3); }
+            .dbm-sidebar-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; cursor: pointer; color: #ffffff; font-size: 0.9rem; border-left: 3px solid transparent; transition: 0.2s; }
+            .dbm-sidebar-item:hover { background: var(--dbm-bg3); color: #ffffff; text-decoration: none; }
+            .dbm-sidebar-item.active { background: rgba(255, 0, 0, 0.1); color: #ffffff; border-left-color: var(--dbm-accent); font-weight: bold; }
+            .dbm-sidebar-item svg { flex-shrink: 0; width: 16px; height: 16px; }
+            .dbm-sidebar-item .dbm-badge { margin-left: auto; background: var(--dbm-bg4); color: var(--dbm-text3); font-size: 0.75rem; padding: 0.1rem 0.4rem; border-radius: 4px; }
+            
+            .dbm-main { flex: 1; overflow: auto; display: flex; flex-direction: column; min-width: 0; }
+            .dbm-topbar { background: var(--dbm-bg2); border-bottom: 1px solid var(--dbm-border); padding: 1rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+            .dbm-topbar-title { font-weight: bold; font-size: 1rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 0; }
+            .dbm-content { padding: 1.5rem; flex: 1; }
+            
+            .dbm-card { background: var(--dbm-bg2); border: 1px solid var(--dbm-border); border-radius: var(--dbm-radius); margin-bottom: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            .dbm-card-header { padding: 1rem; border-bottom: 1px solid var(--dbm-border); display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+            .dbm-card-body { padding: 1.25rem; }
+            
+            .dbm-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+            .dbm-table-wrap table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+            .dbm-table-wrap th { background: var(--dbm-bg3); color: var(--dbm-text2); font-weight: 600; text-align: left; padding: 0.75rem 1rem; border-bottom: 2px solid var(--dbm-border); white-space: nowrap; position: sticky; top: 0; }
+            .dbm-table-wrap td { padding: 0.6rem 1rem; border-bottom: 1px solid var(--dbm-border); vertical-align: top; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            .dbm-table-wrap tr:hover td { background: rgba(255,255,255,0.02); }
+            
+            .dbm-null { color: var(--dbm-text3); font-style: italic; font-size: 0.85rem; }
+            .dbm-blob { color: var(--dbm-purple); font-size: 0.85rem; }
+            .dbm-hex { font-size: 0.75rem; color: var(--dbm-text3); word-break: break-all; white-space: normal; }
+            .dbm-truncated { color: var(--dbm-text3); }
+            .dbm-table-wrap td.pk { color: var(--dbm-yellow); }
+            .dbm-table-wrap td.actions { white-space: nowrap; width: 1%; }
+            .dbm-td-wide { max-width: none; white-space: normal; word-break: break-all; }
+            
+            .dbm-form-group { margin-bottom: 1rem; }
+            #dbm-app label { display: block; font-size: 0.85rem; font-weight: 600; color: var(--dbm-text2); margin-bottom: 0.4rem; }
+            .dbm-form-control, .dbm-form-select { width: 100%; padding: 0.5rem 0.75rem; background: var(--dbm-bg3); border: 1px solid var(--dbm-border2); border-radius: 6px; color: var(--dbm-text); font-size: 0.9rem; font-family: inherit; transition: 0.2s; }
+            .dbm-form-control:focus, .dbm-form-select:focus { outline: none; border-color: var(--dbm-accent); box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.15); }
+            textarea.dbm-form-control { resize: vertical; min-height: 100px; }
+            .dbm-form-row { display: flex; gap: 1rem; flex-wrap: wrap; }
+            .dbm-form-row .dbm-form-group { flex: 1; min-width: 150px; }
+            .dbm-form-inline { display: flex; gap: 0.75rem; align-items: flex-end; flex-wrap: wrap; }
+            .dbm-form-inline .dbm-form-group { margin-bottom: 0; flex: 1; min-width: 150px; }
+            .dbm-form-check { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+            .dbm-form-check input[type=checkbox] { width: auto; }
+            
+            .dbm-btn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.5rem 1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border: 1px solid transparent; transition: 0.2s; white-space: nowrap; font-family: inherit; text-decoration: none; }
+            .dbm-btn:hover { filter: brightness(1.1); text-decoration: none; }
+            .dbm-btn-primary { background: var(--dbm-accent); color: #fff; border-color: var(--dbm-accent); }
+            .dbm-btn-danger { background: var(--dbm-red); color: #fff; border-color: var(--dbm-red); }
+            .dbm-btn-success { background: var(--dbm-green); color: #000; border-color: var(--dbm-green); }
+            .dbm-btn-secondary { background: var(--dbm-bg3); color: var(--dbm-text); border-color: var(--dbm-border2); }
+            .dbm-btn-outline { background: transparent; color: #ffffff; border-color: var(--dbm-border2); }
+            .dbm-btn-outline:hover { background: var(--dbm-bg3); color: #ffffff; }
+            .dbm-table-wrap td { color: #ffffff; }
+            .dbm-btn-sm { padding: 0.35rem 0.75rem; font-size: 0.8rem; }
+            .dbm-btn-xs { padding: 0.2rem 0.5rem; font-size: 0.75rem; }
+            .dbm-btn svg { pointer-events: none; }
+            
+            .dbm-alert { padding: 0.75rem 1rem; border-radius: var(--dbm-radius); font-size: 0.9rem; margin-bottom: 1rem; display: flex; align-items: flex-start; gap: 0.75rem; font-weight: 500; }
+            .dbm-alert-success { background: rgba(63,185,80,0.15); border: 1px solid rgba(63,185,80,0.4); color: #3fb950; }
+            .dbm-alert-error { background: rgba(248,81,73,0.15); border: 1px solid rgba(248,81,73,0.4); color: #f85149; }
+            
+            .dbm-badge { display: inline-flex; align-items: center; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; white-space: nowrap; }
+            .dbm-badge-blue { background: rgba(56,139,253,0.2); color: #79c0ff; }
+            .dbm-badge-green { background: rgba(63,185,80,0.2); color: #56d364; }
+            .dbm-badge-red { background: rgba(248,81,73,0.2); color: #ffa198; }
+            .dbm-badge-yellow { background: rgba(210,153,34,0.2); color: var(--dbm-yellow); }
+            .dbm-badge-purple { background: rgba(188,140,255,0.2); color: var(--dbm-purple); }
+            .dbm-badge-gray { background: var(--dbm-bg4); color: var(--dbm-text3); }
+            
+            .dbm-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--dbm-border); margin-bottom: 1.5rem; }
+            .dbm-tab-btn { background: none; border: none; color: var(--dbm-text2); padding: 0.75rem 1.25rem; cursor: pointer; font-size: 0.9rem; font-family: inherit; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: 0.2s; font-weight: 600; }
+            .dbm-tab-btn:hover { color: var(--dbm-text); }
+            .dbm-tab-btn.active { color: var(--dbm-accent); border-bottom-color: var(--dbm-accent); }
+            .dbm-tab-pane { display: none; }
+            .dbm-tab-pane.active { display: block; }
+            
+            .dbm-pagination { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; margin-top: 1rem; }
+            .dbm-page-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; background: var(--dbm-bg3); border: 1px solid var(--dbm-border); border-radius: 6px; color: var(--dbm-text2); font-size: 0.85rem; cursor: pointer; text-decoration: none; transition: 0.2s; font-weight: bold; }
+            .dbm-page-btn:hover { background: var(--dbm-bg4); color: var(--dbm-text); text-decoration: none; }
+            .dbm-page-btn.active { background: var(--dbm-accent); border-color: var(--dbm-accent); color: #fff; }
+            .dbm-page-btn.disabled { opacity: 0.4; pointer-events: none; }
+            
+            .dbm-sql-editor-wrap { border: 1px solid var(--dbm-border2); border-radius: 6px; overflow: hidden; }
+            .dbm-sql-editor-wrap .CodeMirror { height: 250px; background: var(--dbm-bg3); color: var(--dbm-text); font-size: 0.9rem; }
+            
+            .dbm-stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+            .dbm-stat-card { background: var(--dbm-bg2); border: 1px solid var(--dbm-border); border-radius: var(--dbm-radius); padding: 1rem 1.25rem; }
+            .dbm-stat-card .dbm-stat-label { font-size: 0.75rem; font-weight: 700; color: var(--dbm-text3); text-transform: uppercase; letter-spacing: 0.08em; }
+            .dbm-stat-card .dbm-stat-value { font-size: 1.5rem; font-weight: bold; color: var(--dbm-text); margin-top: 0.25rem; }
+            .dbm-stat-card .dbm-stat-sub { font-size: 0.8rem; color: var(--dbm-text2); margin-top: 0.2rem; }
+            
+            .dbm-empty-state { text-align: center; padding: 4rem 1rem; color: var(--dbm-text3); }
+            .dbm-empty-state svg { margin-bottom: 1rem; opacity: 0.5; }
+            
+            .dbm-modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 2000; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
+            .dbm-modal-backdrop.open { display: flex; }
+            .dbm-modal { background: var(--dbm-bg2); border: 1px solid var(--dbm-border2); border-radius: 12px; width: 100%; max-width: 550px; max-height: 90vh; overflow-y: auto; padding: 2rem; box-shadow: 0 10px 40px rgba(0,0,0,0.8); }
+            .dbm-modal h2 { margin-bottom: 1.5rem; }
+            .dbm-modal-footer { display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1.5rem; border-top: 1px solid var(--dbm-border); padding-top: 1.5rem; }
+            
+            .dbm-sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1040; backdrop-filter: blur(2px); }
+            .dbm-sidebar-overlay.open { display: block; }
+            
+            #dbm-mobile-menu-btn { display: none; }
+            #dbm-sidebar-close-btn { display: none; }
+
+            @media(max-width: 991px) {
+              #dbm-app { flex-direction: column; height: auto; }
+              .dbm-sidebar { position: fixed; top: 0; left: -320px; width: 280px; height: 100vh; z-index: 1050; border-right: 1px solid var(--dbm-border); transition: left 0.3s ease; display: flex; flex-direction: column; }
+              .dbm-sidebar.open { left: 0; }
+              .dbm-sidebar-section { display: block; padding: 0.75rem 0; }
+              .dbm-sidebar-item { border: none; border-left: 3px solid transparent; border-radius: 0; margin-bottom: 0; }
+              .dbm-stats-grid { grid-template-columns: repeat(2, 1fr); }
+              .dbm-topbar { flex-wrap: wrap; gap: 0.5rem; }
+              .dbm-topbar-title { width: 100%; flex: none; order: 2; padding-top: 0.5rem; }
+              #dbm-mobile-menu-btn { display: inline-flex; order: 1; }
+              #dbm-sidebar-close-btn { display: inline-flex; }
+            }
+          </style>
+
+          <div id="dbm-app">
+            <div class="dbm-sidebar-overlay" id="dbm-sidebar-overlay" onclick="dbmToggleSidebar()"></div>
+            <!-- SIDEBAR -->
+            <nav class="dbm-sidebar" id="dbm-sidebar-menu">
+              <div class="dbm-sidebar-header">
+                <div style="display: flex; align-items: center; gap: 0.5rem; flex: 1; min-width: 0;">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0018 0V5"/><path d="M3 12a9 3 0 0018 0"/></svg>
+                  <span class="dbm-title"><?= $dbName ? dbm_e($dbName) : 'PHPDBManager' ?></span>
+                </div>
+                <button class="dbm-btn dbm-btn-outline" id="dbm-sidebar-close-btn" onclick="dbmToggleSidebar()" style="padding: 0.2rem; border: none; background: transparent; color: #fff;">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+              </div>
+
+              <div class="dbm-sidebar-section">
+                <div class="dbm-sidebar-label">Databases</div>
+                <?php foreach (dbm_list_databases() as $db): ?>
+                <a class="dbm-sidebar-item <?= $db['name'] === $dbName ? 'active' : '' ?>" href="<?= dbm_e(dbm_self_url(['db' => $db['name']])) ?>">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v5a9 3 0 0018 0V5"/><path d="M3 10v5a9 3 0 0018 0v-5"/><path d="M3 15v4a9 3 0 0018 0v-4"/></svg>
+                  <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"><?= dbm_e($db['name']) ?></span>
+                  <span class="dbm-badge"><?= dbm_e(dbm_format_bytes($db['size'])) ?></span>
+                </a>
+                <?php endforeach; ?>
+                <a class="dbm-sidebar-item" href="#" id="dbm-toggle-new-db">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+                  New / Upload
+                </a>
+              </div>
+
+              <?php if ($dbm_pdo && $dbm_tables): ?>
+              <div class="dbm-sidebar-section">
+                <div class="dbm-sidebar-label">Tables <?php $tv = 0; $vv = 0; foreach($dbm_tables as $t){ if($t['type']==='view') $vv++; else $tv++; } echo "($tv)"; ?></div>
+                <?php foreach ($dbm_tables as $t): ?>
+                <a class="dbm-sidebar-item <?= ($curTable === $t['name'] && in_array($dbm_view, ['browse','structure','insert'])) ? 'active' : '' ?>" href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name']])) ?>">
+                  <?php if ($t['type'] === 'view'): ?>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <?php else: ?>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
+                  <?php endif; ?>
+                  <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"><?= dbm_e($t['name']) ?></span>
+                </a>
+                <?php endforeach; ?>
+              </div>
+              <?php endif; ?>
+
+              <?php if ($dbm_pdo): ?>
+              <div class="dbm-sidebar-section">
+                <div class="dbm-sidebar-label">Database</div>
+                <a class="dbm-sidebar-item <?= ($dbm_view === 'sql' && !$curTable) ? 'active' : '' ?>" href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'sql'])) ?>">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg> SQL Editor
+                </a>
+                <a class="dbm-sidebar-item <?= $dbm_view === 'create_table' ? 'active' : '' ?>" href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'create_table'])) ?>">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 8v8M8 12h8"/></svg> New Table
+                </a>
+                <a class="dbm-sidebar-item <?= $dbm_view === 'maintenance' ? 'active' : '' ?>" href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'maintenance'])) ?>">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg> Maintenance
+                </a>
+                <a class="dbm-sidebar-item" href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'dbm_action' => 'export_sql'])) ?>">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export SQL
+                </a>
+                <a class="dbm-sidebar-item" href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'dbm_action' => 'download_db'])) ?>">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download DB
+                </a>
+              </div>
+              <?php endif; ?>
+            </nav>
+
+            <!-- MAIN -->
+            <div class="dbm-main">
+              <div class="dbm-topbar">
+                <button class="dbm-btn dbm-btn-outline" id="dbm-mobile-menu-btn" onclick="dbmToggleSidebar()" style="padding: 0.4rem; border-color: var(--dbm-border2);">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+                </button>
+                <h1 class="dbm-topbar-title text-white">
+                  <?php if ($dbName): ?>
+                    <a href="<?= dbm_e(dbm_self_url(['db' => $dbName])) ?>"><?= dbm_e($dbName) ?></a>
+                    <?php if ($curTable): ?> / <strong class="text-white"><?= dbm_e($curTable) ?></strong><?php endif; ?>
+                  <?php else: ?>
+                    Select or create a database
+                  <?php endif; ?>
+                </h1>
+
+                <?php if ($dbm_pdo && $curTable): ?>
+                <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline <?= ($dbm_view === 'browse') ? 'dbm-btn-primary' : '' ?>"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg> Browse</a>
+                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'structure'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline <?= ($dbm_view === 'structure') ? 'dbm-btn-primary' : '' ?>"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="14" y2="12"/><line x1="4" y1="18" x2="11" y2="18"/></svg> Structure</a>
+                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'insert'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline <?= ($dbm_view === 'insert') ? 'dbm-btn-primary' : '' ?>"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg> Insert</a>
+                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'dbm_action' => 'export_csv'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> CSV</a>
+                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'dbm_action' => 'export_sql'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> SQL</a>
+                  <button class="dbm-btn dbm-btn-sm dbm-btn-outline" onclick="document.getElementById('dbm-renameModal').classList.add('open')">Rename</button>
+                  <button class="dbm-btn dbm-btn-sm dbm-btn-danger" onclick="document.getElementById('dbm-dropModal').classList.add('open')">Drop</button>
+                </div>
+                <?php endif; ?>
+              </div>
+
+              <div style="padding: 1rem 1.5rem 0;">
+                <?php if (!empty($dbm_flash)): ?>
+                  <div class="dbm-alert dbm-alert-<?= dbm_e($dbm_flash['type']) ?>">
+                    <?php if ($dbm_flash['type'] === 'success'): ?>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                    <?php else: ?>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <?php endif; ?>
+                    <?= dbm_e($dbm_flash['msg']) ?>
+                  </div>
+                <?php endif; ?>
+              </div>
+
+              <div class="dbm-content">
+
+                <!-- NEW / UPLOAD DB -->
+                <div id="dbm-new-db-panel" class="dbm-card" style="display:none">
+                  <div class="dbm-card-header">
+                    <h2>New / Upload Database</h2>
+                    <button class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="document.getElementById('dbm-new-db-panel').style.display='none'">✕ Close</button>
+                  </div>
+                  <div class="dbm-card-body">
+                    <div class="dbm-form-row">
+                      <div style="flex: 1;">
+                        <h3 style="margin-bottom: 0.75rem;">Create New</h3>
+                        <form method="post" action="<?= dbm_e(dbm_self_url()) ?>">
+                          <?= dbm_csrf_field() ?>
+                          <input type="hidden" name="dbm_action" value="create_db">
+                          <div class="dbm-form-inline">
+                            <div class="dbm-form-group">
+                              <label>Database filename</label>
+                              <input type="text" name="db_name" class="dbm-form-control" placeholder="mydb.sqlite" required>
+                            </div>
+                            <button type="submit" class="dbm-btn dbm-btn-primary">Create</button>
+                          </div>
+                        </form>
+                      </div>
+                      <div style="flex: 1;">
+                        <h3 style="margin-bottom: 0.75rem;">Upload Existing</h3>
+                        <form method="post" action="<?= dbm_e(dbm_self_url()) ?>" enctype="multipart/form-data">
+                          <?= dbm_csrf_field() ?>
+                          <input type="hidden" name="dbm_action" value="upload_db">
+                          <div class="dbm-form-inline">
+                            <div class="dbm-form-group">
+                              <label>SQLite file (.sqlite, .db)</label>
+                              <input type="file" name="db_file" class="dbm-form-control" accept=".sqlite,.sqlite3,.db,.db3" required style="padding: 0.35rem 0.75rem;">
+                            </div>
+                            <button type="submit" class="dbm-btn dbm-btn-primary">Upload</button>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <?php if (!$dbm_pdo): ?>
+                  <!-- HOME / DATABASES -->
+                  <div class="dbm-card">
+                    <div class="dbm-card-header"><h2>Available Databases in <?php echo MUSIC_DIR; ?></h2></div>
+                    <div class="dbm-card-body" style="padding: 0;">
+                      <?php $dbs = dbm_list_databases(); if (empty($dbs)): ?>
+                      <div class="dbm-empty-state">
+                        <svg width="50" height="50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0018 0V5"/></svg>
+                        <h3 style="margin-bottom: 0.5rem;">No databases found</h3>
+                        <p>Click <strong>New / Upload</strong> in the sidebar to create or upload one.</p>
+                      </div>
+                      <?php else: ?>
+                      <div class="dbm-table-wrap">
+                        <table>
+                          <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th style="text-align: right;">Actions</th></tr></thead>
+                          <tbody>
+                          <?php foreach ($dbs as $db_item): ?>
+                          <tr>
+                            <td style="font-weight: bold;"><a href="<?= dbm_e(dbm_self_url(['db' => $db_item['name']])) ?>"><?= dbm_e($db_item['name']) ?></a></td>
+                            <td style="color: var(--dbm-text2);"><?= dbm_e(dbm_format_bytes($db_item['size'])) ?></td>
+                            <td style="color: var(--dbm-text2);"><?= dbm_e(date('Y-m-d H:i', filemtime($db_item['path']))) ?></td>
+                            <td class="actions" style="text-align: right;">
+                              <a href="<?= dbm_e(dbm_self_url(['db' => $db_item['name']])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-primary">Manage</a>
+                              <a href="<?= dbm_e(dbm_self_url(['db' => $db_item['name'], 'dbm_action' => 'download_db'])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-outline">Download</a>
+                            </td>
+                          </tr>
+                          <?php endforeach; ?>
+                          </tbody>
+                        </table>
+                      </div>
+                      <?php endif; ?>
+                    </div>
+                  </div>
+
+                <?php else: ?>
+                  <!-- DATABASE CONNECTED -->
+                  <?php if ($dbm_view === 'home' || ($dbm_view === 'browse' && $curTable === '')): 
+                    $dbSize = filesize($dbPath);
+                    $tableCount = count(array_filter($dbm_tables, fn($t) => $t['type'] === 'table'));
+                    $viewCount  = count(array_filter($dbm_tables, fn($t) => $t['type'] === 'view'));
+                    $pragmaPage = $dbm_pdo->query('PRAGMA page_size')->fetchColumn();
+                    $pragmaCount = $dbm_pdo->query('PRAGMA page_count')->fetchColumn();
+                    $encoding = $dbm_pdo->query('PRAGMA encoding')->fetchColumn();
+                    $journalMode = $dbm_pdo->query('PRAGMA journal_mode')->fetchColumn();
+                  ?>
+                    <div class="dbm-stats-grid">
+                      <div class="dbm-stat-card"><div class="dbm-stat-label">File Size</div><div class="dbm-stat-value text-info"><?= dbm_e(dbm_format_bytes($dbSize)) ?></div></div>
+                      <div class="dbm-stat-card"><div class="dbm-stat-label">Tables</div><div class="dbm-stat-value text-success"><?= $tableCount ?></div></div>
+                      <div class="dbm-stat-card"><div class="dbm-stat-label">Views</div><div class="dbm-stat-value text-warning"><?= $viewCount ?></div></div>
+                      <div class="dbm-stat-card"><div class="dbm-stat-label">Page Size</div><div class="dbm-stat-value text-white"><?= dbm_e($pragmaPage) ?></div><div class="dbm-stat-sub"><?= $pragmaCount ?> pages</div></div>
+                      <div class="dbm-stat-card"><div class="dbm-stat-label">Encoding</div><div class="dbm-stat-value text-white" style="font-size:1.2rem"><?= dbm_e($encoding) ?></div></div>
+                      <div class="dbm-stat-card"><div class="dbm-stat-label">Journal Mode</div><div class="dbm-stat-value text-danger" style="font-size:1.2rem;text-transform:uppercase"><?= dbm_e($journalMode) ?></div></div>
+                    </div>
+
+                    <div class="dbm-card">
+                      <div class="dbm-card-header">
+                        <h2>Tables &amp; Views</h2>
+                        <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'create_table'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-primary">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg> New Table
+                        </a>
+                      </div>
+                      <?php if (empty($dbm_tables)): ?>
+                      <div class="dbm-empty-state"><p>No tables yet. <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'create_table'])) ?>">Create one</a>.</p></div>
+                      <?php else: ?>
+                      <div class="dbm-table-wrap">
+                        <table>
+                          <thead><tr><th style="width:40px; text-align:center;"><input type="checkbox" onclick="dbmToggleCheckAll(this, 'check_tbl')" style="cursor:pointer; margin-top:3px;"></th><th>Name</th><th>Type</th><th>Rows (approx)</th><th>Actions</th></tr></thead>
+                          <tbody>
+                          <?php foreach ($dbm_tables as $t):
+                            $rowCount = '-';
+                            try { $rowCount = number_format((int)$dbm_pdo->query('SELECT COUNT(*) FROM ' . dbm_quote_ident($t['name']))->fetchColumn()); } catch(Exception $e) {}
+                          ?>
+                          <tr>
+                            <td style="text-align:center;"><input type="checkbox" name="check[]" value="<?= dbm_e($t['name']) ?>" class="check_tbl" style="cursor:pointer; margin-top:3px;"></td>
+                            <td style="font-weight: bold;"><a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name']])) ?>"><?= dbm_e($t['name']) ?></a></td>
+                            <td><span class="dbm-badge <?= $t['type']==='view'?'dbm-badge-purple':'dbm-badge-blue' ?>"><?= dbm_e($t['type']) ?></span></td>
+                            <td style="color: var(--dbm-text2);"><?= $rowCount ?></td>
+                            <td class="actions">
+                              <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name']])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-primary">Browse</a>
+                              <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name'], 'view' => 'structure'])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-outline">Structure</a>
+                              <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name'], 'dbm_action' => 'export_csv'])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-outline">CSV</a>
+                            </td>
+                          </tr>
+                          <?php endforeach; ?>
+                          </tbody>
+                        </table>
+                      </div>
+                      <?php endif; ?>
+                    </div>
+
+                    <div class="dbm-card" style="border-color: rgba(248,81,73,0.5);">
+                      <div class="dbm-card-header"><h3 class="text-danger">Danger Zone</h3></div>
+                      <div class="dbm-card-body">
+                        <div style="display:flex; gap:1rem; align-items:center;">
+                          <button class="dbm-btn dbm-btn-danger" onclick="document.getElementById('dbm-deleteDbModal').classList.add('open')">Delete Database</button>
+                          <span style="color: var(--dbm-text3); font-size: 0.9rem;">Permanently deletes the file from disk.</span>
+                        </div>
+                      </div>
+                    </div>
+
+                  <?php elseif ($dbm_view === 'browse' && $curTable !== ''): 
+                    $cols = dbm_get_table_info($dbm_pdo, $curTable);
+                    $pkCol = dbm_get_pk_column($dbm_pdo, $curTable) ?: 'rowid';
+                    $totalRows = dbm_get_row_count($dbm_pdo, $curTable, $dbm_search);
+                    $totalPages = max(1, (int)ceil($totalRows / $dbm_limit));
+                    $dbm_page = min($dbm_page, $totalPages);
+                    $offset = ($dbm_page - 1) * $dbm_limit;
+
+                    $where = ''; $params = [];
+                    if ($dbm_search !== '') {
+                        $conds = [];
+                        foreach ($cols as $col) { $conds[] = dbm_quote_ident($col['name']) . ' LIKE ?'; $params[] = '%' . $dbm_search . '%'; }
+                        $where = 'WHERE ' . implode(' OR ', $conds);
+                    }
+
+                    $stmt = $dbm_pdo->prepare('SELECT rowid as __rowid__, * FROM ' . dbm_quote_ident($curTable) . ' ' . $where . ' LIMIT ' . $dbm_limit . ' OFFSET ' . $offset);
+                    $stmt->execute($params);
+                    $rows = $stmt->fetchAll();
+                  ?>
+                    <div class="dbm-card" style="margin-bottom: 0;">
+                      <div class="dbm-card-header">
+                        <h2>Browse Data</h2>
+                        <form method="get" style="display:flex; gap:0.5rem; align-items:center;">
+                          <input type="hidden" name="access" value="admin">
+                          <input type="hidden" name="page" value="dbmanager">
+                          <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                          <input type="hidden" name="table" value="<?= dbm_e($curTable) ?>">
+                          <select name="limit" class="dbm-form-select" style="width:auto; padding: 0.35rem 2.5rem 0.35rem 0.75rem; cursor:pointer; appearance:none; -webkit-appearance:none; background-image:url('data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\' fill=\'none\' stroke=\'%23aaaaaa\' stroke-width=\'2\' stroke-linecap=\'round\' stroke-linejoin=\'round\'%3E%3Cpolyline points=\'6 9 12 15 18 9\'%3E%3C/polyline%3E%3C/svg%3E'); background-repeat:no-repeat; background-position:right 0.75rem center; background-size:1rem;" onchange="this.form.submit()">
+                            <option value="25" <?= $dbm_limit == 25 ? 'selected' : '' ?>>25 rows</option>
+                            <option value="50" <?= $dbm_limit == 50 ? 'selected' : '' ?>>50 rows</option>
+                            <option value="100" <?= $dbm_limit == 100 ? 'selected' : '' ?>>100 rows</option>
+                            <option value="150" <?= $dbm_limit == 150 ? 'selected' : '' ?>>150 rows</option>
+                            <option value="200" <?= $dbm_limit == 200 ? 'selected' : '' ?>>200 rows</option>
+                            <option value="250" <?= $dbm_limit == 250 ? 'selected' : '' ?>>250 rows</option>
+                          </select>
+                          <input type="text" name="search" value="<?= dbm_e($dbm_search) ?>" placeholder="Search rows…" class="dbm-form-control" style="width:200px; padding: 0.35rem 0.75rem;">
+                          <button type="submit" class="dbm-btn dbm-btn-sm dbm-btn-primary">Search</button>
+                          <?php if ($dbm_search): ?><a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'limit' => $dbm_limit])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline">Clear</a><?php endif; ?>
+                        </form>
+                      </div>
+                      <div class="dbm-table-wrap">
+                        <?php if (empty($rows)): ?>
+                        <div class="dbm-empty-state">
+                          <p><?= $dbm_search ? 'No rows match "' . dbm_e($dbm_search) . '".' : 'Table is completely empty.' ?></p>
+                          <?php if (!$dbm_search): ?><p style="margin-top: 1rem;"><a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'insert'])) ?>" class="dbm-btn dbm-btn-primary">Insert the first row</a></p><?php endif; ?>
+                        </div>
+                        <?php else: ?>
+                        <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable])) ?>" id="massRowForm">
+                          <?= dbm_csrf_field() ?>
+                          <input type="hidden" name="dbm_action" value="delete_row_mass">
+                          <input type="hidden" name="page" value="<?= $dbm_page ?>">
+                          <input type="hidden" name="search" value="<?= dbm_e($dbm_search) ?>">
+                          <input type="hidden" name="limit" value="<?= $dbm_limit ?>">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th style="width:40px; text-align:center;"><input type="checkbox" onclick="dbmToggleCheckAll(this, 'check_row')" style="cursor:pointer; margin-top:3px;"></th>
+                              <th style="width: 50px;">#</th>
+                              <?php foreach ($cols as $col): ?>
+                              <th>
+                                <?= dbm_e($col['name']) ?>
+                                <?php if ($col['pk']): ?><span style="color:var(--dbm-yellow); font-size:0.75rem; margin-left:4px; font-weight:bold;">PK</span><?php endif; ?>
+                                <span class="dbm-badge dbm-badge-gray" style="margin-left:6px; font-weight:normal;"><?= dbm_e($col['type'] ?: '—') ?></span>
+                              </th>
+                              <?php endforeach; ?>
+                              <th style="text-align: right;">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                          <?php foreach ($rows as $i => $row):
+                            $rowid = $row['__rowid__'];
+                            $pkVal = $row[$pkCol] ?? $rowid;
+                          ?>
+                          <tr>
+                            <td style="text-align:center;"><input type="checkbox" name="check[]" value="<?= dbm_e((string)$pkVal) ?>" class="check_row" style="cursor:pointer; margin-top:3px;"></td>
+                            <td style="color: var(--dbm-text3);"><?= $offset + $i + 1 ?></td>
+                            <?php foreach ($cols as $col): ?>
+                            <td class="<?= $col['pk'] ? 'pk' : '' ?>" title="<?= dbm_e((string)($row[$col['name']] ?? '')) ?>">
+                              <?php
+                                $v = $row[$col['name']] ?? null;
+                                if (is_string($v) && dbm_is_binary($v)): ?>
+                                <div style="display:flex; align-items:center; gap:0.5rem;">
+                                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'dbm_action' => 'blob_view', 'col' => $col['name'], 'rowid' => $rowid])) ?>" target="_blank" style="color:#79c0ff; text-decoration:underline; font-weight:bold;">View BLOB (<?= dbm_format_bytes(strlen($v)) ?>)</a>
+                                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'dbm_action' => 'blob', 'col' => $col['name'], 'rowid' => $rowid])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-outline" download>DL</a>
+                                </div>
+                              <?php else: ?>
+                                <?= dbm_format_value($v) ?>
+                              <?php endif; ?>
+                            </td>
+                            <?php endforeach; ?>
+                            <td class="actions" style="text-align: right;">
+                              <?php 
+                                // Safely mask BLOBs so `json_encode` doesn't crash on invalid UTF-8 bytes
+                                $safeRow = array_map(function($val){ return (is_string($val) && dbm_is_binary($val)) ? '[BLOB_DATA]' : $val; }, $row);
+                              ?>
+                              <button class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="dbmOpenEditModal(<?= dbm_e(json_encode($safeRow)) ?>, <?= dbm_e(json_encode($pkCol)) ?>, <?= dbm_e(json_encode(array_column($cols, null, 'name'))) ?>, <?= $dbm_page ?>, <?= dbm_e(json_encode($dbm_search)) ?>)">Edit</button>
+                              <form method="post" style="display:inline; margin-left:0.25rem;" onsubmit="return confirm('Delete this row completely?')">
+                                <?= dbm_csrf_field() ?>
+                                <input type="hidden" name="dbm_action" value="delete_row">
+                                <input type="hidden" name="pk_val" value="<?= dbm_e((string)$pkVal) ?>">
+                                <input type="hidden" name="page" value="<?= $dbm_page ?>">
+                                <input type="hidden" name="search" value="<?= dbm_e($dbm_search) ?>">
+                                <input type="hidden" name="limit" value="<?= $dbm_limit ?>">
+                                <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                                <input type="hidden" name="table" value="<?= dbm_e($curTable) ?>">
+                                <button type="submit" class="dbm-btn dbm-btn-xs dbm-btn-danger">Del</button>
+                              </form>
+                            </td>
+                          </tr>
+                          <?php endforeach; ?>
+                          </tbody>
+                        </table>
+                        </form>
+                        <?php endif; ?>
+                      </div>
+                      <?php if ($totalRows > 0): ?>
+                      <div style="padding: 1rem; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--dbm-border); flex-wrap: wrap; gap: 1rem;">
+                        <span style="color: var(--dbm-text3); font-size: 0.9rem;">
+                          <?= number_format($totalRows) ?> row<?= $totalRows !== 1 ? 's' : '' ?>
+                          <?= $dbm_search ? 'matching "' . dbm_e($dbm_search) . '"' : '' ?>
+                          (page <?= $dbm_page ?> of <?= $totalPages ?>)
+                        </span>
+                        <?php if ($totalPages > 1): ?>
+                        <div class="dbm-pagination">
+                          <?php
+                          $prevPage = max(1, $dbm_page - 1);
+                          $nextPage = min($totalPages, $dbm_page + 1);
+                          $pageUrl = fn($p) => dbm_self_url(['db' => $dbName, 'table' => $curTable, 'page' => $p, 'search' => $dbm_search, 'limit' => $dbm_limit]);
+                          ?>
+                          <a href="<?= dbm_e($pageUrl(1)) ?>" class="dbm-page-btn <?= $dbm_page <= 1 ? 'disabled' : '' ?>">«</a>
+                          <a href="<?= dbm_e($pageUrl($prevPage)) ?>" class="dbm-page-btn <?= $dbm_page <= 1 ? 'disabled' : '' ?>">‹</a>
+                          <?php
+                          $range = range(max(1, $dbm_page - 2), min($totalPages, $dbm_page + 2));
+                          foreach ($range as $p): ?>
+                          <a href="<?= dbm_e($pageUrl($p)) ?>" class="dbm-page-btn <?= $p === $dbm_page ? 'active' : '' ?>"><?= $p ?></a>
+                          <?php endforeach; ?>
+                          <a href="<?= dbm_e($pageUrl($nextPage)) ?>" class="dbm-page-btn <?= $dbm_page >= $totalPages ? 'disabled' : '' ?>">›</a>
+                          <a href="<?= dbm_e($pageUrl($totalPages)) ?>" class="dbm-page-btn <?= $dbm_page >= $totalPages ? 'disabled' : '' ?>">»</a>
+                        </div>
+                        <?php endif; ?>
+                      </div>
+                      <?php endif; ?>
+                    </div>
+
+                    <div style="margin-top: 1.5rem; display: flex; justify-content: flex-end; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                      <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'insert'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-primary">+ Insert row</a>
+                      <a href="#" onclick="if(confirm('Empty table <?= dbm_e(addslashes($curTable)) ?> completely?')){document.getElementById('dbm-empty-form').submit();}return false;" class="dbm-btn dbm-btn-sm dbm-btn-outline">Empty table</a>
+                      <?php if (!empty($rows)): ?>
+                      <div style="border-left: 1px solid var(--dbm-border); height: 24px; margin: 0 0.5rem;"></div>
+                      <span style="color:var(--dbm-text2);font-size:0.85rem;">With selected:</span>
+                      <button type="button" class="dbm-btn dbm-btn-sm dbm-btn-danger" onclick="if(confirm('Delete selected rows completely?')){ document.getElementById('massRowForm').submit(); }">Delete</button>
+                      <?php endif; ?>
+                    </div>
+                    <form id="dbm-empty-form" method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable])) ?>" style="display:none">
+                      <?= dbm_csrf_field() ?><input type="hidden" name="dbm_action" value="empty_table">
+                    </form>
+
+                  <?php elseif ($dbm_view === 'structure'): 
+                    $cols    = dbm_get_table_info($dbm_pdo, $curTable);
+                    $indexes = dbm_get_table_indexes($dbm_pdo, $curTable);
+                    $fkeys   = dbm_get_foreign_keys($dbm_pdo, $curTable);
+                    $ddl     = dbm_get_table_sql($dbm_pdo, $curTable);
+                  ?>
+                    <div class="dbm-tabs">
+                      <button class="dbm-tab-btn active" onclick="dbmSwitchTab(this,'tab-cols')">Columns</button>
+                      <button class="dbm-tab-btn" onclick="dbmSwitchTab(this,'tab-idx')">Indexes</button>
+                      <button class="dbm-tab-btn" onclick="dbmSwitchTab(this,'tab-fk')">Foreign Keys</button>
+                      <button class="dbm-tab-btn" onclick="dbmSwitchTab(this,'tab-ddl')">DDL</button>
+                      <button class="dbm-tab-btn" onclick="dbmSwitchTab(this,'tab-addcol')">Add Column</button>
+                      <button class="dbm-tab-btn" onclick="dbmSwitchTab(this,'tab-addidx')">Add Index</button>
+                    </div>
+
+                    <div id="tab-cols" class="dbm-tab-pane active">
+                      <div class="dbm-card">
+                        <div class="dbm-table-wrap">
+                          <table>
+                            <thead><tr><th>#</th><th>Name</th><th>Type</th><th>Not Null</th><th>Default</th><th>PK</th><th style="text-align: right;">Actions</th></tr></thead>
+                            <tbody>
+                            <?php foreach ($cols as $col): ?>
+                            <tr>
+                              <td style="color: var(--dbm-text3);"><?= $col['cid'] ?></td>
+                              <td style="font-weight: bold; color: var(--dbm-text);"><code><?= dbm_e($col['name']) ?></code> <?php if ($col['pk']): ?><span style="color:var(--dbm-yellow); font-size:0.75rem; margin-left:4px; font-weight:bold;">PK</span><?php endif; ?></td>
+                              <td><span class="dbm-badge dbm-badge-gray"><?= dbm_e($col['type'] ?: '—') ?></span></td>
+                              <td><?= $col['notnull'] ? '<span class="dbm-badge dbm-badge-red">YES</span>' : '<span style="color:var(--dbm-text3)">—</span>' ?></td>
+                              <td><?= $col['dflt_value'] !== null ? '<code>' . dbm_e($col['dflt_value']) . '</code>' : '<span style="color:var(--dbm-text3)">—</span>' ?></td>
+                              <td><?= $col['pk'] ? '<span class="dbm-badge dbm-badge-yellow">' . $col['pk'] . '</span>' : '<span style="color:var(--dbm-text3)">—</span>' ?></td>
+                              <td class="actions" style="text-align: right;">
+                                <button class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="dbmOpenRenameColModal('<?= dbm_e($col['name']) ?>')">Rename</button>
+                                <form method="post" style="display:inline; margin-left:0.25rem;" onsubmit="return confirm('Drop column <?= dbm_e($col['name']) ?> completely?')">
+                                  <?= dbm_csrf_field() ?>
+                                  <input type="hidden" name="dbm_action" value="drop_column">
+                                  <input type="hidden" name="col_name" value="<?= dbm_e($col['name']) ?>">
+                                  <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                                  <input type="hidden" name="table" value="<?= dbm_e($curTable) ?>">
+                                  <button type="submit" class="dbm-btn dbm-btn-xs dbm-btn-danger">Drop</button>
+                                </form>
+                              </td>
+                            </tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="tab-idx" class="dbm-tab-pane">
+                      <div class="dbm-card">
+                        <?php if (empty($indexes)): ?>
+                        <div class="dbm-empty-state"><p>No indexes defined for this table.</p></div>
+                        <?php else: ?>
+                        <div class="dbm-table-wrap">
+                          <table>
+                            <thead><tr><th>Name</th><th>Unique</th><th>Columns</th><th>Origin</th><th>Actions</th></tr></thead>
+                            <tbody>
+                            <?php foreach ($indexes as $idx): ?>
+                            <tr>
+                              <td style="font-weight: bold;"><code><?= dbm_e($idx['name']) ?></code></td>
+                              <td><?= $idx['unique'] ? '<span class="dbm-badge dbm-badge-green">YES</span>' : '<span style="color:var(--dbm-text3)">—</span>' ?></td>
+                              <td><code><?= dbm_e(implode(', ', $idx['columns'])) ?></code></td>
+                              <td><span class="dbm-badge dbm-badge-gray"><?= dbm_e($idx['origin']) ?></span></td>
+                              <td class="actions">
+                                <?php if ($idx['origin'] !== 'pk'): ?>
+                                <form method="post" style="display:inline" onsubmit="return confirm('Drop index <?= dbm_e($idx['name']) ?>?')">
+                                  <?= dbm_csrf_field() ?>
+                                  <input type="hidden" name="dbm_action" value="drop_index">
+                                  <input type="hidden" name="index_name" value="<?= dbm_e($idx['name']) ?>">
+                                  <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                                  <input type="hidden" name="table" value="<?= dbm_e($curTable) ?>">
+                                  <button type="submit" class="dbm-btn dbm-btn-xs dbm-btn-danger">Drop</button>
+                                </form>
+                                <?php endif; ?>
+                              </td>
+                            </tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                          </table>
+                        </div>
+                        <?php endif; ?>
+                      </div>
+                    </div>
+
+                    <div id="tab-fk" class="dbm-tab-pane">
+                      <div class="dbm-card">
+                        <?php if (empty($fkeys)): ?>
+                        <div class="dbm-empty-state"><p>No foreign keys defined for this table.</p></div>
+                        <?php else: ?>
+                        <div class="dbm-table-wrap">
+                          <table>
+                            <thead><tr><th>ID</th><th>Column</th><th>Ref. Table</th><th>Ref. Column</th><th>On Update</th><th>On Delete</th></tr></thead>
+                            <tbody>
+                            <?php foreach ($fkeys as $fk): ?>
+                            <tr>
+                              <td><?= dbm_e($fk['id']) ?></td>
+                              <td><code style="color: var(--dbm-accent);"><?= dbm_e($fk['from']) ?></code></td>
+                              <td style="font-weight: bold;"><a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $fk['table']])) ?>"><?= dbm_e($fk['table']) ?></a></td>
+                              <td><code><?= dbm_e($fk['to']) ?></code></td>
+                              <td><span class="dbm-badge dbm-badge-gray"><?= dbm_e($fk['on_update']) ?></span></td>
+                              <td><span class="dbm-badge dbm-badge-gray"><?= dbm_e($fk['on_delete']) ?></span></td>
+                            </tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                          </table>
+                        </div>
+                        <?php endif; ?>
+                      </div>
+                    </div>
+
+                    <div id="tab-ddl" class="dbm-tab-pane">
+                      <div class="dbm-card">
+                        <div class="dbm-card-body">
+                          <pre class="dbm-sql-editor-wrap" style="white-space:pre-wrap; background:var(--dbm-bg3); padding:1rem; border-radius:6px; font-size:0.9rem; margin:0;"><?= dbm_e($ddl) ?></pre>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="tab-addcol" class="dbm-tab-pane">
+                      <div class="dbm-card">
+                        <div class="dbm-card-header"><h3>Add Column</h3></div>
+                        <div class="dbm-card-body">
+                          <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'structure'])) ?>">
+                            <?= dbm_csrf_field() ?>
+                            <input type="hidden" name="dbm_action" value="add_column">
+                            <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                            <input type="hidden" name="table" value="<?= dbm_e($curTable) ?>">
+                            <div class="dbm-form-row">
+                              <div class="dbm-form-group">
+                                <label>Column Name</label>
+                                <input type="text" name="col_name" class="dbm-form-control" required placeholder="new_column">
+                              </div>
+                              <div class="dbm-form-group">
+                                <label>Type</label>
+                                <select name="col_type" class="dbm-form-select">
+                                  <?php foreach (['TEXT','INTEGER','REAL','NUMERIC','BLOB','BOOLEAN','DATE','DATETIME'] as $t): ?>
+                                  <option><?= $t ?></option>
+                                  <?php endforeach; ?>
+                                </select>
+                              </div>
+                              <div class="dbm-form-group">
+                                <label>Default Value</label>
+                                <input type="text" name="col_default" class="dbm-form-control" placeholder="NULL or 'value'">
+                              </div>
+                            </div>
+                            <button type="submit" class="dbm-btn dbm-btn-primary" style="margin-top: 1rem;">Add Column</button>
+                          </form>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="tab-addidx" class="dbm-tab-pane">
+                      <div class="dbm-card">
+                        <div class="dbm-card-header"><h3>Create Index</h3></div>
+                        <div class="dbm-card-body">
+                          <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'structure'])) ?>">
+                            <?= dbm_csrf_field() ?>
+                            <input type="hidden" name="dbm_action" value="create_index">
+                            <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                            <input type="hidden" name="table" value="<?= dbm_e($curTable) ?>">
+                            <div class="dbm-form-row">
+                              <div class="dbm-form-group">
+                                <label>Index Name</label>
+                                <input type="text" name="index_name" class="dbm-form-control" required placeholder="idx_<?= dbm_e($curTable) ?>_col">
+                              </div>
+                              <div class="dbm-form-group">
+                                <label>Columns (comma-separated)</label>
+                                <input type="text" name="index_cols" class="dbm-form-control" required placeholder="col1, col2">
+                              </div>
+                            </div>
+                            <div class="dbm-form-check" style="margin-top: 0.5rem; margin-bottom: 1.5rem;">
+                              <input type="checkbox" name="index_unique" id="index_unique" value="1">
+                              <label for="index_unique" style="margin:0; font-weight:normal;">Create as Unique index</label>
+                            </div>
+                            <button type="submit" class="dbm-btn dbm-btn-primary">Create Index</button>
+                          </form>
+                        </div>
+                      </div>
+                    </div>
+
+                  <?php elseif ($dbm_view === 'insert'): 
+                    $cols = dbm_get_table_info($dbm_pdo, $curTable);
+                  ?>
+                    <div class="dbm-card">
+                      <div class="dbm-card-header"><h2>Insert Row</h2></div>
+                      <div class="dbm-card-body">
+                        <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'insert'])) ?>">
+                          <?= dbm_csrf_field() ?>
+                          <input type="hidden" name="dbm_action" value="insert_row">
+                          <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                          <input type="hidden" name="table" value="<?= dbm_e($curTable) ?>">
+                          <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem;">
+                            <?php foreach ($cols as $col):
+                              $isAutoPk = $col['pk'] && strtolower($col['type']) === 'integer';
+                            ?>
+                            <div class="dbm-form-group">
+                              <label>
+                                <?= dbm_e($col['name']) ?>
+                                <?php if ($col['pk']): ?><span style="color:var(--dbm-yellow); font-size:0.75rem; margin-left:4px; font-weight:bold;">PK</span><?php endif; ?>
+                                <span class="dbm-badge dbm-badge-gray" style="margin-left: 6px;"><?= dbm_e($col['type'] ?: 'ANY') ?></span>
+                                <?php if ($isAutoPk): ?><span style="color:var(--dbm-text3); font-size:0.75rem; margin-left:4px; font-weight:normal;">(auto-increment)</span><?php endif; ?>
+                              </label>
+                              <?php if (in_array(strtoupper($col['type']), ['TEXT','BLOB','CLOB'])): ?>
+                              <textarea name="row[<?= dbm_e($col['name']) ?>]" class="dbm-form-control" placeholder="<?= $isAutoPk ? 'Leave blank for auto-increment' : ($col['dflt_value'] !== null ? 'Default: ' . dbm_e($col['dflt_value']) : 'NULL') ?>"></textarea>
+                              <?php else: ?>
+                              <input type="text" name="row[<?= dbm_e($col['name']) ?>]" class="dbm-form-control" placeholder="<?= $isAutoPk ? 'Leave blank for auto-increment' : ($col['dflt_value'] !== null ? 'Default: ' . dbm_e($col['dflt_value']) : 'NULL') ?>">
+                              <?php endif; ?>
+                            </div>
+                            <?php endforeach; ?>
+                          </div>
+                          <div style="display:flex; gap:1rem; margin-top: 2rem; border-top: 1px solid var(--dbm-border); padding-top: 1.5rem;">
+                            <button type="submit" class="dbm-btn dbm-btn-primary">Insert Row</button>
+                            <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable])) ?>" class="dbm-btn dbm-btn-outline">Cancel</a>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+
+                  <?php elseif ($dbm_view === 'sql'): 
+                    $lastResult = $_SESSION['dbm_sql_result'] ?? null;
+                    unset($_SESSION['dbm_sql_result']);
+                    $lastSql = $lastResult['sql'] ?? '';
+                  ?>
+                    <div class="dbm-card">
+                      <div class="dbm-card-header">
+                        <h2>SQL Editor</h2>
+                        <div style="font-size: 0.85rem; color: var(--dbm-text3);">
+                          Press <kbd style="background: var(--dbm-bg4); padding: 0.2rem 0.4rem; border-radius: 4px; border: 1px solid var(--dbm-border);">Ctrl+Enter</kbd> to run
+                        </div>
+                      </div>
+                      <div class="dbm-card-body">
+                        <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'sql'])) ?>" id="dbm-sql-form">
+                          <?= dbm_csrf_field() ?>
+                          <input type="hidden" name="dbm_action" value="exec_sql">
+                          <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                          <div class="dbm-sql-editor-wrap" style="position: relative; height: 250px;">
+                            <textarea id="dbm-sql-editor" name="sql" class="dbm-form-control mono" style="display: none;"><?= dbm_e($lastSql ?: "SELECT * FROM " . (!empty($dbm_tables) ? dbm_quote_ident($dbm_tables[0]['name']) : 'table_name') . " LIMIT 50;") ?></textarea>
+                          </div>
+                          <div style="display: flex; gap: 1rem; margin-top: 1rem; flex-wrap: wrap;">
+                            <button type="submit" class="dbm-btn dbm-btn-primary">
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run
+                            </button>
+                            <button type="button" class="dbm-btn dbm-btn-outline" onclick="dbmClearEditor()">Clear</button>
+                            <div style="margin-left: auto;">
+                              <select class="dbm-form-select" style="width: 250px;" onchange="dbmInsertSnippet(this.value); this.value=''">
+                                <option value="">Quick insert…</option>
+                                <?php foreach ($dbm_tables as $t): ?>
+                                <option value="SELECT * FROM <?= dbm_e(addslashes(dbm_quote_ident($t['name']))) ?> LIMIT 50;">SELECT * FROM <?= dbm_e($t['name']) ?></option>
+                                <option value="SELECT COUNT(*) FROM <?= dbm_e(addslashes(dbm_quote_ident($t['name']))) ?>;">COUNT <?= dbm_e($t['name']) ?></option>
+                                <?php endforeach; ?>
+                                <option value="PRAGMA table_list;">PRAGMA table_list</option>
+                                <option value="PRAGMA integrity_check;">PRAGMA integrity_check</option>
+                                <option value="PRAGMA foreign_key_list(table_name);">PRAGMA foreign_key_list</option>
+                                <option value="SELECT name, sql FROM sqlite_master WHERE type='table';">sqlite_master tables</option>
+                                <option value="SELECT name, sql FROM sqlite_master WHERE type='index';">sqlite_master indexes</option>
+                              </select>
+                            </div>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+
+                    <?php if ($lastResult): ?>
+                      <?php if (isset($lastResult['error'])): ?>
+                      <div class="dbm-alert dbm-alert-error"><?= dbm_e($lastResult['error']) ?></div>
+                      <?php elseif (is_array($lastResult['rows'])): ?>
+                      <div class="dbm-card">
+                        <div class="dbm-card-header">
+                          <h3>Query Results</h3>
+                          <span style="font-size: 0.85rem; color: var(--dbm-text3);"><?= number_format($lastResult['count']) ?> row(s) · <?= $lastResult['time'] ?> ms</span>
+                        </div>
+                        <?php if (empty($lastResult['rows'])): ?>
+                        <div class="dbm-empty-state"><p>No rows returned.</p></div>
+                        <?php else: ?>
+                        <div class="dbm-table-wrap">
+                          <table>
+                            <thead><tr><?php foreach (array_keys($lastResult['rows'][0]) as $h): ?><th><?= dbm_e($h) ?></th><?php endforeach; ?></tr></thead>
+                            <tbody>
+                            <?php foreach ($lastResult['rows'] as $row): ?>
+                            <tr><?php foreach ($row as $v): ?><td class="dbm-td-wide"><?= dbm_format_value($v) ?></td><?php endforeach; ?></tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                          </table>
+                        </div>
+                        <?php endif; ?>
+                      </div>
+                      <?php else: ?>
+                      <div class="dbm-alert dbm-alert-success">Query executed · <?= number_format((int)$lastResult['count']) ?> row(s) affected · <?= $lastResult['time'] ?> ms</div>
+                      <?php endif; ?>
+                    <?php endif; ?>
+
+                    <div class="dbm-card">
+                      <div class="dbm-card-header"><h3>Import SQL Dump</h3></div>
+                      <div class="dbm-card-body">
+                        <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'sql'])) ?>" enctype="multipart/form-data">
+                          <?= dbm_csrf_field() ?>
+                          <input type="hidden" name="dbm_action" value="import_sql">
+                          <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                          <div class="dbm-form-group">
+                            <label>Upload .sql file</label>
+                            <input type="file" name="sql_file" class="dbm-form-control" accept=".sql,.txt" style="padding: 0.35rem 0.75rem; max-width: 400px;">
+                          </div>
+                          <div class="dbm-form-group" style="margin-top: 1.5rem;">
+                            <label>…or paste SQL directly</label>
+                            <textarea name="sql_text" class="dbm-form-control mono" style="min-height: 120px;" placeholder="CREATE TABLE ...&#10;INSERT INTO ..."></textarea>
+                          </div>
+                          <button type="submit" class="dbm-btn dbm-btn-primary" style="margin-top: 0.5rem;">Import SQL</button>
+                        </form>
+                      </div>
+                    </div>
+
+                  <?php elseif ($dbm_view === 'create_table'): ?>
+                    <div class="dbm-card">
+                      <div class="dbm-card-header"><h2>Create New Table</h2></div>
+                      <div class="dbm-card-body">
+                        <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'create_table'])) ?>" id="dbm-create-table-form">
+                          <?= dbm_csrf_field() ?>
+                          <input type="hidden" name="dbm_action" value="create_table">
+                          <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                          
+                          <div class="dbm-form-group">
+                            <label>Table Name</label>
+                            <input type="text" name="table_name" class="dbm-form-control" required placeholder="my_table" style="max-width: 400px;">
+                          </div>
+
+                          <h3 style="margin-top: 2rem; margin-bottom: 1rem;">Columns</h3>
+                          <div class="dbm-table-wrap">
+                            <table id="dbm-col-table">
+                              <thead>
+                                <tr>
+                                  <th>Name</th>
+                                  <th>Type</th>
+                                  <th style="text-align: center;">PK</th>
+                                  <th style="text-align: center;">Not Null</th>
+                                  <th style="text-align: center;">Unique</th>
+                                  <th>Default</th>
+                                  <th></th>
+                                </tr>
+                              </thead>
+                              <tbody id="dbm-col-rows">
+                                <tr class="dbm-col-row">
+                                  <td><input type="text" name="col_name[]" class="dbm-form-control" placeholder="id" required></td>
+                                  <td><select name="col_type[]" class="dbm-form-select"><?php foreach (['INTEGER','TEXT','REAL','NUMERIC','BLOB','BOOLEAN','DATE','DATETIME'] as $t): ?><option><?= $t ?></option><?php endforeach; ?></select></td>
+                                  <td style="text-align:center; vertical-align: middle;"><input type="checkbox" name="col_pk[]" value="0"></td>
+                                  <td style="text-align:center; vertical-align: middle;"><input type="checkbox" name="col_nn[]" value="0"></td>
+                                  <td style="text-align:center; vertical-align: middle;"><input type="checkbox" name="col_unique[]" value="0"></td>
+                                  <td><input type="text" name="col_default[]" class="dbm-form-control" placeholder="NULL"></td>
+                                  <td style="vertical-align: middle;"><button type="button" class="dbm-btn dbm-btn-xs dbm-btn-danger" onclick="dbmRemoveRow(this)">✕</button></td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                          <button type="button" class="dbm-btn dbm-btn-sm dbm-btn-outline" style="margin-top: 1rem;" onclick="dbmAddColumnRow()">+ Add Column</button>
+
+                          <div style="display:flex; gap:1rem; margin-top: 2.5rem; border-top: 1px solid var(--dbm-border); padding-top: 1.5rem;">
+                            <button type="submit" class="dbm-btn dbm-btn-primary">Create Table</button>
+                            <a href="<?= dbm_e(dbm_self_url(['db' => $dbName])) ?>" class="dbm-btn dbm-btn-outline">Cancel</a>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+
+                  <?php elseif ($dbm_view === 'maintenance'): 
+                    $pragmas = ['page_size','page_count','journal_mode','foreign_keys','auto_vacuum','synchronous','cache_size','temp_store','locking_mode','encoding','user_version','application_id','freelist_count','wal_autocheckpoint'];
+                  ?>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; margin-bottom: 1.5rem;">
+                      <?php
+                      $actions = [
+                        ['vacuum','VACUUM','Run','Reclaims unused space and defragments the database.'],
+                        ['integrity_check','Integrity Check','Run','Verifies internal consistency of the database.'],
+                        ['wal_checkpoint','WAL Checkpoint','Run','Flushes the WAL file back into the main database.'],
+                        ['analyze','ANALYZE','Run','Gathers statistics used by the query planner.'],
+                        ['reindex','REINDEX','Run','Rebuilds all indexes from scratch.'],
+                      ];
+                      foreach ($actions as [$act, $label, $btn, $desc]): ?>
+                      <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'maintenance'])) ?>">
+                        <?= dbm_csrf_field() ?>
+                        <input type="hidden" name="dbm_action" value="<?= dbm_e($act) ?>">
+                        <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                        <div class="dbm-card" style="margin-bottom: 0; height: 100%;">
+                          <div class="dbm-card-body" style="display: flex; flex-direction: column; height: 100%;">
+                            <strong style="font-size: 1.1rem; color: var(--dbm-text);"><?= dbm_e($label) ?></strong>
+                            <p style="font-size: 0.85rem; color: var(--dbm-text3); margin-top: 0.5rem; flex: 1;"><?= dbm_e($desc) ?></p>
+                            <button type="submit" class="dbm-btn dbm-btn-sm dbm-btn-primary" style="margin-top: 1rem; align-self: flex-start;"><?= $btn ?></button>
+                          </div>
+                        </div>
+                      </form>
+                      <?php endforeach; ?>
+                    </div>
+
+                    <div class="dbm-card">
+                      <div class="dbm-card-header"><h3>PRAGMA Values</h3></div>
+                      <div class="dbm-table-wrap">
+                        <table>
+                          <thead><tr><th>PRAGMA</th><th>Value</th></tr></thead>
+                          <tbody>
+                          <?php foreach ($pragmas as $prg):
+                            try { $val = $dbm_pdo->query('PRAGMA ' . $prg)->fetchColumn(); } catch (Exception $e) { $val = 'N/A'; }
+                          ?>
+                          <tr>
+                            <td style="font-weight: bold; color: var(--dbm-text);"><code><?= dbm_e($prg) ?></code></td>
+                            <td><code><?= dbm_e((string)$val) ?></code></td>
+                          </tr>
+                          <?php endforeach; ?>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <div class="dbm-card">
+                      <div class="dbm-card-header"><h3>Run Custom PRAGMA / SQL</h3></div>
+                      <div class="dbm-card-body">
+                        <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'sql'])) ?>">
+                          <?= dbm_csrf_field() ?>
+                          <input type="hidden" name="dbm_action" value="exec_sql">
+                          <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                          <div class="dbm-form-inline">
+                            <div class="dbm-form-group">
+                              <label>SQL / PRAGMA statement</label>
+                              <input type="text" name="sql" class="dbm-form-control mono" placeholder="PRAGMA cache_size = 4096;" style="min-width: 300px;">
+                            </div>
+                            <button type="submit" class="dbm-btn dbm-btn-primary">Execute</button>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+                  <?php endif; ?>
+                <?php endif; ?>
+
+              </div><!-- .dbm-content -->
+            </div><!-- .dbm-main -->
+          </div><!-- #dbm-app -->
+
+          <!-- MODALS -->
+          <div class="dbm-modal-backdrop" id="dbm-editModal">
+            <div class="dbm-modal" style="max-width: 700px;">
+              <h2>Edit Row</h2>
+              <form method="post" id="dbm-edit-form">
+                <?= dbm_csrf_field() ?>
+                <input type="hidden" name="dbm_action" value="update_row">
+                <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                <input type="hidden" name="table" value="<?= dbm_e($curTable) ?>">
+                <input type="hidden" name="pk_val" id="dbm-edit-pk-val">
+                <input type="hidden" name="page" id="dbm-edit-page">
+                <input type="hidden" name="search" id="dbm-edit-search">
+                <div id="dbm-edit-fields" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem;"></div>
+                <div class="dbm-modal-footer">
+                  <button type="button" class="dbm-btn dbm-btn-outline" onclick="document.getElementById('dbm-editModal').classList.remove('open')">Cancel</button>
+                  <button type="submit" class="dbm-btn dbm-btn-primary">Save Changes</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div class="dbm-modal-backdrop" id="dbm-renameModal">
+            <div class="dbm-modal" style="max-width: 450px;">
+              <h2>Rename Table</h2>
+              <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable])) ?>">
+                <?= dbm_csrf_field() ?>
+                <input type="hidden" name="dbm_action" value="rename_table">
+                <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                <input type="hidden" name="target_table" id="dbm-rt-old" value="<?= dbm_e($curTable) ?>">
+                <div class="dbm-form-group">
+                  <label>New Table Name</label>
+                  <input type="text" name="new_name" id="dbm-rt-new" class="dbm-form-control" value="<?= dbm_e($curTable) ?>" required>
+                </div>
+                <div class="dbm-modal-footer">
+                  <button type="button" class="dbm-btn dbm-btn-outline" onclick="document.getElementById('dbm-renameModal').classList.remove('open')">Cancel</button>
+                  <button type="submit" class="dbm-btn dbm-btn-primary">Rename Table</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div class="dbm-modal-backdrop" id="dbm-dropModal">
+            <div class="dbm-modal" style="max-width: 450px;">
+              <h2>Drop Table</h2>
+              <p style="color: var(--dbm-text2); margin-bottom: 1.5rem;">This will permanently delete table <strong class="text-white" id="dbm-dt-display"><?= dbm_e($curTable) ?></strong> and all its data.</p>
+              <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName])) ?>">
+                <?= dbm_csrf_field() ?>
+                <input type="hidden" name="dbm_action" value="drop_table">
+                <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                <input type="hidden" name="target_table" id="dbm-dt-name" value="<?= dbm_e($curTable) ?>">
+                <div class="dbm-modal-footer">
+                  <button type="button" class="dbm-btn dbm-btn-outline" onclick="document.getElementById('dbm-dropModal').classList.remove('open')">Cancel</button>
+                  <button type="submit" class="dbm-btn dbm-btn-danger">Drop Table</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div class="dbm-modal-backdrop" id="dbm-renameColModal">
+            <div class="dbm-modal" style="max-width: 450px;">
+              <h2>Rename Column</h2>
+              <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'structure'])) ?>">
+                <?= dbm_csrf_field() ?>
+                <input type="hidden" name="dbm_action" value="rename_column">
+                <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                <input type="hidden" name="table" value="<?= dbm_e($curTable) ?>">
+                <input type="hidden" name="old_col" id="dbm-rc-old" value="">
+                <div class="dbm-form-group">
+                  <label>New Column Name</label>
+                  <input type="text" name="new_col" id="dbm-rc-new" class="dbm-form-control" required>
+                </div>
+                <div class="dbm-modal-footer">
+                  <button type="button" class="dbm-btn dbm-btn-outline" onclick="document.getElementById('dbm-renameColModal').classList.remove('open')">Cancel</button>
+                  <button type="submit" class="dbm-btn dbm-btn-primary">Rename Column</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <?php if ($dbm_pdo): ?>
+          <div class="dbm-modal-backdrop" id="dbm-deleteDbModal">
+            <div class="dbm-modal" style="max-width: 450px;">
+              <h2>Delete Database</h2>
+              <p style="color: var(--dbm-text2); margin-bottom: 1.5rem;">Type the database name to confirm deletion:</p>
+              <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName])) ?>">
+                <?= dbm_csrf_field() ?>
+                <input type="hidden" name="dbm_action" value="delete_db">
+                <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                <div class="dbm-form-group">
+                  <label>Database name: <code><?= dbm_e($dbName) ?></code></label>
+                  <input type="text" name="confirm_name" class="dbm-form-control" required placeholder="<?= dbm_e($dbName) ?>">
+                </div>
+                <div class="dbm-modal-footer">
+                  <button type="button" class="dbm-btn dbm-btn-outline" onclick="document.getElementById('dbm-deleteDbModal').classList.remove('open')">Cancel</button>
+                  <button type="submit" class="dbm-btn dbm-btn-danger">Delete Forever</button>
+                </div>
+              </form>
+            </div>
+          </div>
+          <?php endif; ?>
+
+          <script>
+            // DB Manager Script Initialization
+            function dbmToggleCheckAll(source, className) {
+              const checkboxes = document.querySelectorAll('.' + className);
+              checkboxes.forEach(cb => cb.checked = source.checked);
+            }
+
+            function dbmToggleSidebar() {
+              const menu = document.getElementById('dbm-sidebar-menu');
+              const overlay = document.getElementById('dbm-sidebar-overlay');
+              if (menu) menu.classList.toggle('open');
+              if (overlay) overlay.classList.toggle('open');
+            }
+
+            function dbmOpenRenameTableModal(tableName) {
+              document.getElementById('dbm-rt-old').value = tableName;
+              document.getElementById('dbm-rt-new').value = tableName;
+              document.getElementById('dbm-renameModal').classList.add('open');
+            }
+
+            function dbmOpenDropTableModal(tableName) {
+              document.getElementById('dbm-dt-name').value = tableName;
+              document.getElementById('dbm-dt-display').innerText = tableName;
+              document.getElementById('dbm-dropModal').classList.add('open');
+            }
+
+            function dbmOpenRenameColModal(colName) {
+              document.getElementById('dbm-rc-old').value = colName;
+              document.getElementById('dbm-rc-new').value = colName;
+              document.getElementById('dbm-renameColModal').classList.add('open');
+            }
+
+            const dbmToggleNewDb = document.getElementById('dbm-toggle-new-db');
+            if (dbmToggleNewDb) {
+              dbmToggleNewDb.addEventListener('click', function(e) {
+                e.preventDefault();
+                const panel = document.getElementById('dbm-new-db-panel');
+                panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+              });
+            }
+
+            function dbmSwitchTab(btn, targetId) {
+              const parent = btn.closest('.dbm-tabs') || btn.parentElement;
+              parent.querySelectorAll('.dbm-tab-btn').forEach(b => b.classList.remove('active'));
+              btn.classList.add('active');
+              document.querySelectorAll('.dbm-tab-pane').forEach(p => p.classList.remove('active'));
+              const target = document.getElementById(targetId);
+              if (target) target.classList.add('active');
+            }
+
+            document.querySelectorAll('.dbm-modal-backdrop').forEach(el => {
+              el.addEventListener('click', function(e) {
+                if (e.target === this) this.classList.remove('open');
+              });
+            });
+
+            document.addEventListener('keydown', e => {
+              if (e.key === 'Escape') {
+                document.querySelectorAll('.dbm-modal-backdrop.open').forEach(el => el.classList.remove('open'));
+              }
+            });
+
+            function dbmOpenEditModal(row, pkCol, colsMeta, page, search) {
+              document.getElementById('dbm-edit-pk-val').value = row[pkCol];
+              document.getElementById('dbm-edit-page').value = page;
+              document.getElementById('dbm-edit-search').value = search;
+
+              const container = document.getElementById('dbm-edit-fields');
+              container.innerHTML = '';
+
+              for (const [colName, meta] of Object.entries(colsMeta)) {
+                if (colName === '__rowid__') continue;
+                const val = row[colName];
+                const div = document.createElement('div');
+                div.className = 'dbm-form-group';
+
+                const label = document.createElement('label');
+                label.innerHTML = dbmEscHtml(colName) + 
+                                  (meta.pk ? ' <span style="color:var(--dbm-yellow); font-size:0.75rem; margin-left:4px; font-weight:bold;">PK</span>' : '') + 
+                                  ' <span class="dbm-badge dbm-badge-gray" style="margin-left: 6px;">' + dbmEscHtml(meta.type || 'ANY') + '</span>';
+
+                const isLong = typeof val === 'string' && val.length > 80;
+                const isBlobField = (val === '[BLOB_DATA]');
+
+                let input;
+                if (isBlobField) {
+                  input = document.createElement('div');
+                  input.className = 'dbm-alert dbm-alert-error';
+                  input.style.padding = '0.5rem';
+                  input.textContent = '[BLOB — cannot edit inline]';
+                  
+                  const hiddenInput = document.createElement('input');
+                  hiddenInput.type = 'hidden';
+                  hiddenInput.name = 'row[' + colName + ']';
+                  hiddenInput.value = '[BLOB_DATA]';
+                  div.appendChild(hiddenInput);
+                } else if (isLong || meta.type === 'TEXT' || meta.type === 'BLOB' || meta.type === 'CLOB') {
+                  input = document.createElement('textarea');
+                  input.name = 'row[' + colName + ']';
+                  input.className = 'dbm-form-control';
+                  input.value = val !== null ? String(val) : '';
+                  input.rows = Math.min(8, Math.max(2, Math.ceil((val || '').length / 60)));
+                } else {
+                  input = document.createElement('input');
+                  input.type = 'text';
+                  input.name = 'row[' + colName + ']';
+                  input.className = 'dbm-form-control';
+                  input.value = val !== null ? String(val) : '';
+                }
+
+                const nullCheck = document.createElement('div');
+                nullCheck.className = 'dbm-form-check';
+                const chk = document.createElement('input');
+                chk.type = 'checkbox';
+                chk.name = 'row_null[' + colName + ']';
+                chk.id = 'dbm_null_' + colName;
+                chk.value = '1';
+                if (val === null) { chk.checked = true; if (!isBlobField) input.disabled = true; }
+                chk.addEventListener('change', () => { if (!isBlobField) input.disabled = chk.checked; });
+                
+                const nullLabel = document.createElement('label');
+                nullLabel.htmlFor = 'dbm_null_' + colName;
+                nullLabel.textContent = 'Set NULL';
+                nullLabel.style.fontWeight = 'normal';
+                nullLabel.style.margin = '0';
+                
+                nullCheck.appendChild(chk);
+                nullCheck.appendChild(nullLabel);
+
+                div.appendChild(label);
+                div.appendChild(input);
+                if (!isBlobField) div.appendChild(nullCheck);
+                container.appendChild(div);
+              }
+              document.getElementById('dbm-editModal').classList.add('open');
+            }
+
+            function dbmEscHtml(str) {
+              return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            }
+
+            let dbmColIdx = 1;
+            function dbmAddColumnRow() {
+              const tbody = document.getElementById('dbm-col-rows');
+              const row = tbody.querySelector('.dbm-col-row').cloneNode(true);
+              row.querySelectorAll('input[type=checkbox]').forEach(chk => {
+                chk.value = dbmColIdx;
+                chk.checked = false;
+              });
+              row.querySelectorAll('input[type=text]').forEach(i => i.value = '');
+              tbody.appendChild(row);
+              dbmColIdx++;
+            }
+
+            function dbmRemoveRow(btn) {
+              const rows = document.querySelectorAll('#dbm-col-rows .dbm-col-row');
+              if (rows.length <= 1) return;
+              btn.closest('.dbm-col-row').remove();
+            }
+
+            const createTableForm = document.getElementById('dbm-create-table-form');
+            if (createTableForm) {
+              createTableForm.addEventListener('submit', function() {
+                document.querySelectorAll('#dbm-col-rows .dbm-col-row').forEach((row, idx) => {
+                  row.querySelectorAll('input[type=checkbox]').forEach(chk => chk.value = String(idx));
+                });
+              });
+            }
+
+            // Bind Ace Editor globally for the SQL Editor panel using the App's native Ace library
+            let dbmSqlEditor = null;
+            if (typeof ace !== 'undefined') {
+              const sqlTextarea = document.getElementById('dbm-sql-editor');
+              if (sqlTextarea) {
+                const editorWrap = sqlTextarea.parentElement;
+                dbmSqlEditor = ace.edit(editorWrap);
+                dbmSqlEditor.setTheme("ace/theme/chaos");
+                dbmSqlEditor.session.setMode("ace/mode/sql");
+                dbmSqlEditor.setOptions({
+                  fontSize: "14px",
+                  showPrintMargin: false,
+                  wrap: true
+                });
+                dbmSqlEditor.setValue(sqlTextarea.value, -1);
+                
+                dbmSqlEditor.commands.addCommand({
+                  name: 'runSql',
+                  bindKey: {win: 'Ctrl-Enter', mac: 'Cmd-Enter'},
+                  exec: function() {
+                    const form = document.getElementById('dbm-sql-form');
+                    if(form) {
+                      sqlTextarea.value = dbmSqlEditor.getValue();
+                      form.submit();
+                    }
+                  }
+                });
+
+                const sqlForm = document.getElementById('dbm-sql-form');
+                if (sqlForm) {
+                  sqlForm.addEventListener('submit', function() {
+                    sqlTextarea.value = dbmSqlEditor.getValue();
+                  });
+                }
+              }
+            }
+
+            function dbmClearEditor() {
+              if (dbmSqlEditor) dbmSqlEditor.setValue('');
+            }
+
+            function dbmInsertSnippet(val) {
+              if (!val) return;
+              if (dbmSqlEditor) { dbmSqlEditor.setValue(val); dbmSqlEditor.focus(); }
+            }
+          </script>
+
         <?php elseif (($_GET['page'] ?? '') === 'ide'): ?>
           <div class="d-flex d-lg-none align-items-center justify-content-center h-100 p-4 text-center">
             <div>
@@ -11293,7 +13043,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                             <?php if ($user['is_admin'] == 1): ?>
                               <?php
                                 $u_settings = json_decode($user['settings'] ?: '{}', true) ?? [];
-                                $u_perms = $u_settings['admin_permissions'] ?? ['users', 'logs', 'reports', 'appeals', 'drive', 'ide', 'api', 'playground'];
+                                $u_perms = $u_settings['admin_permissions'] ?? ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
                                 $perms_json = htmlspecialchars(json_encode($u_perms), ENT_QUOTES, 'UTF-8');
                               ?>
                               <button type="button" class="dropdown-item d-flex align-items-center gap-3 text-success fw-bold" onclick="openPermissionsModal(<?php echo $user['id']; ?>, '<?php echo addslashes(htmlspecialchars($user['artist'], ENT_QUOTES)); ?>', '<?php echo $perms_json; ?>')">
@@ -11371,7 +13121,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const userData = JSON.parse(btn.getAttribute('data-user'));
                 const modalBody = document.getElementById('user-details-modal-body');
                 
-                let u_perms = ['users', 'logs', 'reports', 'appeals', 'drive', 'ide', 'api', 'playground'];
+                let u_perms = ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
                 try {
                   const settings = JSON.parse(userData.settings || '{}');
                   if (settings.admin_permissions) u_perms = settings.admin_permissions;
@@ -11544,6 +13294,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="form-check form-switch">
                     <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="ide" id="perm-ide">
                     <label class="form-check-label text-white fw-medium" for="perm-ide">PHPEditor (IDE)</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="dbmanager" id="perm-dbmanager">
+                    <label class="form-check-label text-white fw-medium" for="perm-dbmanager">PHPDBManager</label>
                   </div>
                 </div>
                 <div class="col-12 col-md-6">
