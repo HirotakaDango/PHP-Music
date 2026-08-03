@@ -376,7 +376,7 @@ $is_super_admin = 0;
 $is_admin = 0;
 
 // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
-$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment', 'post_phpboard', 'delete_phpboard_post'];
+$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment', 'post_phpboard', 'delete_phpboard_post', 'inspect_audio', 'save_audio_editor'];
 $current_action = $_GET['action'] ?? '';
 
 if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
@@ -387,7 +387,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '7.9');
+define('APP_VERSION', '8.0');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -539,6 +539,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
+  if (!function_exists('log_admin_activity')) {
+    function log_admin_activity($db, $admin_email, $action, $target_user_id = 0) {
+      $target_email = 'System/Database';
+      if ($target_user_id > 0) {
+        $stmt = $db->prepare("SELECT email FROM users WHERE id = ?");
+        $stmt->execute([$target_user_id]);
+        $target_email = $stmt->fetchColumn() ?: 'Unknown';
+      }
+      try {
+        $db->prepare("INSERT INTO admin_logs (admin_email, action, target_user_id, target_email) VALUES (?, ?, ?, ?)")->execute([$admin_email, $action, $target_user_id, $target_email]);
+      } catch(Exception $e) {}
+    }
+  }
+
   // Release the PHP session write-lock early for non-auth Drive actions.
   // This allows parallel uploads and chunked streams to run concurrently without freezing.
   if (isset($_GET['page']) && $_GET['page'] === 'drive') {
@@ -641,6 +655,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         $db = get_db();
         $stmt = $db->prepare("INSERT INTO drive_activity (file_name, file_path, action, timestamp) VALUES (?, ?, ?, ?)");
         $stmt->execute([$fileName, $filePath, $action, time()]);
+        if (function_exists('log_admin_activity') && isset($_SESSION['admin_email'])) {
+          log_admin_activity($db, $_SESSION['admin_email'], "Drive: {$action} {$fileName}", 0);
+        }
       } catch (Exception $e) {}
     }
 
@@ -1384,7 +1401,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               if ($output === null || $output === false || $output === "") {
-                 $output = "Command execution failed or shell functions are disabled on this host.";
+                $output = "Command execution failed or shell functions are disabled on this host.";
+              }
+              
+              if (function_exists('log_admin_activity') && isset($_SESSION['admin_email'])) {
+                log_admin_activity(get_db(), $_SESSION['admin_email'], "Terminal: " . substr($cmd, 0, 50), 0);
               }
 
               echo json_encode(['success' => true, 'output' => htmlspecialchars(trim($output))]);
@@ -1842,12 +1863,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       die("Security violation: CSRF token mismatch.");
     }
 
-    function log_admin_activity($db, $admin_email, $action, $target_user_id) {
-      $stmt = $db->prepare("SELECT email FROM users WHERE id = ?");
-      $stmt->execute([$target_user_id]);
-      $target_email = $stmt->fetchColumn() ?: 'Unknown';
-      $db->prepare("INSERT INTO admin_logs (admin_email, action, target_user_id, target_email) VALUES (?, ?, ?, ?)")->execute([$admin_email, $action, $target_user_id, $target_email]);
-    }
+    // log_admin_activity defined globally above
 
     if (isset($_POST['generate_reset_link']) && isset($_POST['user_id'])) {
       $db = get_db();
@@ -2130,7 +2146,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground']; // Default to all if missing
+  $current_admin_permissions = ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground', 'storage']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -2168,12 +2184,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     }
   }
 ?>
+<?php
+  $page_titles = [
+    'users' => 'User Management',
+    'logs' => 'Activity Logs',
+    'reports' => 'Pending Reports',
+    'appeals' => 'Ban Appeals',
+    'drive' => 'Drive Manager',
+    'dbmanager' => 'PHPDBManager',
+    'ide' => 'PHPEditor (IDE)',
+    'api' => 'API Keys',
+    'storage' => 'Storage Stats'
+  ];
+  $active_page_key = $_GET['page'] ?? 'users';
+  $admin_page_title = isset($page_titles[$active_page_key]) ? $page_titles[$active_page_key] . " - Admin Panel" : "Admin Panel";
+?>
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Admin Panel - PHP Music</title>
+    <title><?php echo $admin_page_title; ?> - PHP Music</title>
     <link rel="icon" id="app-favicon" type="image/svg+xml" href="?action=get_app_icon" />
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
@@ -2187,6 +2218,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-beautify.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/diff_match_patch/20121119/diff_match_patch.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
       :root {
         --ytm-bg: #030303;
@@ -2484,6 +2516,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         border-color: #404040;
         color: var(--ytm-secondary-text);
       }
+      .admin-pagination { display: flex; align-items: center; justify-content: center; gap: 0.35rem; flex-wrap: wrap; margin-top: 1rem; }
+      .admin-page-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 32px; padding: 0 8px; background: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 6px; color: var(--ytm-secondary-text); font-size: 0.85rem; cursor: pointer; text-decoration: none; transition: 0.2s; font-weight: bold; }
+      .admin-page-btn:hover { background: #404040; color: #fff; text-decoration: none; }
+      .admin-page-btn.active { background: var(--ytm-accent); border-color: var(--ytm-accent); color: #fff; }
+      .admin-page-btn.disabled { opacity: 0.4; pointer-events: none; }
 
       @media (min-width: 992px) {
         .app-container {
@@ -2868,6 +2905,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php if ($is_super_admin_check || in_array('dbmanager', $current_admin_permissions)): ?>
             <a href="?access=admin&page=dbmanager" class="nav-link <?php echo (($_GET['page'] ?? '') === 'dbmanager') ? 'active' : ''; ?>"><i class="bi bi-database-fill-gear"></i><span>PHPDBManager</span></a>
             <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('storage', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=storage" class="nav-link <?php echo (($_GET['page'] ?? '') === 'storage') ? 'active' : ''; ?>"><i class="bi bi-hdd-network-fill"></i><span>Storage Stats</span></a>
+            <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('ide', $current_admin_permissions)): ?>
             <a href="?access=admin&page=ide" class="nav-link <?php echo (($_GET['page'] ?? '') === 'ide') ? 'active' : ''; ?>"><i class="bi bi-code-slash"></i><span>PHPEditor (IDE)</span></a>
             <?php endif; ?>
@@ -2966,6 +3006,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                   if (activeOverlay && !currentMain.contains(activeOverlay)) {
                     currentMain.prepend(activeOverlay);
+                  }
+                  
+                  if (doc.title) {
+                    document.title = doc.title;
                   }
 
                   const newNavLinks = doc.querySelectorAll('.sidebar .nav-link');
@@ -3105,26 +3149,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </table>
             </div>
             <?php if ($total_rep_pages > 1): ?>
-            <nav aria-label="Reports pagination">
-              <ul class="pagination justify-content-center">
-                <li class="page-item <?php echo ($rep_page <= 1) ? 'disabled' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=reports&p=<?php echo $rep_page - 1; ?>">Previous</a>
-                </li>
-                <?php
-                  $start_p = max(1, $rep_page - 1);
-                  $end_p = min($total_rep_pages, $start_p + 2);
-                  if ($end_p - $start_p < 2) { $start_p = max(1, $end_p - 2); }
-                ?>
-                <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
-                <li class="page-item <?php echo ($rep_page == $i) ? 'active' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=reports&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-                </li>
-                <?php endfor; ?>
-                <li class="page-item <?php echo ($rep_page >= $total_rep_pages) ? 'disabled' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=reports&p=<?php echo $rep_page + 1; ?>">Next</a>
-                </li>
-              </ul>
-            </nav>
+            <div class="admin-pagination">
+              <a class="admin-page-btn <?php echo ($rep_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&p=1">«</a>
+              <a class="admin-page-btn <?php echo ($rep_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&p=<?php echo $rep_page - 1; ?>">‹</a>
+              <?php
+                $start_p = max(1, $rep_page - 2);
+                $end_p = min($total_rep_pages, $start_p + 4);
+                if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+              ?>
+              <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
+                <a class="admin-page-btn <?php echo ($rep_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=reports&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+              <?php endfor; ?>
+              <a class="admin-page-btn <?php echo ($rep_page >= $total_rep_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&p=<?php echo $rep_page + 1; ?>">›</a>
+              <a class="admin-page-btn <?php echo ($rep_page >= $total_rep_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&p=<?php echo $total_rep_pages; ?>">»</a>
+            </div>
             <?php endif; ?>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'appeals'): ?>
@@ -3184,26 +3222,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </table>
             </div>
             <?php if ($total_app_pages > 1): ?>
-            <nav aria-label="Appeals pagination">
-              <ul class="pagination justify-content-center">
-                <li class="page-item <?php echo ($app_page <= 1) ? 'disabled' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=appeals&p=<?php echo $app_page - 1; ?>">Previous</a>
-                </li>
-                <?php
-                  $start_p = max(1, $app_page - 1);
-                  $end_p = min($total_app_pages, $start_p + 2);
-                  if ($end_p - $start_p < 2) { $start_p = max(1, $end_p - 2); }
-                ?>
-                <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
-                <li class="page-item <?php echo ($app_page == $i) ? 'active' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=appeals&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-                </li>
-                <?php endfor; ?>
-                <li class="page-item <?php echo ($app_page >= $total_app_pages) ? 'disabled' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=appeals&p=<?php echo $app_page + 1; ?>">Next</a>
-                </li>
-              </ul>
-            </nav>
+            <div class="admin-pagination">
+              <a class="admin-page-btn <?php echo ($app_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&p=1">«</a>
+              <a class="admin-page-btn <?php echo ($app_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&p=<?php echo $app_page - 1; ?>">‹</a>
+              <?php
+                $start_p = max(1, $app_page - 2);
+                $end_p = min($total_app_pages, $start_p + 4);
+                if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+              ?>
+              <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
+                <a class="admin-page-btn <?php echo ($app_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=appeals&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+              <?php endfor; ?>
+              <a class="admin-page-btn <?php echo ($app_page >= $total_app_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&p=<?php echo $app_page + 1; ?>">›</a>
+              <a class="admin-page-btn <?php echo ($app_page >= $total_app_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&p=<?php echo $total_app_pages; ?>">»</a>
+            </div>
             <?php endif; ?>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'logs'): ?>
@@ -3242,27 +3274,407 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </table>
             </div>
             <?php if ($total_log_pages > 1): ?>
-            <nav aria-label="Logs pagination">
-              <ul class="pagination justify-content-center">
-                <li class="page-item <?php echo ($log_page <= 1) ? 'disabled' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=logs&p=<?php echo $log_page - 1; ?>">Previous</a>
-                </li>
-                <?php
-                  $start_p = max(1, $log_page - 1);
-                  $end_p = min($total_log_pages, $start_p + 2);
-                  if ($end_p - $start_p < 2) { $start_p = max(1, $end_p - 2); }
-                ?>
-                <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
-                <li class="page-item <?php echo ($log_page == $i) ? 'active' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=logs&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-                </li>
-                <?php endfor; ?>
-                <li class="page-item <?php echo ($log_page >= $total_log_pages) ? 'disabled' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=logs&p=<?php echo $log_page + 1; ?>">Next</a>
-                </li>
-              </ul>
-            </nav>
+            <div class="admin-pagination">
+              <a class="admin-page-btn <?php echo ($log_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&p=1">«</a>
+              <a class="admin-page-btn <?php echo ($log_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&p=<?php echo $log_page - 1; ?>">‹</a>
+              <?php
+                $start_p = max(1, $log_page - 2);
+                $end_p = min($total_log_pages, $start_p + 4);
+                if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+              ?>
+              <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
+                <a class="admin-page-btn <?php echo ($log_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=logs&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+              <?php endfor; ?>
+              <a class="admin-page-btn <?php echo ($log_page >= $total_log_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&p=<?php echo $log_page + 1; ?>">›</a>
+              <a class="admin-page-btn <?php echo ($log_page >= $total_log_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&p=<?php echo $total_log_pages; ?>">»</a>
+            </div>
             <?php endif; ?>
+          </div>
+        <?php elseif (($_GET['page'] ?? '') === 'storage'): ?>
+          <div class="page-header"><h1 class="content-title m-0">System Storage & Assets</h1></div>
+          <div class="content-area-wrapper">
+            <?php
+              $disk_total = @disk_total_space(__DIR__) ?: 0;
+              $disk_free = @disk_free_space(__DIR__) ?: 0;
+              $disk_used = max(0, $disk_total - $disk_free);
+              $disk_pct = $disk_total > 0 ? min(100, ($disk_used / $disk_total) * 100) : 0;
+              $disk_pct_css = number_format($disk_pct, 2, '.', ''); // Forces dot decimal for valid CSS
+
+              if (!function_exists('format_storage_bytes')) {
+                function format_storage_bytes($bytes, $precision = 2) {
+                  $units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+                  $bytes = max($bytes, 0);
+                  $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+                  $pow = min($pow, count($units) - 1);
+                  $bytes /= pow(1024, $pow);
+                  return number_format($bytes, $precision, '.', '') . ' ' . $units[$pow];
+                }
+              }
+  
+              $db_size = file_exists(DB_FILE) ? filesize(DB_FILE) : 0;
+              $total_songs = 0;
+              $total_audio_size = 0;
+              $artist_stats = [];
+  
+              // Recursively scan the entire directory for non-audio assets (images, zip backups, webp covers)
+              $non_audio_count = 0;
+              $non_audio_size = 0;
+              try {
+                $dir_iterator = new RecursiveIteratorIterator(
+                  new RecursiveDirectoryIterator(
+                    MUSIC_DIR,
+                    FilesystemIterator::SKIP_DOTS
+                  )
+                );
+                foreach ($dir_iterator as $file) {
+                  if ($file->isFile()) {
+                    $ext = strtolower($file->getExtension());
+                    // Audio extensions recognized by the system
+                    if (!in_array($ext, ["mp3", "flac", "m4a", "ogg", "wav"])) {
+                      $non_audio_count++;
+                      $non_audio_size += $file->getSize();
+                    }
+                  }
+                }
+              } catch (Exception $e) {
+              }
+  
+              // Remove the Database file itself from the "Non-Audio" count to prevent duplicate display counting
+              if (file_exists(DB_FILE)) {
+                $non_audio_count = max(0, $non_audio_count - 1);
+                $non_audio_size = max(0, $non_audio_size - filesize(DB_FILE));
+              }
+  
+              $db = get_db();
+              $stmt_u = $db->query("SELECT id, artist, email FROM users");
+              while ($u = $stmt_u->fetch()) {
+                $artist_stats[$u["id"]] = [
+                  "name" => $u["artist"],
+                  "email" => $u["email"] ?? "Anonymous",
+                  "count" => 0,
+                  "size" => 0,
+                ];
+              }
+  
+              $stmt_m = $db->query("SELECT user_id, file FROM music");
+              while ($m = $stmt_m->fetch()) {
+                $uid = $m["user_id"];
+                $path = $m["file"];
+                if ($path) {
+                  if (!file_exists($path)) {
+                    $dynamic_path =
+                      MUSIC_DIR .
+                      "/uploads/" .
+                      basename(dirname(dirname($path))) .
+                      "/" .
+                      basename(dirname($path)) .
+                      "/" .
+                      basename($path);
+                    if (file_exists($dynamic_path)) {
+                      $path = $dynamic_path;
+                    }
+                  }
+                  if (file_exists($path)) {
+                    $fsize = filesize($path);
+                    if (isset($artist_stats[$uid])) {
+                      $artist_stats[$uid]["count"]++;
+                      $artist_stats[$uid]["size"] += $fsize;
+                    }
+                    $total_songs++;
+                    $total_audio_size += $fsize;
+                  }
+                }
+              }
+  
+              usort($artist_stats, function ($a, $b) {
+                return $b["size"] <=> $a["size"];
+              });
+  
+              $storage_page = isset($_GET["p"]) ? max(1, (int) $_GET["p"]) : 1;
+              $total_storage_users = count($artist_stats);
+              $total_storage_pages = ceil($total_storage_users / ADMIN_PAGE_SIZE);
+              if ($total_storage_pages == 0) {
+                $total_storage_pages = 1;
+              }
+              $storage_offset = ($storage_page - 1) * ADMIN_PAGE_SIZE;
+  
+              $paged_artist_stats = array_slice($artist_stats, $storage_offset, ADMIN_PAGE_SIZE);
+              
+              $app_assets_total = $total_audio_size + $non_audio_size + $db_size;
+              $other_used = max(0, $disk_used - $app_assets_total);
+            ?>
+            <div class="row g-4 mb-4">
+              <!-- Disk Stats & Chart -->
+              <div class="col-12 col-xl-5">
+                <div class="card bg-dark border-secondary shadow-sm h-100">
+                  <div class="card-body p-4 d-flex flex-column">
+                    <h5 class="fw-bold text-white mb-4">
+                      <i class="bi bi-device-hdd text-info me-2"></i> Host Server Disk Space
+                    </h5>
+                    <div class="d-flex justify-content-between text-secondary small fw-bold mb-2">
+                      <span>Used:
+                      <?php echo format_storage_bytes($disk_used); ?>
+                      </span> <span>Total:
+                      <?php echo format_storage_bytes($disk_total); ?> (<?php echo $disk_pct_css; ?>%)</span>
+                    </div>
+                    <div class="progress mb-4" style="height: 12px; background-color: #000; border: 1px solid #333;">
+                      <div class="progress-bar <?php echo $disk_pct > 85 ? 'bg-danger' : ($disk_pct > 60 ? 'bg-warning' : 'bg-info'); ?>" role="progressbar" style="width: <?php echo $disk_pct_css; ?>%;"></div>
+                    </div>
+                    <div class="text-end text-secondary small fw-bold mb-4">
+                      Free Space: <span class="text-success">
+                      <?php echo format_storage_bytes($disk_free); ?>
+                      </span>
+                    </div>
+                    <div class="mt-auto position-relative" style="height: 200px; width: 100%;">
+                      <canvas id="diskPieChart"></canvas>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <!-- App Assets Stats -->
+              <div class="col-12 col-xl-7">
+                <div class="card bg-dark border-secondary shadow-sm h-100">
+                  <div class="card-body p-4">
+                    <h5 class="fw-bold text-white mb-4">
+                      <i class="bi bi-music-note-list text-danger me-2"></i> App Assets
+                    </h5>
+                    <div class="row g-3">
+                      <div class="col-sm-6 col-md-4">
+                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
+                          <i class="bi bi-file-music fs-3 text-danger mb-2 d-block"></i>
+                          <div class="fs-5 fw-bold text-white">
+                            <?php echo number_format($total_songs); ?>
+                          </div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">
+                            Audio Files
+                          </div>
+                        </div>
+                      </div>
+                      <div class="col-sm-6 col-md-4">
+                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
+                          <i class="bi bi-hdd-stack fs-3 text-warning mb-2 d-block"></i>
+                          <div class="fs-5 fw-bold text-white">
+                            <?php echo format_storage_bytes($total_audio_size); ?>
+                          </div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">
+                            Audio Storage
+                          </div>
+                        </div>
+                      </div>
+                      <div class="col-sm-6 col-md-4">
+                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
+                          <i class="bi bi-database fs-3 text-info mb-2 d-block"></i>
+                          <div class="fs-5 fw-bold text-white">
+                            <?php echo format_storage_bytes($db_size); ?>
+                          </div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">
+                            Database Size
+                          </div>
+                        </div>
+                      </div>
+                      <div class="col-sm-6 col-md-6">
+                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
+                          <i class="bi bi-files fs-3 text-success mb-2 d-block"></i>
+                          <div class="fs-5 fw-bold text-white">
+                            <?php echo number_format($non_audio_count); ?>
+                          </div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">
+                            Non-Audio Files (Images, Zips)
+                          </div>
+                        </div>
+                      </div>
+                      <div class="col-sm-12 col-md-6">
+                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
+                          <i class="bi bi-server fs-3 text-success mb-2 d-block"></i>
+                          <div class="fs-5 fw-bold text-white">
+                            <?php echo format_storage_bytes($non_audio_size); ?>
+                          </div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">
+                            Non-Audio Storage
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Top Users Chart -->
+            <div class="card bg-dark border-secondary shadow-sm mb-4">
+              <div class="card-body p-4">
+                <h5 class="fw-bold text-white mb-4">
+                  <i class="bi bi-bar-chart-fill text-primary me-2"></i> Top Users by Storage
+                </h5>
+                <div class="position-relative" style="height: 250px; width: 100%;">
+                  <canvas id="usersBarChart"></canvas>
+                </div>
+              </div>
+            </div>
+            <!-- Artist Breakdown Table -->
+            <div class="card bg-dark border-secondary shadow-sm">
+              <div class="card-header border-bottom border-secondary bg-transparent py-3">
+                <h5 class="m-0 text-white fw-bold">
+                  <i class="bi bi-people-fill text-warning me-2"></i> User Storage Footprint
+                </h5>
+              </div>
+              <div class="table-responsive">
+                <table class="table table-dark table-striped m-0 align-middle">
+                  <thead class="border-bottom border-secondary">
+                    <tr>
+                      <th class="py-3 px-4" style="width: 60px;">#</th>
+                      <th class="py-3 px-4">Artist / User</th>
+                      <th class="py-3 px-4">Email</th>
+                      <th class="py-3 px-4 text-center">Audio Files</th>
+                      <th class="py-3 px-4 text-end">Total Size</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php $rank = $storage_offset + 1; foreach ($paged_artist_stats as $stat): ?>
+                    <tr>
+                      <td class="py-3 px-4 text-secondary fw-bold">
+                        <?php echo $rank++; ?>
+                      </td>
+                      <td class="py-3 px-4 fw-bold text-info">
+                        <?php echo htmlspecialchars($stat['name']); ?>
+                      </td>
+                      <td class="py-3 px-4 text-secondary small">
+                        <?php echo htmlspecialchars($stat['email']); ?>
+                      </td>
+                      <td class="py-3 px-4 text-center text-white fw-medium">
+                        <?php echo number_format($stat['count']); ?>
+                      </td>
+                      <td class="py-3 px-4 text-end text-warning fw-bold font-monospace">
+                        <?php echo format_storage_bytes($stat['size']); ?>
+                      </td>
+                    </tr>
+                    <?php endforeach; ?>
+                    <?php if(empty($paged_artist_stats)): ?>
+                    <tr>
+                      <td colspan="5" class="text-center py-4 text-secondary">No users found.</td>
+                    </tr>
+                    <?php endif; ?>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            
+            <?php if ($total_storage_pages > 1): ?>
+            <div class="admin-pagination mt-4">
+              <a class="admin-page-btn <?php echo ($storage_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&p=1">«</a>
+              <a class="admin-page-btn <?php echo ($storage_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&p=<?php echo $storage_page - 1; ?>">‹</a>
+              <?php
+                $start_p = max(1, $storage_page - 2);
+                $end_p = min($total_storage_pages, $start_p + 4);
+                if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+              ?>
+              <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
+              <a class="admin-page-btn <?php echo ($storage_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=storage&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+              <?php endfor; ?>
+              <a class="admin-page-btn <?php echo ($storage_page >= $total_storage_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&p=<?php echo $storage_page + 1; ?>">›</a>
+              <a class="admin-page-btn <?php echo ($storage_page >= $total_storage_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&p=<?php echo $total_storage_pages; ?>">»</a>
+            </div>
+            <?php endif; ?>
+
+            <script>
+              (function() {
+                // Safely destroy existing charts if SPA navigates back to this page
+                if (window.diskPieChart instanceof Chart) window.diskPieChart.destroy();
+                if (window.usersBarChart instanceof Chart) window.usersBarChart.destroy();
+  
+                Chart.defaults.color = '#aaaaaa';
+                Chart.defaults.font.family = "'Roboto', sans-serif";
+  
+                const ctxPie = document.getElementById('diskPieChart').getContext('2d');
+                window.diskPieChart = new Chart(ctxPie, {
+                  type: 'doughnut',
+                  data: {
+                    labels: ['PHP Music Assets', 'Other Used Space', 'Free Space'],
+                    datasets: [{
+                      data: [<?php echo $app_assets_total; ?>, <?php echo $other_used; ?>, <?php echo $disk_free; ?>],
+                      backgroundColor: ['#ff3b30', '#404040', '#198754'],
+                      borderColor: '#121212',
+                      borderWidth: 2
+                    }]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                      legend: { position: 'right', labels: { color: '#ffffff', boxWidth: 12 } },
+                      tooltip: {
+                        callbacks: {
+                          label: function(context) {
+                            let val = context.raw;
+                            if (val === 0) return ' 0 B';
+                            const k = 1024;
+                            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                            const i = Math.floor(Math.log(val) / Math.log(k));
+                            return ' ' + parseFloat((val / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+                          }
+                        }
+                      }
+                    }
+                  }
+                });
+  
+                <?php
+                  $top_users = array_slice($artist_stats, 0, 10);
+                  $user_labels = array_map(function($u) { return htmlspecialchars($u['name']); }, $top_users);
+                  $user_data = array_map(function($u) { return $u['size']; }, $top_users);
+                ?>
+  
+                const ctxBar = document.getElementById('usersBarChart').getContext('2d');
+                window.usersBarChart = new Chart(ctxBar, {
+                  type: 'bar',
+                  data: {
+                    labels: <?php echo json_encode($user_labels); ?>,
+                    datasets: [{
+                      label: 'Storage Used',
+                      data: <?php echo json_encode($user_data); ?>,
+                      backgroundColor: '#ff3b30',
+                      borderRadius: 4
+                    }]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                      y: {
+                        beginAtZero: true,
+                        grid: { color: '#333333' },
+                        ticks: {
+                          callback: function(val) {
+                            if (val === 0) return '0 B';
+                            const k = 1024;
+                            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                            const i = Math.floor(Math.log(val) / Math.log(k));
+                            return parseFloat((val / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+                          }
+                        }
+                      },
+                      x: {
+                        grid: { display: false }
+                      }
+                    },
+                    plugins: {
+                      legend: { display: false },
+                      tooltip: {
+                        callbacks: {
+                          label: function(context) {
+                            let val = context.raw;
+                            if (val === 0) return ' 0 B';
+                            const k = 1024;
+                            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                            const i = Math.floor(Math.log(val) / Math.log(k));
+                            return ' ' + parseFloat((val / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+                          }
+                        }
+                      }
+                    }
+                  }
+                });
+              })();
+            </script>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'api'): ?>
           <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
@@ -3403,26 +3815,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </table>
             </div>
             <?php if ($total_api_pages > 1): ?>
-            <nav aria-label="API pagination">
-              <ul class="pagination justify-content-center">
-                <li class="page-item <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $api_page - 1; ?>">Previous</a>
-                </li>
-                <?php
-                  $start_p = max(1, $api_page - 2);
-                  $end_p = min($total_api_pages, $start_p + 4);
-                  if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
-                ?>
-                <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
-                <li class="page-item <?php echo ($api_page == $i) ? 'active' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-                </li>
-                <?php endfor; ?>
-                <li class="page-item <?php echo ($api_page >= $total_api_pages) ? 'disabled' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $api_page + 1; ?>">Next</a>
-                </li>
-              </ul>
-            </nav>
+            <div class="admin-pagination">
+              <a class="admin-page-btn <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=1">«</a>
+              <a class="admin-page-btn <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $api_page - 1; ?>">‹</a>
+              <?php
+                $start_p = max(1, $api_page - 2);
+                $end_p = min($total_api_pages, $start_p + 4);
+                if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+              ?>
+              <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
+                <a class="admin-page-btn <?php echo ($api_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+              <?php endfor; ?>
+              <a class="admin-page-btn <?php echo ($api_page >= $total_api_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $api_page + 1; ?>">›</a>
+              <a class="admin-page-btn <?php echo ($api_page >= $total_api_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $total_api_pages; ?>">»</a>
+            </div>
             <?php endif; ?>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'manage'): ?>
@@ -3611,9 +4017,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
           $dbm_action = $_REQUEST['dbm_action'] ?? '';
           $dbName  = $_GET['db'] ?? $_POST['db'] ?? '';
+          
+          if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($dbm_action) && function_exists('log_admin_activity') && isset($_SESSION['admin_email'])) {
+            $log_target = $dbName ? $dbName : 'System';
+            $log_table = ($_GET['table'] ?? $_POST['table'] ?? '') ? " on table " . ($_GET['table'] ?? $_POST['table'] ?? '') : "";
+            log_admin_activity(get_db(), $_SESSION['admin_email'], "DBManager: {$dbm_action} - {$log_target}{$log_table}", 0);
+          }
           $dbPath  = '';
           $dbm_pdo = null;
-          $curTable = $_GET['table'] ?? '';
+          $curTable = $_GET['table'] ?? $_POST['table'] ?? '';
 
           if ($_SERVER['REQUEST_METHOD'] === 'POST' && $dbm_action === 'create_db') {
             dbm_csrf_require();
@@ -3811,10 +4223,65 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   if (!empty($setClauses)) { try { $sql = 'UPDATE ' . dbm_quote_ident($curTable) . ' SET ' . implode(', ', $setClauses) . ' WHERE ' . dbm_quote_ident($pkCol) . ' = ?'; $stmt = $dbm_pdo->prepare($sql); $stmt->execute($params); dbm_flash_set('success', 'Row updated.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
                 }
                 dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'page' => (int)($_POST['page'] ?? 1), 'search' => $_POST['search'] ?? '']));
+              case 'update_multiple_rows':
+                if ($dbm_pdo && $curTable !== '' && isset($_POST['rows']) && is_array($_POST['rows'])) {
+                  $pkCol = dbm_get_pk_column($dbm_pdo, $curTable) ?: 'rowid';
+                  $updated = 0;
+                  try {
+                    $dbm_pdo->beginTransaction();
+                    foreach ($_POST['rows'] as $pkVal => $data) {
+                      $setClauses = [];
+                      $params = [];
+                      foreach ($data as $k => $v) {
+                        if ($v === '[BLOB_DATA]') continue;
+                        $setClauses[] = dbm_quote_ident($k) . ' = ?';
+                        $params[] = ($v === '' && isset($_POST['row_null'][$pkVal][$k])) ? null : $v;
+                      }
+                      if (!empty($setClauses)) {
+                        $params[] = $pkVal;
+                        $sql = 'UPDATE ' . dbm_quote_ident($curTable) . ' SET ' . implode(', ', $setClauses) . ' WHERE ' . dbm_quote_ident($pkCol) . ' = ?';
+                        $stmt = $dbm_pdo->prepare($sql);
+                        $stmt->execute($params);
+                        $updated++;
+                      }
+                    }
+                    $dbm_pdo->commit();
+                    dbm_flash_set('success', "$updated row(s) updated successfully.");
+                  } catch (PDOException $e) {
+                    $dbm_pdo->rollBack();
+                    dbm_flash_set('error', 'Error: ' . $e->getMessage());
+                  }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'page' => (int)($_POST['page'] ?? 1), 'search' => $_POST['search'] ?? '', 'limit' => (int)($_POST['limit'] ?? 25)]));
               case 'delete_row':
                 if ($dbm_pdo && $curTable !== '') {
                   $pkCol = dbm_get_pk_column($dbm_pdo, $curTable) ?: 'rowid'; $pkVal = $_POST['pk_val'] ?? '';
                   try { $stmt = $dbm_pdo->prepare('DELETE FROM ' . dbm_quote_ident($curTable) . ' WHERE ' . dbm_quote_ident($pkCol) . ' = ?'); $stmt->execute([$pkVal]); dbm_flash_set('success', 'Row deleted.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'page' => (int)($_POST['page'] ?? 1), 'search' => $_POST['search'] ?? '', 'limit' => (int)($_POST['limit'] ?? 25)]));
+              case 'update_row_mass':
+                if ($dbm_pdo && $curTable !== '' && !empty($_POST['check']) && isset($_POST['mass_col']) && isset($_POST['mass_val'])) {
+                  $pkCol = dbm_get_pk_column($dbm_pdo, $curTable) ?: 'rowid';
+                  $pks = $_POST['check'];
+                  $col = $_POST['mass_col'];
+                  $val = $_POST['mass_val'] === '' && isset($_POST['mass_null']) ? null : $_POST['mass_val'];
+                  
+                  // Low-end hardware optimization: Slice bulk arrays into 25-item chunks to prevent PHP memory exhaustion
+                  $chunks = array_chunk($pks, 25);
+                  try {
+                    $dbm_pdo->beginTransaction();
+                    foreach ($chunks as $chunk) {
+                      $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+                      $stmt = $dbm_pdo->prepare('UPDATE ' . dbm_quote_ident($curTable) . ' SET ' . dbm_quote_ident($col) . ' = ? WHERE ' . dbm_quote_ident($pkCol) . ' IN (' . $placeholders . ')');
+                      $params = array_merge([$val], $chunk);
+                      $stmt->execute($params);
+                    }
+                    $dbm_pdo->commit();
+                    dbm_flash_set('success', count($pks) . ' row(s) updated.');
+                  } catch (PDOException $e) { 
+                    $dbm_pdo->rollBack();
+                    dbm_flash_set('error', 'Error: ' . $e->getMessage()); 
+                  }
                 }
                 dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'page' => (int)($_POST['page'] ?? 1), 'search' => $_POST['search'] ?? '', 'limit' => (int)($_POST['limit'] ?? 25)]));
               case 'delete_row_mass':
@@ -3829,6 +4296,61 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); }
                 }
                 dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'page' => (int)($_POST['page'] ?? 1), 'search' => $_POST['search'] ?? '', 'limit' => (int)($_POST['limit'] ?? 25)]));
+              case 'export_tables_mass':
+                if ($dbm_pdo && !empty($_POST['check'])) {
+                  while (ob_get_level()) ob_end_clean();
+                  header('Content-Type: application/sql; charset=UTF-8');
+                  header('Content-Disposition: attachment; filename="backup_tables_' . date('Y-m-d_H-i-s') . '.sql"');
+                  echo "-- Mass Table Backup\n\nPRAGMA foreign_keys = OFF;\nBEGIN TRANSACTION;\n\n";
+                  foreach ($_POST['check'] as $t) {
+                    $sql = dbm_get_table_sql($dbm_pdo, $t);
+                    if ($sql) {
+                      echo "-- Table: $t\n" . $sql . ";\n\n";
+                      $stmt = $dbm_pdo->prepare('SELECT * FROM ' . dbm_quote_ident($t)); $stmt->execute();
+                      $colNames = array_column(dbm_get_table_info($dbm_pdo, $t), 'name');
+                      // Low end RAM chunking protection: Output directly to stream buffer
+                      while ($row = $stmt->fetch()) {
+                        $vals = [];
+                        foreach ($row as $v) {
+                          if ($v === null) $vals[] = 'NULL'; elseif (is_numeric($v)) $vals[] = $v; else $vals[] = "'" . str_replace("'", "''", $v) . "'";
+                        }
+                        echo "INSERT INTO " . dbm_quote_ident($t) . " (" . implode(', ', array_map('dbm_quote_ident', $colNames)) . ") VALUES (" . implode(', ', $vals) . ");\n";
+                      }
+                      echo "\n";
+                    }
+                  }
+                  echo "COMMIT;\nPRAGMA foreign_keys = ON;\n";
+                  exit;
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName]));
+              case 'import_csv':
+                if ($dbm_pdo && $curTable !== '' && !empty($_FILES['csv_file']['tmp_name'])) {
+                  $file = fopen($_FILES['csv_file']['tmp_name'], 'r');
+                  if ($file !== false) {
+                    $header = fgetcsv($file);
+                    if ($header) {
+                      $cols = array_map('dbm_quote_ident', $header);
+                      $placeholders = implode(',', array_fill(0, count($cols), '?'));
+                      $sql = 'INSERT INTO ' . dbm_quote_ident($curTable) . ' (' . implode(',', $cols) . ') VALUES (' . $placeholders . ')';
+                      $stmt = $dbm_pdo->prepare($sql);
+                      $count = 0;
+                      $dbm_pdo->beginTransaction();
+                      try {
+                        while (($row = fgetcsv($file)) !== false) {
+                          $stmt->execute($row);
+                          $count++;
+                        }
+                        $dbm_pdo->commit();
+                        dbm_flash_set('success', "Successfully imported $count rows from CSV.");
+                      } catch (Exception $e) {
+                        $dbm_pdo->rollBack();
+                        dbm_flash_set('error', 'Import failed: ' . $e->getMessage());
+                      }
+                    }
+                    fclose($file);
+                  }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable]));
               case 'drop_table_mass':
                 if ($dbm_pdo && !empty($_POST['check'])) {
                   foreach($_POST['check'] as $t) {
@@ -4116,8 +4638,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline <?= ($dbm_view === 'browse') ? 'dbm-btn-primary' : '' ?>"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg> Browse</a>
                   <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'structure'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline <?= ($dbm_view === 'structure') ? 'dbm-btn-primary' : '' ?>"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="14" y2="12"/><line x1="4" y1="18" x2="11" y2="18"/></svg> Structure</a>
                   <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'view' => 'insert'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline <?= ($dbm_view === 'insert') ? 'dbm-btn-primary' : '' ?>"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg> Insert</a>
-                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'dbm_action' => 'export_csv'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> CSV</a>
-                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'dbm_action' => 'export_sql'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> SQL</a>
+                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'dbm_action' => 'export_csv'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export CSV</a>
+                  <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'dbm_action' => 'export_sql'])) ?>" class="dbm-btn dbm-btn-sm dbm-btn-outline"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export SQL</a>
+                  <button class="dbm-btn dbm-btn-sm dbm-btn-primary" onclick="document.getElementById('dbm-importCsvModal').classList.add('open')">Import CSV</button>
                   <button class="dbm-btn dbm-btn-sm dbm-btn-outline" onclick="document.getElementById('dbm-renameModal').classList.add('open')">Rename</button>
                   <button class="dbm-btn dbm-btn-sm dbm-btn-danger" onclick="document.getElementById('dbm-dropModal').classList.add('open')">Drop</button>
                 </div>
@@ -4244,27 +4767,37 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <div class="dbm-empty-state"><p>No tables yet. <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'create_table'])) ?>">Create one</a>.</p></div>
                       <?php else: ?>
                       <div class="dbm-table-wrap">
-                        <table>
-                          <thead><tr><th style="width:40px; text-align:center;"><input type="checkbox" onclick="dbmToggleCheckAll(this, 'check_tbl')" style="cursor:pointer; margin-top:3px;"></th><th>Name</th><th>Type</th><th>Rows (approx)</th><th>Actions</th></tr></thead>
-                          <tbody>
-                          <?php foreach ($dbm_tables as $t):
-                            $rowCount = '-';
-                            try { $rowCount = number_format((int)$dbm_pdo->query('SELECT COUNT(*) FROM ' . dbm_quote_ident($t['name']))->fetchColumn()); } catch(Exception $e) {}
-                          ?>
-                          <tr>
-                            <td style="text-align:center;"><input type="checkbox" name="check[]" value="<?= dbm_e($t['name']) ?>" class="check_tbl" style="cursor:pointer; margin-top:3px;"></td>
-                            <td style="font-weight: bold;"><a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name']])) ?>"><?= dbm_e($t['name']) ?></a></td>
-                            <td><span class="dbm-badge <?= $t['type']==='view'?'dbm-badge-purple':'dbm-badge-blue' ?>"><?= dbm_e($t['type']) ?></span></td>
-                            <td style="color: var(--dbm-text2);"><?= $rowCount ?></td>
-                            <td class="actions">
-                              <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name']])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-primary">Browse</a>
-                              <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name'], 'view' => 'structure'])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-outline">Structure</a>
-                              <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name'], 'dbm_action' => 'export_csv'])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-outline">CSV</a>
-                            </td>
-                          </tr>
-                          <?php endforeach; ?>
-                          </tbody>
-                        </table>
+                        <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName])) ?>" id="massTableForm">
+                          <?= dbm_csrf_field() ?>
+                          <input type="hidden" name="dbm_action" id="massTableAction" value="">
+                          <table>
+                            <thead><tr><th style="width:40px; text-align:center;"><input type="checkbox" onclick="dbmToggleCheckAll(this, 'check_tbl')" style="cursor:pointer; margin-top:3px;"></th><th>Name</th><th>Type</th><th>Rows (approx)</th><th>Actions</th></tr></thead>
+                            <tbody>
+                            <?php foreach ($dbm_tables as $t):
+                              $rowCount = '-';
+                              try { $rowCount = number_format((int)$dbm_pdo->query('SELECT COUNT(*) FROM ' . dbm_quote_ident($t['name']))->fetchColumn()); } catch(Exception $e) {}
+                            ?>
+                            <tr>
+                              <td style="text-align:center;"><input type="checkbox" name="check[]" value="<?= dbm_e($t['name']) ?>" class="check_tbl" style="cursor:pointer; margin-top:3px;"></td>
+                              <td style="font-weight: bold;"><a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name']])) ?>"><?= dbm_e($t['name']) ?></a></td>
+                              <td><span class="dbm-badge <?= $t['type']==='view'?'dbm-badge-purple':'dbm-badge-blue' ?>"><?= dbm_e($t['type']) ?></span></td>
+                              <td style="color: var(--dbm-text2);"><?= $rowCount ?></td>
+                              <td class="actions">
+                                <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name']])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-primary">Browse</a>
+                                <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name'], 'view' => 'structure'])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-outline">Structure</a>
+                                <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $t['name'], 'dbm_action' => 'export_csv'])) ?>" class="dbm-btn dbm-btn-xs dbm-btn-outline">CSV</a>
+                              </td>
+                            </tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                          </table>
+                        </form>
+                      </div>
+                      <div style="margin-top: 1rem; display: flex; justify-content: flex-end; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                        <span style="color:var(--dbm-text2);font-size:0.85rem;">With selected tables:</span>
+                        <button type="button" class="dbm-btn dbm-btn-sm dbm-btn-primary" onclick="if(confirm('Backup selected tables to SQL?')){ document.getElementById('massTableAction').value='export_tables_mass'; document.getElementById('massTableForm').submit(); }">Backup (SQL)</button>
+                        <button type="button" class="dbm-btn dbm-btn-sm dbm-btn-outline" onclick="if(confirm('Empty selected tables?')){ document.getElementById('massTableAction').value='empty_table_mass'; document.getElementById('massTableForm').submit(); }">Empty</button>
+                        <button type="button" class="dbm-btn dbm-btn-sm dbm-btn-danger" onclick="if(confirm('Drop selected tables?')){ document.getElementById('massTableAction').value='drop_table_mass'; document.getElementById('massTableForm').submit(); }">Drop</button>
                       </div>
                       <?php endif; ?>
                     </div>
@@ -4351,9 +4884,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                           <?php foreach ($rows as $i => $row):
                             $rowid = $row['__rowid__'];
                             $pkVal = $row[$pkCol] ?? $rowid;
+                            // Safely mask BLOBs so `json_encode` doesn't crash on invalid UTF-8 bytes
+                            $safeRow = array_map(function($val){ return (is_string($val) && dbm_is_binary($val)) ? '[BLOB_DATA]' : $val; }, $row);
                           ?>
                           <tr>
-                            <td style="text-align:center;"><input type="checkbox" name="check[]" value="<?= dbm_e((string)$pkVal) ?>" class="check_row" style="cursor:pointer; margin-top:3px;"></td>
+                            <td style="text-align:center;"><input type="checkbox" name="check[]" value="<?= dbm_e((string)$pkVal) ?>" data-row="<?= dbm_e(json_encode($safeRow)) ?>" class="check_row" style="cursor:pointer; margin-top:3px;"></td>
                             <td style="color: var(--dbm-text3);"><?= $offset + $i + 1 ?></td>
                             <?php foreach ($cols as $col): ?>
                             <td class="<?= $col['pk'] ? 'pk' : '' ?>" title="<?= dbm_e((string)($row[$col['name']] ?? '')) ?>">
@@ -4370,11 +4905,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                             </td>
                             <?php endforeach; ?>
                             <td class="actions" style="text-align: right;">
-                              <?php 
-                                // Safely mask BLOBs so `json_encode` doesn't crash on invalid UTF-8 bytes
-                                $safeRow = array_map(function($val){ return (is_string($val) && dbm_is_binary($val)) ? '[BLOB_DATA]' : $val; }, $row);
-                              ?>
-                              <button class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="dbmOpenEditModal(<?= dbm_e(json_encode($safeRow)) ?>, <?= dbm_e(json_encode($pkCol)) ?>, <?= dbm_e(json_encode(array_column($cols, null, 'name'))) ?>, <?= $dbm_page ?>, <?= dbm_e(json_encode($dbm_search)) ?>)">Edit</button>
+                              <button type="button" class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="dbmOpenEditModal(<?= dbm_e(json_encode($safeRow)) ?>, <?= dbm_e(json_encode($pkCol)) ?>, <?= dbm_e(json_encode(array_column($cols, null, 'name'))) ?>, <?= $dbm_page ?>, <?= dbm_e(json_encode($dbm_search)) ?>)">Edit</button>
                               <form method="post" style="display:inline; margin-left:0.25rem;" onsubmit="return confirm('Delete this row completely?')">
                                 <?= dbm_csrf_field() ?>
                                 <input type="hidden" name="dbm_action" value="delete_row">
@@ -4429,6 +4960,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <?php if (!empty($rows)): ?>
                       <div style="border-left: 1px solid var(--dbm-border); height: 24px; margin: 0 0.5rem;"></div>
                       <span style="color:var(--dbm-text2);font-size:0.85rem;">With selected:</span>
+                        <button type="button" class="dbm-btn dbm-btn-sm dbm-btn-primary" onclick="dbmOpenMultiEditModal(<?= dbm_e(json_encode($pkCol ?? 'rowid')) ?>, <?= dbm_e(json_encode(array_column($cols ?? [], null, 'name'))) ?>)">Multi-Edit</button>
+                        <button type="button" class="dbm-btn dbm-btn-sm dbm-btn-outline" onclick="dbmOpenMassEditModal()">Bulk Fill</button>
                       <button type="button" class="dbm-btn dbm-btn-sm dbm-btn-danger" onclick="if(confirm('Delete selected rows completely?')){ document.getElementById('massRowForm').submit(); }">Delete</button>
                       <?php endif; ?>
                     </div>
@@ -4870,8 +5403,65 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </div><!-- #dbm-app -->
 
           <!-- MODALS -->
+          <div class="dbm-modal-backdrop" id="dbm-multiEditModal">
+            <div class="dbm-modal" style="max-width: 900px; width: 95%; background: #121212; border: 1px solid #4d4d4d;">
+              <h2>Multi-Edit Selected Rows</h2>
+              <form method="post" id="dbm-multi-edit-form" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable])) ?>">
+                <?= dbm_csrf_field() ?>
+                <input type="hidden" name="dbm_action" value="update_multiple_rows">
+                <input type="hidden" name="db" value="<?= dbm_e($dbName) ?>">
+                <input type="hidden" name="table" value="<?= dbm_e($curTable) ?>">
+                <input type="hidden" name="page" value="<?= $dbm_page ?>">
+                <input type="hidden" name="search" value="<?= dbm_e($dbm_search) ?>">
+                <input type="hidden" name="limit" value="<?= $dbm_limit ?>">
+                <div id="dbm-multi-edit-container" style="max-height: 60vh; overflow-y: auto; padding-right: 10px; display: flex; flex-direction: column; gap: 2rem;"></div>
+                <div class="dbm-modal-footer">
+                  <button type="button" class="dbm-btn dbm-btn-outline" onclick="document.getElementById('dbm-multiEditModal').classList.remove('open')">Cancel</button>
+                  <button type="submit" class="dbm-btn dbm-btn-primary">Save All Changes</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div class="dbm-modal-backdrop" id="dbm-massEditModal">
+            <div class="dbm-modal" style="max-width: 500px;">
+              <h2>Bulk Edit Selected Rows</h2>
+              <p style="color: var(--dbm-text2); font-size: 0.85rem; margin-bottom: 1rem;">Process executes in batched memory chunks optimized for low-end hardware.</p>
+              <form method="post" id="dbm-mass-edit-form" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable])) ?>">
+                <?= dbm_csrf_field() ?>
+                <input type="hidden" name="dbm_action" value="update_row_mass">
+                <input type="hidden" name="page" value="<?= $dbm_page ?>">
+                <input type="hidden" name="search" value="<?= dbm_e($dbm_search) ?>">
+                <input type="hidden" name="limit" value="<?= $dbm_limit ?>">
+                <div id="dbm-mass-edit-hidden-checks"></div>
+                <div class="dbm-form-group">
+                  <label>Column to Update</label>
+                  <select name="mass_col" class="dbm-form-select" required>
+                    <?php if ($curTable !== '' && $dbm_pdo): ?>
+                      <?php foreach (dbm_get_table_info($dbm_pdo, $curTable) as $col): ?>
+                        <option value="<?= dbm_e($col['name']) ?>"><?= dbm_e($col['name']) ?> (<?= dbm_e($col['type']) ?>)</option>
+                      <?php endforeach; ?>
+                    <?php endif; ?>
+                  </select>
+                </div>
+                <div class="dbm-form-group">
+                  <label>New Value</label>
+                  <input type="text" name="mass_val" class="dbm-form-control">
+                </div>
+                <div class="dbm-form-check mb-3">
+                  <input type="checkbox" name="mass_null" id="dbm_mass_null" value="1">
+                  <label for="dbm_mass_null" style="font-weight:normal; margin:0;">Set as strict NULL</label>
+                </div>
+                <div class="dbm-modal-footer">
+                  <button type="button" class="dbm-btn dbm-btn-outline" onclick="document.getElementById('dbm-massEditModal').classList.remove('open')">Cancel</button>
+                  <button type="submit" class="dbm-btn dbm-btn-primary">Apply to Selection</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
           <div class="dbm-modal-backdrop" id="dbm-editModal">
-            <div class="dbm-modal" style="max-width: 700px;">
+            <div class="dbm-modal" style="max-width: 700px; background: #121212; border: 1px solid #4d4d4d;">
               <h2>Edit Row</h2>
               <form method="post" id="dbm-edit-form">
                 <?= dbm_csrf_field() ?>
@@ -4927,6 +5517,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
           </div>
 
+          <div class="dbm-modal-backdrop" id="dbm-importCsvModal">
+            <div class="dbm-modal" style="max-width: 450px;">
+              <h2>Import CSV</h2>
+              <form method="post" enctype="multipart/form-data" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $curTable])) ?>">
+                <?= dbm_csrf_field() ?>
+                <input type="hidden" name="dbm_action" value="import_csv">
+                <div class="dbm-form-group">
+                  <label>Select CSV File</label>
+                  <input type="file" name="csv_file" class="dbm-form-control" accept=".csv" required>
+                  <small style="color: var(--dbm-text3); display: block; margin-top: 8px;">The first row must contain column headers exactly matching the table schema.</small>
+                </div>
+                <div class="dbm-modal-footer">
+                  <button type="button" class="dbm-btn dbm-btn-outline" onclick="document.getElementById('dbm-importCsvModal').classList.remove('open')">Cancel</button>
+                  <button type="submit" class="dbm-btn dbm-btn-primary">Import Data</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
           <div class="dbm-modal-backdrop" id="dbm-renameColModal">
             <div class="dbm-modal" style="max-width: 450px;">
               <h2>Rename Column</h2>
@@ -4975,6 +5584,151 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             function dbmToggleCheckAll(source, className) {
               const checkboxes = document.querySelectorAll('.' + className);
               checkboxes.forEach(cb => cb.checked = source.checked);
+            }
+
+            function dbmOpenMultiEditModal(pkCol, colsMeta) {
+              const form = document.getElementById('massRowForm');
+              const checkboxes = form.querySelectorAll('input.check_row:checked');
+              if (checkboxes.length === 0) {
+                alert('Please select at least one row to edit.');
+                return;
+              }
+              
+              const container = document.getElementById('dbm-multi-edit-container');
+              container.innerHTML = '';
+              
+              checkboxes.forEach((cb) => {
+                const row = JSON.parse(cb.dataset.row);
+                const pkVal = row[pkCol] || row['__rowid__'];
+                
+                const fieldset = document.createElement('div');
+                fieldset.style.border = '1px solid #4d4d4d';
+                fieldset.style.padding = '1.25rem';
+                fieldset.style.borderRadius = '8px';
+                fieldset.style.background = '#1a1a1a';
+                
+                const header = document.createElement('h4');
+                header.innerText = 'Row: ' + pkVal;
+                header.style.marginTop = '0';
+                header.style.marginBottom = '1.25rem';
+                header.style.color = '#ff0000';
+                fieldset.appendChild(header);
+                
+                const grid = document.createElement('div');
+                grid.style.display = 'grid';
+                grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(280px, 1fr))';
+                grid.style.gap = '1.25rem';
+                
+                for (const [colName, meta] of Object.entries(colsMeta)) {
+                  if (colName === '__rowid__') continue;
+                  const val = row[colName];
+                  const div = document.createElement('div');
+                  div.className = 'dbm-form-group';
+                  div.style.marginBottom = '0';
+
+                  const label = document.createElement('label');
+                  label.innerHTML = dbmEscHtml(colName) + 
+                                    (meta.pk ? ' <span style="color:#d29922; font-size:0.75rem; margin-left:4px; font-weight:bold;">PK</span>' : '') + 
+                                    ' <span class="dbm-badge dbm-badge-gray" style="margin-left: 6px; background:#262626; color:#bbbbbb;">' + dbmEscHtml(meta.type || 'ANY') + '</span>';
+                  label.style.color = '#e0e0e0';
+
+                  const isLong = typeof val === 'string' && val.length > 80;
+                  const isBlobField = (val === '[BLOB_DATA]');
+
+                  let input;
+                  const inputName = `rows[${pkVal}][${colName}]`;
+                  
+                  if (isBlobField) {
+                    input = document.createElement('div');
+                    input.className = 'dbm-alert dbm-alert-error';
+                    input.style.padding = '0.5rem';
+                    input.style.marginBottom = '0';
+                    input.style.background = 'rgba(248,81,73,0.15)';
+                    input.style.color = '#f85149';
+                    input.style.border = '1px solid rgba(248,81,73,0.4)';
+                    input.textContent = '[BLOB — cannot edit inline]';
+                    
+                    const hiddenInput = document.createElement('input');
+                    hiddenInput.type = 'hidden';
+                    hiddenInput.name = inputName;
+                    hiddenInput.value = '[BLOB_DATA]';
+                    div.appendChild(hiddenInput);
+                  } else if (isLong || meta.type === 'TEXT' || meta.type === 'BLOB' || meta.type === 'CLOB') {
+                    input = document.createElement('textarea');
+                    input.name = inputName;
+                    input.className = 'dbm-form-control';
+                    input.style.background = '#0a0a0a';
+                    input.style.color = '#fff';
+                    input.style.border = '1px solid #4d4d4d';
+                    input.value = val !== null ? String(val) : '';
+                    input.rows = 2;
+                  } else {
+                    input = document.createElement('input');
+                    input.type = 'text';
+                    input.name = inputName;
+                    input.className = 'dbm-form-control';
+                    input.style.background = '#0a0a0a';
+                    input.style.color = '#fff';
+                    input.style.border = '1px solid #4d4d4d';
+                    input.value = val !== null ? String(val) : '';
+                  }
+
+                  const nullCheck = document.createElement('div');
+                  nullCheck.className = 'dbm-form-check';
+                  nullCheck.style.display = 'flex';
+                  nullCheck.style.alignItems = 'center';
+                  nullCheck.style.gap = '0.5rem';
+                  nullCheck.style.marginTop = '0.5rem';
+                  
+                  const chk = document.createElement('input');
+                  chk.type = 'checkbox';
+                  chk.name = `row_null[${pkVal}][${colName}]`;
+                  const chkId = `dbm_null_${pkVal}_${colName}`;
+                  chk.id = chkId;
+                  chk.value = '1';
+                  if (val === null) { chk.checked = true; if (!isBlobField) input.disabled = true; }
+                  chk.addEventListener('change', () => { if (!isBlobField) input.disabled = chk.checked; });
+                  
+                  const nullLabel = document.createElement('label');
+                  nullLabel.htmlFor = chkId;
+                  nullLabel.textContent = 'Set NULL';
+                  nullLabel.style.fontWeight = 'normal';
+                  nullLabel.style.margin = '0';
+                  nullLabel.style.color = '#bbbbbb';
+                  
+                  nullCheck.appendChild(chk);
+                  nullCheck.appendChild(nullLabel);
+
+                  div.appendChild(label);
+                  div.appendChild(input);
+                  if (!isBlobField) div.appendChild(nullCheck);
+                  grid.appendChild(div);
+                }
+                
+                fieldset.appendChild(grid);
+                container.appendChild(fieldset);
+              });
+              
+              document.getElementById('dbm-multiEditModal').classList.add('open');
+            }
+
+            function dbmOpenMassEditModal() {
+              const form = document.getElementById('massRowForm');
+              const checkboxes = form.querySelectorAll('input.check_row:checked');
+              if (checkboxes.length === 0) {
+                alert('Please select at least one row to edit.');
+                return;
+              }
+              const hiddenContainer = document.getElementById('dbm-mass-edit-hidden-checks');
+              hiddenContainer.innerHTML = '';
+              checkboxes.forEach(cb => {
+                const hidden = document.createElement('input');
+                hidden.type = 'hidden';
+                hidden.name = 'check[]';
+                hidden.value = cb.value;
+                hiddenContainer.appendChild(hidden);
+              });
+              document.getElementById('dbm-massEditModal').classList.add('open');
             }
 
             function dbmToggleSidebar() {
@@ -5070,6 +5824,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   input = document.createElement('textarea');
                   input.name = 'row[' + colName + ']';
                   input.className = 'dbm-form-control';
+                  input.style.background = '#0a0a0a';
+                  input.style.color = '#fff';
+                  input.style.border = '1px solid #4d4d4d';
                   input.value = val !== null ? String(val) : '';
                   input.rows = Math.min(8, Math.max(2, Math.ceil((val || '').length / 60)));
                 } else {
@@ -5077,6 +5834,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   input.type = 'text';
                   input.name = 'row[' + colName + ']';
                   input.className = 'dbm-form-control';
+                  input.style.background = '#0a0a0a';
+                  input.style.color = '#fff';
+                  input.style.border = '1px solid #4d4d4d';
                   input.value = val !== null ? String(val) : '';
                 }
 
@@ -13043,7 +13803,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                             <?php if ($user['is_admin'] == 1): ?>
                               <?php
                                 $u_settings = json_decode($user['settings'] ?: '{}', true) ?? [];
-                                $u_perms = $u_settings['admin_permissions'] ?? ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
+                                $u_perms = $u_settings['admin_permissions'] ?? ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground', 'storage'];
                                 $perms_json = htmlspecialchars(json_encode($u_perms), ENT_QUOTES, 'UTF-8');
                               ?>
                               <button type="button" class="dropdown-item d-flex align-items-center gap-3 text-success fw-bold" onclick="openPermissionsModal(<?php echo $user['id']; ?>, '<?php echo addslashes(htmlspecialchars($user['artist'], ENT_QUOTES)); ?>', '<?php echo $perms_json; ?>')">
@@ -13121,7 +13881,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const userData = JSON.parse(btn.getAttribute('data-user'));
                 const modalBody = document.getElementById('user-details-modal-body');
                 
-                let u_perms = ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
+                let u_perms = ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground', 'storage'];
                 try {
                   const settings = JSON.parse(userData.settings || '{}');
                   if (settings.admin_permissions) u_perms = settings.admin_permissions;
@@ -13218,28 +13978,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
             </script>
             <?php if ($total_pages > 1): ?>
-            <nav class="mt-4" aria-label="User pagination">
-              <ul class="pagination justify-content-center">
-                <li class="page-item <?php echo ($page <= 1) ? 'disabled' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=<?php echo $page - 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">Previous</a>
-                </li>
-                <?php
-                  $start_page = max(1, $page - 1);
-                  $end_page = min($total_pages, $start_page + 2);
-                  if ($end_page - $start_page < 2) {
-                    $start_page = max(1, $end_page - 2);
-                  }
-                ?>
-                <?php for ($i = $start_page; $i <= $end_page; $i++): ?>
-                <li class="page-item <?php echo ($page == $i) ? 'active' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>"><?php echo $i; ?></a>
-                </li>
-                <?php endfor; ?>
-                <li class="page-item <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>">
-                  <a class="page-link" href="?access=admin&page=<?php echo $page + 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">Next</a>
-                </li>
-              </ul>
-            </nav>
+            <div class="admin-pagination mt-4">
+              <a class="admin-page-btn <?php echo ($page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=1&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">«</a>
+              <a class="admin-page-btn <?php echo ($page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=<?php echo $page - 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">‹</a>
+              <?php
+                $start_page = max(1, $page - 2);
+                $end_page = min($total_pages, $start_page + 4);
+                if ($end_page - $start_page < 4) {
+                  $start_page = max(1, $end_page - 4);
+                }
+              ?>
+              <?php for ($i = $start_page; $i <= $end_page; $i++): ?>
+                <a class="admin-page-btn <?php echo ($page == $i) ? 'active' : ''; ?>" href="?access=admin&page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>"><?php echo $i; ?></a>
+              <?php endfor; ?>
+              <a class="admin-page-btn <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=<?php echo $page + 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">›</a>
+              <a class="admin-page-btn <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=<?php echo $total_pages; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">»</a>
+            </div>
             <?php endif; ?>
           </div>
         <?php endif; ?>
@@ -13312,6 +14066,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="form-check form-switch">
                     <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="playground" id="perm-playground">
                     <label class="form-check-label text-white fw-medium" for="perm-playground">API Playground</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="storage" id="perm-storage">
+                    <label class="form-check-label text-white fw-medium" for="perm-storage">Storage Stats</label>
                   </div>
                 </div>
               </div>
@@ -16246,6 +17006,182 @@ HTML;
       }
       http_response_code(404);
       send_json(['status' => 'error', 'message' => 'File not found.']);
+      break;
+
+    case 'inspect_audio':
+      if (!$user_id) { http_response_code(403); exit; }
+      if (!isset($_FILES['audio'])) send_json(['ok' => false, 'message' => 'No audio file']);
+      $tmp = $_FILES['audio']['tmp_name'];
+      $reader = new getID3();
+      $info = $reader->analyze($tmp);
+      getid3_lib::CopyTagsToComments($info);
+      $audio = $info['audio'] ?? [];
+      $bitrate = isset($info['audio']['bitrate']) ? (int) round(((float) $info['audio']['bitrate']) / 1000) : null;
+      $playtime = isset($info['playtime_seconds']) ? (float) $info['playtime_seconds'] : null;
+      $firstTag = function($info, $name) {
+        $val = $info['comments_html'][$name][0] ?? $info['comments'][$name][0] ?? $info['tags_html']['id3v2'][$name][0] ?? '';
+        return trim((string)$val) !== '' ? (string)$val : '—';
+      };
+      send_json([
+        'ok' => true,
+        'message' => 'Metadata read locally with getID3.',
+        'metadata' => [
+          'format' => $audio['dataformat'] ?? $info['fileformat'] ?? '—',
+          'bitrate' => $bitrate ? $bitrate . ' kbps' : '—',
+          'sampleRate' => isset($audio['sample_rate']) ? number_format((float) $audio['sample_rate']) . ' Hz' : '—',
+          'channels' => $audio['channels'] ?? '—',
+          'duration' => $playtime,
+          'encoder' => $audio['encoder'] ?? '—',
+          'title' => $firstTag($info, 'title'),
+          'artist' => $firstTag($info, 'artist'),
+          'album' => $firstTag($info, 'album')
+        ]
+      ]);
+      break;
+
+    case 'save_audio_editor':
+      if (!$user_id) { http_response_code(403); exit; }
+      try {
+        if (!isset($_FILES['audio'])) throw new Exception('No audio file.');
+        $audioUpload = $_FILES['audio'];
+        $title = trim(htmlspecialchars($_POST['title'] ?? '', ENT_QUOTES, 'UTF-8'));
+        $artist = trim(htmlspecialchars($_POST['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
+        $album = trim(htmlspecialchars($_POST['album'] ?? '', ENT_QUOTES, 'UTF-8'));
+        $existing_id = !empty($_POST['song_id']) ? (int)$_POST['song_id'] : null;
+        
+        $ext = strtolower(pathinfo($audioUpload['name'], PATHINFO_EXTENSION));
+        if (!in_array($ext, ['mp3', 'flac', 'm4a', 'ogg', 'wav'])) throw new Exception('Invalid extension.');
+
+        if ($existing_id) {
+          $stmt = $db->prepare("SELECT file FROM music WHERE id = ? AND (user_id = ? OR ? = 1)");
+          $stmt->execute([$existing_id, $user_id, $is_admin]);
+          $existing_file = $stmt->fetchColumn();
+          if (!$existing_file) throw new Exception('Unauthorized or song not found.');
+          $audioPath = $existing_file;
+          if (!file_exists($audioPath)) {
+            $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($audioPath))) . '/' . basename(dirname($audioPath)) . '/' . basename($audioPath);
+            if (file_exists($dynamic_path)) $audioPath = $dynamic_path;
+          }
+        } else {
+          $shard = substr(md5($artist), 0, 2);
+          $upload_dir = MUSIC_DIR . '/uploads/' . $shard . '/' . sanitize_for_path($artist);
+          if (!is_dir($upload_dir)) mkdir($upload_dir, 0755, true);
+          $filename = uniqid('ae_') . '.' . $ext;
+          $audioPath = $upload_dir . '/' . $filename;
+        }
+
+        move_uploaded_file($audioUpload['tmp_name'], $audioPath);
+
+        $cover = null;
+        $webp_data = null;
+        if (isset($_FILES['cover']) && $_FILES['cover']['error'] === UPLOAD_ERR_OK) {
+          $raw = file_get_contents($_FILES['cover']['tmp_name']);
+          $webp_data = process_image_to_webp($raw);
+          $cover = [
+            'data' => process_image_to_jpeg($raw),
+            'mime' => 'image/jpeg'
+          ];
+        }
+
+        if (file_exists(__DIR__ . '/getid3/write.php')) {
+          require_once __DIR__ . '/getid3/write.php';
+          $writer = new getid3_writetags();
+          $writer->filename = $audioPath;
+          $writer->tagformats = ['id3v1', 'id3v2.3'];
+          if ($ext === 'flac') $writer->tagformats = ['metaflac'];
+          if ($ext === 'ogg') $writer->tagformats = ['vorbiscomment'];
+          $writer->overwrite_tags = true;
+          $writer->tag_encoding = 'UTF-8';
+          $writer->tag_data = [
+            'title' => [$title],
+            'artist' => [$artist],
+            'album' => [$album]
+          ];
+          if ($cover && $ext === 'mp3') {
+            $writer->tag_data['attached_picture'] = [[
+              'data' => $cover['data'],
+              'picturetypeid' => 3,
+              'description' => 'Cover',
+              'mime' => $cover['mime']
+            ]];
+          }
+          $writer->WriteTags();
+        }
+
+        $reader = new getID3();
+        $info = $reader->analyze($audioPath);
+        $duration = (int)($info['playtime_seconds'] ?? 0);
+        $bitrate = (int)($info['audio']['bitrate'] ?? 0);
+        $mtime = filemtime($audioPath);
+
+        if ($existing_id) {
+          if ($webp_data) {
+            $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, duration = ?, bitrate = ?, image = ?, last_modified = ? WHERE id = ?")->execute([$title, $artist, $album, $duration, $bitrate, $webp_data, $mtime, $existing_id]);
+          } else {
+            $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, duration = ?, bitrate = ?, last_modified = ? WHERE id = ?")->execute([$title, $artist, $album, $duration, $bitrate, $mtime, $existing_id]);
+          }
+        } else {
+          $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+          $stmt->execute([$user_id, $audioPath, $title, $artist, $album, $duration, $bitrate, $webp_data, $mtime]);
+        }
+
+        send_json(['ok' => true, 'message' => 'Saved to library successfully.']);
+      } catch(Exception $e) {
+        send_json(['ok' => false, 'message' => $e->getMessage()]);
+      }
+      break;
+
+    case 'get_song_versions':
+      if (!$user_id) { http_response_code(403); exit; }
+      $song_id = (int)json_decode(file_get_contents('php://input'), true)['id'];
+      $stmt = $db->prepare("SELECT file, user_id FROM music WHERE id = ?");
+      $stmt->execute([$song_id]);
+      $song = $stmt->fetch();
+      if ($song && ($song['user_id'] == $user_id || $is_admin == 1)) {
+        $file = $song['file'];
+        $verDir = MUSIC_DIR . '/.file_version/' . basename($file);
+        $versions = [];
+        if (is_dir($verDir)) {
+          foreach (array_diff(scandir($verDir), ['.', '..']) as $v) {
+            $versions[] = ['name' => $v, 'mtime' => filemtime($verDir . '/' . $v), 'size' => round(filesize($verDir . '/' . $v)/1048576, 2).' MB'];
+          }
+          usort($versions, function($a, $b) { return $b['mtime'] - $a['mtime']; });
+          // Hardware optimization: Return only latest 10 versions to prevent memory bloat
+          $versions = array_slice($versions, 0, 10);
+        }
+        send_json(['status' => 'success', 'versions' => $versions]);
+      } else {
+        http_response_code(403); send_json(['status' => 'error', 'message' => 'Unauthorized']);
+      }
+      break;
+
+    case 'restore_song_version':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $song_id = (int)$data['id'];
+      $version_name = basename($data['version_name']);
+      $stmt = $db->prepare("SELECT file, user_id FROM music WHERE id = ?");
+      $stmt->execute([$song_id]);
+      $song = $stmt->fetch();
+      if ($song && ($song['user_id'] == $user_id || $is_admin == 1)) {
+        $file = $song['file'];
+        $src = MUSIC_DIR . '/.file_version/' . basename($file) . '/' . $version_name;
+        if (!file_exists($src)) {
+          send_json(['status' => 'error', 'message' => 'Version not found']);
+        }
+        
+        // Securely backup the current file state before rollback
+        $verDir = MUSIC_DIR . '/.file_version/' . basename($file);
+        if (!is_dir($verDir)) @mkdir($verDir, 0755, true);
+        @copy($file, $verDir . '/' . basename($file) . '_' . date('Y-m-d_H-i-s'));
+        
+        // Commit the rollback
+        copy($src, $file);
+        $db->prepare("UPDATE music SET last_modified = ? WHERE id = ?")->execute([time(), $song_id]);
+        send_json(['status' => 'success', 'message' => 'Restored successfully']);
+      } else {
+        http_response_code(403); send_json(['status' => 'error', 'message' => 'Unauthorized']);
+      }
       break;
 
     case 'edit_metadata':
@@ -29146,6 +30082,10 @@ function perform_cover_scan($db) {
             <a href="#" class="nav-link" data-view="get_community">
               <i class="bi bi-people"></i>
               <span>Community</span>
+            </a>
+            <a href="#" class="nav-link" data-view="audio_editor">
+              <i class="bi bi-music-note-list"></i>
+              <span>PHPAudio</span>
             </a>
             <a href="#" class="nav-link" data-view="photo_editor">
               <i class="bi bi-image"></i>
@@ -44199,6 +45139,2075 @@ SOFTWARE.</div>
               allContentloaded = true;
               break;
     
+            case "audio_editor":
+              updateContentTitle("PHPAudio", !!currentUser);
+              if (currentUser) {
+                contentArea.innerHTML = `
+                  <style>
+                    .ae-app-shell {
+                      --primary: #f04450;
+                      --on-primary: #250609;
+                      --primary-container: #5b151d;
+                      --on-primary-container: #ffd9dc;
+                      --secondary: #d5969b;
+                      --secondary-container: #43252a;
+                      --on-secondary-container: #ffd9dc;
+                      --tertiary: #d9a94d;
+                      --tertiary-container: #4a3511;
+                      --on-tertiary-container: #ffe6ad;
+                      --error: #ffb4ab;
+                      --error-container: #93000a;
+                      --on-error-container: #ffdad6;
+                      --surface: #160d0f;
+                      --surface-dim: #160d0f;
+                      --surface-container-low: #211416;
+                      --surface-container: #2a191c;
+                      --surface-container-high: #351f22;
+                      --surface-container-highest: #44282d;
+                      --on-surface: #f5dedf;
+                      --on-surface-variant: #d9bfc1;
+                      --outline: #a98b8e;
+                      --outline-variant: #5f4548;
+                      --shadow: rgba(0, 0, 0, .42);
+                      --shape-xs: 8px;
+                      --shape-sm: 12px;
+                      --shape-md: 16px;
+                      --shape-lg: 24px;
+                      --shape-xl: 32px;
+                      width: min(1440px, 100%);
+                      margin: 0 auto;
+                      padding: 0 0 32px;
+                      color: var(--on-surface);
+                      font-size: 15px;
+                    }
+
+                    .ae-app-shell button,
+                    .ae-app-shell input {
+                      font: inherit;
+                    }
+
+                    .ae-app-shell button {
+                      cursor: pointer;
+                    }
+
+                    .ae-app-shell button:disabled {
+                      cursor: not-allowed;
+                      opacity: .46;
+                    }
+
+                    .ae-top-app-bar {
+                      min-height: 84px;
+                      display: flex;
+                      align-items: center;
+                      justify-content: space-between;
+                      gap: 20px;
+                    }
+
+                    .ae-brand {
+                      display: flex;
+                      align-items: center;
+                      gap: 12px;
+                      min-width: 0;
+                    }
+
+                    .ae-brand-mark {
+                      width: 42px;
+                      height: 42px;
+                      border-radius: 15px;
+                      display: grid;
+                      place-items: center;
+                      color: var(--on-primary);
+                      background: var(--primary);
+                      box-shadow: 0 6px 14px rgba(103, 80, 164, .24);
+                    }
+
+                    .ae-brand-mark svg {
+                      width: 25px;
+                      height: 25px;
+                    }
+
+                    .ae-brand-name {
+                      margin: 0;
+                      font-size: 1.22rem;
+                      font-weight: 750;
+                      letter-spacing: -.03em;
+                    }
+
+                    .ae-brand-subtitle {
+                      margin: 1px 0 0;
+                      color: var(--on-surface-variant);
+                      font-size: .78rem;
+                    }
+
+                    .ae-hero {
+                      display: grid;
+                      grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr);
+                      gap: 24px;
+                      align-items: stretch;
+                      margin: 12px 0 24px;
+                    }
+
+                    .ae-intro {
+                      padding: 25px 6px 20px;
+                    }
+
+                    .ae-eyebrow {
+                      margin: 0 0 9px;
+                      color: var(--primary);
+                      font-size: .75rem;
+                      font-weight: 800;
+                      letter-spacing: .12em;
+                      text-transform: uppercase;
+                    }
+
+                    .ae-h1 {
+                      max-width: 710px;
+                      margin: 0;
+                      font-size: clamp(2.25rem, 5vw, 4.35rem);
+                      line-height: .99;
+                      letter-spacing: -.065em;
+                    }
+
+                    .ae-intro-copy {
+                      max-width: 655px;
+                      margin: 18px 0 0;
+                      color: var(--on-surface-variant);
+                      font-size: clamp(1rem, 1.5vw, 1.12rem);
+                    }
+
+                    .ae-notice {
+                      position: relative;
+                      overflow: hidden;
+                      padding: 22px 23px;
+                      border-radius: var(--shape-xl);
+                      color: var(--on-tertiary-container);
+                      background: var(--tertiary-container);
+                      box-shadow: 0 1px 1px rgba(0, 0, 0, .2);
+                    }
+
+                    .ae-notice::after {
+                      position: absolute;
+                      right: -18px;
+                      bottom: -54px;
+                      width: 160px;
+                      height: 160px;
+                      border: 28px solid rgba(217, 169, 77, .12);
+                      border-radius: 50%;
+                      content: "";
+                    }
+
+                    .ae-notice-label {
+                      display: flex;
+                      align-items: center;
+                      gap: 9px;
+                      margin: 0 0 10px;
+                      font-weight: 800;
+                    }
+
+                    .ae-notice p {
+                      position: relative;
+                      z-index: 1;
+                      margin: 0;
+                      font-size: .9rem;
+                      line-height: 1.55;
+                    }
+
+                    .ae-round-icon {
+                      flex: 0 0 auto;
+                      width: 25px;
+                      height: 25px;
+                      display: grid;
+                      place-items: center;
+                      border-radius: 50%;
+                      color: var(--on-tertiary-container);
+                      background: rgba(255, 255, 255, .5);
+                    }
+
+                    .ae-round-icon svg {
+                      width: 16px;
+                      height: 16px;
+                    }
+
+                    .ae-workspace {
+                      display: grid;
+                      grid-template-columns: minmax(0, 1fr) 312px;
+                      gap: 20px;
+                    }
+
+                    .ae-surface-card {
+                      min-width: 0;
+                      border-radius: var(--shape-xl);
+                      background: var(--surface-container-low);
+                      box-shadow: 0 2px 2px rgba(0, 0, 0, .18), 0 10px 28px rgba(0, 0, 0, .24);
+                    }
+
+                    .ae-editor-card {
+                      padding: clamp(18px, 3vw, 32px);
+                    }
+
+                    .ae-metadata-card {
+                      padding: 21px;
+                      align-self: start;
+                      background: var(--surface-container);
+                    }
+
+                    .ae-upload-zone {
+                      position: relative;
+                      min-height: 170px;
+                      display: grid;
+                      place-items: center;
+                      padding: 25px;
+                      border: 1.5px dashed var(--outline);
+                      border-radius: var(--shape-lg);
+                      color: var(--on-surface-variant);
+                      background: rgba(255, 255, 255, .025);
+                      text-align: center;
+                      transition: background .18s ease, border-color .18s ease, transform .18s ease;
+                    }
+
+                    .ae-upload-zone:hover,
+                    .ae-upload-zone.is-dragover {
+                      border-color: var(--primary);
+                      background: var(--primary-container);
+                      transform: translateY(-1px);
+                    }
+
+                    .ae-upload-zone.is-loaded {
+                      min-height: 0;
+                      padding: 16px 18px;
+                      border-style: solid;
+                      border-color: transparent;
+                      text-align: left;
+                      background: var(--primary-container);
+                    }
+
+                    .ae-upload-zone-inner {
+                      display: grid;
+                      justify-items: center;
+                    }
+
+                    .ae-upload-glyph {
+                      width: 45px;
+                      height: 45px;
+                      display: grid;
+                      place-items: center;
+                      margin-bottom: 10px;
+                      border-radius: 16px;
+                      color: var(--primary);
+                      background: var(--surface);
+                    }
+
+                    .ae-upload-glyph svg {
+                      width: 25px;
+                      height: 25px;
+                    }
+
+                    .ae-upload-title {
+                      margin: 0;
+                      color: var(--on-surface);
+                      font-weight: 750;
+                    }
+
+                    .ae-upload-copy {
+                      margin: 5px 0 14px;
+                      font-size: .84rem;
+                    }
+
+                    .ae-text-button {
+                      display: inline-flex;
+                      align-items: center;
+                      justify-content: center;
+                      min-height: 38px;
+                      padding: 0 15px;
+                      border: 0;
+                      border-radius: 999px;
+                      color: var(--primary);
+                      background: transparent;
+                      font-size: .88rem;
+                      font-weight: 750;
+                    }
+
+                    .ae-text-button:hover {
+                      background: rgba(240, 68, 80, .14);
+                    }
+
+                    .ae-loaded-file {
+                      display: none;
+                      min-width: 0;
+                      align-items: center;
+                      gap: 13px;
+                    }
+
+                    .ae-loaded-file.visible {
+                      display: flex;
+                    }
+
+                    .ae-file-icon {
+                      flex: 0 0 auto;
+                      width: 38px;
+                      height: 38px;
+                      display: grid;
+                      place-items: center;
+                      border-radius: 12px;
+                      color: var(--on-primary-container);
+                      background: rgba(255, 255, 255, .1);
+                    }
+
+                    .ae-file-icon svg {
+                      width: 22px;
+                      height: 22px;
+                    }
+
+                    .ae-file-name {
+                      overflow: hidden;
+                      margin: 0;
+                      color: var(--on-primary-container);
+                      font-weight: 760;
+                      text-overflow: ellipsis;
+                      white-space: nowrap;
+                    }
+
+                    .ae-file-meta {
+                      margin: 2px 0 0;
+                      color: color-mix(in srgb, var(--on-primary-container) 72%, transparent);
+                      font-size: .8rem;
+                    }
+
+                    .ae-loaded-file .ae-text-button {
+                      margin-left: auto;
+                      flex: 0 0 auto;
+                      color: var(--on-primary-container);
+                    }
+
+                    #ae-audioFile {
+                      position: absolute;
+                      width: 1px;
+                      height: 1px;
+                      opacity: 0;
+                      pointer-events: none;
+                    }
+
+                    .ae-editor-content {
+                      display: none;
+                      margin-top: 26px;
+                    }
+
+                    .ae-editor-content.visible {
+                      display: block;
+                    }
+
+                    .ae-track-summary {
+                      display: flex;
+                      align-items: baseline;
+                      justify-content: space-between;
+                      gap: 16px;
+                      margin-bottom: 14px;
+                    }
+
+                    .ae-track-summary h2,
+                    .ae-metadata-card h2 {
+                      margin: 0;
+                      font-size: 1.08rem;
+                      letter-spacing: -.025em;
+                      color: #fff;
+                    }
+
+                    .ae-track-summary p {
+                      margin: 0;
+                      color: var(--on-surface-variant);
+                      font-size: .82rem;
+                    }
+
+                    .ae-wave-shell {
+                      position: relative;
+                      overflow: hidden;
+                      height: 190px;
+                      border-radius: var(--shape-lg);
+                      border: 1px solid var(--outline-variant);
+                      background: #12090b;
+                      user-select: none;
+                    }
+
+                    #ae-waveform {
+                      width: 100%;
+                      height: 100%;
+                      display: block;
+                      cursor: pointer;
+                      touch-action: none;
+                    }
+
+                    .ae-wave-empty {
+                      position: absolute;
+                      inset: 0;
+                      display: grid;
+                      place-items: center;
+                      padding: 20px;
+                      color: #d7d0dc;
+                      font-size: .88rem;
+                      pointer-events: none;
+                      text-align: center;
+                    }
+
+                    .ae-wave-empty.hidden {
+                      display: none;
+                    }
+
+                    .ae-wave-legend {
+                      display: flex;
+                      align-items: center;
+                      gap: 15px;
+                      flex-wrap: wrap;
+                      margin-top: 10px;
+                      color: var(--on-surface-variant);
+                      font-size: .75rem;
+                    }
+
+                    .ae-legend-item {
+                      display: inline-flex;
+                      align-items: center;
+                      gap: 6px;
+                    }
+
+                    .ae-legend-line {
+                      width: 15px;
+                      height: 3px;
+                      border-radius: 3px;
+                      background: var(--primary);
+                    }
+
+                    .ae-legend-line.play {
+                      background: #ffd3d6;
+                    }
+
+                    .ae-selection-panel {
+                      display: grid;
+                      grid-template-columns: 1fr;
+                      gap: 20px;
+                      margin-top: 22px;
+                      padding: 18px;
+                      border-radius: var(--shape-md);
+                      background: var(--surface-container);
+                    }
+
+                    .ae-selection-field {
+                      min-width: 0;
+                    }
+
+                    .ae-selection-label {
+                      display: flex;
+                      justify-content: space-between;
+                      gap: 8px;
+                      margin-bottom: 8px;
+                      color: var(--on-surface-variant);
+                      font-size: .77rem;
+                      font-weight: 750;
+                      letter-spacing: .04em;
+                      text-transform: uppercase;
+                    }
+
+                    .ae-time-readout {
+                      color: var(--on-surface);
+                      letter-spacing: 0;
+                      text-transform: none;
+                      font-variant-numeric: tabular-nums;
+                    }
+
+                    .ae-selection-field input[type="range"],
+                    .ae-progress-wrap input[type="range"],
+                    .ae-utility-control input[type="range"] {
+                      width: 100%;
+                      height: 25px;
+                      margin: 0;
+                      appearance: none;
+                      background: transparent;
+                      accent-color: var(--primary);
+                    }
+
+                    .ae-selection-field input[type="range"]::-webkit-slider-runnable-track,
+                    .ae-progress-wrap input[type="range"]::-webkit-slider-runnable-track,
+                    .ae-utility-control input[type="range"]::-webkit-slider-runnable-track {
+                      height: 4px;
+                      border-radius: 8px;
+                      background: var(--outline-variant);
+                    }
+
+                    .ae-selection-field input[type="range"]::-webkit-slider-thumb,
+                    .ae-progress-wrap input[type="range"]::-webkit-slider-thumb,
+                    .ae-utility-control input[type="range"]::-webkit-slider-thumb {
+                      width: 18px;
+                      height: 18px;
+                      margin-top: -7px;
+                      border: 2px solid var(--primary);
+                      border-radius: 50%;
+                      appearance: none;
+                      background: var(--primary);
+                      box-shadow: 0 0 0 3px var(--surface-container);
+                    }
+
+                    .ae-transport {
+                      display: flex;
+                      align-items: center;
+                      gap: 11px;
+                      margin-top: 22px;
+                      padding-top: 4px;
+                      flex-wrap: wrap;
+                    }
+
+                    .ae-icon-button {
+                      width: 46px;
+                      height: 46px;
+                      display: inline-grid;
+                      place-items: center;
+                      padding: 0;
+                      border: 0;
+                      border-radius: 16px;
+                      color: var(--on-primary);
+                      background: var(--primary);
+                      box-shadow: 0 4px 10px rgba(240, 68, 80, .25);
+                      transition: transform .18s ease, box-shadow .18s ease;
+                    }
+
+                    .ae-icon-button:hover:not(:disabled) {
+                      box-shadow: 0 7px 16px rgba(240, 68, 80, .36);
+                      transform: translateY(-1px);
+                    }
+
+                    .ae-icon-button svg {
+                      width: 22px;
+                      height: 22px;
+                    }
+
+                    .ae-time-position {
+                      min-width: 104px;
+                      color: var(--on-surface-variant);
+                      font-size: .88rem;
+                      font-variant-numeric: tabular-nums;
+                    }
+
+                    .ae-progress-wrap {
+                      flex: 1 1 130px;
+                    }
+
+                    .ae-progress-wrap input {
+                      display: block;
+                    }
+
+                    .ae-utility-control {
+                      display: inline-flex;
+                      align-items: center;
+                      gap: 8px;
+                      min-width: 136px;
+                      color: var(--on-surface-variant);
+                      font-size: .82rem;
+                    }
+
+                    .ae-utility-control svg {
+                      flex: 0 0 auto;
+                      width: 17px;
+                      height: 17px;
+                    }
+
+                    .ae-utility-control input {
+                      min-width: 0;
+                    }
+
+                    .ae-rate-select {
+                      height: 38px;
+                      padding: 0 26px 0 12px;
+                      border: 1px solid var(--outline-variant);
+                      border-radius: 11px;
+                      color: var(--on-surface);
+                      background: var(--surface);
+                      font-weight: 650;
+                    }
+
+                    .ae-action-row {
+                      display: flex;
+                      justify-content: flex-end;
+                      align-items: center;
+                      gap: 10px;
+                      flex-wrap: wrap;
+                      margin-top: 22px;
+                    }
+
+                    .ae-filled-button,
+                    .ae-outlined-button {
+                      min-height: 42px;
+                      display: inline-flex;
+                      align-items: center;
+                      justify-content: center;
+                      gap: 8px;
+                      padding: 0 18px;
+                      border-radius: 999px;
+                      font-size: .89rem;
+                      font-weight: 760;
+                      letter-spacing: .01em;
+                      transition: box-shadow .18s ease, background .18s ease;
+                    }
+
+                    .ae-filled-button {
+                      border: 0;
+                      color: var(--on-primary);
+                      background: var(--primary);
+                      box-shadow: 0 3px 8px rgba(240, 68, 80, .24);
+                    }
+
+                    .ae-filled-button:hover:not(:disabled) {
+                      box-shadow: 0 5px 13px rgba(240, 68, 80, .36);
+                    }
+
+                    .ae-outlined-button {
+                      border: 1px solid var(--outline);
+                      color: var(--primary);
+                      background: transparent;
+                    }
+
+                    .ae-outlined-button:hover:not(:disabled) {
+                      background: rgba(240, 68, 80, .12);
+                    }
+
+                    .ae-filled-button svg,
+                    .ae-outlined-button svg {
+                      width: 18px;
+                      height: 18px;
+                    }
+
+                    .ae-editor-message {
+                      display: none;
+                      margin-top: 16px;
+                      padding: 11px 14px;
+                      border-radius: var(--shape-sm);
+                      color: var(--on-secondary-container);
+                      background: var(--secondary-container);
+                      font-size: .84rem;
+                    }
+
+                    .ae-editor-message.visible {
+                      display: block;
+                    }
+
+                    .ae-editor-message.error {
+                      color: var(--on-error-container);
+                      background: var(--error-container);
+                    }
+
+                    .ae-metadata-head {
+                      display: flex;
+                      justify-content: space-between;
+                      align-items: center;
+                      gap: 12px;
+                      padding-bottom: 17px;
+                      border-bottom: 1px solid var(--outline-variant);
+                    }
+
+                    .ae-metadata-state {
+                      margin: 17px 0;
+                      color: var(--on-surface-variant);
+                      font-size: .86rem;
+                      line-height: 1.5;
+                    }
+
+                    .ae-metadata-state .ae-mini-spinner {
+                      display: inline-block;
+                      width: 13px;
+                      height: 13px;
+                      margin: 0 6px -2px 0;
+                      border: 2px solid var(--outline-variant);
+                      border-top-color: var(--primary);
+                      border-radius: 50%;
+                      animation: spin .7s linear infinite;
+                    }
+
+                    @keyframes spin {
+                      to {
+                        transform: rotate(1turn);
+                      }
+                    }
+
+                    .ae-metadata-list {
+                      display: grid;
+                      grid-template-columns: 1fr 1fr;
+                      gap: 15px 12px;
+                      margin: 0;
+                    }
+
+                    .ae-metadata-list div {
+                      min-width: 0;
+                    }
+
+                    .ae-metadata-list dt {
+                      margin: 0;
+                      color: var(--on-surface-variant);
+                      font-size: .71rem;
+                      font-weight: 760;
+                      letter-spacing: .045em;
+                      text-transform: uppercase;
+                    }
+
+                    .ae-metadata-list dd {
+                      overflow: hidden;
+                      margin: 3px 0 0;
+                      color: var(--on-surface);
+                      font-size: .87rem;
+                      font-weight: 650;
+                      text-overflow: ellipsis;
+                      white-space: nowrap;
+                    }
+
+                    .ae-id3-badge {
+                      display: inline-flex;
+                      align-items: center;
+                      gap: 5px;
+                      padding: 5px 8px;
+                      border-radius: 8px;
+                      color: var(--on-primary-container);
+                      background: var(--primary-container);
+                      font-size: .7rem;
+                      font-weight: 800;
+                    }
+
+                    .ae-id3-badge.unavailable {
+                      color: var(--on-surface-variant);
+                      background: var(--surface-container-highest);
+                    }
+
+                    .ae-metadata-editor {
+                      margin-top: 22px;
+                      padding-top: 17px;
+                      border-top: 1px solid var(--outline-variant);
+                    }
+
+                    .ae-metadata-editor h3 {
+                      margin: 0 0 12px;
+                      font-size: .88rem;
+                      letter-spacing: .01em;
+                      color: #fff;
+                    }
+
+                    .ae-field-grid {
+                      display: grid;
+                      gap: 11px;
+                    }
+
+                    .ae-field-grid label {
+                      display: grid;
+                      gap: 5px;
+                      color: var(--on-surface-variant);
+                      font-size: .74rem;
+                      font-weight: 750;
+                      letter-spacing: .03em;
+                      text-transform: uppercase;
+                    }
+
+                    .ae-field-grid input[type="text"] {
+                      width: 100%;
+                      min-height: 39px;
+                      padding: 8px 10px;
+                      border: 1px solid var(--outline-variant);
+                      border-radius: 10px;
+                      color: var(--on-surface);
+                      background: var(--surface);
+                      outline: none;
+                    }
+
+                    .ae-field-grid input[type="text"]:focus {
+                      border-color: var(--primary);
+                      box-shadow: 0 0 0 3px rgba(240, 68, 80, .16);
+                    }
+
+                    .ae-cover-picker {
+                      display: flex;
+                      align-items: center;
+                      gap: 9px;
+                      margin-top: 13px;
+                    }
+
+                    .ae-cover-picker input {
+                      position: absolute;
+                      width: 1px;
+                      height: 1px;
+                      overflow: hidden;
+                      clip: rect(0, 0, 0, 0);
+                    }
+
+                    .ae-cover-picker label {
+                      min-height: 36px;
+                      display: inline-flex;
+                      align-items: center;
+                      padding: 0 11px;
+                      border: 1px solid var(--outline);
+                      border-radius: 999px;
+                      color: var(--primary);
+                      cursor: pointer;
+                      font-size: .78rem;
+                      font-weight: 750;
+                    }
+
+                    .ae-cover-picker label:hover {
+                      background: rgba(240, 68, 80, .12);
+                    }
+
+                    .ae-cover-name {
+                      overflow: hidden;
+                      color: var(--on-surface-variant);
+                      font-size: .76rem;
+                      text-overflow: ellipsis;
+                      white-space: nowrap;
+                    }
+
+                    .ae-save-library-button {
+                      width: 100%;
+                      margin-top: 14px;
+                    }
+
+                    .ae-cover-preview {
+                      position: relative;
+                      overflow: hidden;
+                      width: 100%;
+                      aspect-ratio: 1 / 1;
+                      display: grid;
+                      place-items: center;
+                      margin: 0 0 14px;
+                      border: 1px solid var(--outline-variant);
+                      border-radius: 14px;
+                      background: linear-gradient(135deg, rgba(240, 68, 80, .32), rgba(39, 13, 16, .9));
+                    }
+
+                    .ae-cover-preview::after {
+                      position: absolute;
+                      right: -22px;
+                      bottom: -37px;
+                      width: 145px;
+                      height: 145px;
+                      border: 22px solid rgba(255, 255, 255, .09);
+                      border-radius: 50%;
+                      content: "";
+                    }
+
+                    .ae-cover-preview img {
+                      position: relative;
+                      z-index: 1;
+                      width: 100%;
+                      height: 100%;
+                      object-fit: cover;
+                    }
+
+                    .ae-cover-preview.placeholder img {
+                      display: none;
+                    }
+
+                    .ae-cover-preview-mark {
+                      position: relative;
+                      z-index: 1;
+                      display: grid;
+                      justify-items: center;
+                      gap: 7px;
+                      color: #ffd9dc;
+                      text-align: center;
+                    }
+
+                    .ae-cover-preview-mark svg {
+                      width: 30px;
+                      height: 30px;
+                    }
+
+                    .ae-cover-preview-mark span {
+                      font-size: .75rem;
+                      font-weight: 750;
+                    }
+
+                    .ae-cover-preview:not(.placeholder) .ae-cover-preview-mark {
+                      display: none;
+                    }
+
+                    .ae-loading-progress {
+                      display: none;
+                      gap: 7px;
+                      margin-top: 14px;
+                    }
+
+                    .ae-loading-progress.visible {
+                      display: grid;
+                    }
+
+                    .ae-loading-progress-top {
+                      display: flex;
+                      justify-content: space-between;
+                      gap: 10px;
+                      color: var(--on-surface-variant);
+                      font-size: .75rem;
+                      font-weight: 700;
+                    }
+
+                    .ae-loading-progress-track {
+                      height: 6px;
+                      overflow: hidden;
+                      border-radius: 99px;
+                      background: var(--surface-container-highest);
+                    }
+
+                    .ae-loading-progress-bar {
+                      width: 0%;
+                      height: 100%;
+                      border-radius: inherit;
+                      background: linear-gradient(90deg, #c92b3a, var(--primary), #ff8992);
+                      transition: width .25s ease;
+                    }
+
+                    @media (max-width: 900px) {
+                      .ae-workspace {
+                        grid-template-columns: 1fr;
+                      }
+
+                      .ae-metadata-card {
+                        display: grid;
+                        grid-template-columns: 200px 1fr;
+                        align-items: start;
+                        gap: 0 24px;
+                      }
+
+                      .ae-metadata-head {
+                        grid-row: span 2;
+                        display: block;
+                        padding: 0;
+                        border: 0;
+                      }
+
+                      .ae-metadata-head h2 {
+                        margin-bottom: 10px;
+                      }
+
+                      .ae-metadata-state {
+                        margin: 0 0 14px;
+                      }
+
+                      .ae-metadata-editor {
+                        grid-column: 2;
+                      }
+                    }
+
+                    @media (max-width: 640px) {
+                      .ae-hero {
+                        grid-template-columns: 1fr;
+                        gap: 10px;
+                        margin-top: 2px;
+                      }
+
+                      .ae-intro {
+                        padding: 16px 2px 18px;
+                      }
+
+                      .ae-h1 {
+                        font-size: clamp(2.3rem, 13vw, 3.25rem);
+                      }
+
+                      .ae-notice {
+                        padding: 18px;
+                        border-radius: var(--shape-lg);
+                      }
+
+                      .ae-editor-card {
+                        padding: 16px;
+                        border-radius: var(--shape-lg);
+                      }
+
+                      .ae-wave-shell {
+                        height: 152px;
+                      }
+
+                      .ae-selection-panel {
+                        grid-template-columns: 1fr;
+                        gap: 14px;
+                        padding: 15px;
+                      }
+
+                      .ae-transport {
+                        gap: 9px;
+                      }
+
+                      .ae-progress-wrap {
+                        order: 3;
+                        flex-basis: 100%;
+                      }
+
+                      .ae-utility-control {
+                        min-width: 100px;
+                        flex: 1;
+                      }
+
+                      .ae-action-row {
+                        justify-content: stretch;
+                      }
+
+                      .ae-action-row button {
+                        flex: 1 1 auto;
+                      }
+
+                      .ae-metadata-card {
+                        display: block;
+                        padding: 18px;
+                        border-radius: var(--shape-lg);
+                      }
+
+                      .ae-metadata-head {
+                        display: flex;
+                        padding-bottom: 14px;
+                        border-bottom: 1px solid var(--outline-variant);
+                      }
+
+                      .ae-metadata-head h2 {
+                        margin: 0;
+                      }
+
+                      .ae-metadata-state {
+                        margin: 14px 0;
+                      }
+                    }
+                  </style>
+                  <div class="ae-app-shell pt-3">
+                    <section class="ae-hero" aria-labelledby="ae-page-title">
+                      <div class="ae-intro">
+                        <p class="ae-eyebrow">Audio, artwork &amp; tags</p>
+                        <h1 id="ae-page-title" class="ae-h1 text-white">Edit your library your way.</h1>
+                        <p class="ae-intro-copy">Open audio files, review their details, update song metadata and cover art, then save the original audio into your local library.</p>
+                      </div>
+                      <aside class="ae-notice" aria-label="Important bitrate limitation">
+                        <p class="ae-notice-label">
+                          <span class="ae-round-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"><path d="M12 8v4m0 4h.01"/><path d="M10.3 3.9 2.9 16.3A2 2 0 0 0 4.6 19h14.8a2 2 0 0 0 1.7-2.7L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></span>
+                          Important limitation
+                        </p>
+                        <p><strong>Your original audio is always kept as uploaded.</strong> Saving tags never re-encodes the file. Browser trimming is available when the current browser can decode the selected format.</p>
+                      </aside>
+                    </section>
+                    <section class="ae-workspace" aria-label="Audio editing workspace">
+                      <article class="ae-surface-card ae-editor-card">
+                        <input type="hidden" id="ae-songId" value="">
+                        <div class="ae-upload-zone" id="ae-uploadZone">
+                          <input id="ae-audioFile" type="file" accept="audio/*,.mp3,.wav,.flac,.aac,.m4a,.mp4,.ogg,.oga,.opus,.wma,.aiff,.aif,.ape,.alac,.amr,.ac3,.dts,.mka,.mpc,.ra,.rm,.tta,.wv,.webm" aria-describedby="ae-uploadHint">
+                          <div class="ae-upload-zone-inner" id="ae-uploadPrompt">
+                            <div class="ae-upload-glyph" aria-hidden="true">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9"><path d="M12 16V4m0 0L8 8m4-4 4 4"/><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>
+                            </div>
+                            <p class="ae-upload-title">Open an audio file</p>
+                            <p class="ae-upload-copy" id="ae-uploadHint">Drop a file here or browse your device</p>
+                            <button type="button" class="ae-text-button" id="ae-browseButton">Browse files</button>
+                          </div>
+                          <div class="ae-loaded-file" id="ae-loadedFile">
+                            <div class="ae-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.9"><path d="M14 3v5a2 2 0 0 0 2 2h5"/><path d="M5 3h9l7 7v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M8 16c1.1-2 2.2 2 3.4 0 1.1-2 2.1-2 3.2 0"/></svg></div>
+                            <div style="min-width:0">
+                              <p class="ae-file-name" id="ae-fileName">—</p>
+                              <p class="ae-file-meta" id="ae-fileSize">—</p>
+                            </div>
+                            <button type="button" class="ae-text-button" id="ae-replaceButton">Replace</button>
+                          </div>
+                        </div>
+                        <div class="ae-editor-content" id="ae-editorContent">
+                          <div class="ae-track-summary">
+                            <h2>Trim selection</h2>
+                            <p>Click the waveform to seek</p>
+                          </div>
+                          <div class="ae-wave-shell" id="ae-waveShell">
+                            <canvas id="ae-waveform" aria-label="Audio waveform. Click to seek within the selected audio."></canvas>
+                            <div class="ae-wave-empty" id="ae-waveEmpty">Preparing the waveform…</div>
+                          </div>
+                          <div class="ae-wave-legend" aria-hidden="true">
+                            <span class="ae-legend-item"><span class="ae-legend-line"></span>Selected clip</span>
+                            <span class="ae-legend-item"><span class="ae-legend-line play"></span>Playhead</span>
+                          </div>
+                          <div class="ae-selection-panel">
+                            <div class="ae-selection-field">
+                              <div class="ae-selection-label"><span>Starts at</span><span class="ae-time-readout" id="ae-startReadout">00:00.0</span></div>
+                              <label class="d-none" for="ae-startRange">Trim start</label>
+                              <input type="range" id="ae-startRange" min="0" max="1" value="0" step="0.01">
+                            </div>
+                            <div class="ae-selection-field">
+                              <div class="ae-selection-label"><span>Ends at</span><span class="ae-time-readout" id="ae-endReadout">00:00.0</span></div>
+                              <label class="d-none" for="ae-endRange">Trim end</label>
+                              <input type="range" id="ae-endRange" min="0" max="1" value="1" step="0.01">
+                            </div>
+                            <div class="ae-selection-field">
+                              <div class="ae-selection-label"><span>Amplify</span><span class="ae-time-readout" id="ae-gainReadout">1.0x</span></div>
+                              <label class="d-none" for="ae-gainRange">Amplify gain</label>
+                              <input type="range" id="ae-gainRange" min="0.1" max="5.0" value="1.0" step="0.1">
+                            </div>
+                          </div>
+                          <div class="ae-transport">
+                            <button type="button" class="ae-icon-button" id="ae-playButton" aria-label="Play selected audio" disabled>
+                              <svg id="ae-playIcon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6c0 .8.9 1.3 1.6.8L20.2 13a1.2 1.2 0 0 0 0-2L9.6 4.4A1.1 1.1 0 0 0 8 5.2Z"/></svg>
+                            </button>
+                            <span class="ae-time-position" id="ae-timePosition">00:00.0 / 00:00.0</span>
+                            <div class="ae-progress-wrap">
+                              <label class="d-none" for="ae-progressRange">Playback position</label>
+                              <input type="range" id="ae-progressRange" min="0" max="1" value="0" step="0.01">
+                            </div>
+                            <label class="ae-utility-control" aria-label="Playback volume">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9"><path d="M4 10v4h4l5 4V6l-5 4H4Z"/><path d="M16 9.5a4 4 0 0 1 0 5M19 7a8 8 0 0 1 0 10"/></svg>
+                              <span class="d-none">Volume</span>
+                              <input type="range" id="ae-volumeRange" min="0" max="1" value="0.9" step="0.01">
+                            </label>
+                            <label class="d-none" for="ae-rateSelect">Playback speed</label>
+                            <select id="ae-rateSelect" class="ae-rate-select">
+                              <option value="0.75">0.75×</option>
+                              <option value="1" selected>1×</option>
+                              <option value="1.25">1.25×</option>
+                              <option value="1.5">1.5×</option>
+                              <option value="2">2×</option>
+                            </select>
+                          </div>
+                          <div class="ae-action-row">
+                            <button type="button" class="ae-outlined-button" id="ae-resetButton">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+                              Reset
+                            </button>
+                            <button type="button" class="ae-filled-button" id="ae-exportButton" disabled>
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 19v2h14v-2"/></svg>
+                              Export Clip
+                            </button>
+                          </div>
+                          <div id="ae-editorMessage" class="ae-editor-message" role="status" aria-live="polite"></div>
+                          <div id="ae-audioProgress" class="ae-loading-progress" role="status" aria-live="polite">
+                            <div class="ae-loading-progress-top"><span id="ae-progressLabel">Preparing audio…</span><span id="ae-progressValue">0%</span></div>
+                            <div class="ae-loading-progress-track"><div id="ae-progressBar" class="ae-loading-progress-bar"></div></div>
+                          </div>
+                        </div>
+                      </article>
+                      <aside class="ae-surface-card ae-metadata-card" aria-labelledby="ae-metadata-title">
+                        <div class="ae-metadata-head">
+                          <h2 id="ae-metadata-title">Track details</h2>
+                          <span id="ae-id3Badge" class="ae-id3-badge unavailable">Waiting for file</span>
+                        </div>
+                        <p id="ae-metadataState" class="ae-metadata-state">Choose a file to inspect its embedded metadata with getID3.</p>
+                        <dl class="ae-metadata-list">
+                          <div><dt>Format</dt><dd id="ae-metaFormat">—</dd></div>
+                          <div><dt>Bitrate</dt><dd id="ae-metaBitrate">—</dd></div>
+                          <div><dt>Duration</dt><dd id="ae-metaDuration">—</dd></div>
+                          <div><dt>Sample rate</dt><dd id="ae-metaSampleRate">—</dd></div>
+                          <div><dt>Channels</dt><dd id="ae-metaChannels">—</dd></div>
+                          <div><dt>Artist</dt><dd id="ae-metaArtist">—</dd></div>
+                          <div><dt>Title</dt><dd id="ae-metaTitle">—</dd></div>
+                          <div><dt>Album</dt><dd id="ae-metaAlbum">—</dd></div>
+                        </dl>
+                        <section class="ae-metadata-editor" aria-labelledby="ae-edit-metadata-title">
+                          <h3 id="ae-edit-metadata-title">Edit metadata &amp; cover</h3>
+                          <div class="ae-cover-preview placeholder" id="ae-coverPreview" aria-label="Album artwork preview">
+                            <img id="ae-coverImage" alt="Selected album artwork preview">
+                            <div class="ae-cover-preview-mark">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-4.5-4.5L8 19"/></svg>
+                              <span>Album art preview</span>
+                            </div>
+                          </div>
+                          <div class="ae-field-grid">
+                            <label>Title <input id="ae-titleInput" type="text" maxlength="500" autocomplete="off" placeholder="Song title"></label>
+                            <label>Artist <input id="ae-artistInput" type="text" maxlength="500" autocomplete="off" placeholder="Artist name"></label>
+                            <label>Album <input id="ae-albumInput" type="text" maxlength="500" autocomplete="off" placeholder="Album name"></label>
+                          </div>
+                          <div class="ae-cover-picker">
+                            <input id="ae-coverFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp">
+                            <label for="ae-coverFile">Change cover</label>
+                            <span id="ae-coverName" class="ae-cover-name">No new cover selected</span>
+                          </div>
+                          <div style="display: flex; gap: 8px; margin-top: 14px; width: 100%;">
+                            <button type="button" id="ae-cancelButton" class="ae-outlined-button" style="flex: 1; padding: 0;">Cancel</button>
+                            <button type="button" id="ae-saveLibraryButton" class="ae-filled-button" style="flex: 2; padding: 0;" disabled>Save to library</button>
+                          </div>
+                          <button type="button" id="ae-rollbackButton" class="ae-outlined-button ae-save-library-button mt-2" style="display: none; border-color: var(--outline-variant); color: var(--on-surface-variant); width: 100%;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                            Rollback to Previous
+                          </button>
+                        </section>
+                      </aside>
+                    </section>
+                  </div>
+                `;
+
+                // Run AudioEditor JS engine
+                setTimeout(() => {
+                  const maxAnalysisBytes = 536870912;
+                  const fileInput = document.getElementById("ae-audioFile");
+                  const uploadZone = document.getElementById("ae-uploadZone");
+                  const uploadPrompt = document.getElementById("ae-uploadPrompt");
+                  const loadedFile = document.getElementById("ae-loadedFile");
+                  const browseButton = document.getElementById("ae-browseButton");
+                  const replaceButton = document.getElementById("ae-replaceButton");
+                  const editorContent = document.getElementById("ae-editorContent");
+                  const fileName = document.getElementById("ae-fileName");
+                  const fileSize = document.getElementById("ae-fileSize");
+                  const aeAudio = new Audio();
+                  aeAudio.crossOrigin = "anonymous";
+                  const aeAudioContextClass = window.AudioContext || window.webkitAudioContext;
+                  const aeAudioCtx = aeAudioContextClass ? new aeAudioContextClass() : null;
+                  let aeSource, aeGain;
+                  if (aeAudioCtx) {
+                    aeSource = aeAudioCtx.createMediaElementSource(aeAudio);
+                    aeGain = aeAudioCtx.createGain();
+                    aeSource.connect(aeGain);
+                    aeGain.connect(aeAudioCtx.destination);
+                  }
+                  const canvas = document.getElementById("ae-waveform");
+                  const waveEmpty = document.getElementById("ae-waveEmpty");
+                  const startRange = document.getElementById("ae-startRange");
+                  const endRange = document.getElementById("ae-endRange");
+                  const gainRange = document.getElementById("ae-gainRange");
+                  const startReadout = document.getElementById("ae-startReadout");
+                  const endReadout = document.getElementById("ae-endReadout");
+                  const gainReadout = document.getElementById("ae-gainReadout");
+                  const progressRange = document.getElementById("ae-progressRange");
+                  const volumeRange = document.getElementById("ae-volumeRange");
+                  const rateSelect = document.getElementById("ae-rateSelect");
+                  const playButton = document.getElementById("ae-playButton");
+                  const playIcon = document.getElementById("ae-playIcon");
+                  const timePosition = document.getElementById("ae-timePosition");
+                  const resetButton = document.getElementById("ae-resetButton");
+                  const exportButton = document.getElementById("ae-exportButton");
+                  const editorMessage = document.getElementById("ae-editorMessage");
+                  const metadataState = document.getElementById("ae-metadataState");
+                  const id3Badge = document.getElementById("ae-id3Badge");
+                  const titleInput = document.getElementById("ae-titleInput");
+                  const artistInput = document.getElementById("ae-artistInput");
+                  const albumInput = document.getElementById("ae-albumInput");
+                  const coverFile = document.getElementById("ae-coverFile");
+                  const coverName = document.getElementById("ae-coverName");
+                  const coverPreview = document.getElementById("ae-coverPreview");
+                  const coverImage = document.getElementById("ae-coverImage");
+                  const saveLibraryButton = document.getElementById("ae-saveLibraryButton");
+                  const audioProgress = document.getElementById("ae-audioProgress");
+                  const progressLabel = document.getElementById("ae-progressLabel");
+                  const progressValue = document.getElementById("ae-progressValue");
+                  const progressBar = document.getElementById("ae-progressBar");
+                  const songIdInput = document.getElementById("ae-songId");
+                  let aeCoverCropper = null;
+
+                  const metadataFields = {
+                    format: document.getElementById("ae-metaFormat"),
+                    bitrate: document.getElementById("ae-metaBitrate"),
+                    duration: document.getElementById("ae-metaDuration"),
+                    sampleRate: document.getElementById("ae-metaSampleRate"),
+                    channels: document.getElementById("ae-metaChannels"),
+                    artist: document.getElementById("ae-metaArtist"),
+                    title: document.getElementById("ae-metaTitle"),
+                    album: document.getElementById("ae-metaAlbum")
+                  };
+
+                  const state = {
+                    file: null,
+                    objectUrl: null,
+                    duration: 0,
+                    start: 0,
+                    end: 0,
+                    gain: 1.0,
+                    decodedBuffer: null,
+                    waveformPeaks: [],
+                    animationFrame: 0,
+                    audioContext: null,
+                    preparing: false,
+                    coverObjectUrl: null
+                  };
+
+                  const pausePath = '<path d="M7.5 5.5h3v13h-3zm6 0h3v13h-3z"/>';
+                  const playPath = '<path d="M8 5.2v13.6c0 .8.9 1.3 1.6.8L20.2 13a1.2 1.2 0 0 0 0-2L9.6 4.4A1.1 1.1 0 0 0 8 5.2Z"/>';
+
+                  function formatTime(seconds) {
+                    if (!Number.isFinite(seconds) || seconds < 0) return "00:00.0";
+                    const mins = Math.floor(seconds / 60);
+                    const secs = Math.floor(seconds % 60);
+                    const tenths = Math.floor((seconds % 1) * 10);
+                    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}.${tenths}`;
+                  }
+
+                  function formatBytes(bytes) {
+                    if (!Number.isFinite(bytes)) return "—";
+                    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+                    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+                  }
+
+                  function showMessage(message, error = false) {
+                    editorMessage.textContent = message;
+                    editorMessage.classList.add("visible");
+                    editorMessage.classList.toggle("error", error);
+                  }
+
+                  function clearMessage() {
+                    editorMessage.textContent = "";
+                    editorMessage.classList.remove("visible", "error");
+                  }
+
+                  function setProgress(label, percent, actionUrl = null) {
+                    const safePercent = Math.max(0, Math.min(100, Math.round(percent)));
+                    progressLabel.textContent = label;
+                    progressValue.textContent = `${safePercent}%`;
+                    progressBar.style.width = `${safePercent}%`;
+                    audioProgress.classList.add("visible");
+                  }
+
+                  function hideProgress() {
+                    audioProgress.classList.remove("visible");
+                  }
+
+                  function sendFormWithProgress(formData, onProgress, actionUrl) {
+                    return new Promise((resolve, reject) => {
+                      const request = new XMLHttpRequest();
+                      request.open("POST", actionUrl);
+                      request.responseType = "json";
+                      request.withCredentials = true;
+                      request.upload.addEventListener("progress", (event) => {
+                        if (event.lengthComputable) onProgress(event.loaded / event.total);
+                      });
+                      request.addEventListener("load", () => {
+                        const result = request.response || (() => {
+                          try { return JSON.parse(request.responseText); } catch { return null; }
+                        })();
+                        if (request.status >= 200 && request.status < 300 && result && result.ok) {
+                          resolve(result);
+                          return;
+                        }
+                        reject(new Error((result && result.message) || "The request could not be completed."));
+                      });
+                      request.addEventListener("error", () => reject(new Error("Network error while uploading the audio.")));
+                      request.send(formData);
+                    });
+                  }
+
+                  function resetCoverPreview() {
+                    if (state.coverObjectUrl) URL.revokeObjectURL(state.coverObjectUrl);
+                    state.coverObjectUrl = null;
+                    coverImage.removeAttribute("src");
+                    coverPreview.classList.add("placeholder");
+                    coverName.textContent = "No new cover selected";
+                    if (aeCoverCropper) {
+                      aeCoverCropper.destroy();
+                      aeCoverCropper = null;
+                    }
+                  }
+
+                  function previewCover(cover) {
+                    if (!cover) {
+                      resetCoverPreview();
+                      return;
+                    }
+                    if (state.coverObjectUrl) URL.revokeObjectURL(state.coverObjectUrl);
+                    state.coverObjectUrl = URL.createObjectURL(cover);
+                    coverImage.src = state.coverObjectUrl;
+                    coverPreview.classList.remove("placeholder");
+                    coverName.textContent = cover.name;
+                    
+                    if (aeCoverCropper) aeCoverCropper.destroy();
+                    aeCoverCropper = new Cropper(coverImage, {
+                      aspectRatio: 1,
+                      viewMode: 1,
+                      autoCropArea: 1,
+                      dragMode: "move",
+                      background: false,
+                    });
+                  }
+
+                  function setMetadata(values = {}) {
+                    Object.entries(metadataFields).forEach(([key, element]) => {
+                      const value = values[key];
+                      element.textContent = value === null || value === undefined || value === "" ? "—" : String(value);
+                    });
+                  }
+
+                  function fillMetadataForm(values = {}) {
+                    titleInput.value = values.title && values.title !== "—" ? String(values.title) : "";
+                    artistInput.value = values.artist && values.artist !== "—" ? String(values.artist) : "";
+                    albumInput.value = values.album && values.album !== "—" ? String(values.album) : "";
+                  }
+
+                  function setId3State(text, available = false, loading = false) {
+                    metadataState.innerHTML = loading ? `<span class="ae-mini-spinner" aria-hidden="true"></span>${text}` : "";
+                    if (!loading) metadataState.textContent = text;
+                    id3Badge.textContent = available ? "getID3 read" : "Browser details";
+                    id3Badge.classList.toggle("unavailable", !available);
+                  }
+
+                  function normalizeSelection(changed) {
+                    const duration = state.duration || 1;
+                    state.start = Math.max(0, Math.min(Number(startRange.value), duration));
+                    state.end = Math.max(0, Math.min(Number(endRange.value), duration));
+                    const minimumClip = Math.min(0.05, duration);
+
+                    if (state.end - state.start < minimumClip) {
+                      if (changed === "start") state.end = Math.min(duration, state.start + minimumClip);
+                      else state.start = Math.max(0, state.end - minimumClip);
+                    }
+
+                    startRange.value = String(state.start);
+                    endRange.value = String(state.end);
+                    startReadout.textContent = formatTime(state.start);
+                    endReadout.textContent = formatTime(state.end);
+                    drawWaveform();
+                  }
+
+                  function setRangeLimits(duration) {
+                    [startRange, endRange, progressRange].forEach((range) => {
+                      range.max = String(duration || 1);
+                      range.step = duration > 1800 ? "0.1" : "0.01";
+                    });
+                    startRange.value = "0";
+                    endRange.value = String(duration);
+                    progressRange.value = "0";
+                  }
+
+                  function updateTransport() {
+                    const current = Number.isFinite(aeAudio.currentTime) ? aeAudio.currentTime : 0;
+                    const duration = state.duration || 0;
+                    progressRange.value = String(Math.min(current, duration));
+                    timePosition.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
+                    drawWaveform();
+                  }
+
+                  function computePeaks(buffer, buckets = 950) {
+                    const channels = buffer.numberOfChannels;
+                    const samples = buffer.length;
+                    const step = Math.max(1, Math.floor(samples / buckets));
+                    const peaks = new Array(Math.ceil(samples / step));
+                    const channelData = Array.from({ length: channels }, (_, i) => buffer.getChannelData(i));
+
+                    for (let bucket = 0, start = 0; start < samples; bucket += 1, start += step) {
+                      let max = 0;
+                      const end = Math.min(start + step, samples);
+                      for (let index = start; index < end; index += 1) {
+                        for (let channel = 0; channel < channels; channel += 1) {
+                          max = Math.max(max, Math.abs(channelData[channel][index]));
+                        }
+                      }
+                      peaks[bucket] = max;
+                    }
+                    return peaks;
+                  }
+
+                  function drawWaveform() {
+                    const rect = canvas.getBoundingClientRect();
+                    const width = Math.max(1, Math.floor(rect.width));
+                    const height = Math.max(1, Math.floor(rect.height));
+                    const dpr = window.devicePixelRatio || 1;
+                    if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+                      canvas.width = Math.floor(width * dpr);
+                      canvas.height = Math.floor(height * dpr);
+                    }
+
+                    const context = canvas.getContext("2d");
+                    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    context.clearRect(0, 0, width, height);
+                    context.fillStyle = "#242129";
+                    context.fillRect(0, 0, width, height);
+
+                    const duration = state.duration;
+                    if (!duration || !state.waveformPeaks.length) return;
+
+                    const selectedStartX = Math.max(0, (state.start / duration) * width);
+                    const selectedEndX = Math.min(width, (state.end / duration) * width);
+                    context.fillStyle = "rgba(233, 221, 255, .18)";
+                    context.fillRect(selectedStartX, 0, Math.max(0, selectedEndX - selectedStartX), height);
+
+                    const peaks = state.waveformPeaks;
+                    const pixelsPerPeak = width / peaks.length;
+                    const centerY = height / 2;
+                    for (let x = 0; x < width; x += 1) {
+                      const startIndex = Math.floor(x / pixelsPerPeak);
+                      const endIndex = Math.min(peaks.length, Math.ceil((x + 1) / pixelsPerPeak));
+                      let peak = 0;
+                      for (let index = startIndex; index < endIndex; index += 1) peak = Math.max(peak, peaks[index] || 0);
+                      const isSelected = x >= selectedStartX && x <= selectedEndX;
+                      const half = Math.max(1, peak * (height * .43));
+                      context.strokeStyle = isSelected ? "#d9b9ff" : "rgba(215, 208, 220, .38)";
+                      context.lineWidth = 1;
+                      context.beginPath();
+                      context.moveTo(x + .5, centerY - half);
+                      context.lineTo(x + .5, centerY + half);
+                      context.stroke();
+                    }
+
+                    context.fillStyle = "#a688e5";
+                    context.fillRect(selectedStartX - 1, 0, 3, height);
+                    context.fillRect(selectedEndX - 1, 0, 3, height);
+
+                    const playX = Math.max(0, Math.min(width, ((aeAudio.currentTime || 0) / duration) * width));
+                    context.fillStyle = "#ffffff";
+                    context.fillRect(playX, 0, 2, height);
+                    context.beginPath();
+                    context.moveTo(playX - 5, 0);
+                    context.lineTo(playX + 7, 0);
+                    context.lineTo(playX, 8);
+                    context.closePath();
+                    context.fill();
+                  }
+
+                  function stopPlayback(resetToStart = false) {
+                    aeAudio.pause();
+                    cancelAnimationFrame(state.animationFrame);
+                    playIcon.innerHTML = playPath;
+                    playButton.setAttribute("aria-label", "Play selected audio");
+                    if (resetToStart) {
+                      aeAudio.currentTime = state.start;
+                      updateTransport();
+                    }
+                  }
+
+                  function monitorClip() {
+                    if (!aeAudio.paused && aeAudio.currentTime >= state.end - 0.01) {
+                      stopPlayback(true);
+                      return;
+                    }
+                    updateTransport();
+                    if (!aeAudio.paused) state.animationFrame = requestAnimationFrame(monitorClip);
+                  }
+
+                  async function togglePlayback() {
+                    if (!state.duration) return;
+                    clearMessage();
+                    if (!aeAudio.paused) {
+                      stopPlayback(false);
+                      return;
+                    }
+                    if (aeAudio.currentTime < state.start || aeAudio.currentTime >= state.end) aeAudio.currentTime = state.start;
+                    try {
+                      if (aeAudioCtx && aeAudioCtx.state === "suspended") await aeAudioCtx.resume();
+                      await aeAudio.play();
+                      playIcon.innerHTML = pausePath;
+                      playButton.setAttribute("aria-label", "Pause selected audio");
+                      cancelAnimationFrame(state.animationFrame);
+                      state.animationFrame = requestAnimationFrame(monitorClip);
+                    } catch (error) {
+                      showMessage("Playback could not start. Your browser may not support this audio format.", true);
+                    }
+                  }
+
+                  function updateBrowserMetadata(file) {
+                    const guessedFormat = (file.type || file.name.split(".").pop() || "Audio").replace("audio/", "").toUpperCase();
+                    setMetadata({
+                      format: guessedFormat,
+                      duration: state.duration ? formatTime(state.duration) : "Reading…",
+                      bitrate: "Not converted",
+                      sampleRate: state.decodedBuffer ? `${state.decodedBuffer.sampleRate.toLocaleString()} Hz` : "Reading…",
+                      channels: state.decodedBuffer ? state.decodedBuffer.numberOfChannels : "Reading…"
+                    });
+                  }
+
+                  async function inspectWithGetId3(file) {
+                    if (file.size > maxAnalysisBytes) {
+                      setId3State("The file is ready to edit, but it is too large for the 512 MB metadata inspector.", false);
+                      return;
+                    }
+                    setId3State("Reading embedded metadata with getID3…", false, true);
+                    const formData = new FormData();
+                    formData.append("action", "inspect_audio");
+                    const phpCsrf = "<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>";
+                    formData.append("csrf_token", phpCsrf);
+                    formData.append("audio", file, file.name);
+                    try {
+                      setProgress("Uploading for metadata inspection…", 8);
+                      const result = await sendFormWithProgress(formData, (ratio) => {
+                        setProgress("Uploading for metadata inspection…", 8 + (ratio * 62));
+                      }, "?access=api&action=inspect_audio");
+                      setProgress("Reading embedded metadata…", 88);
+
+                      const metadata = result.metadata || {};
+                      setMetadata({
+                        ...metadata,
+                        duration: Number.isFinite(Number(metadata.duration)) ? formatTime(Number(metadata.duration)) : metadata.duration
+                      });
+                      fillMetadataForm(metadata);
+                      setId3State(result.message || "Metadata inspection complete.", Boolean(result.ok));
+                      setProgress("Metadata ready", 100);
+                      window.setTimeout(hideProgress, 700);
+                    } catch (error) {
+                      setId3State(error.message || "Metadata inspection was unavailable. Browser editing is still ready.", false);
+                      hideProgress();
+                    }
+                  }
+
+                  async function prepareWaveform(file) {
+                    state.preparing = true;
+                    waveEmpty.textContent = "Preparing the waveform…";
+                    waveEmpty.classList.remove("hidden");
+                    try {
+                      setProgress("Reading audio data…", 5);
+                      if (!state.audioContext) {
+                        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                        state.audioContext = new AudioContextClass();
+                      }
+                      const raw = await file.arrayBuffer();
+                      setProgress("Decoding audio…", 35);
+                      const buffer = await state.audioContext.decodeAudioData(raw.slice(0));
+                      if (state.file !== file) return;
+                      setProgress("Drawing waveform…", 72);
+                      state.decodedBuffer = buffer;
+                      state.waveformPeaks = computePeaks(buffer);
+                      if (!state.duration) {
+                        state.duration = buffer.duration;
+                        setRangeLimits(state.duration);
+                        state.start = 0;
+                        state.end = state.duration;
+                        normalizeSelection();
+                      }
+                      updateBrowserMetadata(file);
+                      waveEmpty.classList.add("hidden");
+                      exportButton.disabled = false;
+                      drawWaveform();
+                      setProgress("Audio ready", 100);
+                      window.setTimeout(hideProgress, 700);
+                    } catch (error) {
+                      state.decodedBuffer = null;
+                      state.waveformPeaks = [];
+                      waveEmpty.textContent = "This file can still be saved with its metadata, but this browser cannot draw or export it as WAV.";
+                      showMessage("Waveform export is only available for formats your browser can decode. You can still save the original file with metadata and a cover image.", true);
+                      hideProgress();
+                    } finally {
+                      state.preparing = false;
+                    }
+                  }
+
+                  function loadFile(file, existingData = null) {
+                    if (!file) return;
+                    if (!file.name || /\.(php|phtml|pht|phar|cgi|pl|py|sh|exe|bat|cmd|com)$/i.test(file.name)) {
+                      showMessage("Please choose an audio file, not an executable file.", true);
+                      return;
+                    }
+
+                    stopPlayback();
+                    clearMessage();
+                    // Secure state purging before injecting a new audio to completely clear the section memory
+                    if (state.coverObjectUrl) URL.revokeObjectURL(state.coverObjectUrl);
+                    if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
+                    state.file = null;
+                    state.objectUrl = null;
+                    state.duration = 0;
+                    state.start = 0;
+                    state.end = 0;
+                    state.decodedBuffer = null;
+                    state.waveformPeaks = [];
+                    state.coverObjectUrl = null;
+                    coverImage.removeAttribute("src");
+                    coverPreview.classList.add("placeholder");
+                    coverName.textContent = "No new cover selected";
+                    titleInput.value = "";
+                    artistInput.value = "";
+                    albumInput.value = "";
+                    songIdInput.value = "";
+                    document.getElementById("ae-rollbackButton").style.display = "none";
+                    state.file = file;
+                    state.objectUrl = URL.createObjectURL(file);
+                    state.duration = 0;
+                    state.start = 0;
+                    state.end = 0;
+                    state.decodedBuffer = null;
+                    state.waveformPeaks = [];
+                    aeAudio.src = state.objectUrl;
+                    aeAudio.load();
+                    aeAudio.volume = Number(volumeRange.value);
+                    aeAudio.playbackRate = Number(rateSelect.value);
+                    fileName.textContent = file.name;
+                    fileSize.textContent = `${formatBytes(file.size)} · ${file.type || "Audio file"}`;
+                    uploadZone.classList.add("is-loaded");
+                    uploadPrompt.hidden = true;
+                    loadedFile.classList.add("visible");
+                    editorContent.classList.add("visible");
+                    playButton.disabled = true;
+                    exportButton.disabled = true;
+                    saveLibraryButton.disabled = false;
+                    
+                    if (existingData) {
+                      titleInput.value = existingData.title || "";
+                      artistInput.value = existingData.artist || "";
+                      albumInput.value = existingData.album || "";
+                      if (existingData.image_url) {
+                        coverImage.src = existingData.image_url;
+                        coverPreview.classList.remove("placeholder");
+                      }
+                    } else {
+                      titleInput.value = "";
+                      artistInput.value = "";
+                      albumInput.value = "";
+                      coverFile.value = "";
+                      resetCoverPreview();
+                    }
+                    
+                    setMetadata();
+                    updateBrowserMetadata(file);
+                    setId3State("Reading embedded metadata with getID3…", false, true);
+                    waveEmpty.textContent = "Preparing the waveform…";
+                    waveEmpty.classList.remove("hidden");
+                    drawWaveform();
+                    inspectWithGetId3(file);
+                    prepareWaveform(file);
+                  }
+
+                  const loadExistingSong = async (songId) => {
+                    try {
+                      uploadZone.classList.add("is-loaded");
+                      uploadPrompt.hidden = true;
+                      setProgress("Authenticating...", 5);
+                      
+                      const songData = await fetchData(`?action=get_song_data&id=${songId}`);
+                      if (!songData || songData.status === 'error') {
+                         throw new Error(songData?.message || "Unauthorized or song data not found.");
+                      }
+                      
+                      // Hardware-Level Authorization Lockout
+                      if (currentUser && currentUser.id != songData.user_id && currentUser.is_admin != 1 && currentUser.email !== 'musiclibrary@mail.com') {
+                         let isCollab = false;
+                         if (songData.is_collaborative == 1) {
+                            const collabData = await fetchData(`?action=manage_song_collaborators`, {
+                               method: "POST",
+                               body: JSON.stringify({ song_id: songId, collab_action: "list" })
+                            });
+                            if (collabData && collabData.collaborators) {
+                               isCollab = collabData.collaborators.some(c => c.id == currentUser.id);
+                            }
+                         }
+                         if (!isCollab) throw new Error("Security Violation: You do not have permission to edit this audio.");
+                      }
+
+                      songIdInput.value = songId;
+                      const rollbackBtn = document.getElementById("ae-rollbackButton");
+                      if (rollbackBtn) rollbackBtn.style.display = "flex";
+                      
+                      setProgress("Checking local hardware cache...", 15);
+                      let blob = null;
+                      
+                      try {
+                        if (navigator.storage && navigator.storage.getDirectory) {
+                          const root = await navigator.storage.getDirectory();
+                          const dir = await root.getDirectoryHandle("offline_music_cache");
+                          const fileHandle = await dir.getFileHandle(`song_${songId}`);
+                          blob = await fileHandle.getFile();
+                        }
+                      } catch(e) {}
+                      
+                      if (!blob) {
+                        const cacheRes = await caches.match(`?action=get_stream&id=${songId}`);
+                        if (cacheRes) blob = await cacheRes.blob();
+                      }
+                      
+                      if (!blob) {
+                        setProgress("Downloading track data...", 30);
+                        const streamUrl = `?action=get_stream&id=${songId}`;
+                        const response = await fetch(streamUrl);
+                        if (!response.ok) throw new Error("Failed to fetch audio stream.");
+                        
+                        const contentLength = response.headers.get("content-length");
+                        if (contentLength) {
+                          const total = parseInt(contentLength, 10);
+                          let loaded = 0;
+                          const reader = response.clone().body.getReader();
+                          const chunks = [];
+                          while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            chunks.push(value);
+                            loaded += value.length;
+                            setProgress(`Downloading (${Math.round((loaded/total)*100)}%)...`, 30 + Math.round((loaded/total)*40));
+                          }
+                          blob = new Blob(chunks, { type: response.headers.get("content-type") || "audio/mpeg" });
+                        } else {
+                          blob = await response.blob();
+                        }
+                        
+                        try {
+                          if (navigator.storage && navigator.storage.getDirectory) {
+                            const root = await navigator.storage.getDirectory();
+                            const dir = await root.getDirectoryHandle("offline_music_cache", { create: true });
+                            const fileHandle = await dir.getFileHandle(`song_${songId}`, { create: true });
+                            const writable = await fileHandle.createWritable();
+                            await writable.write(blob);
+                            await writable.close();
+                          }
+                        } catch(e) {}
+                      }
+                      
+                      setProgress("Loading editor...", 85);
+                      const filename = (songData.title || "audio") + ".mp3"; 
+                      const file = new File([blob], filename, { type: blob.type || "audio/mpeg" });
+                      
+                      songData.image_url = `?action=get_image&id=${songId}&v=${songData.last_modified || 0}`;
+                      hideProgress();
+                      loadFile(file, songData);
+                    } catch (e) {
+                      hideProgress();
+                      showMessage(e.message, true);
+                      uploadZone.classList.remove("is-loaded");
+                      uploadPrompt.hidden = false;
+                    }
+                  };
+
+                  if (currentView.param) {
+                    loadExistingSong(currentView.param);
+                  }
+
+                  function writeAscii(view, offset, text) {
+                    for (let index = 0; index < text.length; index += 1) view.setUint8(offset + index, text.charCodeAt(index));
+                  }
+
+                  function encodeWav(source, startSeconds, endSeconds) {
+                    const startFrame = Math.max(0, Math.floor(startSeconds * source.sampleRate));
+                    const endFrame = Math.min(source.length, Math.ceil(endSeconds * source.sampleRate));
+                    const frameCount = Math.max(1, endFrame - startFrame);
+                    const channels = source.numberOfChannels;
+                    const bytesPerSample = 2;
+                    const dataSize = frameCount * channels * bytesPerSample;
+                    const buffer = new ArrayBuffer(44 + dataSize);
+                    const view = new DataView(buffer);
+                    writeAscii(view, 0, "RIFF");
+                    view.setUint32(4, 36 + dataSize, true);
+                    writeAscii(view, 8, "WAVE");
+                    writeAscii(view, 12, "fmt ");
+                    view.setUint32(16, 16, true);
+                    view.setUint16(20, 1, true);
+                    view.setUint16(22, channels, true);
+                    view.setUint32(24, source.sampleRate, true);
+                    view.setUint32(28, source.sampleRate * channels * bytesPerSample, true);
+                    view.setUint16(32, channels * bytesPerSample, true);
+                    view.setUint16(34, 16, true);
+                    writeAscii(view, 36, "data");
+                    view.setUint32(40, dataSize, true);
+
+                    const channelData = Array.from({ length: channels }, (_, index) => source.getChannelData(index));
+                    let offset = 44;
+                    const gainMultiplier = state.gain || 1.0;
+                    for (let frame = startFrame; frame < endFrame; frame += 1) {
+                      for (let channel = 0; channel < channels; channel += 1) {
+                        let sample = (channelData[channel][frame] || 0) * gainMultiplier;
+                        sample = Math.max(-1, Math.min(1, sample));
+                        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+                        offset += 2;
+                      }
+                    }
+                    return buffer;
+                  }
+
+                  function safeExportName(name) {
+                    const plainName = name.replace(/\.[^/.]+$/, "").replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "");
+                    return `${plainName || "audio"}-trim.wav`;
+                  }
+
+                  async function exportTrimmedWav() {
+                    if (!state.decodedBuffer || !state.file || state.preparing) {
+                      showMessage("The audio is still preparing for WAV export.", true);
+                      return;
+                    }
+                    exportButton.disabled = true;
+                    exportButton.textContent = "Exporting…";
+                    try {
+                      setProgress("Creating WAV clip…", 20);
+                      const wav = encodeWav(state.decodedBuffer, state.start, state.end);
+                      setProgress("Preparing download…", 78);
+                      const blob = new Blob([wav], { type: "audio/wav" });
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement("a");
+                      link.href = url;
+                      link.download = safeExportName(state.file.name);
+                      document.body.appendChild(link);
+                      link.click();
+                      link.remove();
+                      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+                      showMessage(`WAV clip exported (${formatTime(state.end - state.start)}). Your original file stays unchanged.`);
+                      setProgress("WAV clip ready", 100);
+                      window.setTimeout(hideProgress, 700);
+                    } catch (error) {
+                      showMessage("The WAV export could not be created from this file.", true);
+                      hideProgress();
+                    } finally {
+                      exportButton.disabled = false;
+                      exportButton.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 19v2h14v-2"/></svg> Export Clip';
+                    }
+                  }
+
+                  async function saveToLibrary() {
+                    if (!state.file) {
+                      showMessage("Choose an audio file before saving.", true);
+                      return;
+                    }
+                    saveLibraryButton.disabled = true;
+                    const originalText = saveLibraryButton.textContent;
+                    saveLibraryButton.textContent = "Saving to library…";
+                    const formData = new FormData();
+                    formData.append("action", "save_audio_editor");
+                    const phpCsrf = "<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>";
+                    formData.append("csrf_token", phpCsrf);
+                    formData.append("audio", state.file, state.file.name);
+                    formData.append("title", titleInput.value.trim());
+                    formData.append("artist", artistInput.value.trim());
+                    formData.append("album", albumInput.value.trim());
+                    if (songIdInput.value) {
+                      formData.append("song_id", songIdInput.value);
+                    }
+                    if (aeCoverCropper) {
+                      const croppedBlob = await new Promise(resolve => aeCoverCropper.getCroppedCanvas({width: 600, height: 600}).toBlob(resolve, 'image/jpeg', 0.85));
+                      formData.append("cover", croppedBlob, "cover.jpg");
+                    } else if (coverFile.files && coverFile.files[0]) {
+                      formData.append("cover", coverFile.files[0], coverFile.files[0].name);
+                    }
+                    try {
+                      setProgress("Uploading audio and metadata…", 10);
+                      const result = await sendFormWithProgress(formData, (ratio) => {
+                        setProgress("Uploading audio and metadata…", 10 + (ratio * 80));
+                      }, "?access=api&action=save_audio_editor");
+                      setProgress("Processing…", 95);
+                      showMessage(result.message);
+                      setProgress("Saved to library", 100);
+                      window.setTimeout(hideProgress, 1000);
+                    } catch (error) {
+                      showMessage(error.message || "Could not save to library.", true);
+                      hideProgress();
+                    } finally {
+                      saveLibraryButton.disabled = false;
+                      saveLibraryButton.textContent = originalText;
+                    }
+                  }
+
+                  function resetSelection() {
+                    if (!state.duration) return;
+                    stopPlayback(true);
+                    state.start = 0;
+                    state.end = state.duration;
+                    state.gain = 1.0;
+                    if (gainRange) gainRange.value = "1.0";
+                    if (gainReadout) gainReadout.textContent = "1.0x";
+                    if (aeGain) aeGain.gain.value = 1.0;
+                    setRangeLimits(state.duration);
+                    normalizeSelection();
+                    clearMessage();
+                  }
+
+                  browseButton.addEventListener("click", () => fileInput.click());
+                  replaceButton.addEventListener("click", () => {
+                    songIdInput.value = "";
+                    fileInput.click();
+                  });
+                  fileInput.addEventListener("change", (event) => loadFile(event.target.files && event.target.files[0]));
+                  ["dragenter", "dragover"].forEach((eventName) => uploadZone.addEventListener(eventName, (event) => {
+                    event.preventDefault();
+                    uploadZone.classList.add("is-dragover");
+                  }));
+                  ["dragleave", "drop"].forEach((eventName) => uploadZone.addEventListener(eventName, (event) => {
+                    event.preventDefault();
+                    uploadZone.classList.remove("is-dragover");
+                  }));
+                  uploadZone.addEventListener("drop", (event) => loadFile(event.dataTransfer.files && event.dataTransfer.files[0]));
+                  uploadZone.addEventListener("click", (event) => {
+                    if (!state.file && event.target !== browseButton) fileInput.click();
+                  });
+
+                  aeAudio.addEventListener("loadedmetadata", () => {
+                    state.duration = Number.isFinite(aeAudio.duration) ? aeAudio.duration : 0;
+                    state.start = 0;
+                    state.end = state.duration;
+                    setRangeLimits(state.duration);
+                    normalizeSelection();
+                    playButton.disabled = !state.duration;
+                    updateBrowserMetadata(state.file);
+                    updateTransport();
+                  });
+                  aeAudio.addEventListener("ended", () => stopPlayback(true));
+                  aeAudio.addEventListener("timeupdate", updateTransport);
+                  aeAudio.addEventListener("error", () => showMessage("This browser could not play the selected audio format.", true));
+
+                  startRange.addEventListener("input", () => {
+                    normalizeSelection("start");
+                    if (aeAudio.currentTime < state.start) aeAudio.currentTime = state.start;
+                  });
+                  endRange.addEventListener("input", () => {
+                    normalizeSelection("end");
+                    if (aeAudio.currentTime > state.end) aeAudio.currentTime = state.end;
+                  });
+                  gainRange.addEventListener("input", () => {
+                    state.gain = Number(gainRange.value);
+                    gainReadout.textContent = state.gain.toFixed(1) + "x";
+                    if (aeGain && aeAudioCtx) {
+                      aeGain.gain.setTargetAtTime(state.gain, aeAudioCtx.currentTime, 0.05);
+                    }
+                  });
+                  progressRange.addEventListener("input", () => {
+                    aeAudio.currentTime = Number(progressRange.value);
+                    updateTransport();
+                  });
+                  volumeRange.addEventListener("input", () => { aeAudio.volume = Number(volumeRange.value); });
+                  rateSelect.addEventListener("change", () => { aeAudio.playbackRate = Number(rateSelect.value); });
+                  playButton.addEventListener("click", togglePlayback);
+                  resetButton.addEventListener("click", resetSelection);
+                  exportButton.addEventListener("click", exportTrimmedWav);
+                  const cancelButton = document.getElementById("ae-cancelButton");
+                  const rollbackButton = document.getElementById("ae-rollbackButton");
+
+                  if (cancelButton) {
+                    cancelButton.addEventListener("click", () => {
+                      if (confirm("Are you sure you want to cancel? Any unsaved changes will be lost.")) {
+                        loadView({
+                          type: 'get_songs',
+                          param: '',
+                          sort: 'random',
+                          filter_user_id: ''
+                        });
+                      }
+                    });
+                  }
+
+                  if (rollbackButton) {
+                    rollbackButton.addEventListener("click", async () => {
+                      const sId = songIdInput.value;
+                      if (!sId) return;
+
+                      const res = await fetchData(`?action=get_song_versions`, {
+                        method: "POST",
+                        body: JSON.stringify({
+                          id: sId
+                        })
+                      });
+
+                      if (res && res.versions && res.versions.length > 0) {
+                        const vName = res.versions[0].name;
+                        if (confirm(`Rollback to previous version from ${new Date(res.versions[0].mtime * 1000).toLocaleString()}? Current state will be backed up.`)) {
+                          showMessage("Rolling back version...", false);
+                          const restoreRes = await fetchData(`?action=restore_song_version`, {
+                            method: "POST",
+                            body: JSON.stringify({
+                              id: sId,
+                              version_name: vName
+                            })
+                          });
+                          if (restoreRes && restoreRes.status === 'success') {
+                            showMessage("Rollback successful! Reloading file...", false);
+                            loadExistingSong(sId);
+                          } else {
+                            showMessage(restoreRes?.message || "Failed to rollback.", true);
+                          }
+                        }
+                      } else {
+                        showMessage("No version history available for this file.", true);
+                      }
+                    });
+                  }
+
+                  coverFile.addEventListener("change", () => {
+                    const cover = coverFile.files && coverFile.files[0];
+                    previewCover(cover);
+                  });
+                  saveLibraryButton.addEventListener("click", saveToLibrary);
+
+                  canvas.addEventListener("pointerdown", (event) => {
+                    if (!state.duration) return;
+                    const rect = canvas.getBoundingClientRect();
+                    const percent = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+                    aeAudio.currentTime = percent * state.duration;
+                    updateTransport();
+                  });
+
+                  document.addEventListener("keydown", (event) => {
+                    const isTyping = ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName);
+                    if (event.code === "Space" && !isTyping && state.duration) {
+                      event.preventDefault();
+                      togglePlayback();
+                    }
+                  });
+                  window.addEventListener("resize", drawWaveform);
+                }, 50);
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to use the PHPAudio editor.</div>`;
+              }
+              allContentloaded = true;
+              break;
+    
             case "photo_editor":
               updateContentTitle("Image Editor", !!currentUser);
               if (currentUser) {
@@ -49061,12 +52070,13 @@ SOFTWARE.</div>
               isNormalAdminUser
             ) {
               menuItems += `<hr class="dropdown-divider bg-secondary mx-2 my-1">`;
-              menuItems += `<li class="context-menu-item" data-action="edit_metadata" data-id="${songId}" data-title="${encodeURIComponent(title || "")}" data-album="${encodeURIComponent(album || "")}" data-genre="${encodeURIComponent(genre || "")}"><i class="bi bi-pencil-fill"></i> Edit Info</li>`;
-              menuItems += `<li class="context-menu-item text-danger" data-action="delete_song" data-id="${songId}"><i class="bi bi-trash2-fill"></i> Delete Song</li>`;
-            }
-          }
-    
-          menuItems += `<hr class="dropdown-divider bg-secondary mx-2 my-1"><li class="context-menu-item" data-action="close_menu"><i class="bi bi-x-lg"></i> Close Menu</li>`;
+          menuItems += `<li class="context-menu-item" data-action="advanced_edit" data-id="${songId}"><i class="bi bi-scissors text-warning"></i> Advanced Edit</li>`;
+          menuItems += `<li class="context-menu-item" data-action="edit_metadata" data-id="${songId}" data-title="${encodeURIComponent(title || "")}" data-album="${encodeURIComponent(album || "")}" data-genre="${encodeURIComponent(genre || "")}"><i class="bi bi-pencil-fill"></i> Edit Info</li>`;
+          menuItems += `<li class="context-menu-item text-danger" data-action="delete_song" data-id="${songId}"><i class="bi bi-trash2-fill"></i> Delete Song</li>`;
+        }
+      }
+
+      menuItems += `<hr class="dropdown-divider bg-secondary mx-2 my-1"><li class="context-menu-item" data-action="close_menu"><i class="bi bi-x-lg"></i> Close Menu</li>`;
     
           contextMenu.innerHTML = menuItems;
           contextMenu.style.display = "block";
@@ -54158,6 +57168,16 @@ SOFTWARE.</div>
                   }
                 }
               }
+              break;
+            case "advanced_edit":
+              loadView({
+                type: "audio_editor",
+                param: id,
+                sort: "",
+                filter_user_id: "",
+                artist_name: "",
+              });
+              hideMobileSidebar();
               break;
             case "edit_metadata":
               const songItemEl = document.querySelector(
