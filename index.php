@@ -387,7 +387,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '8.0');
+define('APP_VERSION', '8.1');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -3058,6 +3058,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               if (href.includes('access=admin') && !href.includes('logout=1') && link.target !== '_blank' && !link.hasAttribute('download')) {
                 e.preventDefault();
+                const adminSidebarEl = document.getElementById('admin-sidebar');
+                if (adminSidebarEl) {
+                  const bsOffcanvas = bootstrap.Offcanvas.getInstance(adminSidebarEl);
+                  if (bsOffcanvas) {
+                    bsOffcanvas.hide();
+                  }
+                }
                 loadAdminPage(href, true);
               }
             });
@@ -17013,15 +17020,13 @@ HTML;
       if (!isset($_FILES['audio'])) send_json(['ok' => false, 'message' => 'No audio file']);
       $tmp = $_FILES['audio']['tmp_name'];
       $reader = new getID3();
+      $reader->setOption(['encoding' => 'UTF-8']);
       $info = $reader->analyze($tmp);
       getid3_lib::CopyTagsToComments($info);
       $audio = $info['audio'] ?? [];
       $bitrate = isset($info['audio']['bitrate']) ? (int) round(((float) $info['audio']['bitrate']) / 1000) : null;
       $playtime = isset($info['playtime_seconds']) ? (float) $info['playtime_seconds'] : null;
-      $firstTag = function($info, $name) {
-        $val = $info['comments_html'][$name][0] ?? $info['comments'][$name][0] ?? $info['tags_html']['id3v2'][$name][0] ?? '';
-        return trim((string)$val) !== '' ? (string)$val : '—';
-      };
+      
       send_json([
         'ok' => true,
         'message' => 'Metadata read locally with getID3.',
@@ -17032,9 +17037,9 @@ HTML;
           'channels' => $audio['channels'] ?? '—',
           'duration' => $playtime,
           'encoder' => $audio['encoder'] ?? '—',
-          'title' => $firstTag($info, 'title'),
-          'artist' => $firstTag($info, 'artist'),
-          'album' => $firstTag($info, 'album')
+          'title' => extract_safe_tag($info['comments'] ?? [], 'title', '—'),
+          'artist' => extract_safe_tag($info['comments'] ?? [], 'artist', '—'),
+          'album' => extract_safe_tag($info['comments'] ?? [], 'album', '—')
         ]
       ]);
       break;
@@ -22457,7 +22462,7 @@ HTML;
         <body>
           <div id='header-wrap'>
             <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-            <div id='warning-txt'>âš ï¸ Optimizing database layout. Do not close this window!</div>
+            <div id='warning-txt'>⚠️ Optimizing database layout. Do not close this window!</div>
           </div>
           <pre id="log-output">PHP Music Library - SQLite VACUUM
 ===================================================
@@ -22607,7 +22612,7 @@ HTML;
         <body>
           <div id='header-wrap'>
             <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-            <div id='warning-txt'>âš ï¸ Wiping note charts to prepare for regeneration!</div>
+            <div id='warning-txt'>⚠️ Wiping note charts to prepare for regeneration!</div>
           </div>
           <pre id="log-output">PHP Music Library - Note Charts Reset & Wipe Scanner
 ===================================================
@@ -22730,7 +22735,7 @@ HTML;
                 <button id="super-admin-reset-btn" style="position: absolute; right: 15px; top: 10px; background-color: #ff3b30; color: #fff; border: none; border-radius: 20px; padding: 4px 16px; font-family: inherit; font-size: 11px; font-weight: bold; cursor: pointer; height: 26px;">Reset & Re-scan All</button>
               <?php endif; ?>
             </div>
-            <div id='warning-txt' style="margin-bottom: 8px;">âš ï¸ Division <?php echo $step; ?>/6 (<?php echo strtoupper($current_diff); ?>): Scanning and generating permanently on the server!</div>
+            <div id='warning-txt' style="margin-bottom: 8px;">⚠️ Division <?php echo $step; ?>/6 (<?php echo strtoupper($current_diff); ?>): Scanning and generating permanently on the server!</div>
           </div>
           <pre id="log-output">PHP Music Library - Server-Side Note Charts Generation Scanner
 =============================================================
@@ -23880,7 +23885,7 @@ function perform_force_rescan($db, $mode) {
 
   echo "<div id='header-wrap'>
           <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-          <div id='warning-txt'>âš ï¸ Forced Rescan (" . strtoupper($mode) . "). Do not close this window!</div>
+          <div id='warning-txt'>⚠️ Forced Rescan (" . strtoupper($mode) . "). Do not close this window!</div>
         </div>";
   echo "<pre>";
   echo "PHP Music Library - Forced Metadata Rescan\n";
@@ -24091,7 +24096,7 @@ function perform_full_scan($db) {
   
   echo "<div id='header-wrap'>
           <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-          <div id='warning-txt'>âš ï¸ Please wait and don't close this modal, the process can take very long!</div>
+          <div id='warning-txt'>⚠️ Please wait and don't close this modal, the process can take very long!</div>
         </div>";
   echo "<pre>";
   echo "PHP Music Library - Full Scan (Optimized Queue System)\n";
@@ -24472,7 +24477,7 @@ function perform_cover_scan($db) {
 
   echo "<div id='header-wrap'>
           <div id='prog-wrap'><div id='prog-track'><div id='prog-bar'></div></div><div id='prog-txt'>0%</div></div>
-          <div id='warning-txt'>âš ï¸ Re-scanning metadata cover arts. Do not close this window!</div>
+          <div id='warning-txt'>⚠️ Re-scanning metadata cover arts. Do not close this window!</div>
         </div>";
   echo "<pre>";
   echo "PHP Music Library - Cover Rescan Process\n";
@@ -25794,7 +25799,7 @@ function perform_cover_scan($db) {
 
       .progress-bar-bg {
         height: 4px;
-        background-color: #404040;
+        background-color: rgba(255, 255, 255, 0.2);
         border-radius: 2px;
         position: absolute;
         top: 50%;
@@ -25815,19 +25820,27 @@ function perform_cover_scan($db) {
         left: 0;
       }
 
+      .progress-bar-fg::after {
+        content: '';
+        position: absolute;
+        right: -7px;
+        top: -5px;
+        width: 14px;
+        height: 14px;
+        border: 2px solid var(--ytm-primary-text);
+        border-radius: 50%;
+        background: var(--ytm-primary-text);
+        box-shadow: none;
+        transition: background-color 0.2s, border-color 0.2s;
+      }
+
       .progress-bar-container:hover .progress-bar-fg {
         background-color: var(--ytm-accent);
       }
 
       .progress-bar-container:hover .progress-bar-fg::after {
-        content: '';
-        position: absolute;
-        right: -6px;
-        top: -4px;
-        width: 12px;
-        height: 12px;
-        border-radius: 50%;
-        background-color: var(--ytm-primary-text);
+        border-color: var(--ytm-accent);
+        background: var(--ytm-accent);
       }
 
       .player-bar .extra-controls {
@@ -25851,63 +25864,77 @@ function perform_cover_scan($db) {
         align-items: center;
       }
 
-      #volume-slider.form-range {
+      input[type="range"].form-range:not(.ae-app-shell input):not(.photo-editor-app input),
+      input[type="range"]:not(.ae-app-shell input):not(.photo-editor-app input) {
         -webkit-appearance: none;
         appearance: none;
         width: 100%;
-        cursor: pointer;
-        outline: none;
+        background: rgba(255, 255, 255, 0.2);
+        height: 4px;
+        border-radius: 9999px;
         padding: 0;
-        height: 4px;
-        border-radius: 2px;
-        background: var(--ytm-surface-2);
-      }
-
-      #volume-slider.form-range::-webkit-slider-runnable-track {
-        -webkit-appearance: none;
-        background: none;
+        margin: 0;
         border: none;
-        height: 4px;
+        outline: none;
       }
 
-      #volume-slider.form-range::-moz-range-track {
-        background: none;
-        border: none;
-        height: 4px;
+      input[type="range"][id="volume-slider"]:not(.ae-app-shell input):not(.photo-editor-app input),
+      input[type="range"][id="bg-gen-hue"]:not(.ae-app-shell input):not(.photo-editor-app input) {
+        background: transparent;
       }
 
-      #volume-slider.form-range::-webkit-slider-thumb {
+      input[type="range"].form-range:not(.ae-app-shell input):not(.photo-editor-app input)::-webkit-slider-runnable-track,
+      input[type="range"]:not(.ae-app-shell input):not(.photo-editor-app input)::-webkit-slider-runnable-track {
+        width: 100%;
+        height: 4px;
+        background: transparent;
+        border-radius: 9999px;
+      }
+
+      input[type="range"].form-range:not(.ae-app-shell input):not(.photo-editor-app input)::-webkit-slider-thumb,
+      input[type="range"]:not(.ae-app-shell input):not(.photo-editor-app input)::-webkit-slider-thumb {
         -webkit-appearance: none;
         appearance: none;
         height: 12px;
         width: 12px;
-        background-color: var(--ytm-primary-text);
-        border-radius: 50%;
         margin-top: -4px;
-        opacity: 0;
-        transition: opacity 0.2s ease-in-out;
+        border: 2px solid var(--ytm-accent, #ff0000);
+        border-radius: 50%;
+        background: var(--ytm-accent, #ff0000);
+        box-shadow: 0 0 0 2px var(--ytm-surface, #121212);
+        cursor: pointer;
+        transition: transform 0.1s;
       }
 
-      #volume-slider.form-range::-moz-range-thumb {
+      input[type="range"].form-range:not(.ae-app-shell input):not(.photo-editor-app input):hover::-webkit-slider-thumb,
+      input[type="range"]:not(.ae-app-shell input):not(.photo-editor-app input):hover::-webkit-slider-thumb {
+        transform: scale(1.2);
+      }
+
+      input[type="range"].form-range:not(.ae-app-shell input):not(.photo-editor-app input)::-moz-range-track,
+      input[type="range"]:not(.ae-app-shell input):not(.photo-editor-app input)::-moz-range-track {
+        width: 100%;
+        height: 4px;
+        background: transparent;
+        border-radius: 9999px;
+        border: none;
+      }
+
+      input[type="range"].form-range:not(.ae-app-shell input):not(.photo-editor-app input)::-moz-range-thumb,
+      input[type="range"]:not(.ae-app-shell input):not(.photo-editor-app input)::-moz-range-thumb {
         height: 12px;
         width: 12px;
-        background-color: var(--ytm-primary-text);
+        border: 2px solid var(--ytm-accent, #ff0000);
         border-radius: 50%;
-        border: none;
-        opacity: 0;
-        transition: opacity 0.2s ease-in-out;
+        background: var(--ytm-accent, #ff0000);
+        box-shadow: 0 0 0 2px var(--ytm-surface, #121212);
+        cursor: pointer;
+        transition: transform 0.1s;
       }
 
-      .volume-control:hover #volume-slider.form-range::-webkit-slider-thumb {
-        opacity: 1;
-      }
-
-      .volume-control:hover #volume-slider.form-range::-moz-range-thumb {
-        opacity: 1;
-      }
-
-      .volume-control:hover #volume-slider.form-range {
-        --track-fill: var(--ytm-accent) !important;
+      input[type="range"].form-range:not(.ae-app-shell input):not(.photo-editor-app input):hover::-moz-range-thumb,
+      input[type="range"]:not(.ae-app-shell input):not(.photo-editor-app input):hover::-moz-range-thumb {
+        transform: scale(1.2);
       }
 
       .modal-content {
@@ -26515,7 +26542,14 @@ function perform_cover_scan($db) {
       }
 
       .player-modal-content.theme-light-bg .progress-bar-fg::after {
-        background-color: #000000 !important;
+        border-color: #000000 !important;
+        background: #000000 !important;
+        box-shadow: none !important;
+      }
+
+      .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg::after {
+        border-color: var(--ytm-accent) !important;
+        background: var(--ytm-accent) !important;
       }
 
       .player-modal-content.theme-light-bg .nav-tabs {
@@ -31398,8 +31432,7 @@ function perform_cover_scan($db) {
               <div class="artist marquee-content" id="player-artist-mobile">Artist Name</div>
             </div>
           </div>
-          <button class="player-btn ms-2 me-3" id="pip-btn-mobile" title="Mini Player"><i class="bi bi-pip"></i></button>
-          <button class="player-btn" id="player-more-btn-mobile" title="More"><i class="bi bi-three-dots-vertical"></i></button>
+          <button class="player-btn ms-1" id="player-more-btn-mobile" title="More"><i class="bi bi-three-dots-vertical"></i></button>
         </div>
         <div class="playback-bar">
           <span class="time" id="current-time">0:00</span>
@@ -31457,10 +31490,10 @@ function perform_cover_scan($db) {
             
             <!-- PLAYER TAB -->
             <div class="tab-pane show active h-100" id="mp-player-pane">
-              <div class="h-100 w-100 overflow-hidden px-4 pb-4 pt-1 d-flex flex-column justify-content-between">
+              <div class="h-100 w-100 overflow-hidden px-4 pb-4 pt-1 d-flex flex-column justify-content-center align-items-center">
                 
-                <div class="d-flex flex-column justify-content-center align-items-center w-100" style="flex-grow: 1; min-height: 0;">
-                  <div class="position-relative shadow-lg" style="width: 100%; max-width: 400px; max-height: 52vh; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; margin: 0 auto;">
+                <div class="d-flex flex-column justify-content-center align-items-center w-100" style="min-height: 0;">
+                  <div class="position-relative shadow-lg" style="width: 100%; max-width: 400px; max-height: 42vh; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; margin: 0 auto;">
                     <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="player-modal-art" alt="Album Art" style="width: 100%; height: 100%; object-fit: cover;">
                     <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
                   </div>
@@ -31522,9 +31555,6 @@ function perform_cover_scan($db) {
               <i class="bi bi-chevron-down fs-2"></i>
             </button>
             <div>
-              <button type="button" class="btn player-btn text-white me-2 d-inline-block" id="dp-immersive-btn" title="Immersive Fullscreen">
-                <i class="bi bi-arrows-fullscreen fs-4"></i>
-              </button>
               <button type="button" class="btn player-btn text-white d-inline-block" id="desktop-player-modal-more-btn" title="More">
                 <i class="bi bi-three-dots-vertical fs-3"></i>
               </button>
@@ -31536,6 +31566,9 @@ function perform_cover_scan($db) {
               <div class="position-relative shadow-lg mx-auto" style="width: 100%; max-width: 50vh; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; flex-shrink: 1;">
                 <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="desktop-player-modal-art" style="width: 100%; height: 100%; object-fit: cover; background-color: var(--ytm-surface-2);">
                 <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
+                <button type="button" class="btn text-white position-absolute top-0 start-0 m-1 z-3 p-2 border-0 rounded-circle d-flex align-items-center justify-content-center border border-secondary" id="dp-immersive-btn" title="Immersive Fullscreen" style="width: 44px; height: 44px; backdrop-filter: blur(4px); transition: all 0.2s;">
+                  <i class="bi bi-arrows-fullscreen fs-5"></i>
+                </button>
               </div>
               <div class="mb-3 text-center mt-4 w-100 px-4">
                 <div class="marquee-container mb-1">
@@ -33275,7 +33308,7 @@ function perform_cover_scan($db) {
                     </select>
                   </div>
                   <div class="d-flex justify-content-between text-center small text-secondary fw-bold" style="padding: 0 10px;">
-                    <span>60Hz</span><span>230Hz</span><span>910Hz</span><span>3.6kHz</span><span>14kHz</span>
+                    <span style="width: 18%;">60Hz</span><span style="width: 18%;">230Hz</span><span style="width: 18%;">910Hz</span><span style="width: 18%;">3.6kHz</span><span style="width: 18%;">14kHz</span>
                   </div>
                   <div class="d-flex justify-content-between mt-4 mb-5">
                     <input type="range" class="form-range eq-band" data-band="0" min="-12" max="12" step="1" value="0" style="width: 18%; transform: rotate(-90deg); margin: 60px 0;">
@@ -35794,31 +35827,44 @@ curl_close($ch);
               left: 0;
               right: 0;
               height: 4px;
-              background-color: #555555;
+              background-color: rgba(255, 255, 255, 0.2);
               border-radius: 2px;
               pointer-events: none;
             }
         
             .timeline-filled {
               height: 4px;
-              background-color: var(--ytm-accent);
+              background-color: var(--ytm-primary-text);
               width: 0%;
               position: absolute;
               left: 0;
               pointer-events: none;
               border-radius: 2px;
               z-index: 2;
+              transition: background-color 0.2s;
             }
-        
-            .timeline-container:hover .timeline-filled::after {
+
+            .timeline-filled::after {
               content: '';
               position: absolute;
-              right: -6px;
-              top: -4px;
-              width: 12px;
-              height: 12px;
+              right: -7px;
+              top: -5px;
+              width: 14px;
+              height: 14px;
+              border: 2px solid var(--ytm-primary-text);
               border-radius: 50%;
+              background: var(--ytm-primary-text);
+              box-shadow: none;
+              transition: background-color 0.2s, border-color 0.2s;
+            }
+        
+            .timeline-container:hover .timeline-filled {
               background-color: var(--ytm-accent);
+            }
+
+            .timeline-container:hover .timeline-filled::after {
+              border-color: var(--ytm-accent);
+              background: var(--ytm-accent);
             }
         
             .pb-right {
@@ -37157,24 +37203,24 @@ SOFTWARE.</div>
               <label class="form-label d-flex justify-content-between align-items-center">
                 <span>Per-Song Equalizer</span>
                 <select class="form-select form-select-sm w-auto" id="sas-eq-preset-select">
-                   <option value="Custom">Custom</option>
-                   <option value="Flat">Flat</option>
-                   <option value="Rock">Rock</option>
-                   <option value="Jazz">Jazz</option>
-                   <option value="Classical">Classical</option>
-                   <option value="Pop">Pop</option>
-                   <option value="Bass Boost">Bass Boost</option>
-                 </select>
+                  <option value="Custom">Custom</option>
+                  <option value="Flat">Flat</option>
+                  <option value="Rock">Rock</option>
+                  <option value="Jazz">Jazz</option>
+                  <option value="Classical">Classical</option>
+                  <option value="Pop">Pop</option>
+                  <option value="Bass Boost">Bass Boost</option>
+                </select>
               </label>
-              <div class="d-flex justify-content-between text-center small text-secondary mt-3">
-                 <span>60Hz</span><span>230Hz</span><span>910Hz</span><span>3.6kHz</span><span>14kHz</span>
+              <div class="d-flex justify-content-between text-center small text-secondary mt-3 mb-5">
+                <span style="width:18%;">60Hz</span><span style="width:18%;">230Hz</span><span style="width:18%;">910Hz</span><span style="width:18%;">3.6kHz</span><span style="width:18%;">14kHz</span>
               </div>
-              <div class="d-flex justify-content-between mt-2 mb-4">
-                 <input type="range" class="form-range sas-eq-band" data-band="0" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
-                 <input type="range" class="form-range sas-eq-band" data-band="1" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
-                 <input type="range" class="form-range sas-eq-band" data-band="2" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
-                 <input type="range" class="form-range sas-eq-band" data-band="3" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
-                 <input type="range" class="form-range sas-eq-band" data-band="4" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
+              <div class="d-flex justify-content-between mt-2 mb-5">
+                <input type="range" class="form-range sas-eq-band" data-band="0" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
+                <input type="range" class="form-range sas-eq-band" data-band="1" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
+                <input type="range" class="form-range sas-eq-band" data-band="2" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
+                <input type="range" class="form-range sas-eq-band" data-band="3" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
+                <input type="range" class="form-range sas-eq-band" data-band="4" min="-12" max="12" step="1" value="0" style="width:18%; transform: rotate(-90deg); margin-top: 40px; margin-bottom: 40px;">
               </div>
             </div>
 
@@ -39912,10 +39958,10 @@ SOFTWARE.</div>
             if (!document.fullscreenElement) {
               document.documentElement.requestFullscreen().then(() => {
                 dpModalContent.classList.add("immersive-active");
-                dpImmersiveBtn.innerHTML = '<i class="bi bi-fullscreen-exit fs-4"></i>';
+                dpImmersiveBtn.innerHTML = '<i class="bi bi-fullscreen-exit fs-5"></i>';
               }).catch(err => {
                 dpModalContent.classList.add("immersive-active");
-                dpImmersiveBtn.innerHTML = '<i class="bi bi-fullscreen-exit fs-4"></i>';
+                dpImmersiveBtn.innerHTML = '<i class="bi bi-fullscreen-exit fs-5"></i>';
               });
             } else {
               if (document.exitFullscreen) document.exitFullscreen();
@@ -39925,7 +39971,7 @@ SOFTWARE.</div>
           document.addEventListener("fullscreenchange", () => {
             if (!document.fullscreenElement) {
               dpModalContent.classList.remove("immersive-active");
-              if (dpImmersiveBtn) dpImmersiveBtn.innerHTML = '<i class="bi bi-arrows-fullscreen fs-4"></i>';
+              if (dpImmersiveBtn) dpImmersiveBtn.innerHTML = '<i class="bi bi-arrows-fullscreen fs-5"></i>';
             }
           });
         }
@@ -40233,7 +40279,7 @@ SOFTWARE.</div>
                 item.classList.add("offline-missing");
                 if (!navigator.onLine) {
                   item.style.transition = "opacity 0.3s ease";
-                  item.style.opacity = "0.4";
+                  item.style.opacity = "0.85";
                 }
                 if (
                   titleWrapper &&
@@ -40241,7 +40287,7 @@ SOFTWARE.</div>
                 ) {
                   titleWrapper.insertAdjacentHTML(
                     "beforeend",
-                    ' <i class="bi bi-cloud-slash text-secondary offline-status-icon ms-1" title="Not saved offline" style="font-size: 0.85rem;"></i>',
+                    ' <i class="bi bi-cloud-slash text-warning offline-status-icon ms-1" title="Not saved offline" style="font-size: 0.85rem;"></i>',
                   );
                 }
               } else {
@@ -40946,7 +40992,7 @@ SOFTWARE.</div>
                 const sec = parseFloat(t.slice(4, -1));
                 parsed.push({
                   time: min * 60 + sec,
-                  text: text || "â™ª",
+                  text: text || "♪",
                 });
               });
             }
@@ -42142,10 +42188,10 @@ SOFTWARE.</div>
                   details.updated_at.replace(" ", "T") + "Z",
                 ).toLocaleDateString()
               : createdDate;
-            statsText += `<br><span class="mt-1 d-block text-secondary" style="font-size: 0.8rem;">Created: ${createdDate} &bull; Updated: ${updatedDate}</span>`;
+            statsText += `<br><span class="mt-1 d-block text-secondary" style="font-size: 0.8rem;">Created: ${createdDate} • Updated: ${updatedDate}</span>`;
           } else if (type === "album") {
             if (details.release_year && details.release_year > 0) {
-              statsText += ` &bull; Released: ${details.release_year}`;
+              statsText += ` • Released: ${details.release_year}`;
             }
             if (details.uploaded_at) {
               const uploadedDate = new Date(
@@ -42158,8 +42204,8 @@ SOFTWARE.</div>
           let finalStatsText = statsText;
           if (type === "artist" || type === "profile") {
             finalStatsText = `${statsText}
-                    &bull; <a href="#" class="text-info text-decoration-none connection-trigger" data-id="${details.user_id}" data-type="followers">${formatSongCount(details.followers_count || 0)} followers</a>
-                    &bull; <a href="#" class="text-info text-decoration-none connection-trigger" data-id="${details.user_id}" data-type="following">${formatSongCount(details.following_count || 0)} following</a>`;
+                    • <a href="#" class="text-info text-decoration-none connection-trigger" data-id="${details.user_id}" data-type="followers">${formatSongCount(details.followers_count || 0)} followers</a>
+                    • <a href="#" class="text-info text-decoration-none connection-trigger" data-id="${details.user_id}" data-type="following">${formatSongCount(details.following_count || 0)} following</a>`;
           }
 
           let shareButtonHTML = "",
@@ -42650,7 +42696,7 @@ SOFTWARE.</div>
 
                 if (!isCached) {
                   item.classList.add("offline-missing");
-                  item.style.opacity = "0.4";
+                  item.style.opacity = "0.85";
                   const titleWrapper = item.querySelector(".song-title-wrapper");
                   if (
                     titleWrapper &&
@@ -42956,9 +43002,9 @@ SOFTWARE.</div>
                 name = item.name;
                 subtext =
                   type === "get_collab_playlists"
-                    ? `by ${item.creator} â€¢ ${formatSongCount(item.song_count)} songs`
+                    ? `by ${item.creator} • ${formatSongCount(item.song_count)} songs`
                     : type === "get_mixes"
-                      ? `Auto Mix â€¢ ${formatSongCount(item.song_count)} songs`
+                      ? `Auto Mix • ${formatSongCount(item.song_count)} songs`
                       : `${formatSongCount(item.song_count)} songs`;
                 imageId = item.image_id;
                 dataType = type === "get_mixes" ? "mix" : "playlist";
@@ -43296,7 +43342,7 @@ SOFTWARE.</div>
                           <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
                           <div class="d-flex flex-column justify-content-center overflow-hidden w-100">
                             <h4 class="text-white text-truncate mb-1 fw-bold">${escapeHTML(song.title)}</h4>
-                            <p class="text-secondary text-truncate mb-0">Song â€¢ ${escapeHTML(song.artist)}</p>
+                            <p class="text-secondary text-truncate mb-0">Song • ${escapeHTML(song.artist)}</p>
                           </div>
                           <button class="btn btn-danger rounded-circle ms-auto me-2 d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; flex-shrink: 0;"><i class="bi bi-play-fill fs-3"></i></button>
                         </div>
@@ -45349,6 +45395,8 @@ SOFTWARE.</div>
                       padding: 21px;
                       align-self: start;
                       background: var(--surface-container);
+                      position: sticky;
+                      top: 100px;
                     }
 
                     .ae-upload-zone {
@@ -46684,7 +46732,7 @@ SOFTWARE.</div>
                     });
                   }
 
-                  async function inspectWithGetId3(file) {
+                  async function inspectWithGetId3(file, skipFormFill = false) {
                     if (file.size > maxAnalysisBytes) {
                       setId3State("The file is ready to edit, but it is too large for the 512 MB metadata inspector.", false);
                       return;
@@ -46699,15 +46747,20 @@ SOFTWARE.</div>
                       setProgress("Uploading for metadata inspection…", 8);
                       const result = await sendFormWithProgress(formData, (ratio) => {
                         setProgress("Uploading for metadata inspection…", 8 + (ratio * 62));
-                      }, "?access=api&action=inspect_audio");
+                      }, "?action=inspect_audio");
                       setProgress("Reading embedded metadata…", 88);
 
                       const metadata = result.metadata || {};
+                      if (skipFormFill) {
+                        metadata.title = titleInput.value;
+                        metadata.artist = artistInput.value;
+                        metadata.album = albumInput.value;
+                      }
                       setMetadata({
                         ...metadata,
                         duration: Number.isFinite(Number(metadata.duration)) ? formatTime(Number(metadata.duration)) : metadata.duration
                       });
-                      fillMetadataForm(metadata);
+                      if (!skipFormFill) fillMetadataForm(metadata);
                       setId3State(result.message || "Metadata inspection complete.", Boolean(result.ok));
                       setProgress("Metadata ready", 100);
                       window.setTimeout(hideProgress, 700);
@@ -46815,21 +46868,28 @@ SOFTWARE.</div>
                         coverImage.src = existingData.image_url;
                         coverPreview.classList.remove("placeholder");
                       }
+                      setMetadata({
+                        title: existingData.title,
+                        artist: existingData.artist,
+                        album: existingData.album,
+                        bitrate: existingData.bitrate ? Math.round(existingData.bitrate / 1000) + ' kbps' : '—',
+                        duration: formatTime(existingData.duration)
+                      });
                     } else {
                       titleInput.value = "";
                       artistInput.value = "";
                       albumInput.value = "";
                       coverFile.value = "";
                       resetCoverPreview();
+                      setMetadata();
                     }
                     
-                    setMetadata();
                     updateBrowserMetadata(file);
                     setId3State("Reading embedded metadata with getID3…", false, true);
                     waveEmpty.textContent = "Preparing the waveform…";
                     waveEmpty.classList.remove("hidden");
                     drawWaveform();
-                    inspectWithGetId3(file);
+                    inspectWithGetId3(file, !!existingData);
                     prepareWaveform(file);
                   }
 
@@ -47042,7 +47102,7 @@ SOFTWARE.</div>
                       setProgress("Uploading audio and metadata…", 10);
                       const result = await sendFormWithProgress(formData, (ratio) => {
                         setProgress("Uploading audio and metadata…", 10 + (ratio * 80));
-                      }, "?access=api&action=save_audio_editor");
+                      }, "?action=save_audio_editor");
                       setProgress("Processing…", 95);
                       showMessage(result.message);
                       setProgress("Saved to library", 100);
@@ -51240,10 +51300,10 @@ SOFTWARE.</div>
           playerElements.title.forEach((el) => applyMarquee(el, escapeHTML(currentSong.title)));
           playerElements.artist.forEach((el) => applyMarquee(el, formatArtistsHTML(currentSong.artist, currentSong.user_id, currentSong.is_collaborative)));
 
-          document.title = `${currentSong.title} â€¢ ${currentSong.artist}`;
+          document.title = `${currentSong.title} • ${currentSong.artist}`;
 
           if (docPipWindow) {
-            docPipWindow.document.title = `${currentSong.title} â€¢ ${currentSong.artist}`;
+            docPipWindow.document.title = `${currentSong.title} • ${currentSong.artist}`;
           }
 
           if ("mediaSession" in navigator && currentSong) {
@@ -51385,7 +51445,7 @@ SOFTWARE.</div>
           const slider = playerElements.volumeSlider;
           const value = (slider.value - slider.min) / (slider.max - slider.min);
           const percent = value * 100;
-          slider.style.background = `linear-gradient(to right, var(--ytm-primary-text) ${percent}%, var(--ytm-surface-2) ${percent}%)`;
+          slider.style.background = `linear-gradient(to right, var(--ytm-accent) ${percent}%, rgba(255, 255, 255, 0.2) ${percent}%)`;
         };
     
         const updateVolumeIcon = () => {
@@ -52928,7 +52988,7 @@ SOFTWARE.</div>
                               <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" class="search-dropdown-img" style="width: 50px; height: 50px; border-radius: 50%;">
                               <div class="search-dropdown-text">
                                 <div class="search-dropdown-title fw-bold" style="font-size: 1rem;">${escapeHTML(song.title)}</div>
-                                <div class="search-dropdown-subtitle">Song â€¢ ${escapeHTML(song.artist)}</div>
+                                <div class="search-dropdown-subtitle">Song • ${escapeHTML(song.artist)}</div>
                               </div>
                             </div>
                             <button class="more-btn p-1 border-0 bg-transparent text-secondary flex-shrink-0 ms-2" data-song-id="${song.id}"><i class="bi bi-three-dots-vertical fs-5"></i></button>
@@ -57975,6 +58035,17 @@ SOFTWARE.</div>
                         body.theme-light-bg .progress-bar-bg, .player-bar.theme-light-bg .timeline-bg, .player-bar.theme-light-bg .volume-bg { background-color: rgba(0, 0, 0, 0.2) !important; }
                         body.theme-light-bg .progress-bar-fg, .player-bar.theme-light-bg .timeline-filled, .player-bar.theme-light-bg .volume-filled { background-color: #000000 !important; }
                         .player-bar.theme-light-bg .timeline-container:hover .timeline-filled, .player-bar.theme-light-bg .volume-bar:hover .volume-filled { background-color: var(--ytm-accent) !important; }
+                        .player-modal-content.theme-light-bg .progress-bar-fg::after,
+                        .player-bar.theme-light-bg .timeline-filled::after { 
+                          border-color: #000000 !important; 
+                          background: #000000 !important; 
+                          box-shadow: none !important; 
+                        }
+                        .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg::after,
+                        .player-bar.theme-light-bg .timeline-container:hover .timeline-filled::after { 
+                          border-color: var(--ytm-accent) !important; 
+                          background: var(--ytm-accent) !important; 
+                        }
                         .player-bar .pb-title, .player-bar .pb-time { text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
                         .player-bar .pb-artist, .player-bar .pb-btn, .player-bar .text-secondary { text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
                         .pb-play-circle .bi-play-fill, .play-btn .bi-play-fill { margin-left: 4px; }
@@ -58011,7 +58082,7 @@ SOFTWARE.</div>
                               </div>
                               <div class="player-modal-progress" style="width: 100%;">
                                 <div class="progress-bar-container" id="pip-progress-container" style="height: 14px; border-radius: 2px; position: relative; margin-bottom: 0.2em;">
-                                  <div class="progress-bar-bg" style="height: 4px; background-color: #404040; border-radius: 2px; position: absolute; top: 5px; left: 0; right: 0; pointer-events: none;"></div>
+                                  <div class="progress-bar-bg" style="height: 4px; background-color: rgba(255, 255, 255, 0.2); border-radius: 2px; position: absolute; top: 5px; left: 0; right: 0; pointer-events: none;"></div>
                                   <div class="progress-bar-fg" id="pip-progress-bar" style="height: 4px; background-color: var(--ytm-primary-text); border-radius: 2px; width: 0%; position: absolute; top: 5px; left: 0; pointer-events: none;"></div>
                                   <input type="range" id="pip-seek-slider" class="slide-range" min="0" max="100" value="0" step="0.1">
                                 </div>
@@ -61965,7 +62036,7 @@ SOFTWARE.</div>
             .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, (c) => c);
         };
         const pdTruncate = (str, len = 50) =>
-          str.length > len ? str.substring(0, len) + "â€¦" : str;
+          str.length > len ? str.substring(0, len) + "…" : str;
     
         const pdLog = (message, isError = false) => {
           const time = new Date().toLocaleTimeString();
@@ -62082,7 +62153,7 @@ SOFTWARE.</div>
         const pdStopAutoDownload = () => {
           if (!pdIsDownloading) return;
           pdStopRequested = true;
-          pdLog("â¹ï¸ Stopping download process...", false);
+          pdLog("⏹️ Stopping download process...", false);
           pdStartAutoBtn.disabled = true;
           pdStartAutoBtn.innerHTML =
             '<i class="bi bi-stop-fill" style="color: #ffffff !important;"></i> Stopping...';
@@ -62108,7 +62179,7 @@ SOFTWARE.</div>
           for (let i = 0; i < songsToDownload.length; i++) {
             if (pdStopRequested) {
               pdLog(
-                `â¹ï¸ Download stopped by user after ${i}/${songsToDownload.length} songs.`,
+                `⏹️ Download stopped by user after ${i}/${songsToDownload.length} songs.`,
               );
               break;
             }
@@ -62124,7 +62195,7 @@ SOFTWARE.</div>
     
           if (!pdStopRequested)
             pdLog(
-              `âœ… All ${songsToDownload.length} selected songs have been sent for download!`,
+              `✅ All ${songsToDownload.length} selected songs have been sent for download!`,
             );
           pdIsDownloading = false;
           pdStopRequested = false;
@@ -62167,7 +62238,7 @@ SOFTWARE.</div>
               pdResultsCard.classList.remove("d-none");
               pdPlaylistTitle.innerHTML = `<i class="bi bi-music-note-beamed" style="color: #ffffff !important;"></i> Playlist loaded <span class="badge bg-secondary ms-2">${pdAllSongs.length} songs</span> <span class="badge bg-info ms-2">~${formatBytes(totalSizeBytes)}</span>`;
               pdLog(
-                `âœ… Successfully loaded ${pdAllSongs.length} songs (~${formatBytes(totalSizeBytes)}).`,
+                `✅ Successfully loaded ${pdAllSongs.length} songs (~${formatBytes(totalSizeBytes)}).`,
               );
               pdRenderSongRows();
               const loader = document.getElementById("pd-infinite-scroll-loader");
@@ -62180,7 +62251,7 @@ SOFTWARE.</div>
               }
             } else {
               showToast("Playlist not found or empty", "error");
-              pdLog("âŒ Failed to load playlist or it is empty.", true);
+              pdLog("❌ Failed to load playlist or it is empty.", true);
             }
           } catch (err) {
             showToast("Error fetching playlist", "error");
@@ -66840,7 +66911,7 @@ SOFTWARE.</div>
                              <div class="marquee-container w-100 mb-1">
                                <h6 class="text-white fw-bold m-0 marquee-content tooltip-marquee" style="font-size: 1.05rem;">${escapeHTML(data.name)}</h6>
                              </div>
-                             <div class="text-secondary" style="font-size: 0.8rem;">${formatSongCount(data.song_count || 0)} tracks â€¢ ${formatTime(data.total_duration || 0)}</div>
+                             <div class="text-secondary" style="font-size: 0.8rem;">${formatSongCount(data.song_count || 0)} tracks • ${formatTime(data.total_duration || 0)}</div>
                              ${data.followers_count !== undefined ? `<div class="text-info mt-1" style="font-size: 0.75rem;"><i class="bi bi-people-fill"></i> ${formatSongCount(data.followers_count)} followers</div>` : `<div class="text-secondary mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(data.play_count || 0)} plays</div>`}
                           </div>
                         </div>
@@ -68772,7 +68843,7 @@ SOFTWARE.</div>
                         }
                         
                         if (!isCached) {
-                          item.style.opacity = "0.4";
+                          item.style.opacity = "0.85";
                           item.classList.add("offline-missing");
                           const infoCol = item.querySelector(
                             ".d-flex.flex-column.justify-content-center",
@@ -71459,7 +71530,7 @@ SOFTWARE.</div>
                         <div class="text-secondary small fw-bold plays-val mb-1" style="font-size: 0.75rem; font-family: monospace;">Plays: <b class="text-white">${artist.plays || 0}</b></div>
     
                         <!-- Row 5: Tracks -->
-                        <div class="text-secondary fw-bold text-truncate rg-tracks-count" style="font-size: 0.85rem; color: #a1a1aa !important;"><i class="bi bi-music-note-beamed text-danger me-1"></i> ${artist.count} Tracks ${artist.followers > 0 ? `â€¢ <i class="bi bi-people-fill text-info ms-1 me-1"></i> ${formatSongCount(artist.followers)}` : ""}</div>
+                        <div class="text-secondary fw-bold text-truncate rg-tracks-count" style="font-size: 0.85rem; color: #a1a1aa !important;"><i class="bi bi-music-note-beamed text-danger me-1"></i> ${artist.count} Tracks ${artist.followers > 0 ? ` • <i class="bi bi-people-fill text-info ms-1 me-1"></i> ${formatSongCount(artist.followers)}` : ""}</div>
                       </div>
     
                       <div class="d-flex align-items-center justify-content-center ms-2 right-actions-col" style="flex-shrink: 0; align-self: stretch; min-height: 84px;">
