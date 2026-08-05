@@ -387,7 +387,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '8.1');
+define('APP_VERSION', '8.2');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -25093,6 +25093,7 @@ function perform_cover_scan($db) {
         .sidebar {
           padding: 1.5rem 0;
           overflow-y: auto;
+          padding-bottom: 110px;
         }
 
         .sidebar .offcanvas-header {
@@ -25105,7 +25106,9 @@ function perform_cover_scan($db) {
 
         .player-bar {
           background-color: var(--ytm-surface);
-          left: 240px;
+          left: 0;
+          padding-left: 1.5rem !important;
+          z-index: 1205 !important;
         }
 
         .page-header {
@@ -25645,6 +25648,7 @@ function perform_cover_scan($db) {
         padding: 0 1.5rem 4px 1.5rem;
         z-index: 1048;
         overflow: hidden;
+        transition: left 0.3s ease, padding-left 0.3s ease;
       }
 
       @media (max-width: 991.98px) {
@@ -29432,494 +29436,559 @@ function perform_cover_scan($db) {
         }
       }
 
-      /* Photo Editor Styles */
+      /* ImagEditor Styles */
       .photo-editor-app {
-        --pe-sys-color-primary: #FF0000;
-        --pe-sys-color-on-primary: #FFFFFF;
-        --pe-sys-color-primary-container: #4A0000;
-        --pe-sys-color-surface: #000000;
-        --pe-sys-color-on-surface: #FFFFFF;
-        --pe-sys-color-surface-variant: #1E1E1E;
-        --pe-sys-color-on-surface-variant: #AAAAAA;
-        --pe-sys-color-surface-container: #0A0A0A;
-        --pe-sys-color-surface-container-high: #121212;
-        --pe-sys-color-surface-container-highest: #1A1A1A;
-        --pe-sys-color-outline: #333333;
-        --pe-sys-color-error: #FF5252;
-        --pe-sys-color-error-container: #8C1D18;
+        --void: #090708;
+        --surface-dim: #110d0e;
+        --surface: #181214;
+        --surface-container-low: #22181b;
+        --surface-container: #2b1d21;
+        --surface-container-high: #38252a;
+        --surface-container-highest: #492f35;
+        --primary: #f2354a;
+        --primary-bright: #ff4d62;
+        --primary-container: #5e151f;
+        --on-primary-container: #ffd9dc;
+        --secondary: #d99a9f;
+        --tertiary: #e5b35a;
+        --on-surface: #f7ebed;
+        --on-surface-variant: #caaeb1;
+        --outline: #9e7f83;
+        --outline-variant: #593f43;
+        --green: #63e2a8;
+        --shadow: rgba(0, 0, 0, 0.6);
+        --shape-xs: 6px;
+        --shape-sm: 10px;
+        --shape-md: 14px;
+        --shape-lg: 20px;
         display: flex;
         flex-direction: column;
         width: 100%;
         height: 100%;
+        flex: 1;
+        min-height: 0;
         overflow: hidden;
-        border-radius: 12px;
         position: relative;
-        /* Added relative context for absolute properties overlay */
+        background-color: var(--void);
+        color: var(--on-surface);
+      }
+
+      .rail-btn {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        width: 100%;
+        min-height: 52px;
+        padding: 6px 4px;
+        color: var(--on-surface-variant);
+        border-radius: var(--shape-sm);
+        transition: all 0.18s ease;
+        cursor: pointer;
+        border: none;
+        background: transparent;
+      }
+
+      .rail-btn:hover {
+        color: var(--on-surface);
+        background: var(--surface-container-low);
+      }
+
+      .rail-btn.active {
+        color: var(--primary-bright);
+        background: var(--primary-container);
+        border: 1px solid rgba(242, 53, 74, 0.4);
+        box-shadow: 0 2px 8px rgba(242, 53, 74, 0.2);
+      }
+
+      .rail-btn svg {
+        width: 20px;
+        height: 20px;
+      }
+
+      .rail-btn span {
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .brand-mark {
+        width: 32px;
+        height: 32px;
+        border-radius: 10px;
+        display: grid;
+        place-items: center;
+        color: #ffffff;
+        background: var(--primary);
+        box-shadow: 0 0 20px rgba(242, 53, 74, 0.4);
+        font-weight: 900;
+        font-size: 0.9rem;
       }
 
       .pe-workspace {
         flex: 1;
         position: relative;
+        background-color: var(--surface-dim);
+        background-image: radial-gradient(circle at 50% 50%, rgba(242, 53, 74, 0.04) 0%, transparent 60%), radial-gradient(#2b1d21 1.2px, transparent 1.2px);
+        background-size: 100% 100%, 22px 22px;
+        overflow: hidden;
         display: flex;
         align-items: center;
         justify-content: center;
-        overflow: hidden;
-        background-color: var(--pe-sys-color-surface-container);
-        background-image: linear-gradient(45deg, var(--pe-sys-color-surface) 25%, transparent 25%), linear-gradient(-45deg, var(--pe-sys-color-surface) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--pe-sys-color-surface) 75%), linear-gradient(-45deg, transparent 75%, var(--pe-sys-color-surface) 75%);
+      }
+
+      .canvas-wrapper-outer {
+        box-shadow: 0 25px 60px rgba(0, 0, 0, 0.85), 0 0 0 1px var(--outline-variant);
+        border-radius: 4px;
+        position: relative;
+        background-image: linear-gradient(45deg, #181113 25%, transparent 25%), linear-gradient(-45deg, #181113 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #181113 75%), linear-gradient(-45deg, transparent 75%, #181113 75%);
         background-size: 20px 20px;
         background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-      }
-
-      .pe-workspace canvas {
-        position: absolute;
-        touch-action: none;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
-        border-radius: 8px;
-      }
-
-      #pe-overlay-canvas {
-        pointer-events: auto;
-        box-shadow: none;
-      }
-
-      /* Navigation Bar - Flex Row on Mobile, Flex Row Parent on Desktop */
-      .pe-bottom-nav {
-        display: flex;
-        flex-direction: column;
-        position: relative;
-        z-index: 20;
-        background-color: var(--pe-sys-color-surface-container);
-      }
-
-      .pe-properties-panel {
-        background-color: var(--pe-sys-color-surface-container-highest);
-        border-radius: 28px 28px 0 0;
-        padding: 24px 20px;
-        max-height: 55vh;
-        overflow-y: auto;
-        display: none;
-        flex-direction: column;
-        box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.6);
-      }
-
-      .pe-properties-panel.open {
-        display: flex;
-        animation: peSlideUp 0.3s cubic-bezier(0.2, 0, 0, 1);
-      }
-
-      @keyframes peSlideUp {
-        from {
-          transform: translateY(100%);
-          opacity: 0;
-        }
-
-        to {
-          transform: translateY(0);
-          opacity: 1;
-        }
-      }
-
-      .pe-panel-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        font-weight: 500;
-        font-size: 18px;
-        color: var(--pe-sys-color-on-surface);
-        margin-bottom: 24px;
-      }
-
-      .pe-panel-header button {
-        background: var(--pe-sys-color-surface-variant);
-        color: var(--pe-sys-color-on-surface-variant);
-        width: 32px;
-        height: 32px;
-        border: none;
-        border-radius: 9999px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        transition: 0.2s;
-      }
-
-      .pe-panel-header button:hover {
-        background: var(--pe-sys-color-outline);
-        color: var(--pe-sys-color-on-surface);
-      }
-
-      .pe-panel-header button svg {
-        width: 24px;
-        height: 24px;
-        fill: currentColor;
-      }
-
-      .pe-grid-2 {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 16px;
-        margin-bottom: 24px;
-      }
-
-      .pe-control-group {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
-
-      .pe-slider-group {
-        margin-bottom: 28px;
-      }
-
-      .pe-control-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-
-      .pe-control-header label,
-      .pe-control-group>label {
-        font-size: 13px;
-        font-weight: 500;
-        color: var(--pe-sys-color-on-surface-variant);
-      }
-
-      .pe-control-header span {
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--pe-sys-color-primary);
-        background: var(--pe-sys-color-surface-variant);
-        padding: 4px 10px;
-        border-radius: 9999px;
-        min-width: 40px;
-        text-align: center;
-      }
-
-      .photo-editor-app input[type="range"] {
-        -webkit-appearance: none;
-        width: 100%;
-        background: transparent;
-        padding: 8px 0;
-        border: none;
-      }
-
-      .photo-editor-app input[type="range"]::-webkit-slider-runnable-track {
-        width: 100%;
-        height: 6px;
-        background: var(--pe-sys-color-surface-variant);
-        border-radius: 9999px;
-      }
-
-      .photo-editor-app input[type="range"]::-webkit-slider-thumb {
-        -webkit-appearance: none;
-        height: 20px;
-        width: 20px;
-        border-radius: 50%;
-        background: var(--pe-sys-color-primary);
-        margin-top: -7px;
-        cursor: pointer;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
-        border: none;
-      }
-
-      .photo-editor-app input[type="number"],
-      .photo-editor-app input[type="text"],
-      .photo-editor-app select {
-        background: var(--pe-sys-color-surface-variant);
-        border: 1px solid var(--pe-sys-color-outline);
-        color: var(--pe-sys-color-on-surface);
-        padding: 10px 12px;
-        border-radius: 8px;
-        width: 100%;
-        outline: none;
-        font-size: 14px;
-        transition: 0.2s;
-      }
-
-      .photo-editor-app input[type="number"]:focus,
-      .photo-editor-app input[type="text"]:focus,
-      .photo-editor-app select:focus {
-        border-color: var(--pe-sys-color-primary);
-        box-shadow: 0 0 0 1px var(--pe-sys-color-primary);
-      }
-
-      .photo-editor-app input[type="color"] {
-        -webkit-appearance: none;
-        border: none;
-        width: 100%;
-        height: 44px;
-        border-radius: 8px;
-        cursor: pointer;
-        background: var(--pe-sys-color-surface-variant);
-        padding: 4px;
-        margin-bottom: 24px;
-      }
-
-      .photo-editor-app input[type="color"]::-webkit-color-swatch-wrapper {
-        padding: 0;
-      }
-
-      .photo-editor-app input[type="color"]::-webkit-color-swatch {
-        border: none;
-        border-radius: 4px;
-      }
-
-      .pe-action-buttons {
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        margin-top: 8px;
-        margin-bottom: 16px;
-      }
-
-      .pe-btn-row {
-        display: flex;
-        gap: 16px;
-      }
-
-      .pe-btn {
-        flex: 1;
-        height: 44px;
-        border: none;
-        border-radius: 9999px;
-        background-color: var(--pe-sys-color-surface-variant);
-        color: var(--pe-sys-color-on-surface);
-        font-size: 14px;
-        font-weight: 500;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 8px;
-        cursor: pointer;
-        transition: 0.2s;
-      }
-
-      .pe-btn:hover {
-        background-color: var(--pe-sys-color-outline);
-      }
-
-      .pe-btn.primary {
-        background-color: var(--pe-sys-color-primary);
-        color: var(--pe-sys-color-on-primary);
-      }
-
-      .pe-btn.primary:hover {
-        background-color: var(--pe-sys-color-primary-container);
-        color: var(--pe-sys-color-on-primary);
-      }
-
-      .pe-btn.error {
-        background-color: var(--pe-sys-color-error-container);
-        color: var(--pe-sys-color-on-surface);
-      }
-
-      .pe-bottom-bar {
-        height: 80px;
-        display: flex;
-        align-items: center;
-        justify-content: flex-start;
-        gap: 12px;
-        background-color: var(--pe-sys-color-surface-container-high);
-        padding: 0 16px;
-        border-top: 1px solid var(--pe-sys-color-outline);
-        overflow-x: auto;
-        scrollbar-width: none;
-        flex-wrap: nowrap;
-      }
-
-      .pe-bottom-bar::-webkit-scrollbar {
-        display: none;
-      }
-
-      .pe-tool-btn {
-        flex-shrink: 0;
-      }
-
-      .pe-tool-btn {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        width: 64px;
-        height: 64px;
-        gap: 4px;
-        border: none;
-        background: transparent;
-        color: var(--pe-sys-color-on-surface-variant);
-        cursor: pointer;
-        border-radius: 16px;
-        transition: 0.2s;
-      }
-
-      .pe-tool-btn:hover,
-      .pe-tool-btn.active {
-        color: var(--pe-sys-color-primary);
-      }
-
-      .pe-tool-btn .pe-icon-container {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 32px;
-        height: 32px;
-        border-radius: 9999px;
-        transition: 0.2s;
-      }
-
-      .pe-tool-btn.active .pe-icon-container {
-        background-color: var(--pe-sys-color-primary-container);
-        color: var(--pe-sys-color-primary);
-      }
-
-      .pe-tool-btn svg {
-        width: 24px;
-        height: 24px;
-        fill: currentColor;
-      }
-
-      .pe-tool-btn span {
-        font-size: 12px;
-        font-weight: 500;
-      }
-
-      /* Mobile/Global Export Button Styles */
-      .pe-export-btn-desktop {
-        display: none !important;
-      }
-
-      .pe-export-btn-mobile {
-        background-color: var(--pe-sys-color-primary);
-        color: var(--pe-sys-color-on-primary);
-        border: none;
-        height: 48px;
-        padding: 0 20px;
-        border-radius: 9999px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-weight: 600;
-        font-size: 14px;
-        cursor: pointer;
-        transition: 0.2s;
-      }
-
-      .pe-export-btn-mobile:hover {
-        background-color: #ff3333;
-        box-shadow: 0 4px 12px rgba(255, 0, 0, 0.3);
-      }
-
-      .pe-export-btn-mobile svg {
-        width: 20px;
-        height: 20px;
-        fill: currentColor;
-      }
-
-      #pe-text-editor {
-        position: absolute;
-        z-index: 30;
-        background: rgba(0, 0, 0, 0.5);
-        color: var(--pe-sys-color-on-surface);
-        border: 2px dashed var(--pe-sys-color-primary);
-        padding: 0;
-        margin: 0;
-        outline: none;
-        display: none;
-        white-space: pre-wrap;
+        background-color: #0d0809;
+        transition: transform 0.12s ease-out;
         transform-origin: center center;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-        resize: none;
-        overflow: hidden;
-        line-height: 1.2;
-        font-family: sans-serif;
-        font-weight: bold;
       }
 
-      /* Desktop Right Sidebar Overrides */
-      @media (min-width: 769px) {
+      .drawer-panel {
+        position: absolute;
+        top: 0;
+        left: 72px;
+        height: 100%;
+        width: 310px;
+        background: var(--surface);
+        border-right: 1px solid var(--outline-variant);
+        z-index: 40;
+        display: none;
+        flex-direction: column;
+        box-shadow: 12px 0 35px rgba(0,0,0,0.55);
+      }
+
+      .drawer-panel.visible {
+        display: flex;
+        animation: slideInLeft 0.2s cubic-bezier(0, 0, 0.2, 1);
+      }
+
+      @keyframes slideInLeft {
+        from { opacity: 0; transform: translateX(-15px); }
+        to { opacity: 1; transform: translateX(0); }
+      }
+      
+      .drawer-header { padding: 16px; border-bottom: 1px solid var(--surface-container-highest); display: flex; justify-content: space-between; align-items: center; }
+      .drawer-title { font-weight: 700; font-size: 0.9rem; color: #fff; display: flex; align-items: center; gap: 8px; margin: 0; }
+      .drawer-close { color: var(--on-surface-variant); background: none; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px; border-radius: 4px; transition: background 0.2s, color 0.2s; }
+      .drawer-close:hover { color: #fff; background: var(--surface-container-highest); }
+      .drawer-content { padding: 16px; overflow-x: hidden; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px; }
+
+      .properties-panel {
+        position: absolute;
+        top: 16px;
+        right: 16px;
+        width: 310px;
+        background: var(--surface-container);
+        border: 1px solid var(--outline-variant);
+        border-radius: var(--shape-md);
+        box-shadow: 0 20px 48px rgba(0,0,0,0.7);
+        display: none;
+        flex-direction: column;
+        z-index: 50;
+        max-height: calc(100dvh - 110px);
+        overflow: hidden;
+        backdrop-filter: blur(12px);
+      }
+
+      .properties-panel.visible {
+        display: flex;
+        animation: slideInRight 0.2s cubic-bezier(0, 0, 0.2, 1);
+      }
+
+      @keyframes slideInRight {
+        from { opacity: 0; transform: translateX(20px); }
+        to { opacity: 1; transform: translateX(0); }
+      }
+
+      .control-group {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--surface-container-highest);
+      }
+
+      .control-label {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.7rem;
+        color: var(--on-surface-variant);
+        margin-bottom: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-weight: 700;
+      }
+
+      .input-text, .input-select {
+        width: 100%;
+        background: var(--surface-dim);
+        border: 1px solid var(--outline-variant);
+        color: var(--on-surface);
+        padding: 8px 12px;
+        border-radius: var(--shape-xs);
+        font-size: 0.82rem;
+        outline: none;
+        transition: border-color 0.18s;
+      }
+
+      .input-select {
+        appearance: none;
+        -webkit-appearance: none;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23caaeb1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: calc(100% - 10px) center;
+        padding-right: 32px;
+      }
+
+      .input-text:focus, .input-select:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 2px rgba(242,53,74,0.25);
+      }
+
+      .color-picker-wrap {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        background: var(--surface-dim);
+        padding: 6px 10px;
+        border: 1px solid var(--outline-variant);
+        border-radius: var(--shape-xs);
+      }
+
+      .color-input {
+        -webkit-appearance: none;
+        border: none;
+        width: 26px;
+        height: 26px;
+        border-radius: 6px;
+        cursor: pointer;
+        padding: 0;
+        background: none;
+      }
+
+      .color-input::-webkit-color-swatch-wrapper {
+        padding: 0;
+      }
+
+      .color-input::-webkit-color-swatch {
+        border: 1px solid var(--outline-variant);
+        border-radius: 6px;
+      }
+
+      .action-btn {
+        padding: 8px 14px;
+        background: var(--surface-container-high);
+        border: 1px solid var(--outline-variant);
+        border-radius: var(--shape-xs);
+        color: var(--on-surface);
+        font-size: 0.8rem;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        justify-content: center;
+        align-items: center;
+        gap: 6px;
+        transition: all 0.15s ease;
+      }
+
+      .action-btn:hover {
+        background: var(--surface-container-highest);
+        border-color: var(--outline);
+      }
+
+      .btn-primary {
+        background: var(--primary);
+        color: #ffffff;
+        border: none;
+        box-shadow: 0 4px 12px rgba(242, 53, 74, 0.35);
+      }
+
+      .btn-primary:hover {
+        background: var(--primary-bright);
+        box-shadow: 0 6px 16px rgba(242, 53, 74, 0.5);
+      }
+
+      .layer-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 12px;
+        background: var(--surface-dim);
+        border: 1px solid var(--outline-variant);
+        border-radius: var(--shape-xs);
+        margin-bottom: 6px;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+
+      .layer-item:hover, .layer-item.active {
+        border-color: var(--primary);
+        background: var(--surface-container-high);
+      }
+
+      .quick-toolbar {
+        position: absolute;
+        background: var(--surface-container);
+        border: 1px solid var(--outline-variant);
+        border-radius: 99px;
+        padding: 4px 8px;
+        display: none;
+        gap: 4px;
+        z-index: 55;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.6);
+      }
+
+      .quick-toolbar.visible {
+        display: flex;
+      }
+
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.78);
+        backdrop-filter: blur(8px);
+        z-index: 3100;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+      }
+
+      .modal-overlay.visible {
+        display: flex;
+      }
+
+      .modal-box {
+        background: var(--surface-container);
+        border: 1px solid var(--outline-variant);
+        border-radius: var(--shape-lg);
+        width: min(520px, 100%);
+        max-height: 90dvh;
+        overflow-x: hidden;
+        overflow-y: auto;
+        box-shadow: 0 24px 48px rgba(0, 0, 0, 0.85);
+        animation: modalPop 0.2s cubic-bezier(0, 0, 0.2, 1);
+      }
+      .modal-box::-webkit-scrollbar, .drawer-content::-webkit-scrollbar, .pe-workspace::-webkit-scrollbar {
+        width: 6px; height: 6px;
+      }
+      .modal-box::-webkit-scrollbar-track, .drawer-content::-webkit-scrollbar-track, .pe-workspace::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .modal-box::-webkit-scrollbar-thumb, .drawer-content::-webkit-scrollbar-thumb, .pe-workspace::-webkit-scrollbar-thumb {
+        background: var(--outline-variant);
+        border-radius: 10px;
+      }
+      .modal-box::-webkit-scrollbar-thumb:hover, .drawer-content::-webkit-scrollbar-thumb:hover, .pe-workspace::-webkit-scrollbar-thumb:hover {
+        background: var(--outline);
+      }
+
+      @keyframes modalPop {
+        from { opacity: 0; transform: scale(0.95); }
+        to { opacity: 1; transform: scale(1); }
+      }
+
+      #pe-toast {
+        position: fixed;
+        top: 68px;
+        left: 50%;
+        transform: translateX(-50%) translateY(-20px);
+        opacity: 0;
+        background: var(--surface-container-high);
+        color: var(--on-surface);
+        border: 1px solid var(--primary);
+        padding: 8px 18px;
+        border-radius: 99px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.7);
+        transition: all 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        z-index: 3200;
+        pointer-events: none;
+      }
+
+      #pe-toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+
+      .grid-overlay {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background-size: 40px 40px;
+        background-image: linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px), linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+        display: none;
+      }
+
+      .grid-overlay.visible {
+        display: block;
+      }
+
+      @media (max-width: 767px) {
         .photo-editor-app {
-          flex-direction: row;
+          position: fixed !important;
+          top: 64px !important;
+          left: 0 !important;
+          right: 0 !important;
+          bottom: 0 !important;
+          width: 100vw !important;
+          height: calc(100dvh - 64px) !important;
+          max-height: calc(100dvh - 64px) !important;
+          z-index: 50 !important;
         }
-
-        .pe-bottom-nav {
-          width: 90px;
-          height: 100%;
-          border-left: 1px solid var(--pe-sys-color-outline);
+        .pe-app-container {
+          flex-direction: column !important;
+          height: 100% !important;
         }
-
-        /* FIXED: Added align-items: center so all buttons line up perfectly down the middle of the vertical bar */
-        .pe-bottom-bar {
-          flex-direction: column;
-          height: 100%;
-          width: 90px;
-          padding: 20px 0;
-          justify-content: flex-start;
+        .pe-header {
+          height: 56px !important;
+          min-height: 56px !important;
+          flex-wrap: nowrap !important;
+          padding: 0 12px !important;
+          gap: 16px !important;
+          justify-content: flex-start !important;
+          overflow-x: auto !important;
+          overflow-y: hidden !important;
+          scrollbar-width: none !important;
+        }
+        .pe-header::-webkit-scrollbar {
+          display: none;
+        }
+        .pe-header-group {
+          flex-wrap: nowrap !important;
+          justify-content: flex-start !important;
+          width: auto !important;
+          flex-shrink: 0 !important;
+        }
+        .pe-title-input {
+          width: 100px !important;
+        }
+        .rail-nav {
+          order: 3;
+          width: 100% !important;
+          height: 64px !important;
+          min-height: 64px !important;
+          flex-direction: row !important;
+          justify-content: space-between !important;
           align-items: center !important;
-          gap: 8px;
-          border-top: none;
-          overflow-y: auto;
+          border-right: none !important;
+          border-top: 1px solid var(--outline-variant) !important;
+          padding: 4px !important;
+          background: #0d0a0b !important;
+          overflow: hidden !important;
+          flex-shrink: 0 !important;
+          z-index: 40 !important;
         }
-
-        /* Float the settings/properties panel on the right side over the canvas */
-        .pe-properties-panel {
-          position: absolute;
-          right: 100px;
-          bottom: 20px;
-          top: 20px;
-          width: 340px;
-          max-height: calc(100% - 40px);
-          border-radius: 16px;
-          border: 1px solid var(--pe-sys-color-outline);
-          z-index: 30;
+        .rail-btn {
+          display: flex !important;
+          flex-direction: column !important;
+          align-items: center !important;
+          justify-content: center !important;
+          gap: 4px !important;
+          min-height: 0 !important;
+          height: 100% !important;
+          padding: 6px 2px !important;
+          flex: 1 1 0% !important;
+          min-width: 0 !important;
+          text-align: center !important;
+          border-radius: 8px !important;
+          border: none !important;
+          background: transparent !important;
         }
-
-        .pe-properties-panel.open {
-          display: flex;
-          animation: peSlideLeft 0.3s cubic-bezier(0.2, 0, 0, 1);
+        .rail-btn svg {
+          width: 20px !important;
+          height: 20px !important;
+          margin: 0 auto;
+          flex-shrink: 0;
         }
-
-        /* Desktop-Specific Export Button Styles (Mathematical Perfect Circle Centering) */
-        .pe-export-btn-mobile {
+        .rail-btn span {
+          font-size: 0.7rem !important;
+          font-weight: 700 !important;
+          width: 100%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .drawer-panel {
+          left: 0;
+          top: auto;
+          bottom: 64px;
+          width: 100%;
+          height: 60dvh;
+          border-right: none;
+          border-top: 1px solid var(--outline-variant);
+          border-radius: var(--shape-lg) var(--shape-lg) 0 0;
+          z-index: 100;
+        }
+        .properties-panel {
+          left: 12px;
+          right: 12px;
+          width: auto;
+          top: auto;
+          bottom: 76px;
+          max-height: 50dvh;
+          z-index: 101;
+        }
+        .pe-zoom-controls {
+          bottom: 76px !important;
+          transform: translateX(-50%) scale(0.7) !important;
+          transform-origin: bottom center !important;
+        }
+        .pe-workspace {
+          flex: 1 !important;
+          min-height: 0 !important;
+          height: auto !important;
+        }
+      }
+  
+      @media (min-width: 992px) {
+        body.sidebar-minimized .sidebar {
+          width: 80px !important;
+          transition: width 0.3s ease;
+        }
+        body.sidebar-minimized .sidebar .nav-link {
+          justify-content: center;
+          padding-left: 0 !important;
+          padding-right: 0 !important;
+          margin-left: 0.5rem;
+          margin-right: 0.5rem;
+          border-radius: 12px !important;
+        }
+        body.sidebar-minimized .sidebar .nav-link span,
+        body.sidebar-minimized .sidebar .nav-link .bi-chevron-down,
+        body.sidebar-minimized .sidebar .nav-link .inbox-badge {
           display: none !important;
         }
-
-        .pe-export-btn-desktop {
-          display: flex !important;
-          width: 56px;
-          height: 56px;
-          background-color: var(--pe-sys-color-primary);
-          color: var(--pe-sys-color-on-primary);
-          border: none;
-          border-radius: 50%;
-          justify-content: center;
-          align-items: center;
-          cursor: pointer;
-          transition: 0.2s;
+        body.sidebar-minimized .sidebar .nav-link .bi {
+          margin: 0;
+          font-size: 1.5rem !important;
         }
-
-        .pe-export-btn-desktop:hover {
-          background-color: #ff3333;
-          box-shadow: 0 4px 12px rgba(255, 0, 0, 0.3);
+        body.sidebar-minimized .sidebar h6.text-uppercase,
+        body.sidebar-minimized .sidebar .text-center.small.text-secondary,
+        body.sidebar-minimized .sidebar .logo {
+          display: none !important;
         }
-
-        .pe-export-btn-desktop svg {
-          width: 20px;
-          height: 20px;
-          fill: currentColor;
+        body.sidebar-minimized .player-bar {
+          left: 0 !important;
+          padding-left: 1.5rem !important;
+          z-index: 1205 !important;
+          transition: padding-left 0.3s ease, left 0.3s ease;
+        }
+        body.sidebar-minimized .content-wrapper {
+          margin-left: 80px !important;
+          transition: margin-left 0.3s ease;
+        }
+        body.sidebar-minimized .sidebar .collapse {
+          display: none !important;
         }
       }
-
-      @keyframes peSlideLeft {
-        from {
-          transform: translateX(100%);
-          opacity: 0;
-        }
-
-        to {
-          transform: translateX(0);
-          opacity: 1;
-        }
-      }
-
+      
       /* Immersive Fullscreen Player Mode */
       .player-modal-content.immersive-active .player-modal-header {
         position: absolute;
@@ -30029,7 +30098,12 @@ function perform_cover_scan($db) {
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#main-nav-offcanvas" aria-label="Close"></button>
         </div>
         <div class="offcanvas-body d-flex flex-column">
-          <div class="logo d-none d-md-block">PHP<span>Music</span></div>
+          <div class="d-none d-md-flex align-items-center justify-content-between px-4 pt-4 pb-2 mb-2">
+            <div class="logo m-0 p-0">PHP<span>Music</span></div>
+            <button class="btn text-secondary p-0" id="main-desktop-sidebar-toggle" title="Toggle Sidebar">
+              <i class="bi bi-layout-sidebar fs-4"></i>
+            </button>
+          </div>
           
           <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-3 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Discover</h6>
           <a href="#" class="nav-link active" data-view="get_songs">
@@ -30123,7 +30197,7 @@ function perform_cover_scan($db) {
             </a>
             <a href="#" class="nav-link" data-view="photo_editor">
               <i class="bi bi-image"></i>
-              <span>Image Editor</span>
+              <span>ImagEditor</span>
             </a>
             <a href="#" class="nav-link" data-view="get_inbox">
               <i class="bi bi-chat-dots-fill"></i>
@@ -30294,7 +30368,7 @@ function perform_cover_scan($db) {
               <i class="bi bi-arrows-fullscreen"></i>
               <span>Full Screen</span>
             </a>
-            <div class="text-center my-5 small text-secondary">
+            <div class="text-center mt-5 small text-secondary">
               Made by <a href="https://github.com/HirotakaDango" target="_blank" class="text-decoration-none fw-bold text-white-50">HirotakaDango</a>
             </div>
           </div>
@@ -35504,7 +35578,7 @@ curl_close($ch);
               display: flex;
               flex-direction: column;
               z-index: 1200;
-              transition: transform 0.3s ease, padding 0.3s ease;
+              transition: transform 0.3s ease, padding 0.3s ease, width 0.3s ease;
             }
         
             .form-control,
@@ -35655,7 +35729,7 @@ curl_close($ch);
               padding: 0 2rem 4px 2rem;
               z-index: 1050;
               transform: translateY(100%);
-              transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+              transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), left 0.3s ease;
               overflow: hidden;
             }
 
@@ -35918,6 +35992,7 @@ curl_close($ch);
               margin-left: var(--sidebar-width);
               padding: 2rem;
               max-width: 1200px;
+              transition: margin-left 0.3s ease;
             }
         
             .ytm-modal {
@@ -37243,6 +37318,7 @@ SOFTWARE.</div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/nosleep/0.12.0/NoSleep.min.js"></script>
     <script>
       // Global Hashchange Interceptor for Playground
@@ -37278,6 +37354,30 @@ SOFTWARE.</div>
       });
     
       document.addEventListener("DOMContentLoaded", () => {
+        // Main Sidebar Toggle Logic
+        const mainSidebarToggle = document.getElementById('main-desktop-sidebar-toggle');
+        if (mainSidebarToggle) {
+          const updateMainToggleIcon = (isMin) => {
+            const icon = mainSidebarToggle.querySelector('i');
+            if (icon) {
+              icon.className = isMin ? 'bi bi-layout-sidebar-reverse fs-4' : 'bi bi-layout-sidebar fs-4';
+            }
+          };
+          if (localStorage.getItem('main_sidebar_minimized') === 'true') {
+            document.body.classList.add('sidebar-minimized');
+            mainSidebarToggle.classList.add('mx-auto');
+            updateMainToggleIcon(true);
+          }
+          mainSidebarToggle.addEventListener('click', () => {
+            document.body.classList.toggle('sidebar-minimized');
+            const isMin = document.body.classList.contains('sidebar-minimized');
+            mainSidebarToggle.classList.toggle('mx-auto', isMin);
+            updateMainToggleIcon(isMin);
+            localStorage.setItem('main_sidebar_minimized', isMin);
+            setTimeout(() => { window.dispatchEvent(new Event('resize')); }, 300);
+          });
+        }
+
         window.applyMarquee = (el, contentHTML) => {
           if (!el) return;
 
@@ -47269,97 +47369,783 @@ SOFTWARE.</div>
               break;
     
             case "photo_editor":
-              updateContentTitle("Image Editor", !!currentUser);
+              updateContentTitle("ImagEditor", !!currentUser);
               if (currentUser) {
                 contentArea.innerHTML = `
-                        <div class="photo-editor-app">
-                          <main class="pe-workspace" id="pe-workspace">
-                            <canvas id="pe-main-canvas"></canvas>
-                            <canvas id="pe-overlay-canvas"></canvas>
-                            <textarea id="pe-text-editor" rows="3" placeholder="Type here... (Shift+Enter for newline)"></textarea>
-                          </main>
-    
-                          <nav class="pe-bottom-nav">
-                            <div class="pe-properties-panel" id="pe-properties-panel">
-                              <div class="pe-panel-header">
-                                <span id="pe-panel-title">Properties</span>
-                                <button id="pe-btn-close-panel">
-                                  <svg><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-                                </button>
-                              </div>
-                              <div id="pe-panel-content"></div>
-                            </div>
-    
-                            <div class="pe-bottom-bar">
-                              <label class="pe-tool-btn" id="pe-nav-img">
-                                <div class="pe-icon-container">
-                                  <svg><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
-                                </div>
-                                <span>Image</span>
-                                <input type="file" id="pe-upload-img" accept="image/*" multiple style="display:none;">
-                              </label>
-                              <button class="pe-tool-btn" id="pe-btn-add-text">
-                                <div class="pe-icon-container">
-                                  <svg><path d="M2.5 4v3h5v12h3V7h5V4h-13zm19 5h-9v3h3v7h3v-7h3V9z"/></svg>
-                                </div>
-                                <span>Text</span>
-                              </button>
-                              <button class="pe-tool-btn" id="pe-btn-add-shape">
-                                <div class="pe-icon-container">
-                                  <svg><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
-                                </div>
-                                <span>Shape</span>
-                              </button>
-                              <button class="pe-tool-btn" id="pe-btn-draw">
-                                <div class="pe-icon-container">
-                                  <svg><path d="M3 17.25V21h3.75L17.81 10.19l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
-                                </div>
-                                <span>Draw</span>
-                              </button>
-                              <button class="pe-tool-btn" id="pe-btn-undo">
-                                <div class="pe-icon-container">
-                                  <svg><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
-                                </div>
-                                <span>Undo</span>
-                              </button>
-                              <button class="pe-tool-btn" id="pe-btn-redo">
-                                <div class="pe-icon-container">
-                                  <svg><path d="M11.5 8C8.85 8 6.45 8.99 4.6 10.6L1 7v9h9L6.38 12.38C7.77 11.22 9.54 10.5 11.5 10.5c3.54 0 6.55 2.31 7.6 5.5l2.37-.78C20.08 11.03 16.15 8 11.5 8z" transform="scale(-1, 1) translate(-24, 0)"/></svg>
-                                </div>
-                                <span>Redo</span>
-                              </button>
-                              <button class="pe-tool-btn" id="pe-btn-reset">
-                                <div class="pe-icon-container">
-                                  <svg><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z" transform="rotate(45 12 12)"/></svg>
-                                </div>
-                                <span>Reset</span>
-                              </button>
-                              <button class="pe-tool-btn" id="pe-btn-properties">
-                                <div class="pe-icon-container">
-                                  <svg><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg>
-                                </div>
-                                <span>Settings</span>
-                              </button>
-                              <!-- Desktop-Specific Export Button (Perfect Circle) -->
-                              <button class="pe-export-btn-desktop" id="pe-btn-export-desktop">
-                                <svg><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-                              </button>
-                              <!-- Mobile-Specific Export Button (Pill Layout) -->
-                              <button class="pe-export-btn-mobile" id="pe-btn-export-mobile">
-                                <svg><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-                                <span>Export</span>
-                              </button>
-                            </div>
-                          </nav>
+                  <style>
+                    /* ImagEditor Vanilla Layout Classes (Replaces Tailwind) */
+                    .pe-header { height: 56px; background-color: #0d0a0b; border-bottom: 1px solid var(--outline-variant); display: flex; align-items: center; justify-content: space-between; padding: 0 12px; z-index: 30; flex-shrink: 0; }
+                    @media (min-width: 768px) { .pe-header { padding: 0 20px; } }
+                    .pe-header-group { display: flex; align-items: center; gap: 8px; }
+                    @media (min-width: 768px) { .pe-header-group { gap: 12px; } }
+                    .pe-app-container { flex: 1; display: flex; height: 100%; position: relative; overflow: hidden; }
+                    .pe-rail-nav { width: 72px; background-color: #0d0a0b; border-right: 1px solid var(--outline-variant); display: flex; flex-direction: column; padding: 8px; gap: 4px; z-index: 30; flex-shrink: 0; }
+                    .pe-drawer-header { padding: 16px; border-bottom: 1px solid var(--surface-container-highest); display: flex; justify-content: space-between; align-items: center; }
+                    .pe-drawer-title { font-weight: 700; font-size: 0.875rem; color: #fff; display: flex; align-items: center; gap: 8px; }
+                    .pe-drawer-close { color: var(--on-surface-variant); background: none; border: none; cursor: pointer; }
+                    .pe-drawer-close:hover { color: #fff; }
+                    .pe-drawer-content { padding: 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px; }
+                    .pe-grid-1 { display: grid; grid-template-columns: 1fr; gap: 12px; }
+                    .pe-grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+                    .pe-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+                    .pe-grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+                    .pe-zoom-controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background-color: rgba(24, 18, 20, 0.85); border: 1px solid var(--outline-variant); padding: 4px 8px; border-radius: 999px; display: flex; align-items: center; gap: 4px; backdrop-filter: blur(12px); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8); z-index: 50; }
+                    .pe-zoom-btn { color: var(--on-surface); font-size: 1.2rem; font-weight: 700; padding: 0; background: none; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; transition: background 0.2s, color 0.2s; }
+                    .pe-zoom-btn:hover { color: var(--primary); background: rgba(255, 255, 255, 0.1); }
+                    .pe-zoom-label { font-family: monospace; font-size: 0.8rem; padding: 0 8px; min-width: 50px; text-align: center; font-weight: bold; }
+                    .pe-zoom-divider { height: 16px; width: 1px; background-color: var(--outline-variant); margin: 0 4px; }
+                    .pe-zoom-fit { color: var(--on-surface); font-size: 0.8rem; font-weight: 700; padding: 6px 12px; background: none; border: none; cursor: pointer; border-radius: 999px; transition: background 0.2s, color 0.2s; text-transform: uppercase; letter-spacing: 0.05em; }
+                    .pe-zoom-fit:hover { color: var(--primary); background: rgba(255, 255, 255, 0.1); }
+                    .pe-modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid var(--surface-container-highest); padding-bottom: 16px; position: sticky; top: 0; background: var(--surface-container); z-index: 10; margin-top: -4px; padding-top: 4px; }
+                    .pe-modal-title { font-weight: 800; font-size: 1.1rem; color: #fff; margin: 0; }
+                    .pe-modal-footer { display: flex; justify-content: flex-end; gap: 12px; padding-top: 16px; border-top: 1px solid var(--surface-container-highest); margin-top: 16px; }
+                    .pe-hidden-sm { display: none; }
+                    @media (min-width: 640px) { .pe-hidden-sm { display: inline; } }
+                    .pe-hidden-md { display: none; }
+                    @media (min-width: 768px) { .pe-hidden-md { display: flex; } }
+                    .pe-template-btn { padding: 12px; background-color: var(--surface-dim); border: 1px solid var(--outline-variant); border-radius: 12px; text-align: left; transition: all 0.2s; cursor: pointer; width: 100%; }
+                    .pe-template-btn:hover { background-color: var(--surface-container-high); }
+                    .pe-template-title { font-weight: 600; font-size: 0.75rem; color: #fff; margin-top: 8px; }
+                    .pe-input-wrapper { display: flex; align-items: center; gap: 6px; background-color: var(--surface-dim); padding: 0 10px; border-radius: 8px; border: 1px solid rgba(158, 127, 131, 0.6); transition: background-color 0.2s; height: 34px; box-sizing: border-box; }
+                    .pe-title-input { background: transparent; border: none; color: #fff; font-size: 0.75rem; font-weight: 700; outline: none; width: 112px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; height: 100%; margin: 0; padding: 0; }
+                    @media (min-width: 640px) { .pe-title-input { width: 176px; } }
+                    .pe-btn-outline { display: flex; align-items: center; gap: 8px; background-color: var(--surface-container-low); padding: 0 10px; border-radius: 8px; border: 1px solid var(--outline-variant); color: var(--on-surface); font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: background-color 0.2s; height: 34px; box-sizing: border-box; }
+                    .pe-btn-outline:hover { background-color: var(--surface-container); }
+                    .pe-upload-label { display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 0; }
+                    .pe-divider-y { height: 16px; width: 1px; background-color: var(--outline-variant); margin: 0 4px; }
+                    .pe-flex-col { display: flex; flex-direction: column; }
+                    .pe-space-y-4 { display: flex; flex-direction: column; gap: 16px; }
+
+                    /* Slider consistency with PHPAudio */
+                    .photo-editor-app input[type="range"] {
+                      -webkit-appearance: none;
+                      appearance: none;
+                      width: 100%;
+                      background: rgba(255, 255, 255, 0.2);
+                      height: 4px;
+                      border-radius: 9999px;
+                      padding: 0;
+                      margin: 0;
+                      border: none;
+                      outline: none;
+                    }
+                    .photo-editor-app input[type="range"]::-webkit-slider-runnable-track {
+                      width: 100%;
+                      height: 4px;
+                      background: transparent;
+                      border: none;
+                      border-radius: 9999px;
+                    }
+                    .photo-editor-app input[type="range"]::-webkit-slider-thumb {
+                      -webkit-appearance: none;
+                      appearance: none;
+                      height: 12px;
+                      width: 12px;
+                      margin-top: -4px;
+                      border: 2px solid var(--primary);
+                      border-radius: 50%;
+                      background: var(--primary);
+                      box-shadow: 0 0 0 2px var(--surface-container);
+                      cursor: pointer;
+                      transition: transform 0.1s;
+                    }
+                    .photo-editor-app input[type="range"]:hover::-webkit-slider-thumb {
+                      transform: scale(1.2);
+                    }
+                    .photo-editor-app input[type="range"]::-moz-range-track {
+                      width: 100%;
+                      height: 4px;
+                      background: transparent;
+                      border-radius: 9999px;
+                      border: none;
+                    }
+                    .photo-editor-app input[type="range"]::-moz-range-thumb {
+                      height: 12px;
+                      width: 12px;
+                      border: 2px solid var(--primary);
+                      border-radius: 50%;
+                      background: var(--primary);
+                      box-shadow: 0 0 0 2px var(--surface-container);
+                      cursor: pointer;
+                      transition: transform 0.1s;
+                    }
+                    .photo-editor-app input[type="range"]:hover::-moz-range-thumb {
+                      transform: scale(1.2);
+                    }
+                  </style>
+                  <div class="photo-editor-app">
+                    <header class="pe-header">
+                      <div class="pe-header-group">
+                        <div class="pe-header-group" style="gap: 8px;">
+                          <div class="brand-mark">IE</div>
+                          <span class="pe-hidden-sm" style="font-weight: 800; font-size: 0.9rem; letter-spacing: -0.02em;">ImagEditor</span>
                         </div>
-                      `;
-    
-                // Allow HTML to render before binding JS engine
+                        <button class="pe-btn-outline" onclick="imageditor.openProjectsModal()" title="Open Projects Manager">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--primary);"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                          <span class="pe-hidden-sm">Projects</span>
+                        </button>
+                        <div class="pe-divider-y"></div>
+                        <div class="pe-input-wrapper">
+                          <input type="text" id="projectTitleInput" class="pe-title-input" value="Untitled Project" onchange="imageditor.updateProjectTitle(this.value)" placeholder="Project Title...">
+                        </div>
+                        <button class="pe-btn-outline pe-hidden-md" onclick="imageditor.showModal('resizeModal')">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px; color: var(--primary);"><rect x="2" y="3" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                          <span id="canvasSizeLabel">1080 x 1080 px</span>
+                        </button>
+                      </div>
+                      <div class="pe-header-group">
+                        <button class="action-btn" style="padding: 8px;" onclick="imageditor.undo()" title="Undo (Ctrl+Z)">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>
+                        </button>
+                        <button class="action-btn" style="padding: 8px;" onclick="imageditor.redo()" title="Redo (Ctrl+Y)">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;"><polyline points="15 14 20 9 15 4"></polyline><path d="M4 20v-7a4 4 0 0 1 4-4h12"></path></svg>
+                        </button>
+                        <div class="pe-divider-y"></div>
+                        <button class="action-btn" style="padding: 8px;" onclick="imageditor.toggleGrid()" title="Toggle Grid Overlay">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 9h18"></path><path d="M3 15h18"></path><path d="M9 3v18"></path><path d="M15 3v18"></path></svg>
+                        </button>
+                        <label class="action-btn pe-upload-label" style="padding: 8px;" title="Upload Image">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                          <span class="pe-hidden-sm" style="margin-left: 4px;">Upload</span>
+                          <input type="file" accept="image/*" style="display: none;" onchange="imageditor.uploadImageToOPFS(event)">
+                        </label>
+                        <button class="action-btn" style="color: var(--primary); border-color: rgba(242,53,74,0.3); padding: 8px 12px;" onclick="imageditor.confirmReset()" title="Reset Canvas">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
+                          <span class="pe-hidden-sm" style="margin-left: 4px;">Reset</span>
+                        </button>
+                        <button class="action-btn btn-primary" style="padding: 8px 16px;" onclick="imageditor.showModal('exportModal')">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                          <span>Export</span>
+                        </button>
+                      </div>
+                    </header>
+                    <div class="pe-app-container">
+                      <nav class="rail-nav pe-rail-nav">
+                        <button class="rail-btn" data-panel="templatesDrawer" onclick="imageditor.openDrawer('templatesDrawer')">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+                          <span>Design</span>
+                        </button>
+                        <button class="rail-btn" data-panel="elementsDrawer" onclick="imageditor.openDrawer('elementsDrawer')">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 14H4L12 2z"></path><circle cx="17" cy="18" r="4"></circle><rect x="3" y="14" width="7" height="8"></rect></svg>
+                          <span>Elements</span>
+                        </button>
+                        <button class="rail-btn" data-panel="textDrawer" onclick="imageditor.openDrawer('textDrawer')">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 7 4 4 20 4 20 7"></polyline><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="4" x2="12" y2="20"></line></svg>
+                          <span>Text</span>
+                        </button>
+                        <button class="rail-btn" data-panel="drawDrawer" onclick="imageditor.openDrawer('drawDrawer')">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"></path><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path></svg>
+                          <span>Draw</span>
+                        </button>
+                        <button class="rail-btn" data-panel="filtersDrawer" onclick="imageditor.openDrawer('filtersDrawer')">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 2a10 10 0 0 0 0 20z"></path></svg>
+                          <span>Filters</span>
+                        </button>
+                        <button class="rail-btn" data-panel="layersDrawer" onclick="imageditor.openDrawer('layersDrawer')">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+                          <span>Layers</span>
+                        </button>
+                        <button class="rail-btn" data-panel="bgDrawer" onclick="imageditor.openDrawer('bgDrawer')">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 9h18"></path><path d="M9 21V9"></path></svg>
+                          <span>Canvas</span>
+                        </button>
+                      </nav>
+                      <div id="templatesDrawer" class="drawer-panel">
+                        <div class="drawer-header">
+                          <h3 class="drawer-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--primary);"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+                            Design Presets
+                          </h3>
+                          <button class="drawer-close" onclick="imageditor.closeDrawers()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div class="drawer-content">
+                          <p style="font-size: 0.75rem; color: var(--on-surface-variant); margin: 0;">Instant professional layout templates.</p>
+                          <div class="pe-grid-1">
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('socialPromo')">
+                              <div style="height: 64px; background: linear-gradient(to right, #dc2626, #d97706); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 900; color: #fff; font-size: 0.75rem; letter-spacing: 0.05em;">BIG SALE 50%</div>
+                              <h4 class="pe-template-title">1. Promo Sale Banner</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('quoteCard')">
+                              <div style="height: 64px; background: #18181b; border: 1px solid #27272a; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; justify-content: center; font-size: 0.6rem; font-style: italic; color: #d4d4d8; font-family: serif;">"Design is intelligence..."</div>
+                              <h4 class="pe-template-title">2. Editorial Quote Card</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('neonParty')">
+                              <div style="height: 64px; background: linear-gradient(to bottom right, #581c87, #000); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: monospace; color: #f472b6; font-weight: bold; font-size: 0.75rem;">CYBER NIGHT</div>
+                              <h4 class="pe-template-title">3. Cyber Neon Poster</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('vintagePoster')">
+                              <div style="height: 64px; background: #fdf6e3; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: serif; color: #3e2723; font-weight: bold; font-size: 0.75rem;">CLASSIC</div>
+                              <h4 class="pe-template-title">4. Vintage Poster</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('modernMinimal')">
+                              <div style="height: 64px; background: #ffffff; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: sans-serif; color: #000; font-weight: 300; font-size: 0.75rem;">Minimal.</div>
+                              <h4 class="pe-template-title">5. Modern Minimalist</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('techAnnouncement')">
+                              <div style="height: 64px; background: #1e3a8a; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: monospace; color: #bfdbfe; font-weight: bold; font-size: 0.75rem;">v2.0 RELEASE</div>
+                              <h4 class="pe-template-title">6. Tech Announcement</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('corporatePitch')">
+                              <div style="height: 64px; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: sans-serif; color: #1e40af; font-weight: bold; font-size: 0.75rem;">Q3 EARNINGS</div>
+                              <h4 class="pe-template-title">7. Corporate Pitch</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('retroWave')">
+                              <div style="height: 64px; background: linear-gradient(to top, #db2777, #312e81); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: sans-serif; color: #fde047; font-weight: 900; font-style: italic; font-size: 0.75rem;">SYNTH</div>
+                              <h4 class="pe-template-title">8. Retro Wave</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('artGallery')">
+                              <div style="height: 64px; background: #fafafa; border: 1px solid #e5e5e5; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: serif; color: #1f2937; letter-spacing: 0.1em; font-size: 0.6rem;">EXHIBITION</div>
+                              <h4 class="pe-template-title">9. Art Gallery</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('fitnessMotivation')">
+                              <div style="height: 64px; background: #000; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: sans-serif; color: #dc2626; font-weight: 900; font-size: 0.75rem; text-transform: uppercase;">No Excuses</div>
+                              <h4 class="pe-template-title">10. Fitness Motivation</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('foodMenu')">
+                              <div style="height: 64px; background: #fff7ed; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: serif; color: #78350f; font-size: 0.75rem;"><span>BISTRO</span><span style="font-size: 0.5rem;">Menu</span></div>
+                              <h4 class="pe-template-title">11. Food Menu</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('travelVlog')">
+                              <div style="height: 64px; background: linear-gradient(to bottom right, #22d3ee, #2563eb); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: sans-serif; color: #fff; font-weight: bold; font-size: 0.75rem; box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);">BALI VLOG</div>
+                              <h4 class="pe-template-title">12. Travel Vlog Thumb</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('musicAlbum')">
+                              <div style="height: 64px; background: #09090b; border-radius: 8px; display: flex; align-items: center; justify-content: center; border: 1px solid #27272a; color: #fff; font-family: monospace; font-size: 0.6rem; letter-spacing: 0.2em;">ALBUM TITLE</div>
+                              <h4 class="pe-template-title">13. Music Album Cover</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('gamingStream')">
+                              <div style="height: 64px; background: #581c87; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 900; color: #4ade80; font-size: 0.75rem; font-style: italic;">LIVE NOW</div>
+                              <h4 class="pe-template-title">14. Gaming Stream</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('realEstate')">
+                              <div style="height: 64px; background: #fff; border: 1px solid #d1d5db; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: serif; color: #1e3a8a; font-weight: 600; font-size: 0.75rem;">JUST LISTED</div>
+                              <h4 class="pe-template-title">15. Real Estate</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('fashionSale')">
+                              <div style="height: 64px; background: #fce7f3; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: serif; color: #be185d; font-weight: bold; font-size: 0.75rem; font-style: italic;">Summer Collection</div>
+                              <h4 class="pe-template-title">16. Fashion Sale</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('podcastCover')">
+                              <div style="height: 64px; background: #fbbf24; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 900; color: #000; font-size: 0.75rem;">THE PODCAST</div>
+                              <h4 class="pe-template-title">17. Podcast Cover</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('hiringPost')">
+                              <div style="height: 64px; background: #2563eb; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: sans-serif; color: #fff; font-weight: bold; font-size: 0.75rem;">WE'RE HIRING</div>
+                              <h4 class="pe-template-title">18. Hiring Post</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('weddingInvite')">
+                              <div style="height: 64px; background: #fff1f2; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: serif; color: #9f1239; font-size: 0.75rem; font-style: italic;">Save the Date</div>
+                              <h4 class="pe-template-title">19. Wedding Invite</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('charityEvent')">
+                              <div style="height: 64px; background: #ecfdf5; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: sans-serif; color: #047857; font-weight: bold; font-size: 0.75rem;">DONATION DRIVE</div>
+                              <h4 class="pe-template-title">20. Charity Event</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('memeTemplate')">
+                              <div style="height: 64px; background: #fff; border: 1px solid #d1d5db; border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between; padding: 4px; align-items: center; font-weight: 900; color: #000; font-size: 0.5rem; text-transform: uppercase;"><span>TOP TEXT</span><span>BOTTOM TEXT</span></div>
+                              <h4 class="pe-template-title">21. Meme Template</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('productLaunch')">
+                              <div style="height: 64px; background: #18181b; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: sans-serif; color: #d4d4d8; font-weight: 300; letter-spacing: 0.2em; font-size: 0.6rem;">INTRODUCING</div>
+                              <h4 class="pe-template-title">22. Product Launch</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('holidayGreeting')">
+                              <div style="height: 64px; background: #b91c1c; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: serif; color: #fff; font-weight: bold; font-size: 0.75rem;">Happy Holidays</div>
+                              <h4 class="pe-template-title">23. Holiday Greeting</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('newsletterHeader')">
+                              <div style="height: 64px; background: #eef2ff; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: serif; color: #312e81; font-weight: bold; font-size: 0.75rem; border-bottom: 4px solid #c7d2fe;">Weekly Digest</div>
+                              <h4 class="pe-template-title">24. Newsletter Header</h4>
+                            </button>
+                            <button class="pe-template-btn" onclick="imageditor.loadTemplate('bookCover')">
+                              <div style="height: 64px; background: #2a2a2a; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: serif; color: #d4af37; font-size: 0.75rem;">THE NOVEL</div>
+                              <h4 class="pe-template-title">25. Book Cover</h4>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <div id="elementsDrawer" class="drawer-panel">
+                        <div class="drawer-header">
+                          <h3 class="drawer-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--primary);"><path d="M12 2l8 14H4L12 2z"></path><circle cx="17" cy="18" r="4"></circle><rect x="3" y="14" width="7" height="8"></rect></svg>
+                            Shapes & Badges
+                          </h3>
+                          <button class="drawer-close" onclick="imageditor.closeDrawers()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div class="drawer-content">
+                          <div class="pe-grid-3">
+                            <button class="action-btn" style="flex-direction: column; padding: 12px;" onclick="imageditor.addShape('rect')">
+                              <svg viewBox="0 0 24 24" fill="currentColor" style="width: 24px; height: 24px; margin-bottom: 4px;"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                              <span style="font-size: 0.65rem;">Rectangle</span>
+                            </button>
+                            <button class="action-btn" style="flex-direction: column; padding: 12px;" onclick="imageditor.addShape('circle')">
+                              <svg viewBox="0 0 24 24" fill="currentColor" style="width: 24px; height: 24px; margin-bottom: 4px;"><circle cx="12" cy="12" r="9"/></svg>
+                              <span style="font-size: 0.65rem;">Circle</span>
+                            </button>
+                            <button class="action-btn" style="flex-direction: column; padding: 12px;" onclick="imageditor.addShape('triangle')">
+                              <svg viewBox="0 0 24 24" fill="currentColor" style="width: 24px; height: 24px; margin-bottom: 4px;"><path d="M12 4l9 16H3L12 4z"/></svg>
+                              <span style="font-size: 0.65rem;">Triangle</span>
+                            </button>
+                            <button class="action-btn" style="flex-direction: column; padding: 12px;" onclick="imageditor.addShape('star')">
+                              <svg viewBox="0 0 24 24" fill="currentColor" style="width: 24px; height: 24px; margin-bottom: 4px;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                              <span style="font-size: 0.65rem;">Star</span>
+                            </button>
+                            <button class="action-btn" style="flex-direction: column; padding: 12px;" onclick="imageditor.addShape('heart')">
+                              <svg viewBox="0 0 24 24" fill="currentColor" style="width: 24px; height: 24px; margin-bottom: 4px;"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l8.72-8.72 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+                              <span style="font-size: 0.65rem;">Heart</span>
+                            </button>
+                            <button class="action-btn" style="flex-direction: column; padding: 12px;" onclick="imageditor.addShape('line')">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="width: 24px; height: 24px; margin-bottom: 4px;"><line x1="4" y1="20" x2="20" y2="4"/></svg>
+                              <span style="font-size: 0.65rem;">Line</span>
+                            </button>
+                          </div>
+                          <div style="border-top: 1px solid var(--surface-container-highest); padding-top: 12px; margin-top: 12px;">
+                            <span class="control-label">Badges & Callouts</span>
+                            <div class="pe-grid-2">
+                              <button class="action-btn" style="background-color: rgba(127, 29, 29, 0.4); color: #f87171; border-color: #991b1b;" onclick="imageditor.addBadge('sale')">🔥 SALE Badge</button>
+                              <button class="action-btn" style="background-color: rgba(120, 53, 15, 0.4); color: #fbbf24; border-color: #92400e;" onclick="imageditor.addBadge('new')">⭐ NEW Badge</button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div id="textDrawer" class="drawer-panel">
+                        <div class="drawer-header">
+                          <h3 class="drawer-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--primary);"><polyline points="4 7 4 4 20 4 20 7"></polyline><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="4" x2="12" y2="20"></line></svg>
+                            Typography
+                          </h3>
+                          <button class="drawer-close" onclick="imageditor.closeDrawers()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div class="drawer-content">
+                          <button class="action-btn" style="width: 100%; font-size: 1.5rem; padding: 16px 0; font-weight: bold;" onclick="imageditor.addText('heading')">Add Heading</button>
+                          <button class="action-btn" style="width: 100%; font-size: 1.125rem; padding: 12px 0; font-weight: 600;" onclick="imageditor.addText('subheading')">Add Subheading</button>
+                          <button class="action-btn" style="width: 100%; font-size: 0.875rem; padding: 8px 0;" onclick="imageditor.addText('body')">Add Body Text</button>
+                          <button class="action-btn" style="width: 100%; font-size: 1.5rem; padding: 16px 0; font-weight: bold; color: var(--primary); text-shadow: 0 0 10px rgba(242,53,74,0.5);" onclick="imageditor.addText('neon')">GLOW NEON</button>
+                        </div>
+                      </div>
+                      <div id="drawDrawer" class="drawer-panel">
+                        <div class="drawer-header">
+                          <h3 class="drawer-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--primary);"><path d="M12 19l7-7 3 3-7 7-3-3z"></path><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path></svg>
+                            Brush Engine
+                          </h3>
+                          <button class="drawer-close" onclick="imageditor.closeDrawers()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div class="drawer-content">
+                          <div style="display: flex; align-items: center; justify-content: space-between; background: var(--surface-dim); padding: 10px; border-radius: 12px; border: 1px solid var(--outline-variant);">
+                            <span style="font-size: 0.75rem; font-weight: bold; color: #fff;">Painting Mode</span>
+                            <button id="toggleDrawBtn" class="action-btn btn-primary" style="padding: 6px 12px;" onclick="imageditor.toggleDrawMode()">Start Drawing</button>
+                          </div>
+                          <div class="control-group" style="border: none; padding: 0;">
+                            <span class="control-label">Digital Brush Engine</span>
+                            <div class="pe-grid-2">
+                              <button class="action-btn" style="justify-content: flex-start; font-size: 0.75rem;" data-brush="dip" onclick="imageditor.setBrushType('dip')">✍️ Dip Pen</button>
+                              <button class="action-btn" style="justify-content: flex-start; font-size: 0.75rem;" data-brush="felt" onclick="imageditor.setBrushType('felt')">🖊️ Felt Tip Pen</button>
+                              <button class="action-btn" style="justify-content: flex-start; font-size: 0.75rem;" data-brush="airbrush" onclick="imageditor.setBrushType('airbrush')">💨 Soft Airbrush</button>
+                              <button class="action-btn" style="justify-content: flex-start; font-size: 0.75rem;" data-brush="calligraphy" onclick="imageditor.setBrushType('calligraphy')">✒️ Calligraphy</button>
+                              <button class="action-btn" style="justify-content: flex-start; font-size: 0.75rem;" data-brush="neon" onclick="imageditor.setBrushType('neon')">🌟 Glow Neon</button>
+                              <button class="action-btn" style="justify-content: flex-start; font-size: 0.75rem;" data-brush="spray" onclick="imageditor.setBrushType('spray')">🎨 Spray Paint</button>
+                              <button class="action-btn" style="justify-content: flex-start; font-size: 0.75rem;" data-brush="eraser" onclick="imageditor.setBrushType('eraser')">🧽 Eraser</button>
+                            </div>
+                          </div>
+                          <div class="control-group pe-space-y-4" style="border: none; padding: 0;">
+                            <div>
+                              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                <span class="control-label" style="margin: 0;">Brush Size</span>
+                                <span style="font-size: 0.75rem; font-family: monospace;" id="brushSizeVal">12px</span>
+                              </div>
+                              <input type="range" id="brushSize" min="1" max="150" value="12" oninput="window.imageditor.updateBrush()" style="width: 100%;">
+                            </div>
+                            <div>
+                              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                <span class="control-label" style="margin: 0;">Flow / Opacity</span>
+                                <span style="font-size: 0.75rem; font-family: monospace;" id="brushOpacityVal">100%</span>
+                              </div>
+                              <input type="range" id="brushOpacity" min="5" max="100" value="100" oninput="window.imageditor.updateBrush()" style="width: 100%;">
+                            </div>
+                            <div>
+                              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                <span class="control-label" style="margin: 0;">Glow Intensity</span>
+                                <span style="font-size: 0.75rem; font-family: monospace;" id="brushGlowVal">0px</span>
+                              </div>
+                              <input type="range" id="brushGlow" min="0" max="40" value="0" oninput="window.imageditor.updateBrush()" style="width: 100%;">
+                            </div>
+                          </div>
+                          <div class="control-group" style="border: none; padding: 8px 0 0 0; margin-top: 8px;">
+                            <span class="control-label">Symmetry Mirror Tool</span>
+                            <select id="symmetrySelect" class="input-select" onchange="window.imageditor.setSymmetryMode(this.value)">
+                              <option value="none">Off (Single Stroke)</option>
+                              <option value="vertical">Vertical Axis Mirror (X)</option>
+                              <option value="horizontal">Horizontal Axis Mirror (Y)</option>
+                              <option value="quad">Quad Mirror (4-Way Axis)</option>
+                            </select>
+                          </div>
+                          <div class="control-group" style="border: none; padding: 8px 0 0 0; margin-top: 8px;">
+                            <span class="control-label">Ink & Palette</span>
+                            <div class="color-picker-wrap" style="margin-bottom: 8px;">
+                              <input type="color" id="brushColor" class="color-input" value="#f2354a" onchange="window.imageditor.updateBrush()">
+                              <span style="font-size: 0.75rem; font-family: monospace;" id="brushColorHex">#f2354a</span>
+                            </div>
+                            <div class="pe-grid-6">
+                              <button style="height: 28px; border-radius: 6px; border: 1px solid var(--outline-variant); background-color: #f2354a; cursor: pointer;" onclick="window.imageditor.setBrushColor('#f2354a')"></button>
+                              <button style="height: 28px; border-radius: 6px; border: 1px solid var(--outline-variant); background-color: #ffffff; cursor: pointer;" onclick="window.imageditor.setBrushColor('#ffffff')"></button>
+                              <button style="height: 28px; border-radius: 6px; border: 1px solid var(--outline-variant); background-color: #000000; cursor: pointer;" onclick="window.imageditor.setBrushColor('#000000')"></button>
+                              <button style="height: 28px; border-radius: 6px; border: 1px solid var(--outline-variant); background-color: #e5b35a; cursor: pointer;" onclick="window.imageditor.setBrushColor('#e5b35a')"></button>
+                              <button style="height: 28px; border-radius: 6px; border: 1px solid var(--outline-variant); background-color: #63e2a8; cursor: pointer;" onclick="window.imageditor.setBrushColor('#63e2a8')"></button>
+                              <button style="height: 28px; border-radius: 6px; border: 1px solid var(--outline-variant); background-color: #38bdf8; cursor: pointer;" onclick="window.imageditor.setBrushColor('#38bdf8')"></button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div id="filtersDrawer" class="drawer-panel">
+                        <div class="drawer-header">
+                          <h3 class="drawer-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--primary);"><circle cx="12" cy="12" r="10"></circle><path d="M12 2a10 10 0 0 0 0 20z"></path></svg>
+                            Filters & FX
+                          </h3>
+                          <button class="drawer-close" onclick="imageditor.closeDrawers()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div class="drawer-content">
+                          <p style="font-size: 0.75rem; color: var(--on-surface-variant); margin: 0;">Select an image on canvas to apply real-time filters.</p>
+                          <div class="control-group" style="border: none; padding: 0;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                              <span class="control-label" style="margin: 0;">Brightness</span>
+                              <span style="font-size: 0.75rem; font-family: monospace;" id="val-bright">0</span>
+                            </div>
+                            <input type="range" id="filter-bright" min="-1" max="1" step="0.05" value="0" oninput="imageditor.applyImageFilter('brightness', parseFloat(this.value)); document.getElementById('val-bright').innerText = this.value;" style="width: 100%;">
+                          </div>
+                          <div class="control-group" style="border: none; padding: 0;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                              <span class="control-label" style="margin: 0;">Contrast</span>
+                              <span style="font-size: 0.75rem; font-family: monospace;" id="val-contrast">0</span>
+                            </div>
+                            <input type="range" id="filter-contrast" min="-1" max="1" step="0.05" value="0" oninput="imageditor.applyImageFilter('contrast', parseFloat(this.value)); document.getElementById('val-contrast').innerText = this.value;" style="width: 100%;">
+                          </div>
+                          <div class="control-group" style="border: none; padding: 0;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                              <span class="control-label" style="margin: 0;">Saturation</span>
+                              <span style="font-size: 0.75rem; font-family: monospace;" id="val-saturate">0</span>
+                            </div>
+                            <input type="range" id="filter-saturate" min="-1" max="1" step="0.05" value="0" oninput="imageditor.applyImageFilter('saturation', parseFloat(this.value)); document.getElementById('val-saturate').innerText = this.value;" style="width: 100%;">
+                          </div>
+                          <div class="control-group" style="border: none; padding: 0;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                              <span class="control-label" style="margin: 0;">Blur</span>
+                              <span style="font-size: 0.75rem; font-family: monospace;" id="val-blur">0</span>
+                            </div>
+                            <input type="range" id="filter-blur" min="0" max="1" step="0.02" value="0" oninput="imageditor.applyImageFilter('blur', parseFloat(this.value)); document.getElementById('val-blur').innerText = this.value;" style="width: 100%;">
+                          </div>
+                          <div class="pe-grid-2" style="margin-top: 8px;">
+                            <button class="action-btn" onclick="imageditor.toggleToggleFilter('sepia')">Sepia</button>
+                            <button class="action-btn" onclick="imageditor.toggleToggleFilter('grayscale')">Grayscale</button>
+                            <button class="action-btn" onclick="imageditor.toggleToggleFilter('invert')">Invert</button>
+                            <button class="action-btn" style="color: var(--primary);" onclick="imageditor.clearImageFilters()">Reset FX</button>
+                          </div>
+                        </div>
+                      </div>
+                      <div id="layersDrawer" class="drawer-panel">
+                        <div class="drawer-header">
+                          <h3 class="drawer-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--primary);"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+                            Layer Stack
+                          </h3>
+                          <button class="drawer-close" onclick="imageditor.closeDrawers()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div class="drawer-content" id="layerList">
+                          <p style="font-size: 0.75rem; color: var(--on-surface-variant); margin: 0;">No layers on canvas.</p>
+                        </div>
+                      </div>
+                      <div id="bgDrawer" class="drawer-panel">
+                        <div class="drawer-header">
+                          <h3 class="drawer-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--primary);"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 9h18"></path><path d="M9 21V9"></path></svg>
+                            Canvas Background
+                          </h3>
+                          <button class="drawer-close" onclick="imageditor.closeDrawers()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div class="drawer-content">
+                          <div class="control-group" style="border: none; padding: 0;">
+                            <span class="control-label">Solid Color</span>
+                            <div class="color-picker-wrap">
+                              <input type="color" id="bgColorPicker" class="color-input" value="#0d0809" onchange="imageditor.setCanvasBgColor(this.value)">
+                              <span style="font-size: 0.75rem; font-family: monospace;">Choose Color</span>
+                            </div>
+                          </div>
+                          <div class="control-group" style="border: none; padding: 0;">
+                            <span class="control-label">Gradient Presets</span>
+                            <div class="pe-grid-2">
+                              <button class="pe-gradient-btn" style="background: linear-gradient(to right, #dc2626, #18181b);" onclick="imageditor.setCanvasBgGradient('#dc2626', '#18181b')"></button>
+                              <button class="pe-gradient-btn" style="background: linear-gradient(to right, #581c87, #7f1d1d);" onclick="imageditor.setCanvasBgGradient('#581c87', '#7f1d1d')"></button>
+                              <button class="pe-gradient-btn" style="background: linear-gradient(to right, #d97706, #dc2626);" onclick="imageditor.setCanvasBgGradient('#d97706', '#dc2626')"></button>
+                              <button class="pe-gradient-btn" style="background: linear-gradient(to right, #18181b, #000000);" onclick="imageditor.setCanvasBgGradient('#18181b', '#000000')"></button>
+                            </div>
+                          </div>
+                          <button class="action-btn" style="width: 100%;" onclick="imageditor.setCanvasBgColor(null)">Set Transparent</button>
+                        </div>
+                      </div>
+                      <main class="pe-workspace" id="workspace">
+                        <div class="canvas-wrapper-outer" id="canvasContainer">
+                          <canvas id="mainCanvas"></canvas>
+                          <div class="grid-overlay" id="gridOverlay"></div>
+                        </div>
+                        <div class="quick-toolbar" id="quickToolbar">
+                          <button class="action-btn" style="padding: 4px 10px; font-size: 0.75rem;" onclick="imageditor.openPropertiesPanel()" title="Settings">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                          </button>
+                          <button class="action-btn" style="padding: 4px 10px; font-size: 0.75rem;" onclick="imageditor.duplicateActive()" title="Duplicate">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                          </button>
+                          <button class="action-btn" style="padding: 4px 10px; font-size: 0.75rem;" onclick="imageditor.toggleLockActive()" title="Lock / Unlock">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                          </button>
+                          <button class="action-btn" style="padding: 4px 10px; font-size: 0.75rem;" onclick="imageditor.flipActive('X')" title="Flip Horizontal">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><polyline points="17 3 21 7 17 11"></polyline><path d="M3 7h18"></path><polyline points="7 13 3 17 7 21"></polyline><path d="M21 17H3"></path></svg>
+                          </button>
+                          <button class="action-btn" style="padding: 4px 10px; font-size: 0.75rem; color: var(--primary);" onclick="imageditor.deleteActive()" title="Delete">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                          </button>
+                        </div>
+                        <div class="properties-panel" id="propertiesPanel">
+                          <div class="pe-modal-header" id="panelHeader" style="cursor: move; background-color: var(--surface-container-high); padding: 12px; margin-bottom: 0;">
+                            <h3 class="pe-modal-title" style="font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;" id="panelTitle">Object Properties</h3>
+                            <button class="drawer-close" onclick="imageditor.closePropertiesPanel()">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                            </button>
+                          </div>
+                          <div style="overflow-y: auto; flex: 1; padding-bottom: 16px;">
+                            <div class="control-group" id="ctrl-color">
+                              <span class="control-label">Fill & Stroke</span>
+                              <div class="pe-grid-2">
+                                <div class="color-picker-wrap">
+                                  <input type="color" id="prop-fill" class="color-input" value="#f2354a" onchange="window.imageditor.updateProperty('fill', this.value)">
+                                  <label style="font-size: 0.75rem; margin: 0;">Fill</label>
+                                </div>
+                                <div class="color-picker-wrap">
+                                  <input type="color" id="prop-stroke" class="color-input" value="#000000" onchange="window.imageditor.updateProperty('stroke', this.value)">
+                                  <label style="font-size: 0.75rem; margin: 0;">Stroke</label>
+                                </div>
+                              </div>
+                            </div>
+                            <div class="control-group" id="ctrl-stroke-width">
+                              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                <span class="control-label" style="margin: 0;">Stroke Width</span>
+                                <span style="font-size: 0.75rem; font-family: monospace;" id="val-stroke-width">0</span>
+                              </div>
+                              <input type="range" id="prop-stroke-width" min="0" max="40" value="0" oninput="window.imageditor.updateProperty('strokeWidth', parseInt(this.value)); document.getElementById('val-stroke-width').innerText = this.value;" style="width: 100%;">
+                            </div>
+                            <div class="control-group d-none" id="ctrl-border-radius">
+                              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                <span class="control-label" style="margin: 0;">Corner Radius</span>
+                                <span style="font-size: 0.75rem; font-family: monospace;" id="val-border-radius">0</span>
+                              </div>
+                              <input type="range" id="prop-border-radius" min="0" max="200" value="0" oninput="window.imageditor.updateProperty('rx', parseInt(this.value)); window.imageditor.updateProperty('ry', parseInt(this.value)); document.getElementById('val-border-radius').innerText = this.value;" style="width: 100%;">
+                            </div>
+                            <div class="control-group" id="ctrl-opacity">
+                              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                <span class="control-label" style="margin: 0;">Opacity</span>
+                                <span style="font-size: 0.75rem; font-family: monospace;" id="val-opacity">100%</span>
+                              </div>
+                              <input type="range" id="prop-opacity" min="0" max="1" step="0.02" value="1" oninput="window.imageditor.updateProperty('opacity', parseFloat(this.value)); document.getElementById('val-opacity').innerText = Math.round(this.value * 100) + '%';" style="width: 100%;">
+                            </div>
+                            <div class="control-group d-none" id="ctrl-text">
+                              <span class="control-label">Text Options</span>
+                              <div class="pe-space-y-4" style="gap: 8px;">
+                                <textarea id="prop-text-value" class="input-text" rows="2" oninput="window.imageditor.updateProperty('text', this.value)"></textarea>
+                                <select id="prop-font-family" class="input-select" onchange="window.imageditor.updateProperty('fontFamily', this.value)">
+                                  <option value="Inter">Inter</option>
+                                  <option value="Roboto">Roboto</option>
+                                  <option value="Montserrat">Montserrat</option>
+                                  <option value="Oswald">Oswald</option>
+                                  <option value="Playfair Display">Playfair Display</option>
+                                  <option value="Pacifico">Pacifico Script</option>
+                                </select>
+                                <div class="pe-grid-3">
+                                  <button class="action-btn" style="padding: 6px;" id="btn-bold" onclick="window.imageditor.toggleTextProperty('fontWeight', 'bold', 'normal')"><b>B</b></button>
+                                  <button class="action-btn" style="padding: 6px; font-style: italic;" id="btn-italic" onclick="window.imageditor.toggleTextProperty('fontStyle', 'italic', 'normal')">I</button>
+                                  <button class="action-btn" style="padding: 6px; text-decoration: underline;" id="btn-underline" onclick="window.imageditor.toggleTextProperty('underline', true, false)">U</button>
+                                </div>
+                              </div>
+                            </div>
+                            <div class="control-group" style="border: none; padding-bottom: 0;">
+                              <span class="control-label">Arrange Layers</span>
+                              <div class="pe-grid-2">
+                                <button class="action-btn" onclick="window.imageditor.layerAction('bringForward')">Forward</button>
+                                <button class="action-btn" onclick="window.imageditor.layerAction('sendBackwards')">Backward</button>
+                                <button class="action-btn" onclick="window.imageditor.layerAction('bringToFront')">To Top</button>
+                                <button class="action-btn" onclick="window.imageditor.layerAction('sendToBack')">To Bottom</button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="pe-zoom-controls">
+                          <button class="pe-zoom-btn" onclick="imageditor.zoomOut()" title="Zoom Out">-</button>
+                          <span id="zoomLevelLabel" class="pe-zoom-label">100%</span>
+                          <button class="pe-zoom-btn" onclick="imageditor.zoomIn()" title="Zoom In">+</button>
+                          <div class="pe-zoom-divider"></div>
+                          <button class="pe-zoom-fit" onclick="imageditor.zoomFit()">Fit Canvas</button>
+                        </div>
+                      </main>
+                    </div>
+                    <div class="modal-overlay" id="resizeModal">
+                      <div class="modal-box" style="padding: 20px;">
+                        <div class="pe-modal-header">
+                          <h3 class="pe-modal-title">Canvas Size Settings</h3>
+                          <button class="drawer-close" onclick="imageditor.closeModal('resizeModal')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div class="pe-space-y-4">
+                          <div>
+                            <span class="control-label">Popular Presets</span>
+                            <select class="input-select" onchange="imageditor.applyPresetDimensions(this.value)">
+                              <option value="1080x1080">Instagram Post (1080 x 1080 px)</option>
+                              <option value="1080x1920">Instagram Story / Reel (1080 x 1920 px)</option>
+                              <option value="1280x720">YouTube Thumbnail (1280 x 720 px)</option>
+                              <option value="1500x500">Twitter Header (1500 x 500 px)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <span class="control-label">Aspect Ratio</span>
+                            <select class="input-select" id="aspectRatioSelect" onchange="imageditor.applyRatio(this.value)">
+                              <option value="custom">Custom (Freeform)</option>
+                              <option value="1:1">1:1 (Square)</option>
+                              <option value="16:9">16:9 (Widescreen)</option>
+                              <option value="9:16">9:16 (Vertical)</option>
+                              <option value="4:3">4:3 (Standard)</option>
+                              <option value="3:4">3:4 (Portrait)</option>
+                            </select>
+                          </div>
+                          <div class="pe-grid-2">
+                            <div>
+                              <span class="control-label">Width (px)</span>
+                              <input type="number" id="customWidth" class="input-text" value="1080" oninput="imageditor.handleDimensionChange('width')">
+                            </div>
+                            <div>
+                              <span class="control-label">Height (px)</span>
+                              <input type="number" id="customHeight" class="input-text" value="1080" oninput="imageditor.handleDimensionChange('height')">
+                            </div>
+                          </div>
+                          <div class="pe-modal-footer">
+                            <button class="action-btn" onclick="imageditor.closeModal('resizeModal')">Cancel</button>
+                            <button class="action-btn btn-primary" onclick="imageditor.applyCustomDimensions()">Apply Size</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="modal-overlay" id="exportModal">
+                      <div class="modal-box" style="padding: 20px;">
+                        <div class="pe-modal-header">
+                          <h3 class="pe-modal-title">Export Graphic File</h3>
+                          <button class="drawer-close" onclick="imageditor.closeModal('exportModal')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div class="pe-space-y-4">
+                          <div>
+                            <span class="control-label">Export Format</span>
+                            <select id="exportFormat" class="input-select">
+                              <option value="png">PNG Image (.png)</option>
+                              <option value="jpeg">JPEG Image (.jpg)</option>
+                              <option value="webp">WEBP High Efficiency (.webp)</option>
+                              <option value="svg">SVG Vector Image (.svg)</option>
+                              <option value="json">ImagEditor Project State (.json)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <span class="control-label">Quality Scale</span>
+                            <select id="exportScale" class="input-select">
+                              <option value="1">1x Standard Resolution</option>
+                              <option value="2" selected>2x HD Quality</option>
+                              <option value="4">4x Ultra HD Quality</option>
+                            </select>
+                          </div>
+                          <div class="pe-modal-footer">
+                            <button class="action-btn" onclick="imageditor.closeModal('exportModal')">Cancel</button>
+                            <button class="action-btn btn-primary" onclick="imageditor.executeExport()">Download File</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="modal-overlay" id="confirmModal">
+                      <div class="modal-box" style="padding: 20px; max-width: 384px;">
+                        <h3 class="pe-modal-title" style="margin-bottom: 8px;">Reset Canvas?</h3>
+                        <p style="font-size: 0.75rem; color: var(--on-surface-variant); margin: 0 0 16px 0;">Are you sure you want to clear the entire canvas? This action cannot be undone easily.</p>
+                        <div class="pe-modal-footer" style="padding-top: 0;">
+                          <button class="action-btn" onclick="imageditor.closeModal('confirmModal')">Cancel</button>
+                          <button class="action-btn btn-primary" id="confirmOkBtn">Reset Canvas</button>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="modal-overlay" id="projectsModal">
+                      <div class="modal-box" style="padding: 20px; max-width: 576px;">
+                        <div class="pe-modal-header">
+                          <div class="pe-header-group">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px; color: var(--primary);"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                            <h3 class="pe-modal-title">Project Library</h3>
+                          </div>
+                          <button class="drawer-close" onclick="imageditor.closeModal('projectsModal')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div class="pe-space-y-4">
+                          <div style="display: flex; justify-content: space-between; align-items: center; background-color: var(--surface-dim); padding: 12px; border-radius: 12px; border: 1px solid var(--outline-variant);">
+                            <div>
+                              <h4 style="font-size: 0.75rem; font-weight: 700; color: #fff; margin: 0;">Create New Canvas Document</h4>
+                              <p style="font-size: 0.7rem; color: var(--on-surface-variant); margin: 0;">Start fresh with a blank workspace.</p>
+                            </div>
+                            <button class="action-btn btn-primary" onclick="imageditor.createNewProject()">+ New Project</button>
+                          </div>
+                          <div>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                              <span class="control-label" style="margin: 0;">Your Saved Documents</span>
+                              <select id="projectSortSelect" class="input-select" style="width: 160px; padding: 6px 12px; font-size: 0.75rem;" onchange="imageditor.setProjectSort(this.value)">
+                                <option value="modified">Recently Modified</option>
+                                <option value="newest">Newest Created</option>
+                                <option value="oldest">Oldest Created</option>
+                              </select>
+                            </div>
+                            <div style="margin-bottom: 12px; padding: 10px; background-color: rgba(69, 26, 3, 0.4); border: 1px solid rgba(120, 53, 15, 0.6); border-radius: 8px; display: flex; gap: 8px; align-items: flex-start; color: #fbbf24;">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; margin-top: 2px; flex-shrink: 0;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                              <p style="font-size: 0.7rem; line-height: 1.25; color: #fde68a; margin: 0;">Projects are strictly saved in this browser. Clearing browser data will delete them. <b>Always backup!</b></p>
+                            </div>
+                            <div style="display: flex; flex-direction: column; gap: 8px; max-height: 256px; overflow-y: auto; padding-right: 4px;" id="projectsListContainer">
+                            </div>
+                          </div>
+                          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--surface-container-highest);">
+                            <div class="pe-header-group">
+                              <button class="action-btn" style="background-color: var(--surface-dim); border: 1px solid var(--outline-variant); font-size: 0.75rem;" onclick="imageditor.exportAllProjects()">⬇ Backup All</button>
+                              <label class="action-btn pe-upload-label" style="background-color: var(--surface-dim); border: 1px solid var(--outline-variant); font-size: 0.75rem;">
+                                ⬆ Restore
+                                <input type="file" accept=".json" style="display: none;" onchange="imageditor.importAllProjects(event)">
+                              </label>
+                            </div>
+                            <button class="action-btn" onclick="imageditor.closeModal('projectsModal')">Close</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div id="pe-toast">Ready</div>
+                  </div>
+                `;
+
                 setTimeout(() => {
-                  if (!window.photoEditorInstance) {
-                    window.photoEditorInstance = new EditorEngine();
+                  if (typeof window.imageditor !== "undefined") {
+                    window.imageditor.init();
                   }
-                  window.photoEditorInstance.initDOM();
                 }, 50);
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to use the image editor.</div>`;
@@ -72213,1164 +72999,1346 @@ SOFTWARE.</div>
           }
         }
     
-        // --- Photo Editor Engine ---
-        class EditorEngine {
-          constructor() {
-            this.layers = [];
-            this.activeLayer = null;
-            this.bgColor = "#0A0A0A";
-            this.canvasW = 800;
-            this.canvasH = 800;
-            this.isDragging = false;
-            this.dragType = null;
-            this.dragStart = {
-              x: 0,
-              y: 0,
-            };
-            this.layerStart = {};
-            this.history = [];
-            this.historyIndex = -1;
-            this.isDrawMode = false;
-            this.currentPath = null;
-            this.brushColor = "#FF0000";
-            this.brushSize = 5;
-            this.loadState();
-          }
-    
-          initDOM() {
-            this.canvas = document.getElementById("pe-main-canvas");
-            if (!this.canvas) return; // Prevent crashes if not mounted
-            this.ctx = this.canvas.getContext("2d");
-            this.overlay = document.getElementById("pe-overlay-canvas");
-            this.overlayCtx = this.overlay.getContext("2d");
-            this.workspace = document.getElementById("pe-workspace");
-            this.textEditor = document.getElementById("pe-text-editor");
-            this.panel = document.getElementById("pe-properties-panel");
-            this.panelContent = document.getElementById("pe-panel-content");
-            this.propBtn = document.getElementById("pe-btn-properties");
-    
-            this.resizeCanvas();
-            window.removeEventListener("resize", this._resizeHandler);
-            this._resizeHandler = () => this.resizeCanvas();
-            window.addEventListener("resize", this._resizeHandler);
-    
-            document
-              .getElementById("pe-upload-img")
-              .addEventListener("change", (e) => this.handleImageUpload(e));
-            document
-              .getElementById("pe-btn-add-text")
-              .addEventListener("click", () => {
-                this.isDrawMode = false;
-                this.updateDrawBtn();
-                this.addText();
-              });
-            document
-              .getElementById("pe-btn-add-shape")
-              .addEventListener("click", () => {
-                this.isDrawMode = false;
-                this.updateDrawBtn();
-                this.addShape();
-              });
-    
-            const btnDraw = document.getElementById("pe-btn-draw");
-            if (btnDraw)
-              btnDraw.addEventListener("click", () => {
-                this.isDrawMode = !this.isDrawMode;
-                this.activeLayer = null;
-                this.closePanel();
-                this.updateDrawBtn();
-                this.render();
-              });
-    
-            const btnUndo = document.getElementById("pe-btn-undo");
-            if (btnUndo) btnUndo.addEventListener("click", () => this.undo());
-    
-            const btnRedo = document.getElementById("pe-btn-redo");
-            if (btnRedo) btnRedo.addEventListener("click", () => this.redo());
-    
-            const btnReset = document.getElementById("pe-btn-reset");
-            if (btnReset)
-              btnReset.addEventListener("click", () => {
-                if (
-                  confirm(
-                    "Are you sure you want to reset the canvas? All unsaved progress will be lost.",
-                  )
-                ) {
-                  this.layers = [];
-                  this.activeLayer = null;
-                  this.bgColor = "#0A0A0A";
-                  this.canvasW = 800;
-                  this.canvasH = 800;
-                  this.history = [];
-                  this.historyIndex = -1;
-                  this.resizeCanvas();
-                  this.saveState();
-                  this.closePanel();
-                }
-              });
-    
-            this.propBtn.addEventListener("click", () => {
-              this.isDrawMode = false;
-              this.updateDrawBtn();
-              if (this.panel.classList.contains("open")) {
-                this.closePanel();
-              } else {
-                if (this.activeLayer) {
-                  this.buildProperties();
-                } else {
-                  this.showCanvasSettings();
-                }
-                this.panel.classList.add("open");
-                this.propBtn.classList.add("active");
-                setTimeout(() => this.resizeCanvas(), 50); // FIX: Recalculate canvas after panel expands
-              }
+        // --- ImagEditor Fabric.js Engine ---
+        window.imageditor = (function() {
+          let canvas;
+          let history = [];
+          let historyIndex = -1;
+          let isProcessingHistory = false;
+          let currentWidth = 1080;
+          let currentHeight = 1080;
+          let zoomLevel = 1;
+          let opfsRoot = null;
+          let autosaveDebounceTimer = null;
+          let currentProjectId = "proj_default";
+          let currentProjectTitle = "Untitled Project";
+          let projectsIndex = [];
+          let currentProjectSort = 'modified';
+          let currentBrushType = 'dip';
+          let symmetryMode = 'none';
+          let verticalGuide = null;
+          let horizontalGuide = null;
+          const toastEl = document.getElementById('pe-toast');
+          const propertiesPanel = document.getElementById('propertiesPanel');
+          const quickToolbar = document.getElementById('quickToolbar');
+  
+          async function init() {
+            if (!document.getElementById('mainCanvas')) return;
+            canvas = new fabric.Canvas('mainCanvas', {
+              preserveObjectStacking: true,
+              selection: true,
+              backgroundColor: null
             });
-    
-            document
-              .getElementById("pe-btn-close-panel")
-              .addEventListener("click", () => this.closePanel());
-    
-            // FIXED: Bind event listeners to both the desktop and mobile buttons
-            const dExport = document.getElementById("pe-btn-export-desktop");
-            const mExport = document.getElementById("pe-btn-export-mobile");
-            if (dExport) dExport.addEventListener("click", () => this.exportImage());
-            if (mExport) mExport.addEventListener("click", () => this.exportImage());
-    
-            this.bindEvents();
-            this.render();
+            setCanvasDimensions(currentWidth, currentHeight);
+            setupEvents();
+            await initOPFS();
+            window.removeEventListener('resize', resizeViewport);
+            window.addEventListener('resize', resizeViewport);
+            resizeViewport();
+            showToast("ImagEditor Ready");
           }
-    
-          updateDrawBtn() {
-            const btn = document.getElementById("pe-btn-draw");
-            if (btn) btn.classList.toggle("active", this.isDrawMode);
+  
+          function setCanvasDimensions(width, height) {
+            currentWidth = width;
+            currentHeight = height;
+            canvas.setWidth(width);
+            canvas.setHeight(height);
+            const label = document.getElementById('canvasSizeLabel');
+            if (label) label.innerText = `${width} x ${height} px`;
+            resizeViewport();
           }
-    
-          undo() {
-            if (this.historyIndex > 0) {
-              this.historyIndex--;
-              this.restoreFromState(this.history[this.historyIndex]);
+  
+          function applyZoom() {
+            const container = document.getElementById('canvasContainer');
+            if (container) {
+              container.style.width = `${currentWidth}px`;
+              container.style.height = `${currentHeight}px`;
+              container.style.transform = `scale(${zoomLevel})`;
             }
+            const zoomLabel = document.getElementById('zoomLevelLabel');
+            if (zoomLabel) zoomLabel.innerText = `${Math.round(zoomLevel * 100)}%`;
           }
-    
-          redo() {
-            if (this.historyIndex < this.history.length - 1) {
-              this.historyIndex++;
-              this.restoreFromState(this.history[this.historyIndex]);
-            }
+
+          function resizeViewport() {
+            const workspace = document.getElementById('workspace');
+            if (!workspace || !canvas) return;
+            const padding = 60;
+            const availableW = workspace.clientWidth - padding;
+            const availableH = workspace.clientHeight - padding;
+            const scaleX = availableW / currentWidth;
+            const scaleY = availableH / currentHeight;
+            zoomLevel = Math.min(scaleX, scaleY, 1);
+            applyZoom();
           }
-    
-          restoreFromState(stateStr) {
+  
+          async function initOPFS() {
             try {
-              const state = JSON.parse(stateStr);
-              this.bgColor = state.bgColor;
-              this.canvasW = state.canvasW;
-              this.canvasH = state.canvasH;
-              this.layers = [];
-              let pendingImages = 0;
-              state.layers.forEach((l) => {
-                if (l.type === "image" && l.imgSrc) {
-                  pendingImages++;
-                  const img = new Image();
-                  img.onload = () => {
-                    l.img = img;
-                    this.layers.push(l);
-                    pendingImages--;
-                    if (pendingImages === 0 && this.ctx) {
-                      this.layers.sort((a, b) => a.id - b.id);
-                      this.activeLayer = null;
-                      this.render();
-                    }
-                  };
-                  img.onerror = () => pendingImages--;
-                  img.src = l.imgSrc;
-                } else {
-                  this.layers.push(l);
-                }
+              if (navigator.storage && navigator.storage.getDirectory) {
+                opfsRoot = await navigator.storage.getDirectory();
+                await loadProjectsIndex();
+              }
+            } catch (err) {
+              console.warn(err);
+            }
+          }
+  
+          async function loadProjectsIndex() {
+            if (!opfsRoot) return;
+            try {
+              const handle = await opfsRoot.getFileHandle("projects_index.json", { create: true });
+              const file = await handle.getFile();
+              const text = await file.text();
+              if (text) {
+                projectsIndex = JSON.parse(text);
+              }
+            } catch (err) {
+              projectsIndex = [];
+            }
+            if (projectsIndex.length === 0) {
+              projectsIndex.push({
+                id: currentProjectId,
+                title: currentProjectTitle,
+                updatedAt: Date.now()
               });
-              if (pendingImages === 0) {
-                this.activeLayer = null;
-                this.render();
-              }
-            } catch (e) {}
-          }
-    
-          saveState() {
-            let safeLayers = this.layers.map((l) => {
-              const clone = {
-                ...l,
-              };
-              if (l.type === "image" && l.img) {
-                // Downscale massively large images for localStorage safety
-                if (l.img.src.length > 2000000) {
-                  const tmpCanvas = document.createElement("canvas");
-                  const tCtx = tmpCanvas.getContext("2d");
-                  tmpCanvas.width = l.img.width > 1200 ? 1200 : l.img.width;
-                  tmpCanvas.height = l.img.height * (tmpCanvas.width / l.img.width);
-                  tCtx.drawImage(l.img, 0, 0, tmpCanvas.width, tmpCanvas.height);
-                  clone.imgSrc = tmpCanvas.toDataURL("image/jpeg", 0.8);
-                } else {
-                  clone.imgSrc = l.img.src;
-                }
-              }
-              delete clone.img;
-              return clone;
-            });
-            const state = {
-              bgColor: this.bgColor,
-              canvasW: this.canvasW,
-              canvasH: this.canvasH,
-              layers: safeLayers,
-            };
-            const stateStr = JSON.stringify(state);
-    
-            // Push to history array for Undo/Redo
-            if (
-              this.historyIndex === -1 ||
-              this.history[this.historyIndex] !== stateStr
-            ) {
-              this.history = this.history.slice(0, this.historyIndex + 1);
-              this.history.push(stateStr);
-              if (this.history.length > 20)
-                this.history.shift(); // Max 20 states
-              else this.historyIndex++;
-            }
-    
-            try {
-              localStorage.setItem("phpMusic_photoEditorState", stateStr);
-            } catch (e) {
-              console.warn("Could not save photo editor state (Quota exceeded).");
-            }
-          }
-    
-          loadState() {
-            try {
-              const saved = localStorage.getItem("phpMusic_photoEditorState");
-              if (saved) {
-                this.history.push(saved);
-                this.historyIndex = 0;
-                const state = JSON.parse(saved);
-                this.bgColor = state.bgColor || "#0A0A0A";
-                this.canvasW = state.canvasW || 800;
-                this.canvasH = state.canvasH || 800;
-                this.layers = [];
-    
-                let pendingImages = 0;
-                state.layers.forEach((l) => {
-                  if (l.type === "image" && l.imgSrc) {
-                    pendingImages++;
-                    const img = new Image();
-                    img.onload = () => {
-                      l.img = img;
-                      this.layers.push(l);
-                      pendingImages--;
-                      if (pendingImages === 0 && this.ctx) {
-                        this.layers.sort((a, b) => a.id - b.id);
-                        this.render();
-                      }
-                    };
-                    img.onerror = () => pendingImages--;
-                    img.src = l.imgSrc;
-                  } else {
-                    this.layers.push(l);
-                  }
-                });
-              }
-            } catch (e) {
-              console.warn("Failed to load photo editor state", e);
-            }
-          }
-    
-          resizeCanvas() {
-            if (!this.workspace) return;
-            // FIX: Prevent negative or 0 dimension calculations causing CSS collapse
-            const maxWidth = Math.max(10, this.workspace.clientWidth - 40);
-            const maxHeight = Math.max(10, this.workspace.clientHeight - 40);
-            const ratio = Math.min(maxWidth / this.canvasW, maxHeight / this.canvasH);
-            const finalW = Math.max(10, this.canvasW * ratio);
-            const finalH = Math.max(10, this.canvasH * ratio);
-    
-            this.canvas.width = this.canvasW;
-            this.canvas.height = this.canvasH;
-            this.canvas.style.width = `${finalW}px`;
-            this.canvas.style.height = `${finalH}px`;
-    
-            this.overlay.width = this.canvasW;
-            this.overlay.height = this.canvasH;
-            this.overlay.style.width = `${finalW}px`;
-            this.overlay.style.height = `${finalH}px`;
-    
-            this.render();
-          }
-    
-          bindEvents() {
-            const ov = this.overlay;
-            ov.addEventListener("pointerdown", (e) => this.onPointerDown(e));
-            window.addEventListener("pointermove", (e) => this.onPointerMove(e));
-            window.addEventListener("pointerup", (e) => this.onPointerUp(e));
-    
-            let lastTap = 0;
-            ov.addEventListener("pointerdown", (e) => {
-              const now = Date.now();
-              if (now - lastTap < 300) this.onDoubleClick(e);
-              lastTap = now;
-            });
-    
-            this.textEditor.addEventListener("blur", () => this.commitTextEdit());
-            this.textEditor.addEventListener("keydown", (e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                this.commitTextEdit();
-              }
-            });
-          }
-    
-          getCoords(e) {
-            const rect = this.overlay.getBoundingClientRect();
-            const scaleX = this.canvasW / rect.width;
-            const scaleY = this.canvasH / rect.height;
-            return {
-              x: (e.clientX - rect.left) * scaleX,
-              y: (e.clientY - rect.top) * scaleY,
-            };
-          }
-    
-          hitTest(x, y) {
-            if (this.activeLayer) {
-              const handle = this.hitTestHandles(x, y, this.activeLayer);
-              if (handle)
-                return {
-                  layer: this.activeLayer,
-                  type: handle,
-                };
-            }
-            for (let i = this.layers.length - 1; i >= 0; i--) {
-              const l = this.layers[i];
-              const cx = l.x + l.w / 2;
-              const cy = l.y + l.h / 2;
-              const dx = x - cx;
-              const dy = y - cy;
-              const rad = (-l.rotation * Math.PI) / 180;
-              const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
-              const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
-    
-              if (
-                rx >= -l.w / 2 &&
-                rx <= l.w / 2 &&
-                ry >= -l.h / 2 &&
-                ry <= l.h / 2
-              ) {
-                return {
-                  layer: l,
-                  type: "move",
-                };
-              }
-            }
-            return null;
-          }
-    
-          hitTestHandles(x, y, l) {
-            const hs = 30;
-            const cx = l.x + l.w / 2;
-            const cy = l.y + l.h / 2;
-            const dx = x - cx;
-            const dy = y - cy;
-            const rad = (-l.rotation * Math.PI) / 180;
-            const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
-            const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
-    
-            if (Math.abs(rx - l.w / 2) < hs && Math.abs(ry - l.h / 2) < hs)
-              return "resize";
-            if (Math.abs(rx) < hs && Math.abs(ry + l.h / 2 + 40) < hs)
-              return "rotate";
-            return null;
-          }
-    
-          onPointerDown(e) {
-            if (e.target === this.textEditor) return;
-            const pos = this.getCoords(e);
-    
-            if (this.isDrawMode) {
-              this.isDragging = true;
-              this.currentPath = {
-                id: Date.now(),
-                type: "path",
-                x: 0,
-                y: 0,
-                w: this.canvasW,
-                h: this.canvasH,
-                rotation: 0,
-                opacity: 1,
-                flipX: false,
-                flipY: false,
-                color: this.brushColor,
-                size: this.brushSize,
-                points: [
-                  {
-                    x: pos.x,
-                    y: pos.y,
-                  },
-                ],
-              };
-              return;
-            }
-    
-            const hit = this.hitTest(pos.x, pos.y);
-    
-            if (hit) {
-              this.activeLayer = hit.layer;
-              this.isDragging = true;
-              this.dragType = hit.type;
-              this.dragStart = pos;
-              this.layerStart = {
-                x: hit.layer.x,
-                y: hit.layer.y,
-                w: hit.layer.w,
-                h: hit.layer.h,
-                r: hit.layer.rotation,
-              };
-              if (this.panel.classList.contains("open")) this.buildProperties();
+              await saveProjectsIndex();
             } else {
-              this.activeLayer = null;
-              if (this.panel.classList.contains("open")) this.showCanvasSettings();
+              const lastActiveId = localStorage.getItem('imageditor_last_project');
+              const foundProject = projectsIndex.find(p => p.id === lastActiveId);
+              if (foundProject) {
+                currentProjectId = foundProject.id;
+                currentProjectTitle = foundProject.title;
+              } else {
+                currentProjectId = projectsIndex[0].id;
+                currentProjectTitle = projectsIndex[0].title;
+              }
             }
-            this.render();
+            const projInput = document.getElementById('projectTitleInput');
+            if (projInput) projInput.value = currentProjectTitle;
+            await loadProject(currentProjectId);
           }
-    
-          onPointerMove(e) {
-            if (!this.isDragging) return;
-            const pos = this.getCoords(e);
-    
-            if (this.isDrawMode && this.currentPath) {
-              this.currentPath.points.push({
-                x: pos.x,
-                y: pos.y,
-              });
-    
-              // Draw the active stroke overlay for smooth realtime preview without triggering full canvas re-render
-              this.overlayCtx.clearRect(0, 0, this.canvasW, this.canvasH);
-              this.overlayCtx.strokeStyle = this.currentPath.color;
-              this.overlayCtx.lineWidth = this.currentPath.size;
-              this.overlayCtx.lineCap = "round";
-              this.overlayCtx.lineJoin = "round";
-              this.overlayCtx.beginPath();
-              this.currentPath.points.forEach((pt, i) => {
-                if (i === 0) this.overlayCtx.moveTo(pt.x, pt.y);
-                else this.overlayCtx.lineTo(pt.x, pt.y);
-              });
-              this.overlayCtx.stroke();
+  
+          async function saveProjectsIndex() {
+            if (!opfsRoot) return;
+            try {
+              const handle = await opfsRoot.getFileHandle("projects_index.json", { create: true });
+              const writable = await handle.createWritable();
+              await writable.write(JSON.stringify(projectsIndex));
+              await writable.close();
+            } catch (err) {
+              console.error(err);
+            }
+          }
+  
+          async function saveAutosaveToOPFS() {
+            if (!opfsRoot) return;
+            try {
+              const fileHandle = await opfsRoot.getFileHandle(`project_${currentProjectId}.json`, { create: true });
+              const writable = await fileHandle.createWritable();
+              const projectData = {
+                id: currentProjectId,
+                title: currentProjectTitle,
+                width: currentWidth,
+                height: currentHeight,
+                state: canvas.toJSON()
+              };
+              await writable.write(JSON.stringify(projectData));
+              await writable.close();
+              const p = projectsIndex.find(item => item.id === currentProjectId);
+              if (p) {
+                p.title = currentProjectTitle;
+                p.updatedAt = Date.now();
+                await saveProjectsIndex();
+              }
+            } catch (err) {
+              console.error(err);
+            }
+          }
+  
+          async function loadProject(projId) {
+            if (!opfsRoot) return;
+            try {
+              const fileHandle = await opfsRoot.getFileHandle(`project_${projId}.json`);
+              const file = await fileHandle.getFile();
+              const text = await file.text();
+              if (text) {
+                const data = JSON.parse(text);
+                currentProjectId = data.id;
+                currentProjectTitle = data.title || "Untitled Project";
+                localStorage.setItem('imageditor_last_project', currentProjectId);
+                const projInput = document.getElementById('projectTitleInput');
+                if (projInput) projInput.value = currentProjectTitle;
+                if (data.width && data.height) {
+                  setCanvasDimensions(data.width, data.height);
+                }
+                isProcessingHistory = true;
+                canvas.loadFromJSON(data.state, function() {
+                  canvas.renderAll();
+                  isProcessingHistory = false;
+                  history = [];
+                  historyIndex = -1;
+                  saveHistory();
+                  showToast(`Loaded "${currentProjectTitle}"`);
+                });
+              }
+            } catch (err) {
+              saveHistory();
+            }
+          }
+  
+          async function createNewProject(title = "Untitled Project") {
+            currentProjectId = `proj_${Date.now()}`;
+            currentProjectTitle = title;
+            localStorage.setItem('imageditor_last_project', currentProjectId);
+            const projInput = document.getElementById('projectTitleInput');
+            if (projInput) projInput.value = currentProjectTitle;
+            projectsIndex.unshift({
+              id: currentProjectId,
+              title: currentProjectTitle,
+              updatedAt: Date.now()
+            });
+            await saveProjectsIndex();
+            canvas.clear();
+            saveHistory();
+            closeModal('projectsModal');
+            showToast("New project created");
+          }
+  
+          async function deleteProject(projId, event) {
+            if (event) event.stopPropagation();
+            if (projectsIndex.length <= 1) {
+              showToast("Cannot delete the only project");
               return;
             }
-    
-            if (!this.activeLayer) return;
-            const dx = pos.x - this.dragStart.x;
-            const dy = pos.y - this.dragStart.y;
-            const l = this.activeLayer;
-    
-            if (this.dragType === "move") {
-              l.x = this.layerStart.x + dx;
-              l.y = this.layerStart.y + dy;
-            } else if (this.dragType === "resize") {
-              const rad = (l.rotation * Math.PI) / 180;
-              const rdx = dx * Math.cos(-rad) - dy * Math.sin(-rad);
-              const rdy = dx * Math.sin(-rad) + dy * Math.cos(-rad);
-              l.w = Math.max(20, this.layerStart.w + rdx);
-              l.h = Math.max(20, this.layerStart.h + rdy);
-            } else if (this.dragType === "rotate") {
-              const cx = l.x + l.w / 2;
-              const cy = l.y + l.h / 2;
-              const angle = Math.atan2(pos.y - cy, pos.x - cx) + Math.PI / 2;
-              l.rotation = (angle * 180) / Math.PI;
+            projectsIndex = projectsIndex.filter(p => p.id !== projId);
+            await saveProjectsIndex();
+            try {
+              await opfsRoot.removeEntry(`project_${projId}.json`);
+            } catch (e) {}
+            if (currentProjectId === projId) {
+              await loadProject(projectsIndex[0].id);
+            } else {
+              renderProjectsList();
             }
-            if (this.panel.classList.contains("open")) this.updateInputsIfOpen();
-            this.render();
+            showToast("Project deleted");
           }
-    
-          onPointerUp(e) {
-            if (this.isDragging) {
-              this.isDragging = false;
-    
-              if (this.isDrawMode && this.currentPath) {
-                if (this.currentPath.points.length > 0) {
-                  let minX = Infinity,
-                    minY = Infinity,
-                    maxX = -Infinity,
-                    maxY = -Infinity;
-                  this.currentPath.points.forEach((p) => {
-                    if (p.x < minX) minX = p.x;
-                    if (p.y < minY) minY = p.y;
-                    if (p.x > maxX) maxX = p.x;
-                    if (p.y > maxY) maxY = p.y;
-                  });
-    
-                  // Adjust points relative to layer center
-                  const cx = (minX + maxX) / 2;
-                  const cy = (minY + maxY) / 2;
-                  this.currentPath.points.forEach((p) => {
-                    p.x -= cx;
-                    p.y -= cy;
-                  });
-    
-                  this.currentPath.x = cx - (maxX - minX) / 2;
-                  this.currentPath.y = cy - (maxY - minY) / 2;
-                  this.currentPath.w = Math.max(10, maxX - minX);
-                  this.currentPath.h = Math.max(10, maxY - minY);
-    
-                  this.layers.push(this.currentPath);
+  
+          async function duplicateProject(projId, event) {
+            if (event) event.stopPropagation();
+            const sourceIndex = projectsIndex.find(p => p.id === projId);
+            if (!sourceIndex) return;
+            const newId = `proj_${Date.now()}`;
+            const newTitle = `${sourceIndex.title} (Copy)`;
+            try {
+              const handle = await opfsRoot.getFileHandle(`project_${projId}.json`);
+              const file = await handle.getFile();
+              const text = await file.text();
+              const newHandle = await opfsRoot.getFileHandle(`project_${newId}.json`, { create: true });
+              const writable = await newHandle.createWritable();
+              const data = JSON.parse(text);
+              data.id = newId;
+              data.title = newTitle;
+              await writable.write(JSON.stringify(data));
+              await writable.close();
+              projectsIndex.unshift({ id: newId, title: newTitle, updatedAt: Date.now() });
+              await saveProjectsIndex();
+              renderProjectsList();
+              showToast("Project duplicated");
+            } catch (e) {
+              showToast("Duplication failed");
+            }
+          }
+  
+          function updateProjectTitle(newTitle) {
+            currentProjectTitle = newTitle.trim() || "Untitled Project";
+            const p = projectsIndex.find(item => item.id === currentProjectId);
+            if (p) {
+              p.title = currentProjectTitle;
+              saveProjectsIndex();
+            }
+            saveAutosaveToOPFS();
+          }
+  
+          function setProjectSort(sortType) {
+            currentProjectSort = sortType;
+            renderProjectsList();
+          }
+  
+          function renderProjectsList() {
+            const container = document.getElementById('projectsListContainer');
+            if (!container) return;
+            container.innerHTML = '';
+            
+            let sortedProjects = [...projectsIndex];
+            
+            if (currentProjectSort === 'modified') {
+              sortedProjects.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+            } else {
+              sortedProjects.sort((a, b) => {
+                const timeA = parseInt(a.id.split('_')[1]) || 0;
+                const timeB = parseInt(b.id.split('_')[1]) || 0;
+                return currentProjectSort === 'newest' ? timeB - timeA : timeA - timeB;
+              });
+            }
+  
+            sortedProjects.forEach(proj => {
+              const isActive = proj.id === currentProjectId;
+              const dateStr = new Date(proj.updatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+              const item = document.createElement('div');
+              const activeStyles = isActive ? 'background: rgba(94, 21, 31, 0.4); border-color: var(--primary);' : 'background: var(--surface-dim); border-color: var(--outline-variant);';
+              item.style.cssText = `display: flex; align-items: center; justify-content: space-between; padding: 12px; border-radius: 12px; border: 1px solid; transition: all 0.2s; cursor: pointer; margin-bottom: 8px; ${activeStyles}`;
+              
+              item.onmouseover = () => { if (!isActive) item.style.background = 'var(--surface-container)'; };
+              item.onmouseout = () => { if (!isActive) item.style.background = 'var(--surface-dim)'; };
+              item.onclick = () => {
+                if (!isActive) {
+                  loadProject(proj.id);
+                  closeModal('projectsModal');
                 }
-                this.currentPath = null;
-                this.overlayCtx.clearRect(0, 0, this.canvasW, this.canvasH);
-                this.render();
-              }
-    
-              this.saveState();
-            }
-          }
-    
-          onDoubleClick(e) {
-            if (!this.activeLayer || this.activeLayer.type !== "text") return;
-            const l = this.activeLayer;
-            const rect = this.overlay.getBoundingClientRect();
-            const scaleX = rect.width / this.canvasW;
-            const scaleY = rect.height / this.canvasH;
-    
-            this.textEditor.style.display = "block";
-            this.textEditor.value = l.text;
-    
-            // Recalculate formatting immediately to ensure sizing is perfect before extracting
-            this.render();
-    
-            // Canva-style: Lock the physical width to match bounding box and enforce word-wrap
-            this.textEditor.style.width = l.w * scaleX + "px";
-            this.textEditor.style.height = l.h * scaleY + "px";
-            this.textEditor.style.whiteSpace = "pre-wrap";
-            this.textEditor.style.wordBreak = "break-word";
-            this.textEditor.style.overflow = "hidden";
-    
-            // Use .oninput to prevent duplicate listeners attaching on multiple clicks
-            this.textEditor.oninput = () => {
-              this.textEditor.style.height = "auto";
-              this.textEditor.style.height = this.textEditor.scrollHeight + "px";
-              // Sync content live so the red Canvas bounding box scales around it as you type
-              l.text = this.textEditor.value;
-              this.render();
-            };
-    
-            const screenX = rect.left + l.x * scaleX;
-            const screenY = rect.top + l.y * scaleY;
-    
-            this.textEditor.style.left = `${screenX}px`;
-            this.textEditor.style.top = `${screenY}px`;
-            this.textEditor.style.fontSize = `${l.fontSize * scaleY}px`;
-            this.textEditor.style.color = l.color;
-            this.textEditor.style.transform = `rotate(${l.rotation}deg)`;
-    
-            l.isEditing = true;
-            this.render();
-            this.textEditor.focus();
-            this.textEditor.select();
-          }
-    
-          commitTextEdit() {
-            if (this.textEditor.style.display === "none") return;
-            if (this.activeLayer && this.activeLayer.type === "text") {
-              this.activeLayer.text = this.textEditor.value || "Text";
-              this.activeLayer.isEditing = false;
-            }
-            this.textEditor.style.display = "none";
-            if (this.panel.classList.contains("open")) this.buildProperties();
-            this.render();
-            this.saveState();
-          }
-    
-          createLayer(type) {
-            return {
-              id: Date.now(),
-              type,
-              x: this.canvasW / 2 - 100,
-              y: this.canvasH / 2 - 100,
-              w: 200,
-              h: 200,
-              rotation: 0,
-              opacity: 1,
-              flipX: false,
-              flipY: false,
-              cornerRadius: 0,
-              brightness: 100,
-              contrast: 100,
-              grayscale: 0,
-              isEditing: false,
-            };
-          }
-    
-          handleImageUpload(e) {
-            const files = e.target.files;
-            if (!files) return;
-            Array.from(files).forEach((file) => {
-              const reader = new FileReader();
-              reader.onload = (ev) => {
-                const img = new Image();
-                img.onload = () => {
-                  const layer = this.createLayer("image");
-                  layer.img = img;
-                  const ratio = img.height / img.width;
-    
-                  // Scale nicely within the current custom canvas bounds
-                  if (this.canvasW / this.canvasH > 1) {
-                    layer.h = this.canvasH * 0.6;
-                    layer.w = layer.h / ratio;
-                  } else {
-                    layer.w = this.canvasW * 0.6;
-                    layer.h = layer.w * ratio;
-                  }
-    
-                  layer.x = (this.canvasW - layer.w) / 2;
-                  layer.y = (this.canvasH - layer.h) / 2;
-                  this.layers.push(layer);
-                  this.activeLayer = layer;
-                  if (this.panel.classList.contains("open")) this.buildProperties();
-                  this.render();
-                  this.saveState();
-                };
-                img.src = ev.target.result;
               };
-              reader.readAsDataURL(file);
+              item.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 12px;">
+                  <div style="width: 32px; height: 32px; border-radius: 8px; background: var(--surface-container-high); display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 0.75rem; color: ${isActive ? 'var(--primary)' : 'var(--on-surface-variant)'};">📄</div>
+                  <div>
+                    <h5 style="margin: 0; font-size: 0.8rem; font-weight: 700; color: #fff;">${proj.title}</h5>
+                    <p style="margin: 0; font-size: 0.65rem; color: var(--on-surface-variant);">Modified: ${dateStr}</p>
+                  </div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 4px;">
+                  <button class="action-btn" style="padding: 6px;" onclick="window.imageditor.duplicateProject('${proj.id}', event)" title="Duplicate Project">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                  <button class="action-btn" style="padding: 6px; color: var(--primary);" onclick="window.imageditor.deleteProject('${proj.id}', event)" title="Delete Project">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                  </button>
+                </div>
+              `;
+              container.appendChild(item);
             });
-            e.target.value = "";
           }
-    
-          addText() {
-            const layer = this.createLayer("text");
-            layer.text = "Double Tap to Edit";
-            layer.fontSize = Math.max(24, this.canvasH * 0.08); // Responsive font scale
-            layer.color = "#FFFFFF";
-            layer.w = this.canvasW * 0.6;
-            layer.h = layer.fontSize * 1.2;
-            layer.x = (this.canvasW - layer.w) / 2;
-            layer.y = (this.canvasH - layer.h) / 2;
-            this.layers.push(layer);
-            this.activeLayer = layer;
-            if (this.panel.classList.contains("open")) this.buildProperties();
-            this.render();
-            this.saveState();
+  
+          function openProjectsModal() {
+            renderProjectsList();
+            showModal('projectsModal');
           }
-    
-          addShape() {
-            const layer = this.createLayer("shape");
-            layer.shapeType = "rect";
-            layer.color = "#FF0000";
-            layer.cornerRadius = 16;
-            layer.w = Math.min(this.canvasW, this.canvasH) * 0.3; // Responsive shape scale
-            layer.h = layer.w;
-            layer.x = (this.canvasW - layer.w) / 2;
-            layer.y = (this.canvasH - layer.h) / 2;
-            this.layers.push(layer);
-            this.activeLayer = layer;
-            if (this.panel.classList.contains("open")) this.buildProperties();
-            this.render();
-            this.saveState();
-          }
-    
-          showCanvasSettings() {
-            document.getElementById("pe-panel-title").innerText = "Canvas Settings";
-            this.panelContent.innerHTML = `
-                    <div class="pe-control-group">
-                      <label>Background Color</label>
-                      <input type="color" value="${this.bgColor}" id="pe-inp-bg">
-                    </div>
-                    <div class="pe-grid-2 mt-4">
-                      <div class="pe-control-group">
-                        <label>Brush Color</label>
-                        <input type="color" value="${this.brushColor}" id="pe-inp-brush-col">
-                      </div>
-                      <div class="pe-control-group pe-slider-group">
-                        <div class="pe-control-header">
-                          <label>Brush Size</label>
-                          <span id="pe-val-brush-size">${this.brushSize}</span>
-                        </div>
-                        <input type="range" id="pe-inp-brush-size" min="1" max="100" value="${this.brushSize}">
-                      </div>
-                    </div>
-                    <hr style="border-color: var(--pe-sys-color-outline); margin: 24px 0;">
-                    <div class="pe-control-group" style="margin-bottom: 16px;">
-                      <label>Canvas Presets</label>
-                      <select id="pe-inp-ratio" style="margin-top: 8px;">
-                        <option value="custom">Custom / Free Form</option>
-                        <optgroup label="Lock Aspect Ratio">
-                          <option value="ratio_1">1:1 (Square)</option>
-                          <option value="ratio_1.7777">16:9 (Landscape)</option>
-                          <option value="ratio_0.5625">9:16 (Portrait)</option>
-                          <option value="ratio_1.3333">4:3 (Standard)</option>
-                          <option value="ratio_3">3:1 (Banner)</option>
-                        </optgroup>
-                        <optgroup label="Device & Social Sizes">
-                          <option value="size_1920_1080">1920 x 1080 (FHD 1080p)</option>
-                          <option value="size_1080_1920">1080 x 1920 (Story / Reel)</option>
-                          <option value="size_1280_720">1280 x 720 (HD 720p)</option>
-                          <option value="size_1080_1080">1080 x 1080 (Social Post)</option>
-                          <option value="size_1170_2532">1170 x 2532 (iPhone Pro)</option>
-                          <option value="size_3840_2160">3840 x 2160 (4K UHD)</option>
-                        </optgroup>
-                      </select>
-                    </div>
-                    <div class="pe-grid-2">
-                      <div class="pe-control-group">
-                        <label>Canvas Width</label>
-                        <input type="number" value="${this.canvasW}" id="pe-inp-cw">
-                      </div>
-                      <div class="pe-control-group">
-                        <label>Canvas Height</label>
-                        <input type="number" value="${this.canvasH}" id="pe-inp-ch">
-                      </div>
-                    </div>
-                  `;
-    
-            document.getElementById("pe-inp-bg").addEventListener("input", (e) => {
-              this.bgColor = e.target.value;
-              this.render();
-              this.saveState();
-            });
-    
-            document
-              .getElementById("pe-inp-brush-col")
-              .addEventListener("input", (e) => {
-                this.brushColor = e.target.value;
-              });
-    
-            document
-              .getElementById("pe-inp-brush-size")
-              .addEventListener("input", (e) => {
-                this.brushSize = parseFloat(e.target.value);
-                document.getElementById("pe-val-brush-size").innerText = Math.round(
-                  this.brushSize,
-                );
-              });
-    
-            const ratioSel = document.getElementById("pe-inp-ratio");
-            const cwInp = document.getElementById("pe-inp-cw");
-            const chInp = document.getElementById("pe-inp-ch");
-    
-            const currentRatio = this.canvasW / this.canvasH;
-            Array.from(ratioSel.options).forEach((opt) => {
-              if (
-                opt.value.startsWith("ratio_") &&
-                Math.abs(parseFloat(opt.value.replace("ratio_", "")) - currentRatio) <
-                  0.01
-              ) {
-                ratioSel.value = opt.value;
+  
+          async function exportAllProjects() {
+            if (!opfsRoot) return showToast("OPFS not available");
+            try {
+              const backupData = {
+                version: 1,
+                timestamp: Date.now(),
+                projects: []
+              };
+              for (const proj of projectsIndex) {
+                try {
+                  const fileHandle = await opfsRoot.getFileHandle(`project_${proj.id}.json`);
+                  const file = await fileHandle.getFile();
+                  const text = await file.text();
+                  backupData.projects.push(JSON.parse(text));
+                } catch (e) {}
               }
-            });
-    
-            ratioSel.addEventListener("change", () => {
-              const val = ratioSel.value;
-              if (val.startsWith("size_")) {
-                const parts = val.replace("size_", "").split("_");
-                this.canvasW = parseInt(parts[0]);
-                this.canvasH = parseInt(parts[1]);
-                cwInp.value = this.canvasW;
-                chInp.value = this.canvasH;
-                this.resizeCanvas();
-                this.saveState();
-                ratioSel.value = "custom"; // Revert to custom so users can freely edit the size afterward
-              } else if (val.startsWith("ratio_")) {
-                const ratio = parseFloat(val.replace("ratio_", ""));
-                const newH = Math.round(this.canvasW / ratio);
-                chInp.value = newH;
-                this.canvasH = newH;
-                this.resizeCanvas();
-                this.saveState();
+              const blob = new Blob([JSON.stringify(backupData)], { type: 'application/json' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `imageditor_backup_${new Date().toISOString().slice(0,10)}.json`;
+              a.click();
+              URL.revokeObjectURL(url);
+              showToast("Backup exported");
+            } catch (err) {
+              console.error(err);
+              showToast("Export failed");
+            }
+          }
+  
+          async function importAllProjects(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async function(evt) {
+              try {
+                const backupData = JSON.parse(evt.target.result);
+                if (!backupData.projects || !Array.isArray(backupData.projects)) {
+                  return showToast("Invalid backup file");
+                }
+                for (const projData of backupData.projects) {
+                  const newId = `proj_${Date.now()}_${Math.floor(Math.random()*1000)}`;
+                  projData.id = newId;
+                  const fileHandle = await opfsRoot.getFileHandle(`project_${newId}.json`, { create: true });
+                  const writable = await fileHandle.createWritable();
+                  await writable.write(JSON.stringify(projData));
+                  await writable.close();
+                  projectsIndex.unshift({
+                    id: newId,
+                    title: projData.title || "Imported Project",
+                    updatedAt: Date.now()
+                  });
+                }
+                await saveProjectsIndex();
+                renderProjectsList();
+                showToast(`${backupData.projects.length} projects imported`);
+              } catch (err) {
+                console.error(err);
+                showToast("Import failed");
               }
+              e.target.value = '';
+            };
+            reader.readAsText(file);
+          }
+  
+          function setupEvents() {
+            canvas.on('selection:created', handleSelection);
+            canvas.on('selection:updated', handleSelection);
+            canvas.on('selection:cleared', () => {
+              const propsPanel = document.getElementById('propertiesPanel');
+              const qToolbar = document.getElementById('quickToolbar');
+              if (propsPanel) propsPanel.classList.remove('visible');
+              if (qToolbar) qToolbar.classList.remove('visible');
             });
-    
-            const resize = (isWidthChange) => {
-              this.canvasW = parseInt(cwInp.value) || 800;
-              const val = ratioSel.value;
-              if (val.startsWith("ratio_")) {
-                const ratio = parseFloat(val.replace("ratio_", ""));
-                if (isWidthChange) {
-                  this.canvasH = Math.round(this.canvasW / ratio);
-                  chInp.value = this.canvasH;
+            canvas.on('object:modified', () => {
+              saveHistory();
+              updateQuickToolbarPosition();
+            });
+            canvas.on('object:moving', (e) => {
+              updateQuickToolbarPosition();
+              handleSnapping(e);
+            });
+            canvas.on('mouse:up', clearGuides);
+            canvas.on('path:created', function(e) {
+              if (!e.path) return;
+              if (currentBrushType === 'eraser') {
+                e.path.globalCompositeOperation = 'destination-out';
+                canvas.renderAll();
+              }
+              if (symmetryMode === 'none') {
+                saveHistory();
+                return;
+              }
+              applySymmetryMirrors(e.path);
+            });
+            setupDraggablePanel();
+          }
+  
+          function handleSelection(e) {
+            const active = e.selected ? e.selected[0] : canvas.getActiveObject();
+            if (!active) return;
+            updateQuickToolbarPosition();
+            const ctrlText = document.getElementById('ctrl-text');
+            const ctrlColor = document.getElementById('ctrl-color');
+            if (ctrlText) ctrlText.classList.add('d-none');
+            if (ctrlColor) ctrlColor.classList.remove('d-none');
+            const panelTitle = document.getElementById('panelTitle');
+            if (panelTitle) panelTitle.innerText = active.type.toUpperCase() + ' PROPERTIES';
+            if (active.fill && typeof active.fill === 'string') {
+              const propFill = document.getElementById('prop-fill');
+              if (propFill) propFill.value = active.fill.startsWith('#') ? active.fill : '#f2354a';
+            }
+            const propStroke = document.getElementById('prop-stroke');
+            if (propStroke) propStroke.value = active.stroke || '#000000';
+            const propStrokeW = document.getElementById('prop-stroke-width');
+            if (propStrokeW) propStrokeW.value = active.strokeWidth || 0;
+            const valStrokeW = document.getElementById('val-stroke-width');
+            if (valStrokeW) valStrokeW.innerText = active.strokeWidth || 0;
+            
+            const ctrlBorderRadius = document.getElementById('ctrl-border-radius');
+            if (active.type === 'rect') {
+              if (ctrlBorderRadius) ctrlBorderRadius.classList.remove('d-none');
+              const propRadius = document.getElementById('prop-border-radius');
+              if (propRadius) propRadius.value = active.rx || 0;
+              const valRadius = document.getElementById('val-border-radius');
+              if (valRadius) valRadius.innerText = active.rx || 0;
+            } else {
+              if (ctrlBorderRadius) ctrlBorderRadius.classList.add('d-none');
+            }
+            
+            const opacity = active.opacity !== undefined ? active.opacity : 1;
+            const propOp = document.getElementById('prop-opacity');
+            if (propOp) propOp.value = opacity;
+            const valOp = document.getElementById('val-opacity');
+            if (valOp) valOp.innerText = Math.round(opacity * 100) + '%';
+            if (active.type === 'i-text' || active.type === 'text') {
+              if (ctrlText) ctrlText.classList.remove('d-none');
+              const propText = document.getElementById('prop-text-value');
+              if (propText) propText.value = active.text;
+              const propFont = document.getElementById('prop-font-family');
+              if (propFont) propFont.value = active.fontFamily || 'Inter';
+            }
+            updateLayersList();
+          }
+  
+          function updateQuickToolbarPosition() {
+            const active = canvas.getActiveObject();
+            const qToolbar = document.getElementById('quickToolbar');
+            const propsPanel = document.getElementById('propertiesPanel');
+            if (!active || (propsPanel && propsPanel.classList.contains('visible'))) {
+              if (qToolbar) qToolbar.classList.remove('visible');
+              return;
+            }
+            if (qToolbar) qToolbar.classList.add('visible');
+            const bound = active.getBoundingRect();
+            const container = document.getElementById('canvasContainer').getBoundingClientRect();
+            if (qToolbar) {
+              qToolbar.style.top = `${container.top + (bound.top * zoomLevel) - 45}px`;
+              qToolbar.style.left = `${container.left + (bound.left * zoomLevel)}px`;
+            }
+          }
+
+          function handleSnapping(e) {
+            const obj = e.target;
+            const canvasCenterX = currentWidth / 2;
+            const canvasCenterY = currentHeight / 2;
+            const snapZone = 15 / zoomLevel;
+
+            const center = obj.getCenterPoint();
+            let snappedX = false;
+            let snappedY = false;
+
+            if (Math.abs(center.x - canvasCenterX) < snapZone) {
+              obj.setPositionByOrigin(new fabric.Point(canvasCenterX, center.y), 'center', 'center');
+              snappedX = true;
+            }
+            
+            const updatedCenter = obj.getCenterPoint();
+
+            if (Math.abs(updatedCenter.y - canvasCenterY) < snapZone) {
+              obj.setPositionByOrigin(new fabric.Point(updatedCenter.x, canvasCenterY), 'center', 'center');
+              snappedY = true;
+            }
+
+            if (snappedX && !verticalGuide) {
+              verticalGuide = new fabric.Line([canvasCenterX, -currentHeight * 2, canvasCenterX, currentHeight * 3], {
+                stroke: '#06b6d4', strokeWidth: 2 / zoomLevel, selectable: false, evented: false, strokeDashArray: [5, 5], opacity: 0.8, excludeFromExport: true
+              });
+              canvas.add(verticalGuide);
+            } else if (!snappedX && verticalGuide) {
+              canvas.remove(verticalGuide);
+              verticalGuide = null;
+            }
+
+            if (snappedY && !horizontalGuide) {
+              horizontalGuide = new fabric.Line([-currentWidth * 2, canvasCenterY, currentWidth * 3, canvasCenterY], {
+                stroke: '#06b6d4', strokeWidth: 2 / zoomLevel, selectable: false, evented: false, strokeDashArray: [5, 5], opacity: 0.8, excludeFromExport: true
+              });
+              canvas.add(horizontalGuide);
+            } else if (!snappedY && horizontalGuide) {
+              canvas.remove(horizontalGuide);
+              horizontalGuide = null;
+            }
+          }
+
+          function clearGuides() {
+            if (verticalGuide) {
+              canvas.remove(verticalGuide);
+              verticalGuide = null;
+            }
+            if (horizontalGuide) {
+              canvas.remove(horizontalGuide);
+              horizontalGuide = null;
+            }
+            canvas.renderAll();
+          }
+  
+          function addShape(type) {
+            let shape;
+            const common = {
+              left: currentWidth / 2,
+              top: currentHeight / 2,
+              originX: 'center',
+              originY: 'center',
+              fill: '#f2354a',
+              stroke: '#000000',
+              strokeWidth: 0,
+              cornerColor: '#f2354a',
+              cornerStrokeColor: '#ffffff',
+              transparentCorners: false,
+              cornerSize: 10
+            };
+            switch(type) {
+              case 'rect': shape = new fabric.Rect({ ...common, width: 200, height: 200 }); break;
+              case 'circle': shape = new fabric.Circle({ ...common, radius: 100 }); break;
+              case 'triangle': shape = new fabric.Triangle({ ...common, width: 200, height: 200 }); break;
+              case 'star': shape = new fabric.Polygon([
+                {x: 0, y: -50}, {x: 14, y: -20}, {x: 47, y: -15}, {x: 23, y: 7},
+                {x: 29, y: 40}, {x: 0, y: 25}, {x: -29, y: 40}, {x: -23, y: 7},
+                {x: -47, y: -15}, {x: -14, y: -20}
+              ], { ...common, scaleX: 2, scaleY: 2 }); break;
+              case 'heart': shape = new fabric.Path('M 272.70141,238.71731 C 206.46141,238.71731 152.70141,292.47731 152.70141,358.71731 C 152.70141,498.71731 352.70141,618.71731 352.70141,618.71731 C 352.70141,618.71731 552.70141,498.71731 552.70141,358.71731 C 552.70141,292.47731 498.94141,238.71731 432.70141,238.71731 C 385.62141,238.71731 345.17141,265.80731 325.70141,305.10731 C 306.23141,265.80731 265.78141,238.71731 272.70141,238.71731 z', { ...common, scaleX: 0.4, scaleY: 0.4 }); break;
+              case 'line': shape = new fabric.Line([50, 100, 250, 100], { ...common, stroke: '#f2354a', strokeWidth: 4 }); break;
+            }
+            if (shape) {
+              canvas.add(shape);
+              canvas.setActiveObject(shape);
+              closeDrawers();
+              saveHistory();
+              showToast(`Added ${type}`);
+            }
+          }
+  
+          function addText(preset = 'heading') {
+            let options = {
+              left: currentWidth / 2,
+              top: currentHeight / 2,
+              originX: 'center',
+              originY: 'center',
+              fontFamily: 'Inter',
+              fill: '#ffffff',
+              cornerColor: '#f2354a',
+              transparentCorners: false
+            };
+            let textStr = 'Edit Text';
+            if (preset === 'heading') { textStr = 'HEADING TITLE'; options.fontSize = 72; options.fontWeight = 'bold'; }
+            else if (preset === 'subheading') { textStr = 'Subheading Text'; options.fontSize = 40; options.fontWeight = '600'; }
+            else if (preset === 'body') { textStr = 'Body paragraph copy goes here...'; options.fontSize = 24; }
+            else if (preset === 'neon') {
+              textStr = 'GLOW NEON'; options.fontSize = 60; options.fill = '#f2354a';
+              options.shadow = new fabric.Shadow({ color: '#f2354a', blur: 20 });
+            }
+            const textObj = new fabric.IText(textStr, options);
+            canvas.add(textObj);
+            canvas.setActiveObject(textObj);
+            closeDrawers();
+            saveHistory();
+          }
+  
+          function addBadge(type) {
+            if (type === 'sale') {
+              const rect = new fabric.Rect({ width: 220, height: 70, fill: '#f2354a', rx: 12, ry: 12 });
+              const text = new fabric.Text('SALE 50%', { fontSize: 28, fill: '#ffffff', fontWeight: 'bold', originX: 'center', originY: 'center', left: 110, top: 35 });
+              const group = new fabric.Group([rect, text], { left: currentWidth/2, top: currentHeight/2, originX: 'center', originY: 'center' });
+              canvas.add(group);
+            } else if (type === 'new') {
+              const circle = new fabric.Circle({ radius: 50, fill: '#e5b35a' });
+              const text = new fabric.Text('NEW!', { fontSize: 24, fill: '#000000', fontWeight: 'bold', originX: 'center', originY: 'center', left: 50, top: 50 });
+              const group = new fabric.Group([circle, text], { left: currentWidth/2, top: currentHeight/2, originX: 'center', originY: 'center' });
+              canvas.add(group);
+            }
+            closeDrawers();
+            saveHistory();
+          }
+  
+          function uploadImageToOPFS(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+              fabric.Image.fromURL(evt.target.result, function(img) {
+                if (img.width > currentWidth * 0.8) img.scaleToWidth(currentWidth * 0.8);
+                img.set({
+                  left: currentWidth / 2,
+                  top: currentHeight / 2,
+                  originX: 'center',
+                  originY: 'center',
+                  cornerColor: '#f2354a',
+                  transparentCorners: false
+                });
+                canvas.add(img);
+                canvas.setActiveObject(img);
+                saveHistory();
+                showToast("Image imported");
+              });
+            };
+            reader.readAsDataURL(file);
+            e.target.value = '';
+          }
+  
+          function applyImageFilter(filterType, value) {
+            const active = canvas.getActiveObject();
+            if (!active || active.type !== 'image') {
+              showToast("Select an image first");
+              return;
+            }
+            let filter;
+            switch(filterType) {
+              case 'brightness': filter = new fabric.Image.filters.Brightness({ brightness: value }); break;
+              case 'contrast': filter = new fabric.Image.filters.Contrast({ contrast: value }); break;
+              case 'saturation': filter = new fabric.Image.filters.Saturate({ saturation: value }); break;
+              case 'blur': filter = new fabric.Image.filters.Blur({ blur: value }); break;
+            }
+            active.filters = active.filters.filter(f => !f || f.type !== filter.type);
+            if (value !== 0) active.filters.push(filter);
+            active.applyFilters();
+            canvas.renderAll();
+            saveHistory();
+          }
+  
+          function toggleToggleFilter(filterType) {
+            const active = canvas.getActiveObject();
+            if (!active || active.type !== 'image') {
+              showToast("Select an image first");
+              return;
+            }
+            let filter;
+            if (filterType === 'sepia') filter = new fabric.Image.filters.Sepia();
+            if (filterType === 'grayscale') filter = new fabric.Image.filters.Grayscale();
+            if (filterType === 'invert') filter = new fabric.Image.filters.Invert();
+            const index = active.filters.findIndex(f => f && f.type === filter.type);
+            if (index > -1) active.filters.splice(index, 1);
+            else active.filters.push(filter);
+            active.applyFilters();
+            canvas.renderAll();
+            saveHistory();
+          }
+  
+          function clearImageFilters() {
+            const active = canvas.getActiveObject();
+            if (active && active.type === 'image') {
+              active.filters = [];
+              active.applyFilters();
+              canvas.renderAll();
+              saveHistory();
+            }
+          }
+  
+          function loadTemplate(type) {
+            canvas.clear();
+            let opts = { left: currentWidth/2, top: currentHeight/2, originX: 'center', originY: 'center', fontFamily: 'Inter' };
+            switch(type) {
+              case 'socialPromo':
+                setCanvasBgColor('#12090b');
+                addShape('rect');
+                if (canvas.getActiveObject()) canvas.getActiveObject().set({ width: currentWidth*0.8, height: currentHeight*0.8, fill: '#5e151f' });
+                addText('heading');
+                break;
+              case 'quoteCard':
+                setCanvasBgColor('#18181b');
+                canvas.add(new fabric.IText('"Design is intelligence\nmade visible."', { ...opts, fill: '#e4e4e7', fontSize: 60, fontStyle: 'italic', fontFamily: 'Playfair Display', textAlign: 'center' }));
+                break;
+              case 'neonParty':
+                setCanvasBgGradient('#581c87', '#7f1d1d');
+                addText('neon');
+                break;
+              case 'vintagePoster':
+                setCanvasBgColor('#fdf6e3');
+                canvas.add(new fabric.IText('VINTAGE', { ...opts, top: currentHeight*0.3, fill: '#3e2723', fontSize: 100, fontWeight: 'bold', fontFamily: 'Playfair Display' }));
+                canvas.add(new fabric.IText('EST. 1920', { ...opts, top: currentHeight*0.5, fill: '#5d4037', fontSize: 40, fontFamily: 'Oswald' }));
+                break;
+              case 'modernMinimal':
+                setCanvasBgColor('#ffffff');
+                canvas.add(new fabric.IText('Less is more.', { ...opts, fill: '#000000', fontSize: 72, fontWeight: '300' }));
+                break;
+              case 'techAnnouncement':
+                setCanvasBgColor('#0f172a');
+                canvas.add(new fabric.Rect({ ...opts, width: currentWidth, height: 200, fill: '#1d4ed8' }));
+                canvas.add(new fabric.IText('NEW FEATURE', { ...opts, fill: '#ffffff', fontSize: 80, fontWeight: 'bold', fontFamily: 'Roboto' }));
+                break;
+              case 'corporatePitch':
+                setCanvasBgColor('#f3f4f6');
+                canvas.add(new fabric.IText('Q3 EARNINGS REPORT', { ...opts, top: currentHeight*0.2, fill: '#1e3a8a', fontSize: 64, fontWeight: 'bold' }));
+                canvas.add(new fabric.Rect({ ...opts, width: currentWidth*0.8, height: currentHeight*0.5, top: currentHeight*0.6, fill: '#ffffff', stroke: '#cbd5e1', strokeWidth: 2 }));
+                break;
+              case 'retroWave':
+                setCanvasBgGradient('#9d174d', '#312e81');
+                canvas.add(new fabric.Circle({ ...opts, radius: currentWidth*0.3, fill: '#fde047' }));
+                canvas.add(new fabric.IText('SYNTHWAVE', { ...opts, fill: '#000000', fontSize: 90, fontStyle: 'italic', fontWeight: '900', fontFamily: 'Montserrat' }));
+                break;
+              case 'artGallery':
+                setCanvasBgColor('#fafafa');
+                canvas.add(new fabric.Rect({ ...opts, width: currentWidth*0.6, height: currentHeight*0.7, fill: 'transparent', stroke: '#111111', strokeWidth: 4 }));
+                canvas.add(new fabric.IText('E X H I B I T I O N', { ...opts, fill: '#111111', fontSize: 48, fontFamily: 'Playfair Display' }));
+                break;
+              case 'fitnessMotivation':
+                setCanvasBgColor('#000000');
+                canvas.add(new fabric.IText('NO EXCUSES.', { ...opts, fill: '#dc2626', fontSize: 120, fontWeight: '900', fontFamily: 'Oswald', fontStyle: 'italic' }));
+                break;
+              case 'foodMenu':
+                setCanvasBgColor('#fffbeb');
+                canvas.add(new fabric.IText('BISTRO MENU', { ...opts, top: currentHeight*0.2, fill: '#78350f', fontSize: 72, fontWeight: 'bold', fontFamily: 'Playfair Display' }));
+                canvas.add(new fabric.IText('Appetizers ....\nMain Course ....\nDesserts ....', { ...opts, top: currentHeight*0.5, fill: '#92400e', fontSize: 40, textAlign: 'center', lineHeight: 1.5 }));
+                break;
+              case 'travelVlog':
+                setCanvasBgGradient('#22d3ee', '#2563eb');
+                canvas.add(new fabric.IText('BALI VLOG #1', { ...opts, fill: '#ffffff', fontSize: 100, fontWeight: 'bold', shadow: new fabric.Shadow({ color: '#000', blur: 10 }) }));
+                break;
+              case 'musicAlbum':
+                setCanvasBgColor('#09090b');
+                canvas.add(new fabric.Circle({ ...opts, radius: currentWidth*0.35, fill: 'transparent', stroke: '#3f3f46', strokeWidth: 2 }));
+                canvas.add(new fabric.IText('ALBUM TITLE', { ...opts, fill: '#ffffff', fontSize: 50, fontFamily: 'Roboto', fontWeight: '300', charSpacing: 200 }));
+                break;
+              case 'gamingStream':
+                setCanvasBgColor('#2e1065');
+                canvas.add(new fabric.IText('LIVE NOW', { ...opts, fill: '#4ade80', fontSize: 110, fontWeight: '900', fontStyle: 'italic', fontFamily: 'Montserrat', shadow: new fabric.Shadow({ color: '#4ade80', blur: 20 }) }));
+                break;
+              case 'realEstate':
+                setCanvasBgColor('#ffffff');
+                canvas.add(new fabric.Rect({ ...opts, width: currentWidth, height: 150, top: currentHeight - 75, fill: '#1e3a8a' }));
+                canvas.add(new fabric.IText('JUST LISTED', { ...opts, fill: '#1e3a8a', fontSize: 80, fontWeight: 'bold', fontFamily: 'Playfair Display' }));
+                break;
+              case 'fashionSale':
+                setCanvasBgColor('#fce7f3');
+                canvas.add(new fabric.IText('Summer Collection', { ...opts, fill: '#be185d', fontSize: 90, fontStyle: 'italic', fontFamily: 'Playfair Display' }));
+                break;
+              case 'podcastCover':
+                setCanvasBgColor('#fbbf24');
+                canvas.add(new fabric.IText('THE\nPODCAST', { ...opts, fill: '#000000', fontSize: 120, fontWeight: '900', textAlign: 'center', lineHeight: 1 }));
+                break;
+              case 'hiringPost':
+                setCanvasBgColor('#2563eb');
+                canvas.add(new fabric.IText("WE'RE HIRING", { ...opts, fill: '#ffffff', fontSize: 80, fontWeight: 'bold' }));
+                canvas.add(new fabric.IText('Join our team today', { ...opts, top: currentHeight*0.6, fill: '#bfdbfe', fontSize: 36 }));
+                break;
+              case 'weddingInvite':
+                setCanvasBgColor('#fff1f2');
+                canvas.add(new fabric.IText('Save the Date', { ...opts, fill: '#9f1239', fontSize: 80, fontFamily: 'Pacifico' }));
+                break;
+              case 'charityEvent':
+                setCanvasBgColor('#ecfdf5');
+                canvas.add(new fabric.IText('DONATION DRIVE', { ...opts, fill: '#047857', fontSize: 70, fontWeight: 'bold', fontFamily: 'Montserrat' }));
+                break;
+              case 'memeTemplate':
+                setCanvasBgColor('#ffffff');
+                canvas.add(new fabric.IText('TOP TEXT', { ...opts, top: currentHeight*0.15, fill: '#000000', fontSize: 80, fontWeight: '900', fontFamily: 'Oswald' }));
+                canvas.add(new fabric.IText('BOTTOM TEXT', { ...opts, top: currentHeight*0.85, fill: '#000000', fontSize: 80, fontWeight: '900', fontFamily: 'Oswald' }));
+                break;
+              case 'productLaunch':
+                setCanvasBgColor('#18181b');
+                canvas.add(new fabric.IText('INTRODUCING', { ...opts, top: currentHeight*0.3, fill: '#a1a1aa', fontSize: 40, fontWeight: '300', charSpacing: 400 }));
+                canvas.add(new fabric.IText('THE NEW X1', { ...opts, top: currentHeight*0.5, fill: '#ffffff', fontSize: 90, fontWeight: 'bold' }));
+                break;
+              case 'holidayGreeting':
+                setCanvasBgColor('#b91c1c');
+                canvas.add(new fabric.IText('Happy Holidays', { ...opts, fill: '#ffffff', fontSize: 90, fontFamily: 'Playfair Display' }));
+                break;
+              case 'newsletterHeader':
+                setCanvasBgColor('#eef2ff');
+                canvas.add(new fabric.Rect({ ...opts, top: 20, width: currentWidth, height: 40, fill: '#c7d2fe' }));
+                canvas.add(new fabric.IText('Weekly Digest', { ...opts, fill: '#312e81', fontSize: 72, fontWeight: 'bold', fontFamily: 'Playfair Display' }));
+                break;
+              case 'bookCover':
+                setCanvasBgColor('#27272a');
+                canvas.add(new fabric.IText('THE NOVEL', { ...opts, fill: '#fbbf24', fontSize: 80, fontFamily: 'Playfair Display', charSpacing: 100 }));
+                canvas.add(new fabric.IText('Author Name', { ...opts, top: currentHeight*0.8, fill: '#a1a1aa', fontSize: 30 }));
+                break;
+            }
+            closeDrawers();
+            saveHistory();
+            showToast("Template Loaded");
+          }
+  
+          function updateLayersList() {
+            const list = document.getElementById('layerList');
+            if (!list) return;
+            const objects = canvas.getObjects();
+            if (objects.length === 0) {
+              list.innerHTML = `<p style="font-size: 0.75rem; color: var(--on-surface-variant); margin: 0;">No layers on canvas.</p>`;
+              return;
+            }
+            list.innerHTML = '';
+            objects.slice().reverse().forEach((obj, idx) => {
+              const realIndex = objects.length - 1 - idx;
+              const item = document.createElement('div');
+              item.className = `layer-item ${canvas.getActiveObject() === obj ? 'active' : ''}`;
+              item.innerHTML = `
+                <span style="font-size: 0.75rem; font-weight: 600; color: #fff; text-transform: capitalize;">${obj.type} #${realIndex + 1}</span>
+                <div style="display: flex; gap: 4px;">
+                  <button class="action-btn" style="padding: 4px 8px; font-size: 0.7rem;" onclick="window.imageditor.selectLayer(${realIndex})">Select</button>
+                </div>
+              `;
+              list.appendChild(item);
+            });
+          }
+  
+          function selectLayer(index) {
+            const objects = canvas.getObjects();
+            if (objects[index]) {
+              canvas.setActiveObject(objects[index]);
+              canvas.renderAll();
+            }
+          }
+  
+          function setCanvasBgColor(color) {
+            canvas.backgroundColor = color;
+            canvas.renderAll();
+            saveHistory();
+          }
+  
+          function setCanvasBgGradient(c1, c2) {
+            const gradient = new fabric.Gradient({
+              type: 'linear',
+              coords: { x1: 0, y1: 0, x2: currentWidth, y2: currentHeight },
+              colorStops: [
+                { offset: 0, color: c1 },
+                { offset: 1, color: c2 }
+              ]
+            });
+            canvas.backgroundColor = gradient;
+            canvas.renderAll();
+            saveHistory();
+          }
+  
+          function toggleDrawMode() {
+            canvas.isDrawingMode = !canvas.isDrawingMode;
+            const btn = document.getElementById('toggleDrawBtn');
+            if (canvas.isDrawingMode) {
+              btn.innerText = 'Stop Drawing';
+              btn.classList.add('btn-primary');
+              updateBrush();
+            } else {
+              btn.innerText = 'Start Drawing';
+              btn.classList.remove('btn-primary');
+            }
+          }
+  
+          function setBrushType(type) {
+            currentBrushType = type;
+            document.querySelectorAll('[data-brush]').forEach(btn => {
+              btn.classList.toggle('border-primary/50', btn.dataset.brush === type);
+            });
+            updateBrush();
+          }
+  
+          function setSymmetryMode(mode) {
+            symmetryMode = mode;
+            showToast(mode === 'none' ? "Symmetry disabled" : `Symmetry mode: ${mode}`);
+          }
+  
+          function setBrushColor(hex) {
+            const brushColorEl = document.getElementById('brushColor');
+            if (brushColorEl) brushColorEl.value = hex;
+            updateBrush();
+          }
+  
+          function updateBrush() {
+            if (!canvas || !canvas.isDrawingMode) return;
+            const size = parseInt(document.getElementById('brushSize').value);
+            const opacity = parseInt(document.getElementById('brushOpacity').value) / 100;
+            const glow = parseInt(document.getElementById('brushGlow').value);
+            const color = document.getElementById('brushColor').value;
+            document.getElementById('brushSizeVal').innerText = size + 'px';
+            document.getElementById('brushOpacityVal').innerText = Math.round(opacity * 100) + '%';
+            document.getElementById('brushGlowVal').innerText = glow + 'px';
+            document.getElementById('brushColorHex').innerText = color;
+            if (currentBrushType === 'spray') {
+              canvas.freeDrawingBrush = new fabric.SprayBrush(canvas);
+              canvas.freeDrawingBrush.width = size * 2;
+              canvas.freeDrawingBrush.density = 25;
+            } else if (currentBrushType === 'airbrush') {
+              canvas.freeDrawingBrush = new fabric.CircleBrush(canvas);
+              canvas.freeDrawingBrush.width = size * 1.5;
+            } else if (currentBrushType === 'eraser') {
+              canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+              canvas.freeDrawingBrush.width = size;
+            } else {
+              canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+              canvas.freeDrawingBrush.width = size;
+            }
+            
+            if (currentBrushType === 'eraser') {
+              canvas.freeDrawingBrush.color = 'rgba(255,255,255,1)';
+            } else {
+              canvas.freeDrawingBrush.color = color;
+            }
+            canvas.freeDrawingBrush.strokeOpacity = opacity;
+            if (glow > 0 || currentBrushType === 'neon') {
+              const blurVal = currentBrushType === 'neon' ? Math.max(glow, 15) : glow;
+              canvas.freeDrawingBrush.shadow = new fabric.Shadow({
+                color: color,
+                blur: blurVal,
+                offsetX: 0,
+                offsetY: 0
+              });
+            } else {
+              canvas.freeDrawingBrush.shadow = null;
+            }
+          }
+  
+          function applySymmetryMirrors(originalPath) {
+            const centerX = currentWidth / 2;
+            const centerY = currentHeight / 2;
+            let clonesExpected = 0;
+            if (symmetryMode === 'vertical' || symmetryMode === 'horizontal') clonesExpected = 1;
+            if (symmetryMode === 'quad') clonesExpected = 3;
+            let clonesDone = 0;
+            
+            const makeMirror = (flipX, flipY) => {
+              originalPath.clone(function(cloned) {
+                cloned.set({
+                  left: flipX ? (centerX * 2) - originalPath.left : originalPath.left,
+                  top: flipY ? (centerY * 2) - originalPath.top : originalPath.top,
+                  flipX: flipX ? !originalPath.flipX : originalPath.flipX,
+                  flipY: flipY ? !originalPath.flipY : originalPath.flipY,
+                  originX: 'center',
+                  originY: 'center'
+                });
+                if (currentBrushType === 'eraser') {
+                  cloned.globalCompositeOperation = 'destination-out';
+                }
+                canvas.add(cloned);
+                clonesDone++;
+                if (clonesDone === clonesExpected) {
+                  canvas.renderAll();
+                  saveHistory();
+                }
+              });
+            };
+            if (symmetryMode === 'vertical' || symmetryMode === 'quad') makeMirror(true, false);
+            if (symmetryMode === 'horizontal' || symmetryMode === 'quad') makeMirror(false, true);
+            if (symmetryMode === 'quad') makeMirror(true, true);
+          }
+  
+          function updateProperty(prop, value) {
+            const active = canvas.getActiveObject();
+            if (active) {
+              active.set(prop, value);
+              canvas.renderAll();
+              saveHistory();
+            }
+          }
+  
+          function toggleTextProperty(prop, val1, val2) {
+            const active = canvas.getActiveObject();
+            if (active && (active.type === 'i-text' || active.type === 'text')) {
+              const current = active.get(prop);
+              active.set(prop, current === val1 ? val2 : val1);
+              canvas.renderAll();
+              saveHistory();
+            }
+          }
+  
+          function layerAction(action) {
+            const active = canvas.getActiveObject();
+            if (active) {
+              canvas[action](active);
+              canvas.renderAll();
+              updateLayersList();
+              saveHistory();
+            }
+          }
+  
+          function deleteActive() {
+            const active = canvas.getActiveObjects();
+            if (active.length) {
+              canvas.discardActiveObject();
+              active.forEach(obj => canvas.remove(obj));
+              saveHistory();
+              const propsPanel = document.getElementById('propertiesPanel');
+              const qToolbar = document.getElementById('quickToolbar');
+              if (propsPanel) propsPanel.classList.remove('visible');
+              if (qToolbar) qToolbar.classList.remove('visible');
+            }
+          }
+  
+          function duplicateActive() {
+            const active = canvas.getActiveObject();
+            if (active) {
+              active.clone(function(cloned) {
+                canvas.discardActiveObject();
+                cloned.set({
+                  left: cloned.left + 20,
+                  top: cloned.top + 20,
+                  evented: true
+                });
+                if (cloned.type === 'activeSelection') {
+                  cloned.canvas = canvas;
+                  cloned.forEachObject(obj => canvas.add(obj));
+                  cloned.setCoordinates();
                 } else {
-                  this.canvasH = parseInt(chInp.value) || 600;
-                  this.canvasW = Math.round(this.canvasH * ratio);
-                  cwInp.value = this.canvasW;
+                  canvas.add(cloned);
                 }
-              } else {
-                this.canvasH = parseInt(chInp.value) || 600;
-              }
-              this.resizeCanvas();
-              this.saveState();
-            };
-    
-            cwInp.addEventListener("change", () => resize(true));
-            chInp.addEventListener("change", () => resize(false));
-          }
-    
-          buildProperties() {
-            if (!this.activeLayer) return;
-            const l = this.activeLayer;
-            document.getElementById("pe-panel-title").innerText =
-              l.type.charAt(0).toUpperCase() + l.type.slice(1) + " Edit";
-    
-            const makeSlider = (id, label, min, max, val) => `
-                    <div class="pe-control-group pe-slider-group">
-                      <div class="pe-control-header">
-                        <label>${label}</label>
-                        <span id="pe-val-${id}">${Math.round(val)}</span>
-                      </div>
-                      <input type="range" id="pe-${id}" min="${min}" max="${max}" value="${val}">
-                    </div>
-                  `;
-    
-            let html = `
-                    <div class="pe-grid-2">
-                      <div class="pe-control-group"><label>X Position</label><input type="number" id="pe-prop-x" value="${Math.round(l.x)}"></div>
-                      <div class="pe-control-group"><label>Y Position</label><input type="number" id="pe-prop-y" value="${Math.round(l.y)}"></div>
-                      <div class="pe-control-group"><label>Width</label><input type="number" id="pe-prop-w" value="${Math.round(l.w)}"></div>
-                      <div class="pe-control-group"><label>Height</label><input type="number" id="pe-prop-h" value="${Math.round(l.h)}"></div>
-                    </div>
-    
-                    ${makeSlider("prop-rot", "Rotation", -180, 180, l.rotation)}
-                    ${makeSlider("prop-op", "Opacity", 0, 100, l.opacity * 100)}
-                  `;
-    
-            if (l.type === "shape") {
-              html += `
-                      <div class="pe-control-group" style="margin-bottom: 24px;">
-                        <label>Shape</label>
-                        <select id="pe-prop-stype" style="margin-top: 8px;">
-                          <option value="rect" ${l.shapeType === "rect" ? "selected" : ""}>Rectangle</option>
-                          <option value="circle" ${l.shapeType === "circle" ? "selected" : ""}>Ellipse</option>
-                        </select>
-                      </div>
-                      <div class="pe-control-group">
-                        <label>Color</label>
-                        <input type="color" id="pe-prop-col" value="${l.color}">
-                      </div>
-                    `;
-              if (l.shapeType === "rect")
-                html += makeSlider(
-                  "prop-rad",
-                  "Corner Radius",
-                  0,
-                  200,
-                  l.cornerRadius,
-                );
-            }
-    
-            if (l.type === "image") {
-              html += makeSlider("prop-rad", "Corner Radius", 0, 200, l.cornerRadius);
-              html += makeSlider("prop-bri", "Brightness", 0, 200, l.brightness);
-              html += makeSlider("prop-con", "Contrast", 0, 200, l.contrast);
-              html += makeSlider("prop-gray", "Grayscale", 0, 100, l.grayscale);
-            }
-    
-            if (l.type === "text") {
-              html += `
-                      <div class="pe-control-group">
-                        <label>Color</label>
-                        <input type="color" id="pe-prop-col" value="${l.color}">
-                      </div>
-                    `;
-              html += makeSlider("prop-fs", "Font Size", 10, 300, l.fontSize);
-            }
-    
-            if (l.type === "path") {
-              html += `
-                      <div class="pe-control-group">
-                        <label>Color</label>
-                        <input type="color" id="pe-prop-col" value="${l.color}">
-                      </div>
-                    `;
-              html += makeSlider("prop-size", "Brush Size", 1, 100, l.size);
-            }
-    
-            html += `
-                    <div class="pe-action-buttons">
-                      ${
-                        l.type === "image" || l.type === "shape"
-                          ? `
-                      <div class="pe-btn-row">
-                        <button class="pe-btn" id="pe-btn-flip-h">Flip Horizontal</button>
-                        <button class="pe-btn" id="pe-btn-flip-v">Flip Vertical</button>
-                      </div>`
-                          : ""
-                      }
-                      <div class="pe-btn-row">
-                        <button class="pe-btn" id="pe-btn-up">Bring Forward</button>
-                        <button class="pe-btn" id="pe-btn-down">Send Back</button>
-                      </div>
-                      <div class="pe-btn-row">
-                        <button class="pe-btn" id="pe-btn-dup">Duplicate Layer</button>
-                        <button class="pe-btn error" id="pe-btn-del">Delete Item</button>
-                      </div>
-                    </div>
-                  `;
-    
-            this.panelContent.innerHTML = html;
-    
-            const bind = (id, key, parser, cb) => {
-              const el = document.getElementById("pe-" + id);
-              const valEl = document.getElementById("pe-val-" + id);
-              if (el) {
-                el.addEventListener("input", (e) => {
-                  if (valEl) valEl.innerText = Math.round(e.target.value);
-                  l[key] = parser(e.target.value);
-                  if (cb) cb();
-                  this.render();
-                  this.saveState();
-                });
-              }
-            };
-    
-            bind("prop-x", "x", parseFloat);
-            bind("prop-y", "y", parseFloat);
-            bind("prop-w", "w", parseFloat);
-            bind("prop-h", "h", parseFloat);
-            bind("prop-rot", "rotation", parseFloat);
-            bind("prop-op", "opacity", (v) => parseFloat(v) / 100);
-            bind("prop-rad", "cornerRadius", parseFloat);
-            bind("prop-col", "color", String);
-    
-            const stype = document.getElementById("pe-prop-stype");
-            if (stype) {
-              stype.addEventListener("input", (e) => {
-                l.shapeType = e.target.value;
-                this.buildProperties();
-                this.saveState();
+                canvas.setActiveObject(cloned);
+                canvas.requestRenderAll();
+                saveHistory();
               });
             }
-    
-            bind("prop-fs", "fontSize", parseFloat);
-    
-            bind("prop-size", "size", parseFloat);
-    
-            bind("prop-bri", "brightness", parseFloat);
-            bind("prop-con", "contrast", parseFloat);
-            bind("prop-gray", "grayscale", parseFloat);
-    
-            const flipH = document.getElementById("pe-btn-flip-h");
-            if (flipH)
-              flipH.addEventListener("click", () => {
-                l.flipX = !l.flipX;
-                this.render();
-                this.saveState();
-              });
-    
-            const flipV = document.getElementById("pe-btn-flip-v");
-            if (flipV)
-              flipV.addEventListener("click", () => {
-                l.flipY = !l.flipY;
-                this.render();
-                this.saveState();
-              });
-    
-            document
-              .getElementById("pe-btn-up")
-              .addEventListener("click", () => this.reorder(1));
-            document
-              .getElementById("pe-btn-down")
-              .addEventListener("click", () => this.reorder(-1));
-            document
-              .getElementById("pe-btn-del")
-              .addEventListener("click", () => this.deleteActive());
-            document
-              .getElementById("pe-btn-dup")
-              .addEventListener("click", () => this.duplicateActive());
           }
-    
-          updateInputsIfOpen() {
-            if (!this.activeLayer) return;
-            const setVal = (id, val) => {
-              const el = document.getElementById("pe-" + id);
-              if (el) el.value = Math.round(val);
-              const valEl = document.getElementById("pe-val-" + id);
-              if (valEl) valEl.innerText = Math.round(val);
-            };
-            setVal("prop-x", this.activeLayer.x);
-            setVal("prop-y", this.activeLayer.y);
-            setVal("prop-w", this.activeLayer.w);
-            setVal("prop-h", this.activeLayer.h);
-            setVal("prop-rot", this.activeLayer.rotation);
-          }
-    
-          reorder(dir) {
-            const idx = this.layers.indexOf(this.activeLayer);
-            if (idx < 0) return;
-            const newIdx = idx + dir;
-            if (newIdx >= 0 && newIdx < this.layers.length) {
-              const temp = this.layers[newIdx];
-              this.layers[newIdx] = this.layers[idx];
-              this.layers[idx] = temp;
-              this.render();
-              this.saveState();
+  
+          function toggleLockActive() {
+            const active = canvas.getActiveObject();
+            if (active) {
+              const isLocked = !active.lockMovementX;
+              active.set({
+                lockMovementX: isLocked,
+                lockMovementY: isLocked,
+                lockRotation: isLocked,
+                lockScalingX: isLocked,
+                lockScalingY: isLocked
+              });
+              canvas.renderAll();
+              showToast(isLocked ? "Object Locked" : "Object Unlocked");
             }
           }
-    
-          deleteActive() {
-            this.layers = this.layers.filter((l) => l !== this.activeLayer);
-            this.activeLayer = null;
-            this.closePanel();
-            this.render();
-            this.saveState();
+  
+          function flipActive(axis) {
+            const active = canvas.getActiveObject();
+            if (active) {
+              if (axis === 'X') active.set('flipX', !active.flipX);
+              if (axis === 'Y') active.set('flipY', !active.flipY);
+              canvas.renderAll();
+              saveHistory();
+            }
           }
-    
-          duplicateActive() {
-            const clone = JSON.parse(JSON.stringify(this.activeLayer));
-            clone.id = Date.now();
-            clone.x += 20;
-            clone.y += 20;
-            if (clone.type === "image") clone.img = this.activeLayer.img;
-            this.layers.push(clone);
-            this.activeLayer = clone;
-            if (this.panel.classList.contains("open")) this.buildProperties();
-            this.render();
-            this.saveState();
+  
+          function saveHistory() {
+            if (isProcessingHistory || !canvas) return;
+            if (historyIndex < history.length - 1) history = history.slice(0, historyIndex + 1);
+            if (history.length > 25) history.shift();
+            else historyIndex++;
+            history.push(JSON.stringify(canvas.toJSON()));
+            updateLayersList();
+            clearTimeout(autosaveDebounceTimer);
+            autosaveDebounceTimer = setTimeout(saveAutosaveToOPFS, 800);
           }
-    
-          closePanel() {
-            this.panel.classList.remove("open");
-            this.propBtn.classList.remove("active");
-            setTimeout(() => this.resizeCanvas(), 50); // FIX: Restore canvas size when workspace regains space
+  
+          function undo() {
+            if (historyIndex > 0) {
+              isProcessingHistory = true;
+              historyIndex--;
+              canvas.loadFromJSON(history[historyIndex], function() {
+                canvas.renderAll();
+                isProcessingHistory = false;
+                updateLayersList();
+                showToast("Undo applied");
+              });
+            }
           }
-    
-          render() {
-            if (!this.ctx) return;
-            this.ctx.clearRect(0, 0, this.canvasW, this.canvasH);
-            this.ctx.fillStyle = this.bgColor;
-            this.ctx.fillRect(0, 0, this.canvasW, this.canvasH);
-    
-            this.layers.forEach((l) => {
-              // Pre-calculate line wrapping and exact bounding box height before coordinate translation
-              if (l.type === "text" && l.text) {
-                this.ctx.font = `bold ${l.fontSize}px sans-serif`;
-                const paragraphs = l.text.split("\n");
-                l.lines = [];
-                paragraphs.forEach((p) => {
-                  const words = p.split(" ");
-                  let currentLine = words[0] || "";
-                  for (let i = 1; i < words.length; i++) {
-                    const word = words[i];
-                    const width = this.ctx.measureText(
-                      currentLine + " " + word,
-                    ).width;
-                    if (width <= l.w) {
-                      currentLine += " " + word;
-                    } else {
-                      l.lines.push(currentLine);
-                      currentLine = word;
-                    }
-                  }
-                  l.lines.push(currentLine);
-                });
-                l.h = Math.max(l.fontSize * 1.2, l.lines.length * (l.fontSize * 1.2));
-              }
-    
-              this.ctx.save();
-              this.ctx.globalAlpha = l.opacity;
-              this.ctx.translate(l.x + l.w / 2, l.y + l.h / 2);
-              this.ctx.rotate((l.rotation * Math.PI) / 180);
-              this.ctx.scale(l.flipX ? -1 : 1, l.flipY ? -1 : 1);
-    
-              this.ctx.filter = `brightness(${l.brightness}%) contrast(${l.contrast}%) grayscale(${l.grayscale}%)`;
-    
-              if (l.type === "image") {
-                if (l.cornerRadius > 0) {
-                  this.ctx.beginPath();
-                  this.ctx.roundRect(-l.w / 2, -l.h / 2, l.w, l.h, l.cornerRadius);
-                  this.ctx.clip();
-                }
-                this.ctx.drawImage(l.img, -l.w / 2, -l.h / 2, l.w, l.h);
-              } else if (l.type === "shape") {
-                this.ctx.fillStyle = l.color;
-                this.ctx.beginPath();
-                if (l.shapeType === "rect") {
-                  this.ctx.roundRect(
-                    -l.w / 2,
-                    -l.h / 2,
-                    l.w,
-                    l.h,
-                    l.cornerRadius || 0,
-                  );
-                } else {
-                  this.ctx.ellipse(0, 0, l.w / 2, l.h / 2, 0, 0, Math.PI * 2);
-                }
-                this.ctx.fill();
-              } else if (l.type === "text") {
-                if (l.text && !l.isEditing) {
-                  this.ctx.font = `bold ${l.fontSize}px sans-serif`;
-                  this.ctx.fillStyle = l.color;
-                  this.ctx.textBaseline = "top";
-    
-                  if (l.lines) {
-                    l.lines.forEach((line, i) => {
-                      this.ctx.fillText(
-                        line,
-                        -l.w / 2,
-                        -l.h / 2 + i * (l.fontSize * 1.2),
-                      );
-                    });
-                  }
-                }
-              } else if (l.type === "path") {
-                this.ctx.strokeStyle = l.color;
-                this.ctx.lineWidth = l.size;
-                this.ctx.lineCap = "round";
-                this.ctx.lineJoin = "round";
-                this.ctx.beginPath();
-                l.points.forEach((pt, i) => {
-                  if (i === 0) this.ctx.moveTo(pt.x, pt.y);
-                  else this.ctx.lineTo(pt.x, pt.y);
-                });
-                this.ctx.stroke();
-              }
-              this.ctx.restore();
+  
+          function redo() {
+            if (historyIndex < history.length - 1) {
+              isProcessingHistory = true;
+              historyIndex++;
+              canvas.loadFromJSON(history[historyIndex], function() {
+                canvas.renderAll();
+                isProcessingHistory = false;
+                updateLayersList();
+                showToast("Redo applied");
+              });
+            }
+          }
+  
+          function confirmReset() {
+            showModal('confirmModal');
+            document.getElementById('confirmOkBtn').onclick = function() {
+              canvas.clear();
+              saveHistory();
+              closeModal('confirmModal');
+              showToast("Canvas Reset");
+            };
+          }
+  
+          function executeExport() {
+            const format = document.getElementById('exportFormat').value;
+            const scale = parseInt(document.getElementById('exportScale').value);
+            if (format === 'json') {
+              const jsonStr = JSON.stringify(canvas.toJSON());
+              const blob = new Blob([jsonStr], { type: 'application/json' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `${currentProjectTitle.replace(/\s+/g, '_')}.json`;
+              a.click();
+              closeModal('exportModal');
+              showToast("Project file downloaded");
+              return;
+            }
+            canvas.discardActiveObject();
+            canvas.renderAll();
+  
+            if (format === 'svg') {
+              const svgStr = canvas.toSVG();
+              const blob = new Blob([svgStr], { type: 'image/svg+xml' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `${currentProjectTitle.replace(/\s+/g, '_')}.svg`;
+              a.click();
+              URL.revokeObjectURL(url);
+              closeModal('exportModal');
+              showToast("SVG exported successfully");
+              return;
+            }
+  
+            const dataURL = canvas.toDataURL({
+              format: format,
+              quality: 0.95,
+              multiplier: scale
             });
-    
-            this.renderOverlay();
-          }
-    
-          renderOverlay() {
-            this.overlayCtx.clearRect(0, 0, this.canvasW, this.canvasH);
-            if (!this.activeLayer) return;
-            const l = this.activeLayer;
-            const ctx = this.overlayCtx;
-    
-            ctx.save();
-            ctx.translate(l.x + l.w / 2, l.y + l.h / 2);
-            ctx.rotate((l.rotation * Math.PI) / 180);
-    
-            ctx.strokeStyle = "#FF0000";
-            ctx.lineWidth = 2;
-            ctx.strokeRect(-l.w / 2, -l.h / 2, l.w, l.h);
-    
-            ctx.fillStyle = "#4A0000";
-            ctx.strokeStyle = "#FFFFFF";
-    
-            ctx.beginPath();
-            ctx.arc(l.w / 2, l.h / 2, 10, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.arc(0, -l.h / 2 - 30, 10, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.stroke();
-    
-            ctx.beginPath();
-            ctx.moveTo(0, -l.h / 2);
-            ctx.lineTo(0, -l.h / 2 - 20);
-            ctx.stroke();
-            ctx.restore();
-          }
-    
-          exportImage() {
-            this.activeLayer = null;
-            this.render();
-            const link = document.createElement("a");
-            link.download = `pro-edit-${Date.now()}.png`;
-            link.href = this.canvas.toDataURL("image/png");
+            const link = document.createElement('a');
+            link.download = `${currentProjectTitle.replace(/\s+/g, '_')}.${format}`;
+            link.href = dataURL;
             link.click();
+            closeModal('exportModal');
+            showToast("Graphic exported successfully");
           }
-        }
+  
+          function applyPresetDimensions(preset) {
+            const parts = preset.split('x');
+            document.getElementById('customWidth').value = parts[0];
+            document.getElementById('customHeight').value = parts[1];
+            document.getElementById('aspectRatioSelect').value = 'custom';
+          }
+
+          function applyRatio(ratio) {
+            if (ratio === 'custom') return;
+            const wInput = document.getElementById('customWidth');
+            const hInput = document.getElementById('customHeight');
+            const w = parseInt(wInput.value) || 1080;
+            const parts = ratio.split(':');
+            const rw = parseInt(parts[0]);
+            const rh = parseInt(parts[1]);
+            hInput.value = Math.round((w / rw) * rh);
+          }
+
+          function handleDimensionChange(source) {
+            const ratioVal = document.getElementById('aspectRatioSelect').value;
+            if (ratioVal === 'custom') return;
+            
+            const wInput = document.getElementById('customWidth');
+            const hInput = document.getElementById('customHeight');
+            const w = parseInt(wInput.value) || 0;
+            const h = parseInt(hInput.value) || 0;
+            
+            const parts = ratioVal.split(':');
+            const rw = parseInt(parts[0]);
+            const rh = parseInt(parts[1]);
+
+            if (source === 'width' && w > 0) {
+              hInput.value = Math.round((w / rw) * rh);
+            } else if (source === 'height' && h > 0) {
+              wInput.value = Math.round((h / rh) * rw);
+            }
+          }
+  
+          function applyCustomDimensions() {
+            const w = parseInt(document.getElementById('customWidth').value);
+            const h = parseInt(document.getElementById('customHeight').value);
+            if (w > 0 && h > 0) {
+              setCanvasDimensions(w, h);
+              closeModal('resizeModal');
+              showToast(`Resized to ${w}x${h}`);
+            }
+          }
+  
+          function toggleGrid() {
+            const grid = document.getElementById('gridOverlay');
+            if (grid) {
+              grid.classList.toggle('visible');
+              showToast(grid.classList.contains('visible') ? "Grid enabled" : "Grid disabled");
+            }
+          }
+  
+          function openDrawer(id) {
+            closeDrawers();
+            const drawer = document.getElementById(id);
+            if (drawer) drawer.classList.add('visible');
+          }
+  
+          function closeDrawers() {
+            document.querySelectorAll('.drawer-panel').forEach(d => d.classList.remove('visible'));
+          }
+  
+          function closePropertiesPanel() {
+            const propsPanel = document.getElementById('propertiesPanel');
+            if (propsPanel) propsPanel.classList.remove('visible');
+            updateQuickToolbarPosition();
+          }
+  
+          function showModal(id) {
+            const el = document.getElementById(id);
+            if (el) el.classList.add('visible');
+          }
+  
+          function closeModal(id) {
+            const el = document.getElementById(id);
+            if (el) el.classList.remove('visible');
+          }
+  
+          let toastTimer;
+          function showToast(msg) {
+            const peToast = document.getElementById('pe-toast');
+            if (!peToast) return;
+            peToast.innerText = msg;
+            peToast.classList.add('show');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => peToast.classList.remove('show'), 2400);
+          }
+  
+          function setupDraggablePanel() {
+            const header = document.getElementById('panelHeader');
+            const propsPanel = document.getElementById('propertiesPanel');
+            if (!header || !propsPanel) return;
+            let isDragging = false, currentX, currentY, initialX, initialY, xOffset = 0, yOffset = 0;
+            header.addEventListener("mousedown", dragStart);
+            document.addEventListener("mouseup", dragEnd);
+            document.addEventListener("mousemove", drag);
+            function dragStart(e) {
+              initialX = e.clientX - xOffset;
+              initialY = e.clientY - yOffset;
+              if (e.target === header || header.contains(e.target)) isDragging = true;
+            }
+            function dragEnd() {
+              initialX = currentX;
+              initialY = currentY;
+              isDragging = false;
+            }
+            function drag(e) {
+              if (isDragging) {
+                e.preventDefault();
+                currentX = e.clientX - initialX;
+                currentY = e.clientY - initialY;
+                xOffset = currentX;
+                yOffset = currentY;
+                propsPanel.style.transform = `translate3d(${currentX}px, ${currentY}px, 0)`;
+              }
+            }
+          }
+  
+          return {
+            init,
+            openPropertiesPanel: () => {
+              const propsPanel = document.getElementById('propertiesPanel');
+              const qToolbar = document.getElementById('quickToolbar');
+              if (propsPanel) propsPanel.classList.add('visible');
+              if (qToolbar) qToolbar.classList.remove('visible');
+            },
+            openDrawer,
+            closeDrawers,
+            closePropertiesPanel,
+            showModal,
+            closeModal,
+            openProjectsModal,
+            setProjectSort,
+            createNewProject,
+            deleteProject,
+            duplicateProject,
+            updateProjectTitle,
+            exportAllProjects,
+            importAllProjects,
+            addShape,
+            addText,
+            addBadge,
+            uploadImageToOPFS,
+            applyImageFilter,
+            toggleToggleFilter,
+            clearImageFilters,
+            loadTemplate,
+            selectLayer,
+            setCanvasBgColor,
+            setCanvasBgGradient,
+            toggleDrawMode,
+            setBrushType,
+            setSymmetryMode,
+            setBrushColor,
+            updateBrush,
+            updateProperty,
+            toggleTextProperty,
+            layerAction,
+            deleteActive,
+            duplicateActive,
+            toggleLockActive,
+            flipActive,
+            undo,
+            redo,
+            confirmReset,
+            executeExport,
+            applyPresetDimensions,
+            applyRatio,
+            handleDimensionChange,
+            applyCustomDimensions,
+            toggleGrid,
+            zoomIn: () => { zoomLevel *= 1.15; applyZoom(); },
+            zoomOut: () => { zoomLevel /= 1.15; applyZoom(); },
+            zoomFit: () => resizeViewport()
+          };
+        })();
     
         init();
       });
