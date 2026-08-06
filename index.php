@@ -11,13 +11,19 @@ if (isset($_GET['action']) && $_GET['action'] === 'clear_session_emergency') {
   exit;
 }
 
+// Detect HTTPS vs HTTP connection state early for session cookie security
+$is_secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ||
+             ($_SERVER['SERVER_PORT'] == 443) ||
+             (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) == 'https') ||
+             (!empty($_SERVER['HTTP_X_FORWARDED_SSL']) && strtolower($_SERVER['HTTP_X_FORWARDED_SSL']) == 'on');
+
 // Bypass Gzip compression for heavy files, streaming, and uploads to prevent memory exhaustion and play crashes
 $raw_uri_gzip = $_SERVER['REQUEST_URI'] ?? '';
 // FIXED: Added all scanning endpoints to bypass GZIP to prevent blank white screens from corrupted buffers
 $is_gzip_bypass = preg_match('/action=(stream|thumb|get_stream|download_song|upload|batch|full_scan|force_rescan|rescan_covers|rescan_charts|vacuum_database|reset_rhythm_charts)/i', $raw_uri_gzip) || isset($_GET['download']) || isset($_GET['batch']);
 
-if (!$is_gzip_bypass && isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip')) {
-  ob_start('ob_gzhandler');
+if (!$is_gzip_bypass && !ini_get('zlib.output_compression') && isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip')) {
+  @ob_start('ob_gzhandler');
 }
 // Main site visually ignores warnings/notices to prevent JSON corruption, logs internally
 error_reporting(E_ALL & ~E_NOTICE & ~E_WARNING & ~E_DEPRECATED);
@@ -366,8 +372,8 @@ session_start([
   'cookie_lifetime' => 31536000,
   'gc_maxlifetime' => 31536000,
   'cookie_httponly' => true,
-  'cookie_samesite' => 'None',
-  'cookie_secure' => true
+  'cookie_samesite' => $is_secure ? 'None' : 'Lax',
+  'cookie_secure' => $is_secure
 ]);
 set_time_limit(0);
 
@@ -387,7 +393,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '8.2');
+define('APP_VERSION', '8.3');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -430,15 +436,52 @@ function get_db() {
     ");
     
     $db->sqliteCreateFunction('match_artist', function($artist_field, $search_name) {
-      if ($artist_field === null || $search_name === null) return 0;
+      if ($artist_field === null || $search_name === null || $artist_field === '' || $search_name === '') return 0;
+      
+      // Fast-path 1: Instant match if exact strings or case-insensitive match
+      if ($artist_field === $search_name || strcasecmp($artist_field, $search_name) === 0) return 1;
+
+      // Fast-path 2: Only run regex if '(id:' is actually present in either string
+      if (strpos($artist_field, '(id:') !== false) {
+        $artist_field = preg_replace('/\s*\(id:\d+\)/i', '', $artist_field);
+      }
+      if (strpos($search_name, '(id:') !== false) {
+        $search_name = preg_replace('/\s*\(id:\d+\)/i', '', $search_name);
+      }
+
+      // Fast-path 3: Match check after stripping ID tags
+      if (strcasecmp($artist_field, $search_name) === 0) return 1;
+
+      // Fast-path 4: If no artist delimiters exist, skip splitting entirely
+      $has_delimiters = preg_match('/[;|,]|\b(?:&|feat|ft|featuring)\b/i', $artist_field) ||
+                        preg_match('/[;|,]|\b(?:&|feat|ft|featuring)\b/i', $search_name);
+
+      if (!$has_delimiters) {
+        if (preg_match('/[^\x00-\x7F]/', $artist_field) || preg_match('/[^\x00-\x7F]/', $search_name)) {
+          return (romanize_string($artist_field) === romanize_string($search_name)) ? 1 : 0;
+        }
+        return 0;
+      }
+
       $db_parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i', $artist_field);
       $search_parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i', $search_name);
+
       if (!is_array($db_parts)) $db_parts = [$artist_field];
       if (!is_array($search_parts)) $search_parts = [$search_name];
+
       foreach ($db_parts as $db_part) {
+        $db_part = trim($db_part);
+        if ($db_part === '') continue;
         foreach ($search_parts as $search_part) {
-          if (strcasecmp(trim($db_part), trim($search_part)) === 0) return 1;
-          if (romanize_string(trim($db_part)) === romanize_string(trim($search_part))) return 1;
+          $search_part = trim($search_part);
+          if ($search_part === '') continue;
+
+          if (strcasecmp($db_part, $search_part) === 0) return 1;
+
+          // Only invoke Transliterator for non-ASCII (e.g. Kanji, Cyrillic)
+          if (preg_match('/[^\x00-\x7F]/', $db_part) || preg_match('/[^\x00-\x7F]/', $search_part)) {
+            if (romanize_string($db_part) === romanize_string($search_part)) return 1;
+          }
         }
       }
       return 0;
@@ -2550,6 +2593,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           overflow-y: visible;
         }
 
+        body.player-visible .main-content {
+          padding-bottom: 190px;
+        }
+
         .content-area-wrapper {
           padding: 1rem;
         }
@@ -2867,8 +2914,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       </div>
       <nav class="sidebar offcanvas-lg offcanvas-start" tabindex="-1" id="admin-sidebar">
         <div class="offcanvas-header border-bottom d-lg-none" style="border-color: var(--ytm-surface-2) !important;">
-          <h5 class="offcanvas-title logo m-0 fw-bold" style="font-size: 1.25rem;">Menu<span class="fw-light"></span></h5>
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#admin-sidebar"></button>
+          <h5 class="offcanvas-title logo m-0 fw-bold d-none" style="font-size: 1.25rem;">Menu<span class="fw-light"></span></h5>
         </div>
         <div class="offcanvas-body d-flex flex-column p-0 h-100">
           <div class="d-none d-lg-flex align-items-center justify-content-between p-3 border-bottom" style="border-color: var(--ytm-surface-2) !important;">
@@ -4170,12 +4216,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   else { try { $dbm_pdo->exec('ALTER TABLE ' . dbm_quote_ident($targetTable) . ' RENAME TO ' . dbm_quote_ident($newName)); dbm_flash_set('success', 'Table renamed to "' . $newName . '".'); if ($curTable === $targetTable) dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $newName])); else dbm_redirect(dbm_self_url(['db' => $dbName])); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
                 }
                 dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable]));
-              case 'drop_table':
-                if ($dbm_pdo) { 
-                  $targetTable = trim($_POST['target_table'] ?? $curTable);
-                  if ($targetTable !== '') { try { $dbm_pdo->exec('DROP TABLE ' . dbm_quote_ident($targetTable)); dbm_flash_set('success', 'Table "' . $targetTable . '" dropped.'); } catch (PDOException $e) { dbm_flash_set('error', 'Error: ' . $e->getMessage()); } }
-                }
-                dbm_redirect(dbm_self_url(['db' => $dbName]));
               case 'rename_column':
                 if ($dbm_pdo && $curTable !== '') {
                   $oldCol = trim($_POST['old_col'] ?? '');
@@ -6705,7 +6745,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
   
             <div class="modal fade" id="ide-settings-modal" tabindex="-1">
-              <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-sm">
                 <div class="modal-content border-danger shadow-lg" style="background-color: #0a0a0a;">
                   <div class="modal-header border-bottom border-danger">
                     <h5 class="modal-title text-white fw-bold"><i class="bi bi-gear-fill text-danger me-2"></i>IDE Settings</h5>
@@ -6818,7 +6858,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
             <!-- IDE New Item Modal -->
             <div class="modal fade" id="ide-new-item-modal" tabindex="-1">
-              <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-sm">
                 <div class="modal-content border-danger shadow-lg" style="background-color: #0a0a0a;">
                   <div class="modal-header border-bottom border-danger">
                     <h5 class="modal-title text-white fw-bold" id="ide-new-item-title"><i class="bi bi-file-earmark-plus text-danger me-2"></i>New Item</h5>
@@ -6842,7 +6882,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
             <!-- IDE Rename Modal -->
             <div class="modal fade" id="ide-rename-modal" tabindex="-1">
-              <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-sm">
                 <div class="modal-content border-danger shadow-lg" style="background-color: #0a0a0a;">
                   <div class="modal-header border-bottom border-danger">
                     <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-danger me-2"></i>Rename</h5>
@@ -6864,7 +6904,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             <!-- IDE Upload URL Modal -->
             <div class="modal fade" id="ide-upload-url-modal" tabindex="-1">
-              <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-sm">
                 <div class="modal-content border-danger shadow-lg" style="background-color: #0a0a0a;">
                   <div class="modal-header border-bottom border-danger">
                     <h5 class="modal-title text-white fw-bold"><i class="bi bi-link text-danger me-2"></i>Upload via URL</h5>
@@ -6887,7 +6927,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
             <!-- IDE Diff Modal -->
             <div class="modal fade" id="ide-diff-modal" tabindex="-1">
-              <div class="modal-dialog modal-dialog-centered modal-xl modal-dialog-scrollable">
+              <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-xl modal-dialog-scrollable">
                 <div class="modal-content border-secondary shadow-lg" style="background-color: #0a0a0a;">
                   <div class="modal-header border-bottom border-secondary">
                     <h5 class="modal-title text-white fw-bold"><i class="bi bi-file-diff text-info me-2"></i><span id="ide-diff-title">File Diff</span></h5>
@@ -6909,7 +6949,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
             <!-- IDE Properties Modal -->
             <div class="modal fade" id="ide-properties-modal" tabindex="-1">
-              <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered">
                 <div class="modal-content border-danger shadow-lg" style="background-color: #0a0a0a;">
                   <div class="modal-header border-bottom border-danger">
                     <h5 class="modal-title text-white fw-bold"><i class="bi bi-info-circle-fill text-danger me-2"></i>Item Properties</h5>
@@ -13871,7 +13911,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
             
             <div class="modal fade" id="user-details-modal" tabindex="-1">
-              <div class="modal-dialog modal-dialog-centered modal-lg">
+              <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
                 <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
                   <div class="modal-header border-0 pb-3" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
                     <h5 class="modal-title text-white fw-bold"><i class="bi bi-person-lines-fill text-info me-2"></i> User Properties & Preferences</h5>
@@ -14008,7 +14048,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     </div>
     <?php endif; ?>
     <div class="modal fade" id="admin-permissions-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-ui-checks text-success me-2"></i>Access Permissions</h5>
@@ -14094,7 +14134,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     </div>
 
     <div class="modal fade" id="admin-rhythm-history-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-controller text-info me-2"></i>Rhythm History: <span id="admin-rh-name"></span></h5>
@@ -14349,10 +14389,11 @@ if (file_exists(__DIR__ . '/getid3/getid3.php')) {
 function extract_safe_tag($comments, $tag, $fallback = '') {
   if (!empty($comments[$tag]) && is_array($comments[$tag])) {
     $val = $comments[$tag][0];
+    if ($val === null) return $fallback;
     
     // FIX 1: Remove double-encoded Mojibake strings appended with a slash
     // 'Ãƒ' is the classic signature of a UTF-8 string corrupted into Latin-1.
-    $val = preg_replace('/\s*\/\s*[ÃƒÃ£Ã¤Ã¥Ã¦Ã§Ã¨Ã©].*/', '', $val);
+    $val = preg_replace('/\s*\/\s*[ÃƒÃ£Ã¤Ã¥Ã¦Ã§Ã¨Ã©].*/', '', (string)$val);
     
     // FIX 2: Remove exact duplicate strings appended with a slash (e.g. "Title / Title")
     if (strpos($val, '/') !== false) {
@@ -14987,14 +15028,15 @@ function init_db($db) {
 }
 
 function romanize_string($string) {
+  if ($string === null || $string === '') return 'unknown';
   if (class_exists('Transliterator')) {
     // Uses the external ICU library to flawlessly romanize Kanji, Katakana, and Hiragana to Romaji
     $transliterator = Transliterator::create('Any-Latin; Latin-ASCII; Lower()');
     if ($transliterator) {
-      $string = $transliterator->transliterate($string);
+      $string = $transliterator->transliterate((string)$string);
     }
   }
-  $string = mb_strtolower($string, 'UTF-8');
+  $string = mb_strtolower((string)$string, 'UTF-8');
   $string = preg_replace('/[^a-z0-9]/', '', $string);
   return empty($string) ? 'unknown' : $string;
 }
@@ -15666,6 +15708,29 @@ if (isset($_GET['action'])) {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );");
+
+      $db->exec("CREATE TABLE IF NOT EXISTS imageditor_projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        public_id TEXT UNIQUE NOT NULL,
+        user_id INTEGER NOT NULL,
+        title TEXT,
+        width INTEGER,
+        height INTEGER,
+        state TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );");
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN category TEXT DEFAULT 'all';"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN starred INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+      try {
+        $db->exec("
+          CREATE TABLE IF NOT EXISTS imageditor_categories (
+            id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+          );
+        ");
+      } catch(Exception $e) {}
       
       $api_cols = $db->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
       if (!in_array('user_id', $api_cols)) { $db->exec("ALTER TABLE api_keys ADD COLUMN user_id INTEGER DEFAULT 0;"); }
@@ -16859,6 +16924,11 @@ HTML;
         $artist = extract_safe_tag($info['comments'] ?? [], 'artist', $uploader_name);
         if (empty($artist) || $artist === 'Unknown Artist') $artist = $uploader_name;
         
+        // Use precision tracking for the uploader
+        if (stripos($artist, "(id:") === false) {
+           $artist .= " (id:" . $user_id . ")";
+        }
+        
         $collab_user_ids = [];
         if ($is_collaborative === 1 && !empty($posted_collabs)) {
           $collab_inputs = array_map('trim', explode(',', $posted_collabs));
@@ -16869,13 +16939,12 @@ HTML;
             $c_user = $stmt_c->fetch();
             if ($c_user && $c_user['id'] != $user_id) {
               $collab_user_ids[] = $c_user['id'];
-              if (stripos($artist, $c_user['artist']) === false) {
-                 $artist .= ', ' . $c_user['artist'];
-              }
+              // Require approval via link: Do not automatically append their name to the track
             }
           }
         }
         
+        $main_artist = trim(preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $artist)[0] ?? '');
         $artist_path = sanitize_for_path($main_artist);
         // SHARDING: Split uploads into 256 physical subfolders to prevent Linux inode collapse
         $shard = substr(md5($artist_path), 0, 2);
@@ -16916,17 +16985,23 @@ HTML;
           
           $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified, is_private, is_collaborative, replaygain) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
           $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $actual_mtime, $is_private, $is_collaborative, $replaygain]);
-          
+          $new_song_id = $db->lastInsertId();
+
           if ($is_private == 0) {
             $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, ?, ?)")->execute([$user_id, 'uploaded a new song', $title]);
           }
-
-          $new_song_id = $db->lastInsertId();
           
           if (!empty($collab_user_ids)) {
-            $stmt_add_c = $db->prepare("INSERT OR IGNORE INTO song_collaborators (song_id, user_id) VALUES (?, ?)");
+            $expires_at = date('Y-m-d H:i:s', time() + 3600); // Strict 1 hour duration
+            $stmt_inv = $db->prepare("INSERT INTO song_invites (token, song_id, expires_at) VALUES (?, ?, ?)");
+            $stmt_msg = $db->prepare("INSERT INTO messages (sender_id, receiver_id, content) VALUES (?, ?, ?)");
             foreach ($collab_user_ids as $c_id) {
-              $stmt_add_c->execute([$new_song_id, $c_id]);
+              $token = bin2hex(random_bytes(16));
+              $stmt_inv->execute([$token, $new_song_id, $expires_at]);
+              
+              $invite_url = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . strtok($_SERVER["REQUEST_URI"], '?') . "?song_invite=" . $token;
+              $msg_content = "I have invited you to collaborate on my new track: [b]" . $title . "[/b].\n\nClick here to accept: [url]" . $invite_url . "[/url]\n\nThis invite expires in 1 hour.";
+              $stmt_msg->execute([$user_id, $c_id, $msg_content]);
             }
           }
 
@@ -17212,6 +17287,22 @@ HTML;
 
         $is_private = intval($_POST['is_private'] ?? 0);
         $is_collaborative = intval($_POST['is_collaborative'] ?? 0);
+
+        if ($is_collaborative === 1) {
+          // Append base ID if missing
+          if (stripos($new_artist, "(id:" . $song['user_id'] . ")") === false) {
+            $new_artist .= " (id:" . $song['user_id'] . ")";
+          }
+          $stmt_collabs = $db->prepare("SELECT u.id, u.artist FROM song_collaborators sc JOIN users u ON sc.user_id = u.id WHERE sc.song_id = ?");
+          $stmt_collabs->execute([$song_id]);
+          $active_collabs = $stmt_collabs->fetchAll();
+          foreach($active_collabs as $ac) {
+            if (stripos($new_artist, "(id:" . $ac['id'] . ")") === false) {
+              $new_artist .= ", " . $ac['artist'] . " (id:" . $ac['id'] . ")";
+            }
+          }
+        }
+
         $update_fields = ["title = ?", "artist = ?", "album = ?", "genre = ?", "lyrics = ?", "is_private = ?", "is_collaborative = ?"];
         $update_params = [$new_title, $new_artist, $new_album, $new_genre, $new_lyrics, $is_private, $is_collaborative];
 
@@ -17532,9 +17623,15 @@ HTML;
         $params[] = $_GET['filter_user_id'];
       }
           
-      $where_clauses[] = "(m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)";
-      $params[] = $user_id;
-      $params[] = $user_id;
+      $session_user_artist = $_SESSION['user_artist'] ?? '';
+      if (!empty($session_user_artist)) {
+        $where_clauses[] = "(m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, ?) = 1 OR {$is_super_admin} = 1)";
+        $params[] = $user_id;
+        $params[] = $session_user_artist;
+      } else {
+        $where_clauses[] = "(m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+        $params[] = $user_id;
+      }
       
       $where_sql = 'WHERE ' . implode(' AND ', $where_clauses);
       
@@ -18091,7 +18188,8 @@ HTML;
         (SELECT COUNT(*) FROM project_members pm2 WHERE pm2.project_id = p.id) as member_count,
         (SELECT COUNT(*) FROM personal_notes pn WHERE pn.project_id = p.id) as note_count,
         (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) as task_count,
-        (SELECT COUNT(*) FROM blogs b WHERE b.project_id = p.id) as blog_count
+        (SELECT COUNT(*) FROM blogs b WHERE b.project_id = p.id) as blog_count,
+        (SELECT COUNT(*) FROM imageditor_projects iep WHERE iep.project_id = p.id) as imageditor_count
         FROM projects p 
         JOIN project_members pm ON p.id = pm.project_id 
         JOIN users u ON p.owner_id = u.id
@@ -18152,10 +18250,13 @@ HTML;
         $db->prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, role) VALUES (?, ?, 'editor')")->execute([$inv_pid, $user_id]);
         send_json(['status' => 'success', 'project_type' => $proj_info['project_type'] ?? 'note']);
       } elseif ($action_type === 'move_item') {
-        $table = $data['item_type'] === 'blog' ? 'blogs' : ($data['item_type'] === 'task' ? 'tasks' : 'personal_notes');
+        $table = $data['item_type'] === 'blog' ? 'blogs' : ($data['item_type'] === 'task' ? 'tasks' : ($data['item_type'] === 'imageditor' ? 'imageditor_projects' : 'personal_notes'));
         $pid = $data['project_id'] ? (int)$data['project_id'] : null;
-        // Only owner can move notes, tasks or blogs
-        $db->prepare("UPDATE $table SET project_id = ? WHERE id = ? AND user_id = ?")->execute([$pid, $data['item_id'], $user_id]);
+        if ($data['item_type'] === 'imageditor') {
+          $db->prepare("UPDATE $table SET project_id = ? WHERE public_id = ? AND user_id = ?")->execute([$pid, $data['item_id'], $user_id]);
+        } else {
+          $db->prepare("UPDATE $table SET project_id = ? WHERE id = ? AND user_id = ?")->execute([$pid, $data['item_id'], $user_id]);
+        }
         send_json(['status' => 'success']);
       }
       break;
@@ -18183,8 +18284,11 @@ HTML;
       $item_id = (int)$_GET['item_id'];
       $item_type = $_GET['item_type'];
       
-      $table = $item_type === 'blog' ? 'blogs' : ($item_type === 'task' ? 'tasks' : 'personal_notes');
-      $col = $item_type === 'task' ? 'items' : 'content';
+      $table = 'personal_notes';
+      $col = 'content';
+      if ($item_type === 'blog') { $table = 'blogs'; }
+      elseif ($item_type === 'task') { $table = 'tasks'; $col = 'items'; }
+      elseif ($item_type === 'imageditor') { $table = 'imageditor_projects'; $col = 'state'; }
       
       $last_update = '';
       
@@ -18226,6 +18330,8 @@ HTML;
         $stmt = $db->prepare("SELECT id, name FROM task_categories WHERE user_id = ?");
       } elseif ($type === 'blog') {
         $stmt = $db->prepare("SELECT id, name FROM blog_categories WHERE user_id = ?");
+      } elseif ($type === 'imageditor') {
+        $stmt = $db->prepare("SELECT id, name FROM imageditor_categories WHERE user_id = ?");
       } else {
         $stmt = $db->prepare("SELECT id, name FROM note_categories WHERE user_id = ?");
       }
@@ -18243,6 +18349,8 @@ HTML;
         $table = 'task_categories';
       } elseif ($type === 'blog') {
         $table = 'blog_categories';
+      } elseif ($type === 'imageditor') {
+        $table = 'imageditor_categories';
       } else {
         $table = 'note_categories';
       }
@@ -18267,6 +18375,8 @@ HTML;
         $table = 'task_categories';
       } elseif ($type === 'blog') {
         $table = 'blog_categories';
+      } elseif ($type === 'imageditor') {
+        $table = 'imageditor_categories';
       } else {
         $table = 'note_categories';
       }
@@ -18276,6 +18386,8 @@ HTML;
           $db->prepare("UPDATE tasks SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
         } elseif ($type === 'blog') {
           $db->prepare("UPDATE blogs SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
+        } elseif ($type === 'imageditor') {
+          $db->prepare("UPDATE imageditor_projects SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
         } else {
           $db->prepare("UPDATE personal_notes SET category = 'all' WHERE category = ? AND user_id = ?")->execute([$cat_id, $user_id]);
         }
@@ -19000,6 +19112,99 @@ HTML;
       $data = json_decode(file_get_contents('php://input'), true);
       $db->prepare("DELETE FROM api_keys WHERE id = ? AND user_id = ?")->execute([(int)$data['id'], $user_id]);
       send_json(['status' => 'success', 'message' => 'API Key deleted.']);
+      break;
+
+    case 'get_imageditor_projects':
+      if (!$user_id) { send_json([]); }
+      $filter = $_GET['filter'] ?? 'all';
+      $where = "WHERE user_id = ?";
+      $params = [$user_id];
+      
+      if (strpos($filter, 'proj_') === 0) {
+        $pid = (int)str_replace('proj_', '', $filter);
+        $where = "WHERE project_id = ? AND (project_id IN (SELECT project_id FROM project_members WHERE user_id = ?) OR project_id IN (SELECT id FROM projects WHERE is_public = 1))";
+        $params = [$pid, $user_id];
+      } elseif ($filter === 'starred') {
+        $where .= " AND starred = 1";
+      } elseif ($filter !== 'all') {
+        $where .= " AND category = ?";
+        $params[] = $filter;
+      }
+
+      $stmt = $db->prepare("SELECT public_id, title, width, height, updated_at, category, starred, project_id, (SELECT name FROM imageditor_categories WHERE id = imageditor_projects.category AND user_id = imageditor_projects.user_id) as category_name FROM imageditor_projects $where ORDER BY updated_at DESC");
+      $stmt->execute($params);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'get_imageditor_project':
+      if (!$user_id) { http_response_code(403); exit; }
+      $public_id = $_GET['public_id'] ?? '';
+      $stmt = $db->prepare("SELECT * FROM imageditor_projects WHERE public_id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))");
+      $stmt->execute([$public_id, $user_id, $user_id]);
+      $project = $stmt->fetch();
+      if ($project) send_json(['status' => 'success', 'project' => $project]);
+      else send_json(['status' => 'error', 'message' => 'Project not found']);
+      break;
+
+    case 'save_imageditor_project':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      if (!is_array($data)) { send_json(['status' => 'error', 'message' => 'Payload too large or invalid.']); }
+      $public_id = $data['public_id'] ?? '';
+      $title = htmlspecialchars($data['title'] ?? 'Untitled Project', ENT_QUOTES, 'UTF-8');
+      $width = (int)($data['width'] ?? 1080);
+      $height = (int)($data['height'] ?? 1080);
+      $state = $data['state'] ?? '{}';
+      $category = $data['category'] ?? 'all';
+      $starred = !empty($data['starred']) ? 1 : 0;
+      $proj_id = !empty($data['project_id']) ? (int)$data['project_id'] : null;
+
+      if ($public_id) {
+        $stmt = $db->prepare("SELECT user_id, category FROM imageditor_projects WHERE public_id = ?");
+        $stmt->execute([$public_id]);
+        $existing = $stmt->fetch();
+        if ($existing) {
+          if ($existing['user_id'] != $user_id) { $category = $existing['category']; }
+          $db->prepare("UPDATE imageditor_projects SET title = ?, width = ?, height = ?, state = ?, category = ?, starred = ?, updated_at = CURRENT_TIMESTAMP WHERE public_id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$title, $width, $height, $state, $category, $starred, $public_id, $user_id, $user_id]);
+          send_json(['status' => 'success', 'public_id' => $public_id]);
+        }
+      }
+      
+      $public_id = bin2hex(random_bytes(8));
+      $db->prepare("INSERT INTO imageditor_projects (public_id, user_id, title, width, height, state, category, starred, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")->execute([$public_id, $user_id, $title, $width, $height, $state, $category, $starred, $proj_id]);
+      send_json(['status' => 'success', 'public_id' => $public_id]);
+      break;
+
+    case 'toggle_imageditor_star':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("UPDATE imageditor_projects SET starred = ? WHERE public_id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$data['starred'], $data['public_id'], $user_id, $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'delete_imageditor_project':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $public_id = $data['public_id'] ?? '';
+      $db->prepare("DELETE FROM imageditor_projects WHERE public_id = ? AND user_id = ?")->execute([$public_id, $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'duplicate_imageditor_project':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $public_id = $data['public_id'] ?? '';
+      $stmt = $db->prepare("SELECT * FROM imageditor_projects WHERE public_id = ? AND user_id = ?");
+      $stmt->execute([$public_id, $user_id]);
+      $project = $stmt->fetch();
+      if ($project) {
+        $new_public_id = bin2hex(random_bytes(8));
+        $new_title = $project['title'] . ' (Copy)';
+        $db->prepare("INSERT INTO imageditor_projects (public_id, user_id, title, width, height, state) VALUES (?, ?, ?, ?, ?, ?)")->execute([$new_public_id, $user_id, $new_title, $project['width'], $project['height'], $project['state']]);
+        send_json(['status' => 'success']);
+      } else {
+        send_json(['status' => 'error']);
+      }
       break;
 
     case 'export_blogs':
@@ -20234,30 +20439,33 @@ HTML;
 
     case 'get_artists':
       $sort_key = $_GET['sort'] ?? 'name_asc';
-      // Select user_id to correctly map primary artists
-      $stmt = $db->prepare("SELECT artist, id, user_id, CASE WHEN image IS NOT NULL THEN 1 ELSE 0 END as has_img FROM music WHERE artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) ORDER BY id DESC");
-      $stmt->execute([$user_id, $user_id]);
+      $session_user_artist = $_SESSION['user_artist'] ?? '';
+      
+      $stmt = $db->prepare("SELECT artist, id, user_id, CASE WHEN image IS NOT NULL THEN 1 ELSE 0 END as has_img FROM music WHERE artist != '' AND artist IS NOT NULL AND (is_private = 0 OR user_id = ? " . ($session_user_artist !== '' ? "OR match_artist(artist, ?) = 1 " : "") . "OR {$is_super_admin} = 1) ORDER BY id DESC");
+      $params = [$user_id];
+      if ($session_user_artist !== '') $params[] = $session_user_artist;
+      $stmt->execute($params);
       $rows = $stmt->fetchAll();
       $artists = [];
-      
-      $stmt_is_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
-      
+
+      // Pre-fetch all user artist maps in a single query to eliminate N+1 loop queries
+      $user_artist_map = $db->query("SELECT LOWER(artist), id FROM users WHERE artist IS NOT NULL AND artist != ''")->fetchAll(PDO::FETCH_KEY_PAIR);
+
       foreach ($rows as $row) {
         $parts = preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i', $row['artist']);
         foreach ($parts as $index => $part) {
-          $p = trim($part);
+          $p = trim(preg_replace('/\s*\(id:\d+\)/i', '', $part));
           if ($p !== '') {
             $key = strtolower($p);
             if (!isset($artists[$key])) {
-              $stmt_is_user->execute([$p]);
-              $uid = $stmt_is_user->fetchColumn();
-              
+              $uid = $user_artist_map[$key] ?? null;
+
               $artists[$key] = [
-                  'name' => $p, 
-                  'id' => $uid ? $uid : $row['id'], 
-                  'has_img' => $row['has_img'],
-                  'is_user' => (bool)$uid,
-                  'user_id' => $uid ? $uid : ($index === 0 ? $row['user_id'] : null)
+                'name' => $p, 
+                'id' => $uid ? $uid : $row['id'], 
+                'has_img' => $row['has_img'],
+                'is_user' => (bool)$uid,
+                'user_id' => $uid ? $uid : ($index === 0 ? $row['user_id'] : null)
               ];
             } elseif (!$artists[$key]['has_img'] && $row['has_img'] && empty($artists[$key]['is_user'])) {
               $artists[$key]['id'] = $row['id'];
@@ -21399,6 +21607,22 @@ HTML;
           send_json(['status' => 'error', 'message' => 'You are already the owner.']);
         }
         $db->prepare("INSERT OR IGNORE INTO song_collaborators (song_id, user_id) VALUES (?, ?)")->execute([$song['id'], $user_id]);
+        
+        $stmt_u = $db->prepare("SELECT artist FROM users WHERE id = ?");
+        $stmt_u->execute([$user_id]);
+        $new_collab_artist = $stmt_u->fetchColumn();
+        
+        if ($new_collab_artist) {
+          $stmt_cur_artist = $db->prepare("SELECT artist FROM music WHERE id = ?");
+          $stmt_cur_artist->execute([$song['id']]);
+          $cur_artist = $stmt_cur_artist->fetchColumn();
+            
+          if (stripos($cur_artist, "(id:" . $user_id . ")") === false) {
+            $updated_artist = $cur_artist . ", " . $new_collab_artist . " (id:" . $user_id . ")";
+            $db->prepare("UPDATE music SET artist = ? WHERE id = ?")->execute([$updated_artist, $song['id']]);
+          }
+        }
+        
         send_json(['status' => 'success', 'message' => 'Joined song successfully!']);
       }
       
@@ -21423,8 +21647,20 @@ HTML;
         if (!$collab_user) { send_json(['status' => 'error', 'message' => 'User not found.']); }
         if ($collab_user == $user_id) { send_json(['status' => 'error', 'message' => 'You already own this song.']); }
           
-        $db->prepare("INSERT OR IGNORE INTO song_collaborators (song_id, user_id) VALUES (?, ?)")->execute([$song['id'], $collab_user]);
-        send_json(['status' => 'success', 'message' => 'Collaborator added successfully.']);
+        $db->exec("DELETE FROM song_invites WHERE expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP");
+        $expires_at = date('Y-m-d H:i:s', time() + 3600);
+        $token = bin2hex(random_bytes(16));
+        $db->prepare("INSERT INTO song_invites (token, song_id, expires_at) VALUES (?, ?, ?)")->execute([$token, $song['id'], $expires_at]);
+        
+        $invite_url = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . strtok($_SERVER["REQUEST_URI"], '?') . "?song_invite=" . $token;
+        $stmt_song_title = $db->prepare("SELECT title FROM music WHERE id = ?");
+        $stmt_song_title->execute([$song['id']]);
+        $s_title = $stmt_song_title->fetchColumn();
+        
+        $msg_content = "I have invited you to collaborate on the track: [b]" . $s_title . "[/b].\n\nClick here to accept: [url]" . $invite_url . "[/url]\n\nThis invite expires in 1 hour.";
+        $db->prepare("INSERT INTO messages (sender_id, receiver_id, content) VALUES (?, ?, ?)")->execute([$user_id, $collab_user, $msg_content]);
+
+        send_json(['status' => 'success', 'message' => 'Invitation sent to the user via Direct Messages. They must accept it within 1 hour.']);
       } elseif ($action_type === 'remove') {
         $remove_id = $data['collab_user_id'];
         $db->prepare("DELETE FROM song_collaborators WHERE song_id = ? AND user_id = ?")->execute([$song['id'], $remove_id]);
@@ -22273,7 +22509,7 @@ HTML;
       }
 
       $where = "WHERE u.email NOT LIKE 'deleted_%' AND u.banned = 0";
-      $params = [$_SESSION['user_id'] ?? 0, $_SESSION['user_id'] ?? 0];
+      $params = [$_SESSION['user_id'] ?? 0];
 
       if ($search !== '') {
         $where .= " AND match_text(u.artist, ?) = 1";
@@ -22284,13 +22520,13 @@ HTML;
         $params[] = (int)$_GET['following_of'];
       }
 
-      // Fetch all registered players and song creators, computing stats natively via SQL
+      // Fetch all registered players and song creators, computing stats natively via SQL using indexed joins
       $sql = "
         SELECT 
           u.id as user_id,
           u.artist as name,
-          (SELECT id FROM music WHERE match_artist(artist, u.artist) = 1 ORDER BY id DESC LIMIT 1) as id,
-          (SELECT COUNT(*) FROM music WHERE match_artist(artist, u.artist) = 1 AND (is_private = 0 OR user_id = ? OR match_artist(artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1)) as count,
+          (SELECT id FROM music WHERE user_id = u.id OR id IN (SELECT song_id FROM song_collaborators WHERE user_id = u.id) ORDER BY id DESC LIMIT 1) as id,
+          (SELECT COUNT(*) FROM music WHERE (user_id = u.id OR id IN (SELECT song_id FROM song_collaborators WHERE user_id = u.id)) AND (is_private = 0 OR user_id = ? OR {$is_super_admin} = 1)) as count,
           COALESCE(SUM(rs.score), 0) as score,
           COALESCE(COUNT(rs.id), 0) as plays,
           COALESCE(SUM(rs.perfect), 0) as perfect,
@@ -23185,18 +23421,17 @@ HTML;
       $rec_artists_rows = $rec_artists_stmt->fetchAll();
       $rec_artists = [];
       $seen_artists = [];
-      $stmt_is_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
-      
+      $user_artist_map = $db->query("SELECT LOWER(artist), id FROM users WHERE artist IS NOT NULL AND artist != ''")->fetchAll(PDO::FETCH_KEY_PAIR);
+
       foreach ($rec_artists_rows as $row) {
         $parts = @preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $row['name']);
         if (!is_array($parts)) $parts = [$row['name']];
         foreach ($parts as $part) {
-          $p = trim($part);
+          $p = trim(preg_replace('/\s*\(id:\d+\)/i', '', $part));
           $key = strtolower($p);
           if ($p !== '' && !isset($seen_artists[$key])) {
             $seen_artists[$key] = true;
-            $stmt_is_user->execute([$p]);
-            $uid = $stmt_is_user->fetchColumn();
+            $uid = $user_artist_map[$key] ?? null;
             $rec_artists[] = [
               'name' => $p,
               'id' => $uid ? $uid : $row['id'],
@@ -23384,6 +23619,8 @@ HTML;
         $stmt = $db->prepare("SELECT id, name, 'task' as category_type, (SELECT COUNT(*) FROM tasks WHERE category = task_categories.id AND user_id = ?) as item_count FROM task_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
       } elseif ($type === 'blog') {
         $stmt = $db->prepare("SELECT id, name, 'blog' as category_type, (SELECT COUNT(*) FROM blogs WHERE category = blog_categories.id AND user_id = ?) as item_count FROM blog_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
+      } elseif ($type === 'imageditor') {
+        $stmt = $db->prepare("SELECT id, name, 'imageditor' as category_type, (SELECT COUNT(*) FROM imageditor_projects WHERE category = imageditor_categories.id AND user_id = ?) as item_count FROM imageditor_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
       } else {
         $stmt = $db->prepare("SELECT id, name, 'note' as category_type, (SELECT COUNT(*) FROM personal_notes WHERE category = note_categories.id AND user_id = ?) as item_count FROM note_categories WHERE user_id = ? ORDER BY name ASC " . $limit_clause);
       }
@@ -24984,6 +25221,10 @@ function perform_cover_scan($db) {
         overflow-y: auto;
       }
 
+      body.player-visible .main-content {
+        padding-bottom: 120px;
+      }
+
       .content-area-wrapper {
         padding: 1.5rem 2rem;
         flex-grow: 1;
@@ -25034,7 +25275,7 @@ function perform_cover_scan($db) {
       }
 
       #player-modal-favorite-btn {
-        color: var(--ytm-secondary-text);
+        color: #ffffff !important;
         font-size: 2rem;
         transition: color 0.2s, transform 0.1s;
       }
@@ -25108,14 +25349,14 @@ function perform_cover_scan($db) {
           background-color: var(--ytm-surface);
           left: 0;
           padding-left: 1.5rem !important;
-          z-index: 1205 !important;
+          z-index: 1030 !important;
         }
 
         .page-header {
           position: sticky !important;
           top: 0 !important;
           background-color: transparent;
-          z-index: 1010 !important;
+          z-index: 1060 !important;
           padding-top: 1.5rem;
           padding-bottom: 1.5rem;
           transition: background-color 0.3s, backdrop-filter 0.3s;
@@ -25253,7 +25494,8 @@ function perform_cover_scan($db) {
         color: var(--ytm-primary-text) !important;
         font-weight: 600;
         font-size: 0.85rem;
-        padding: 0.4rem 2rem 0.4rem 1rem !important;
+        height: 40px !important;
+        padding: 0 2rem 0 1rem !important;
         cursor: pointer;
         transition: all 0.2s ease-in-out;
         background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23aaaaaa'%3E%3Cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E") !important;
@@ -25646,7 +25888,7 @@ function perform_cover_scan($db) {
         align-items: center;
         gap: 1.5rem;
         padding: 0 1.5rem 4px 1.5rem;
-        z-index: 1048;
+        z-index: 1030;
         overflow: hidden;
         transition: left 0.3s ease, padding-left 0.3s ease;
       }
@@ -26239,7 +26481,7 @@ function perform_cover_scan($db) {
           height: var(--header-height-mobile);
           background-color: transparent;
           border-bottom: 1px solid transparent;
-          z-index: 1010;
+          z-index: 1060 !important;
           display: flex;
           align-items: center;
           padding: 0 0.5rem;
@@ -26434,7 +26676,7 @@ function perform_cover_scan($db) {
         transition: color 0.4s ease;
       }
 
-      /* The blurred cover image sits inside the modal */
+      /* The blurred cover image sits inside the modal with dark ambient tinting */
       .dynamic-blur-bg {
         position: absolute;
         top: -60px;
@@ -26443,7 +26685,7 @@ function perform_cover_scan($db) {
         bottom: -60px;
         background-size: cover;
         background-position: center;
-        filter: blur(45px) brightness(0.6);
+        filter: blur(45px) brightness(0.38) saturate(1.2);
         opacity: 0.95;
         z-index: 0;
         transition: background-image 0.8s ease, filter 0.4s ease;
@@ -26452,25 +26694,25 @@ function perform_cover_scan($db) {
         transform-origin: center;
       }
 
-      /* Dynamic Light Theme Overrides for Player Modals Only (Player Bar stays 90% dark) */
+      /* Ensure Player Modals remain dark & readable regardless of cover brightness */
       .player-modal-content.theme-light-bg {
-        background-color: rgba(255, 255, 255, 0.85) !important;
-        color: #000000 !important;
+        background-color: #050505 !important;
+        color: #ffffff !important;
       }
 
       .player-modal-content.theme-light-bg .dynamic-blur-bg {
-        filter: blur(45px) brightness(1.15) saturate(1.2) !important;
-        opacity: 1 !important;
+        filter: blur(45px) brightness(0.38) saturate(1.2) !important;
+        opacity: 0.95 !important;
       }
 
       .player-modal-content.theme-light-bg .text-white,
-      .player-modal-content.theme-light-bg .title {
-        color: #000000 !important;
+      .player-modal-content.theme-light-bg .title,
+      .player-modal-content.theme-light-bg .artist {
+        color: #ffffff !important;
       }
 
       .player-modal-content.theme-light-bg .text-secondary {
-        color: #444444 !important;
-        font-weight: 600;
+        color: rgba(255, 255, 255, 0.75) !important;
       }
 
       .player-modal-content .modal-header {
@@ -26570,7 +26812,7 @@ function perform_cover_scan($db) {
         color: #ffffff !important;
       }
 
-      /* Soft Contrast Shadows for Mobile & Desktop Player Modals */
+      /* Clean Thin Stroke & High-Contrast White Player Controls */
       .player-modal-content .title,
       .player-modal-content .artist,
       .player-modal-content #player-modal-title,
@@ -26581,16 +26823,19 @@ function perform_cover_scan($db) {
       .player-modal-content #player-modal-time-left,
       .player-modal-content #desktop-player-modal-current-time,
       .player-modal-content #desktop-player-modal-time-left {
-        text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45) !important;
+        text-shadow: none !important;
+        color: #ffffff !important;
       }
 
       .player-modal-content .player-btn,
       .player-modal-content #player-modal-favorite-btn {
-        filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.4));
+        filter: none !important;
+        color: #ffffff !important;
       }
 
       .player-modal-content .play-btn {
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18) !important;
+        box-shadow: none !important;
+        border: 1px solid rgba(255, 255, 255, 0.25) !important;
       }
 
       .player-modal-content .progress-bar-container {
@@ -26696,7 +26941,7 @@ function perform_cover_scan($db) {
         aspect-ratio: 1/1;
         object-fit: cover;
         border-radius: 12px;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+        box-shadow: none !important;
       }
 
       .player-modal-track-info {
@@ -26707,12 +26952,14 @@ function perform_cover_scan($db) {
       .player-modal-track-info .title {
         font-weight: 700;
         font-size: 1.5rem;
+        color: #ffffff !important;
       }
 
       .player-modal-track-info .artist {
-        color: var(--ytm-secondary-text);
+        color: #ffffff !important;
         font-size: 1rem;
         cursor: pointer;
+        opacity: 0.85;
       }
 
       .player-modal-track-info .artist:hover {
@@ -26728,7 +26975,8 @@ function perform_cover_scan($db) {
         display: flex;
         justify-content: space-between;
         font-size: 0.8rem;
-        color: var(--ytm-secondary-text);
+        color: #ffffff !important;
+        opacity: 0.85;
         margin-top: 0.5rem;
       }
 
@@ -27096,7 +27344,7 @@ function perform_cover_scan($db) {
 
       #artist-hover-tooltip {
         position: absolute;
-        z-index: 1080;
+        z-index: 99999 !important;
         background: var(--ytm-surface-2);
         border: 1px solid #404040;
         border-radius: 12px;
@@ -27885,16 +28133,25 @@ function perform_cover_scan($db) {
         background-color: var(--ytm-surface) !important;
         border: 1px solid var(--ytm-surface-2) !important;
         box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8) !important;
-        border-radius: 14px !important;
-        min-width: 280px !important;
-        padding: 0.5rem 0 !important;
+        border-radius: 12px !important;
+        min-width: 240px !important;
+        padding: 0.25rem 0 !important;
         backdrop-filter: blur(10px) !important;
+        z-index: 100000 !important;
+      }
+
+      .modal {
+        z-index: 1300 !important;
+      }
+
+      .modal-backdrop {
+        z-index: 1290 !important;
       }
 
       .phpmusic-profile-header-card {
         padding: 0;
         border-bottom: 1px solid var(--ytm-surface-2);
-        margin-bottom: 0.5rem;
+        margin-bottom: 0.25rem;
         position: relative;
         overflow: hidden;
       }
@@ -27912,17 +28169,17 @@ function perform_cover_scan($db) {
       }
 
       .phpmusic-profile-header-card-inner {
-        padding: 1rem 1.25rem;
+        padding: 0.75rem 1rem;
         display: flex;
         align-items: center;
-        gap: 1rem;
+        gap: 0.75rem;
         position: relative;
         z-index: 1;
       }
 
       .phpmusic-profile-header-card img {
-        width: 48px;
-        height: 48px;
+        width: 40px;
+        height: 40px;
         border-radius: 50%;
         object-fit: cover;
         border: 1px solid rgba(255, 255, 255, 0.1);
@@ -27936,15 +28193,15 @@ function perform_cover_scan($db) {
       .phpmusic-profile-header-card .info .name {
         font-weight: 700;
         color: var(--ytm-primary-text);
-        font-size: 0.95rem;
-        margin-bottom: 0.15rem;
+        font-size: 0.9rem;
+        margin-bottom: 0.1rem;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
 
       .phpmusic-profile-header-card .info .meta {
-        font-size: 0.75rem;
+        font-size: 0.7rem;
         color: var(--ytm-secondary-text);
         white-space: nowrap;
         overflow: hidden;
@@ -27952,13 +28209,16 @@ function perform_cover_scan($db) {
       }
 
       .phpmusic-profile-dropdown .dropdown-item {
-        padding: 0.75rem 1.25rem !important;
+        padding: 0.5rem 1rem !important;
         color: var(--ytm-secondary-text) !important;
+        font-size: 0.9rem;
         font-weight: 500;
+        cursor: pointer;
         display: flex;
         align-items: center;
-        gap: 0.75rem;
-        transition: all 0.2s;
+        gap: 0.5rem;
+        transition: all 0.2s ease-in-out;
+        background: transparent !important;
       }
 
       .phpmusic-profile-dropdown .dropdown-item:hover {
@@ -27967,12 +28227,24 @@ function perform_cover_scan($db) {
       }
 
       .phpmusic-profile-dropdown .dropdown-item i {
-        font-size: 1.15rem;
+        font-size: 1.05rem;
         color: var(--ytm-secondary-text);
+        transition: color 0.2s;
       }
 
       .phpmusic-profile-dropdown .dropdown-item:hover i {
         color: var(--ytm-primary-text);
+      }
+
+      /* Main Client Floating Mini Player Icon Scaling */
+      #main-mini-player #mmp-play-pause i {
+        font-size: 2.8rem !important;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+      }
+      #main-mini-player #mmp-prev i,
+      #main-mini-player #mmp-next i {
+        font-size: 2.1rem !important;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
       }
 
       .modern-custom-scroll {
@@ -29542,12 +29814,19 @@ function perform_cover_scan($db) {
         box-shadow: 0 25px 60px rgba(0, 0, 0, 0.85), 0 0 0 1px var(--outline-variant);
         border-radius: 4px;
         position: relative;
-        background-image: linear-gradient(45deg, #181113 25%, transparent 25%), linear-gradient(-45deg, #181113 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #181113 75%), linear-gradient(-45deg, transparent 75%, #181113 75%);
+        background-color: #1a1a1a;
+        background-image:
+          linear-gradient(45deg, #333333 25%, transparent 25%, transparent 75%, #333333 75%, #333333),
+          linear-gradient(45deg, #333333 25%, transparent 25%, transparent 75%, #333333 75%, #333333);
         background-size: 20px 20px;
-        background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-        background-color: #0d0809;
+        background-position: 0 0, 10px 10px;
         transition: transform 0.12s ease-out;
         transform-origin: center center;
+      }
+
+      .canvas-wrapper-outer .canvas-container,
+      .canvas-wrapper-outer canvas {
+        border-radius: inherit;
       }
 
       .drawer-panel {
@@ -29561,7 +29840,7 @@ function perform_cover_scan($db) {
         z-index: 40;
         display: none;
         flex-direction: column;
-        box-shadow: 12px 0 35px rgba(0,0,0,0.55);
+        box-shadow: 12px 0 35px rgba(0, 0, 0, 0.55);
       }
 
       .drawer-panel.visible {
@@ -29735,12 +30014,14 @@ function perform_cover_scan($db) {
         position: absolute;
         background: var(--surface-container);
         border: 1px solid var(--outline-variant);
-        border-radius: 99px;
-        padding: 4px 8px;
+        border-radius: 0.75em;
+        padding: 0.25em;
         display: none;
         gap: 4px;
         z-index: 55;
         box-shadow: 0 10px 25px rgba(0,0,0,0.6);
+        white-space: nowrap;
+        align-items: center;
       }
 
       .quick-toolbar.visible {
@@ -29830,22 +30111,25 @@ function perform_cover_scan($db) {
         display: block;
       }
 
-      @media (max-width: 767px) {
+      @media (max-width: 991.98px) {
         .photo-editor-app {
           position: fixed !important;
           top: 64px !important;
           left: 0 !important;
           right: 0 !important;
           bottom: 0 !important;
-          width: 100vw !important;
+          width: 100% !important;
           height: calc(100dvh - 64px) !important;
           max-height: calc(100dvh - 64px) !important;
           z-index: 50 !important;
         }
+
         .pe-app-container {
           flex-direction: column !important;
           height: 100% !important;
+          width: 100% !important;
         }
+
         .pe-header {
           height: 56px !important;
           min-height: 56px !important;
@@ -29854,7 +30138,7 @@ function perform_cover_scan($db) {
           gap: 16px !important;
           justify-content: flex-start !important;
           overflow-x: auto !important;
-          overflow-y: hidden !important;
+          overflow-y: visible !important;
           scrollbar-width: none !important;
         }
         .pe-header::-webkit-scrollbar {
@@ -29935,11 +30219,13 @@ function perform_cover_scan($db) {
           max-height: 50dvh;
           z-index: 101;
         }
+
         .pe-zoom-controls {
-          bottom: 76px !important;
-          transform: translateX(-50%) scale(0.7) !important;
+          bottom: 12px !important;
+          transform: translateX(-50%) scale(0.85) !important;
           transform-origin: bottom center !important;
         }
+
         .pe-workspace {
           flex: 1 !important;
           min-height: 0 !important;
@@ -29986,6 +30272,34 @@ function perform_cover_scan($db) {
         }
         body.sidebar-minimized .sidebar .collapse {
           display: none !important;
+        }
+        body.sidebar-minimized .sidebar .collapse.show {
+          display: block !important;
+          position: absolute;
+          left: 80px;
+          width: 220px;
+          background-color: var(--ytm-surface-2);
+          border: 1px solid var(--ytm-border);
+          border-radius: 0 12px 12px 0;
+          box-shadow: 10px 5px 20px rgba(0,0,0,0.8);
+          z-index: 2000;
+          padding: 0.5rem 0;
+        }
+        body.sidebar-minimized .sidebar .collapse.show .list-unstyled {
+          margin-left: 0 !important;
+          padding-left: 0 !important;
+        }
+        body.sidebar-minimized .sidebar .collapse.show .nav-link {
+          justify-content: flex-start !important;
+          padding: 0.5rem 1rem !important;
+          margin: 0.2rem 0.5rem !important;
+        }
+        body.sidebar-minimized .sidebar .collapse.show .nav-link span {
+          display: inline !important;
+        }
+        body.sidebar-minimized .sidebar .collapse.show .nav-link .bi {
+          font-size: 1.1rem !important;
+          margin-right: 0.75rem !important;
         }
       }
       
@@ -30094,8 +30408,7 @@ function perform_cover_scan($db) {
     <div class="app-container">
       <nav class="sidebar offcanvas-md offcanvas-start" tabindex="-1" id="main-nav-offcanvas">
         <div class="offcanvas-header">
-          <div class="logo">PHP<span>Music</span></div>
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#main-nav-offcanvas" aria-label="Close"></button>
+          <div class="logo d-none">PHP<span>Music</span></div>
         </div>
         <div class="offcanvas-body d-flex flex-column">
           <div class="d-none d-md-flex align-items-center justify-content-between px-4 pt-4 pb-2 mb-2">
@@ -30191,19 +30504,29 @@ function perform_cover_scan($db) {
               <i class="bi bi-people"></i>
               <span>Community</span>
             </a>
-            <a href="#" class="nav-link" data-view="audio_editor">
-              <i class="bi bi-music-note-list"></i>
-              <span>PHPAudio</span>
-            </a>
-            <a href="#" class="nav-link" data-view="photo_editor">
-              <i class="bi bi-image"></i>
-              <span>ImagEditor</span>
-            </a>
             <a href="#" class="nav-link" data-view="get_inbox">
               <i class="bi bi-chat-dots-fill"></i>
               <span>Messages</span>
               <span class="badge bg-danger rounded-pill d-none ms-auto inbox-badge">0</span>
             </a>
+            <a href="#" class="nav-link" data-view="audio_editor">
+              <i class="bi bi-music-note-list"></i>
+              <span>PHPAudio</span>
+            </a>
+            <a href="#imageditorSubmenu" data-bs-toggle="collapse" class="nav-link collapsed">
+              <i class="bi bi-image" style="font-size:1.25rem;width:24px;text-align:center;"></i>
+              <span>ImagEditor</span>
+              <i class="bi bi-chevron-down ms-auto" style="font-size: 0.8rem; transition: transform 0.2s;"></i>
+            </a>
+            <div class="collapse" id="imageditorSubmenu">
+              <ul class="list-unstyled ms-4 mb-0 pb-2">
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 imageditor-filter-link" data-view="get_imageditor_projects" data-filter="all"><i class="bi bi-folder2"></i> All Designs</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 imageditor-filter-link" data-view="get_imageditor_projects" data-filter="starred"><i class="bi bi-star"></i> Starred</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="get_categories" data-cat-type="imageditor"><i class="bi bi-grid-fill"></i> View Categories</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 cat-nav-link" data-view="manage_note_categories" data-cat-type="imageditor"><i class="bi bi-tags"></i> Edit Categories</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 filter-nav-link" data-view="get_projects" data-filter="imageditor"><i class="bi bi-briefcase-fill text-danger"></i> Design Projects</a></li>
+              </ul>
+            </div>
             <a href="#blogsSubmenu" data-bs-toggle="collapse" class="nav-link collapsed">
               <i class="bi bi-journal-richtext" style="font-size:1.25rem;width:24px;text-align:center;"></i>
               <span>My Blogs</span>
@@ -30368,7 +30691,7 @@ function perform_cover_scan($db) {
               <i class="bi bi-arrows-fullscreen"></i>
               <span>Full Screen</span>
             </a>
-            <div class="text-center mt-5 small text-secondary">
+            <div class="text-center mt-5 mb-5 mb-md-0 small text-secondary">
               Made by <a href="https://github.com/HirotakaDango" target="_blank" class="text-decoration-none fw-bold text-white-50">HirotakaDango</a>
             </div>
           </div>
@@ -30379,12 +30702,19 @@ function perform_cover_scan($db) {
           <button class="header-btn" type="button" data-bs-toggle="offcanvas" data-bs-target="#main-nav-offcanvas" aria-controls="main-nav-offcanvas">
             <i class="bi bi-list"></i>
           </button>
-          <div class="input-group search-bar flex-grow-1 position-relative">
-            <input type="text" class="form-control" id="search-input-mobile" placeholder="Search your music" aria-label="Search your music">
-            <button class="btn" type="button" id="search-btn-mobile"><i class="bi bi-search"></i></button>
-            <div id="search-dropdown-mobile" class="search-dropdown d-none"></div>
+          <div class="fw-bold fs-4 ms-2 me-auto" style="letter-spacing: -0.5px; z-index: 1;">PHP<span style="color: var(--ytm-accent);">Music</span></div>
+          <button class="header-btn ms-auto me-2" type="button" id="mobile-search-toggle-btn" style="z-index: 1;">
+            <i class="bi bi-search"></i>
+          </button>
+          <div class="position-absolute top-50 start-50 translate-middle w-100 px-2 d-none align-items-center" id="mobile-search-container" style="z-index: 1070; background: var(--ytm-surface); height: 100%;">
+            <button class="btn border-0 text-white p-0 me-2 flex-shrink-0" type="button" id="mobile-search-back-btn" style="width: 40px; height: 40px;"><i class="bi bi-arrow-left fs-4"></i></button>
+            <div class="input-group search-bar flex-grow-1 position-relative">
+              <input type="text" class="form-control" id="search-input-mobile" placeholder="Search..." aria-label="Search...">
+              <button class="btn" type="button" id="search-btn-mobile"><i class="bi bi-search"></i></button>
+              <div id="search-dropdown-mobile" class="search-dropdown d-none" style="position: absolute; top: 100%; left: -48px; width: calc(100vw - 16px); margin-top: 12px; margin-bottom: 80px;"></div>
+            </div>
           </div>
-          <div class="dropdown logged-in-only position-relative">
+          <div class="dropdown logged-in-only position-relative" style="z-index: 1;">
             <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" class="profile-picture" id="profile-picture-header-mobile" alt="Profile" data-bs-toggle="dropdown" aria-expanded="false" style="cursor: pointer;">
             <span class="position-absolute top-0 start-100 translate-middle p-1 bg-danger border border-dark rounded-circle d-none notif-dot" style="z-index: 10; width: 10px; height: 10px;"></span>
             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end phpmusic-profile-dropdown">
@@ -30470,7 +30800,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="console-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2 d-flex justify-content-between align-items-center" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white mb-0"><i class="bi bi-terminal-fill text-info me-2"></i> Application Console</h5>
@@ -30487,7 +30817,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="how-to-use-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-info-circle-fill text-danger me-2"></i>Comprehensive User Guide</h5>
@@ -30941,7 +31271,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="shortcuts-modal" tabindex="-1">
-      <div class="modal-dialog modal-fullscreen">
+      <div class="modal-dialog modal-dialog-scrollable modal-fullscreen">
         <div class="modal-content" style="background-color: var(--ytm-bg); border: none;">
           <div class="modal-header border-0 pb-2 px-4" style="border-bottom: 1px solid var(--ytm-surface-2) !important; background-color: var(--ytm-surface);">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-keyboard-fill text-danger me-2"></i>Keyboard Shortcuts</h5>
@@ -31547,7 +31877,7 @@ function perform_cover_scan($db) {
     <ul class="context-menu" id="context-menu"></ul>
 
     <div class="modal fade" id="player-modal" tabindex="-1" aria-hidden="true">
-      <div class="modal-dialog modal-fullscreen">
+      <div class="modal-dialog modal-dialog-scrollable modal-fullscreen">
         <div class="modal-content player-modal-content">
           <div class="dynamic-blur-bg" id="mobile-player-bg"></div>
           
@@ -31567,7 +31897,7 @@ function perform_cover_scan($db) {
               <div class="h-100 w-100 overflow-hidden px-4 pb-4 pt-1 d-flex flex-column justify-content-center align-items-center">
                 
                 <div class="d-flex flex-column justify-content-center align-items-center w-100" style="min-height: 0;">
-                  <div class="position-relative shadow-lg" style="width: 100%; max-width: 400px; max-height: 42vh; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; margin: 0 auto;">
+                  <div class="position-relative" style="width: 100%; max-width: 400px; max-height: 42vh; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden; margin: 0 auto;">
                     <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="player-modal-art" alt="Album Art" style="width: 100%; height: 100%; object-fit: cover;">
                     <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
                   </div>
@@ -31580,7 +31910,7 @@ function perform_cover_scan($db) {
                         <h3 id="player-modal-title" class="title fw-bold m-0 marquee-content" style="font-size: 1.5rem;">Song Title</h3>
                       </div>
                       <div class="marquee-container">
-                        <p id="player-modal-artist" class="artist text-secondary m-0 marquee-content" style="font-size: 1.1rem;">Artist Name</p>
+                        <p id="player-modal-artist" class="artist text-white m-0 marquee-content" style="font-size: 1.1rem; opacity: 0.85;">Artist Name</p>
                       </div>
                     </div>
                     <button class="btn p-0 border-0" id="player-modal-favorite-btn" style="background: transparent; flex-shrink: 0;">
@@ -31592,17 +31922,17 @@ function perform_cover_scan($db) {
                     <div class="progress-bar-container" id="player-modal-progress-container" style="padding: 10px 0;">
                       <div class="progress-bar-bg"></div><div class="progress-bar-fg" id="player-modal-progress-bar"></div>
                     </div>
-                    <div class="d-flex justify-content-between small text-secondary mt-1 fw-medium" style="font-size: 0.85rem;">
+                    <div class="d-flex justify-content-between small text-white mt-1 fw-medium" style="font-size: 0.85rem; opacity: 0.85;">
                       <span id="player-modal-current-time">0:00</span><span id="player-modal-time-left">0:00</span>
                     </div>
                   </div>
                   
                   <div class="d-flex justify-content-between align-items-center w-100 mx-auto mb-2">
-                    <button class="player-btn fs-3 text-secondary" id="player-modal-shuffle-btn"><i class="bi bi-shuffle"></i></button>
+                    <button class="player-btn fs-3 text-white" id="player-modal-shuffle-btn"><i class="bi bi-shuffle"></i></button>
                     <button class="player-btn text-white" id="player-modal-prev-btn" style="font-size: 2.5rem;"><i class="bi bi-skip-start-fill"></i></button>
                     <button class="player-btn play-btn bg-white text-dark rounded-circle d-flex align-items-center justify-content-center" id="player-modal-play-pause-btn" style="width: 72px; height: 72px;"><i class="bi bi-play-fill" style="font-size: 3rem; margin-left: 4px;"></i></button>
                     <button class="player-btn text-white" id="player-modal-next-btn" style="font-size: 2.5rem;"><i class="bi bi-skip-end-fill"></i></button>
-                    <button class="player-btn fs-3 text-secondary" id="player-modal-repeat-btn"><i class="bi bi-repeat"></i></button>
+                    <button class="player-btn fs-3 text-white" id="player-modal-repeat-btn"><i class="bi bi-repeat"></i></button>
                   </div>
                 </div>
                 
@@ -31620,7 +31950,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="desktop-player-modal" tabindex="-1" aria-hidden="true">
-      <div class="modal-dialog modal-fullscreen">
+      <div class="modal-dialog modal-dialog-scrollable modal-fullscreen">
         <div class="modal-content player-modal-content" id="dp-modal-content-wrapper">
           <div class="dynamic-blur-bg" id="desktop-player-bg"></div>
           <canvas class="visualizer-canvas immersive-visualizer d-none" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; opacity: 0.4;"></canvas>
@@ -31706,7 +32036,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="connections-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
           <div class="modal-header border-0 pb-2 px-4 pt-4">
             <h5 class="modal-title text-white fw-bold" id="connections-modal-title"><i class="bi bi-people-fill text-info me-2"></i>Connections</h5>
@@ -31720,7 +32050,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="reply-comment-modal" tabindex="-1" data-bs-backdrop="static" style="z-index: 1065;">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
           <div class="modal-header border-0 pb-2 px-4 pt-4">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-reply-fill text-info me-2"></i>Reply</h5>
@@ -31762,7 +32092,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="reply-blog-comment-modal" tabindex="-1" data-bs-backdrop="static" style="z-index: 1065;">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
           <div class="modal-header border-0 pb-2 px-4 pt-4">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-reply-fill text-info me-2"></i>Reply to Comment</h5>
@@ -31804,7 +32134,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="reply-community-post-modal" tabindex="-1" data-bs-backdrop="static" style="z-index: 1065;">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
           <div class="modal-header border-0 pb-2 px-4 pt-4">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-reply-fill text-info me-2"></i>Reply to Post</h5>
@@ -31846,7 +32176,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="comments-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
           <div class="modal-header border-secondary">
             <h5 class="modal-title w-100 text-white">Song Comments</h5>
@@ -31922,7 +32252,7 @@ function perform_cover_scan($db) {
 
     <!-- Media Preview Modal -->
     <div class="modal fade" id="media-preview-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-fullscreen bg-black bg-opacity-75">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-fullscreen bg-black bg-opacity-75">
         <div class="modal-content bg-transparent border-0 h-100">
           <div class="modal-header border-0 justify-content-end p-3 position-absolute w-100 z-3" style="top: 0; gap: 10px;">
             <button id="media-preview-download-btn" class="btn btn-dark rounded-circle d-flex align-items-center justify-content-center" style="width: 44px; height: 44px; background-color: rgba(0,0,0,0.6); border: none; color: #fff;" title="Download Media"><i class="bi bi-download fs-5"></i></button>
@@ -32246,7 +32576,7 @@ function perform_cover_scan($db) {
     <input type="file" id="fileImportJsonBlogs" accept=".json" style="display: none;" />
 
     <div class="modal fade" id="bbcode-info-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-info-circle text-info me-2"></i> Formatting Help</h5>
@@ -32282,7 +32612,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="markdown-info-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-info-circle-fill text-danger me-2"></i> Guide</h5>
@@ -32411,7 +32741,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="download-note-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-sm">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-sm">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-cloud-arrow-down-fill text-danger me-2"></i> Download</h5>
@@ -32438,7 +32768,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="calendar-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content shadow-lg" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px;">
           <div class="modal-header border-0 pb-0">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-calendar3 text-danger me-2"></i> Time & Date</h5>
@@ -32482,7 +32812,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="login-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Login</h5>
@@ -32511,7 +32841,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="register-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Register</h5>
@@ -32542,7 +32872,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="appeal-ban-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-shield-exclamation text-warning me-2"></i> Appeal Account Ban</h5>
@@ -32570,7 +32900,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="settings-appeal-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-shield-exclamation text-warning me-2"></i> Appeal Game Suspension</h5>
@@ -32594,7 +32924,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="forgot-password-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-key-fill text-warning me-2"></i> Reset Password</h5>
@@ -32618,7 +32948,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="reset-password-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-shield-lock-fill text-success me-2"></i> Set New Password</h5>
@@ -32638,7 +32968,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="restore-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Restore Account</h5>
@@ -32670,7 +33000,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="edit-comment-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
           <div class="modal-header border-0 pb-2 px-4 pt-4">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-danger me-2"></i>Edit Comment</h5>
@@ -32718,7 +33048,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="edit-phpboard-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
           <div class="modal-header border-0 pb-2 px-4 pt-4">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-warning me-2"></i>Edit Post</h5>
@@ -32767,7 +33097,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="edit-post-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
           <div class="modal-header border-0 pb-2 px-4 pt-4">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info me-2"></i>Edit Post</h5>
@@ -32815,7 +33145,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="edit-blog-comment-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
           <div class="modal-header border-0 pb-2 px-4 pt-4">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info me-2"></i>Edit Blog Comment</h5>
@@ -32864,7 +33194,7 @@ function perform_cover_scan($db) {
     
     <!-- Dynamic Modals for Editing and Deleting Direct Messages -->
     <div class="modal fade" id="edit-chat-msg-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-danger me-2"></i>Edit Message</h5>
@@ -32889,7 +33219,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="delete-chat-msg-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-sm">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-sm">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px;">
           <div class="modal-body p-4 text-center">
             <i class="bi bi-trash2-fill text-danger mb-3" style="font-size: 3rem; display: block;"></i>
@@ -32906,7 +33236,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="settings-modal" tabindex="-1">
-      <div class="modal-dialog modal-fullscreen">
+      <div class="modal-dialog modal-dialog-scrollable modal-fullscreen">
         <div class="modal-content" style="background-color: var(--ytm-bg);">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-sliders text-secondary me-2"></i> Settings</h5>
@@ -33447,7 +33777,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="group-manage-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 15px 35px rgba(0,0,0,0.5);">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white fw-bold" id="group-manage-title"><i class="bi bi-people-fill text-info me-2"></i>Create Group</h5>
@@ -33485,7 +33815,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="group-info-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 15px 35px rgba(0,0,0,0.5);">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-info-circle text-info me-2"></i>Group Info</h5>
@@ -33530,7 +33860,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="activity-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
           <div class="modal-header border-0 pb-2 d-flex justify-content-between align-items-center">
             <h5 class="modal-title mb-0"><i class="bi bi-activity text-danger me-2"></i>Activity Feed</h5>
@@ -33545,7 +33875,7 @@ function perform_cover_scan($db) {
     </div>
     <!-- Auth Required Warning Modal -->
     <div class="modal fade" id="auth-required-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-sm">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-sm">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
           <div class="modal-body text-center p-4">
             <i class="bi bi-person-lock text-warning mb-3" style="font-size: 3.5rem; display: block;"></i>
@@ -33562,7 +33892,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="request-verification-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-patch-check-fill text-info me-2"></i>Account Verification</h5>
@@ -33578,7 +33908,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="upload-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Upload Music</h5>
@@ -33624,7 +33954,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="genres-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">All Genres</h5>
@@ -33637,7 +33967,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="song-collab-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Manage Song Collaborators</h5>
@@ -33672,7 +34002,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="song-collab-invite-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-secondary">
             <h5 class="modal-title text-white">Song Collaboration Invite</h5>
@@ -33692,7 +34022,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="collab-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Manage Collaborators</h5>
@@ -33726,7 +34056,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="collab-invite-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-secondary">
             <h5 class="modal-title text-white">Collaboration Invite</h5>
@@ -33745,7 +34075,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="create-playlist-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Create New Playlist</h5>
@@ -33775,7 +34105,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="edit-playlist-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Edit Playlist</h5>
@@ -33806,7 +34136,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="import-playlist-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Import Playlist</h5>
@@ -33825,7 +34155,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="import-offline-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Import Offline Library</h5>
@@ -33844,7 +34174,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="import-favorites-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Import Favorites</h5>
@@ -33863,7 +34193,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="import-listen-later-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Import Listen Later</h5>
@@ -33882,7 +34212,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="import-following-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Import Following</h5>
@@ -33901,7 +34231,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="import-notes-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface);">
           <div class="modal-header border-0">
             <h5 class="modal-title text-white">Import Notes</h5>
@@ -33920,7 +34250,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="add-to-playlist-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Add to Playlist</h5>
@@ -33932,7 +34262,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="metadata-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
           <div class="modal-header border-0 pb-0">
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
@@ -33943,7 +34273,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="lyrics-modal" tabindex="-1">
-      <div class="modal-dialog modal-fullscreen">
+      <div class="modal-dialog modal-dialog-scrollable modal-fullscreen">
         <div class="modal-content" style="background: rgba(10, 10, 10, 0.85); backdrop-filter: blur(25px); -webkit-backdrop-filter: blur(25px); border: none;">
           <div class="modal-header border-0 pb-0 pt-4 position-absolute w-100 z-3 align-items-center pe-5">
             <h5 class="modal-title text-start fw-bold text-white opacity-75 text-truncate ps-1" id="lyrics-modal-title" style="letter-spacing: 1px; text-shadow: 0 2px 4px rgba(0,0,0,0.5); max-width: 90%;">Lyrics</h5>
@@ -33955,7 +34285,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="edit-metadata-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Edit Metadata</h5>
@@ -34013,7 +34343,7 @@ function perform_cover_scan($db) {
       </div>
     </div>
     <div class="modal fade" id="artists-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-sm">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-sm">
         <div class="modal-content" style="background: var(--ytm-surface); border: 1px solid #444;">
           <div class="modal-header border-0 pb-0">
             <h5 class="modal-title">Artists</h5>
@@ -34029,7 +34359,7 @@ function perform_cover_scan($db) {
       .share-platform-btn:hover .icon-box { transform: scale(1.15) translateY(-2px); box-shadow: 0 8px 16px rgba(0,0,0,0.6) !important; }
     </style>
     <div class="modal fade" id="share-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(20, 20, 20, 0.95); backdrop-filter: blur(15px); border: 1px solid #444; border-radius: 24px;">
           <div class="modal-header border-0 pb-1">
             <h5 class="modal-title fw-bold text-white" id="share-modal-title">Share</h5>
@@ -34215,7 +34545,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="embed-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-code-slash text-info me-2"></i>Embed Song</h5>
@@ -34234,7 +34564,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="rescan-options-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-arrow-repeat text-info me-2"></i> Re-scan Options</h5>
@@ -34255,7 +34585,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="emergency-scan-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #ff0000; box-shadow: 0 0 20px rgba(255, 0, 0, 0.4);">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-exclamation-triangle-fill text-warning me-2"></i> Database Empty</h5>
@@ -34273,7 +34603,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="full-scan-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content">
           <div class="modal-header border-0 d-flex align-items-center flex-nowrap gap-3">
             <div class="marquee-container flex-grow-1 m-0" style="min-width: 0;">
@@ -34292,7 +34622,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="chart-scan-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content">
           <div class="modal-header border-0 d-flex align-items-center flex-nowrap gap-3">
             <div class="marquee-container flex-grow-1 m-0" style="min-width: 0;">
@@ -34311,7 +34641,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="chart-config-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-sm">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-sm">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-sliders text-danger me-2"></i> Adjust Chart Scan</h5>
@@ -34340,7 +34670,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="vacuum-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content">
           <div class="modal-header border-0">
             <h5 class="modal-title">Database Optimization Log</h5>
@@ -34354,7 +34684,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="rg-player-stats-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content" style="background-color: #030303; border: 1px solid #333; border-radius: 16px;">
           <div class="modal-header border-0 pb-0">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-controller text-danger me-2"></i> Player History</h5>
@@ -34368,7 +34698,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="rg-how-to-play-modal" tabindex="-1">
-      <div class="modal-dialog modal-fullscreen">
+      <div class="modal-dialog modal-dialog-scrollable modal-fullscreen">
         <div class="modal-content" style="background-color: var(--ytm-bg); border: none;">
           <div class="modal-header border-0 pb-2 px-4" style="border-bottom: 1px solid var(--ytm-surface-2) !important; background-color: var(--ytm-surface);">
             <h5 class="modal-title text-white fw-bold"><i class="bi bi-info-circle-fill text-info me-2"></i>How to Play: Rhythm Game</h5>
@@ -34518,7 +34848,7 @@ function perform_cover_scan($db) {
     </div>
 
     <div class="modal fade" id="cover-scan-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content">
           <div class="modal-header border-0 d-flex align-items-center flex-nowrap gap-3">
             <div class="marquee-container flex-grow-1 m-0" style="min-width: 0;">
@@ -34553,7 +34883,7 @@ function perform_cover_scan($db) {
     </div>
     
     <div class="modal fade" id="update-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface);">
           <div class="modal-header border-0">
             <h5 class="modal-title"><i class="bi bi-arrow-clockwise"></i> Check for Updates</h5>
@@ -34568,7 +34898,7 @@ function perform_cover_scan($db) {
 
     <!-- MAIN COMPREHENSIVE API MODAL -->
     <div class="modal fade" id="api-modal" tabindex="-1">
-      <div class="modal-dialog modal-fullscreen">
+      <div class="modal-dialog modal-dialog-scrollable modal-fullscreen">
         <div class="modal-content" style="background-color: var(--ytm-bg);">
           
           <div class="modal-header border-0 align-items-center px-4 py-3" style="border-bottom: 1px solid var(--ytm-surface-2) !important; background-color: var(--ytm-surface);">
@@ -35401,7 +35731,7 @@ curl_close($ch);
 
     <!-- PROJECT MANAGEMENT MODALS -->
     <div class="modal fade" id="project-manage-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-secondary">
             <h5 class="modal-title text-white">Manage Project</h5>
@@ -35428,7 +35758,7 @@ curl_close($ch);
       </div>
     </div>
     <div class="modal fade" id="project-move-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2">
             <h5 class="modal-title text-white"><i class="bi bi-briefcase-fill text-danger me-2"></i> Move Item</h5>
@@ -35437,7 +35767,7 @@ curl_close($ch);
           <div class="modal-body p-4">
             <label class="form-label text-secondary small fw-bold mb-2">SELECT DESTINATION</label>
             <select id="project-move-select" class="form-select bg-dark text-white border-secondary mb-4">
-              <option value="">ðŸ  Personal (Private)</option>
+              <option value="">🏠 Personal (Private)</option>
               <!-- Populated dynamically via JS -->
             </select>
             <button type="button" class="btn btn-info w-100 fw-bold" id="confirm-move-project-btn">Move to Destination</button>
@@ -35446,7 +35776,7 @@ curl_close($ch);
       </div>
     </div>
     <div class="modal fade" id="project-invite-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-secondary">
             <h5 class="modal-title text-white">Project Invitation</h5>
@@ -35608,7 +35938,8 @@ curl_close($ch);
               color: var(--ytm-primary-text) !important;
               font-weight: 600;
               font-size: 0.85rem;
-              padding: 0.4rem 2rem 0.4rem 1rem !important;
+              height: 40px !important;
+              padding: 0 2rem 0 1rem !important;
               cursor: pointer;
               transition: all 0.2s ease-in-out;
               background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23aaaaaa'%3E%3Cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E") !important;
@@ -36091,7 +36422,7 @@ curl_close($ch);
         
             @media (min-width: 769px) {
               .player-bar.visible {
-                z-index: 1048;
+                z-index: 1030;
               }
         
               body:has(.player-bar.visible) .sidebar {
@@ -37155,7 +37486,7 @@ curl_close($ch);
     </template>
 
     <div class="modal fade" id="license-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
             <h5 class="modal-title text-white"><i class="bi bi-shield-check text-success me-2"></i> Software License</h5>
@@ -37192,7 +37523,7 @@ SOFTWARE.</div>
     </div>
 
     <div class="modal fade" id="playlist-downloader-modal" tabindex="-1">
-      <div class="modal-dialog modal-fullscreen">
+      <div class="modal-dialog modal-dialog-scrollable modal-fullscreen">
         <div class="modal-content" style="background-color: var(--ytm-bg);">
           <div class="modal-header border-0" style="background-color: var(--ytm-surface-2);">
             <h5 class="modal-title"><i class="bi bi-cloud-arrow-down-fill"></i> Playlist Downloader</h5>
@@ -37256,7 +37587,7 @@ SOFTWARE.</div>
     </div>
     
     <div class="modal fade" id="song-audio-settings-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(10px); border: 1px solid #444;">
           <div class="modal-header border-0 pb-0">
             <h5 class="modal-title w-100 text-center text-white">Audio Settings for <br><small id="sas-song-title" class="text-secondary"></small></h5>
@@ -37315,10 +37646,52 @@ SOFTWARE.</div>
       <button class="action-btn text-secondary" id="sleep-timer-cancel-btn" title="Cancel Timer"><i class="bi bi-x-circle-fill"></i></button>
     </div>
 
+    <!-- Main Client Floating Mini Player -->
+    <div id="main-mini-player" class="d-none shadow-lg" style="position: fixed; bottom: 80px; right: 20px; width: 210px; height: 210px; background: #000; border-radius: 12px; z-index: 9999; overflow: hidden; color: #fff; aspect-ratio: 1 / 1; box-shadow: 0 16px 40px rgba(0,0,0,0.8);" onmouseenter="document.getElementById('mmp-overlay').style.opacity='1'" onmouseleave="document.getElementById('mmp-overlay').style.opacity='0'">
+
+      <!-- Media Background -->
+      <div style="position: absolute; top:0; left:0; right:0; bottom:0; display: flex; align-items: center; justify-content: center; background: #000;">
+        <img id="mmp-cover" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg'/>" style="width: 100%; height: 100%; object-fit: cover;">
+        <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; opacity: 0.7;"></canvas>
+      </div>
+
+      <!-- Overlay Container -->
+      <div id="mmp-overlay" style="position: absolute; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.5); opacity: 0; transition: opacity 0.2s; display: flex; flex-direction: column; justify-content: space-between; z-index: 10;">
+
+        <!-- Drag Header, PiP & Close -->
+        <div id="mmp-header" style="height: 34px; padding: 6px 10px; cursor: move; display: flex; align-items: center; justify-content: flex-end; gap: 6px; background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent);">
+          <button class="btn btn-sm text-white p-0 border-0 rounded-circle d-flex align-items-center justify-content-center" id="mmp-pip" style="width: 24px; height: 24px; background: rgba(255,255,255,0.2); backdrop-filter: blur(4px);" title="Pop Out Mini Player (PiP)"><i class="bi bi-pip" style="font-size: 0.75rem;"></i></button>
+          <button class="btn btn-sm text-white p-0 border-0 rounded-circle d-flex align-items-center justify-content-center" id="mmp-close" style="width: 24px; height: 24px; background: rgba(255,255,255,0.2); backdrop-filter: blur(4px);" title="Close Mini Player"><i class="bi bi-x-lg" style="font-size: 0.75rem;"></i></button>
+        </div>
+
+        <!-- Center Controls -->
+        <div class="d-flex align-items-center justify-content-center gap-3">
+          <button class="btn text-white p-0 border-0" id="mmp-prev" title="Previous"><i class="bi bi-skip-start-fill" style="text-shadow: 0 2px 8px rgba(0,0,0,0.6);"></i></button>
+          <button class="btn text-white p-0 border-0" id="mmp-play-pause" title="Play/Pause"><i class="bi bi-play-fill" id="mmp-play-icon" style="text-shadow: 0 2px 8px rgba(0,0,0,0.6);"></i></button>
+          <button class="btn text-white p-0 border-0" id="mmp-next" title="Next"><i class="bi bi-skip-end-fill" style="text-shadow: 0 2px 8px rgba(0,0,0,0.6);"></i></button>
+        </div>
+
+        <!-- Title, Artist & Timeline (Matching IDE style) -->
+        <div style="padding: 8px 12px; background: linear-gradient(to top, rgba(0,0,0,0.85), transparent);">
+          <div id="mmp-title" class="fw-bold text-truncate text-white text-center mb-0" style="font-size: 0.8rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">Track Title</div>
+          <div id="mmp-artist" class="text-truncate text-white-50 text-center mb-1" style="font-size: 0.7rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">Artist Name</div>
+          <div style="position: relative; height: 10px; display: flex; align-items: center;">
+            <div style="width: 100%; height: 4px; background: rgba(255,255,255,0.3); border-radius: 2px; pointer-events: none;">
+              <div id="mmp-progress" style="width: 0%; height: 100%; background: #ff0000; border-radius: 2px;"></div>
+            </div>
+            <input type="range" id="mmp-seek" min="0" max="100" value="0" step="0.1" style="-webkit-appearance: none; width: 100%; height: 100%; background: transparent; position: absolute; top: 0; left: 0; margin: 0; cursor: pointer; outline: none; opacity: 0;">
+          </div>
+          <!-- Hidden time elements to prevent JS crashes -->
+          <span id="mmp-cur-time" class="d-none"></span>
+          <span id="mmp-time-left" class="d-none"></span>
+        </div>
+      </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/nosleep/0.12.0/NoSleep.min.js"></script>
     <script>
       // Global Hashchange Interceptor for Playground
@@ -38528,7 +38901,7 @@ SOFTWARE.</div>
           window.handleManualDropdownClick = (e) => {
             const activeDoc = e.target.ownerDocument;
             const toggle = e.target.closest('[data-bs-toggle="dropdown"]');
-    
+
             if (
               toggle &&
               (toggle.id === "profile-picture-header-desktop" ||
@@ -38536,36 +38909,36 @@ SOFTWARE.</div>
             ) {
               return;
             }
-    
+
             if (toggle) {
               e.preventDefault();
               e.stopPropagation();
               e.stopImmediatePropagation(); // Prevents Bootstrap event listener collision
-    
+
               const menu = toggle
                 .closest(".dropdown, .dropup")
                 ?.querySelector(".dropdown-menu");
               if (!menu) return;
               const isOpen = menu.classList.contains("show");
-    
+
               activeDoc.querySelectorAll(".dropdown-menu.show").forEach((m) => {
                 m.classList.remove("show");
-                m.style.display = "none";
+                m.style.display = "";
               });
-    
+
               if (!isOpen) {
                 menu.classList.add("show");
                 menu.style.display = "block";
-    
+
                 const rect = toggle.getBoundingClientRect();
                 const winHeight = activeDoc.defaultView.innerHeight;
-    
+
                 const menuHeight = menu.offsetHeight || 200;
                 const menuWidth = menu.offsetWidth || 180;
-    
+
                 const offsetParent = menu.offsetParent || activeDoc.body;
                 const parentRect = offsetParent.getBoundingClientRect();
-    
+
                 let topPos;
                 if (
                   rect.bottom + menuHeight > winHeight &&
@@ -38575,12 +38948,12 @@ SOFTWARE.</div>
                 } else {
                   topPos = rect.bottom - parentRect.top + 4;
                 }
-    
+
                 let leftPos = rect.right - parentRect.left - menuWidth;
                 if (leftPos < 8) {
                   leftPos = Math.max(8, rect.left - parentRect.left);
                 }
-    
+
                 menu.style.position = "absolute";
                 menu.style.top = topPos + "px";
                 menu.style.left = leftPos + "px";
@@ -38593,7 +38966,7 @@ SOFTWARE.</div>
               const activeDoc = e.target.ownerDocument;
               activeDoc.querySelectorAll(".dropdown-menu.show").forEach((m) => {
                 m.classList.remove("show");
-                m.style.display = "none";
+                m.style.display = "";
               });
             }
           };
@@ -39971,63 +40344,186 @@ SOFTWARE.</div>
           "profile-picture-preview",
         );
     
+        const mmpPlayer = document.getElementById("main-mini-player");
+        const mmpCover = document.getElementById("mmp-cover");
+        const mmpTitle = document.getElementById("mmp-title");
+        const mmpArtist = document.getElementById("mmp-artist");
+        const mmpCurTime = document.getElementById("mmp-cur-time");
+        const mmpTimeLeft = document.getElementById("mmp-time-left");
+        const mmpProgress = document.getElementById("mmp-progress");
+        const mmpProgressContainer = document.getElementById("mmp-progress-container");
+        const mmpPlayPause = document.getElementById("mmp-play-pause");
+        const mmpPlayIcon = document.getElementById("mmp-play-icon");
+        const mmpPrev = document.getElementById("mmp-prev");
+        const mmpNext = document.getElementById("mmp-next");
+        const mmpClose = document.getElementById("mmp-close");
+
+        window.toggleMainMiniPlayer = (forceShow = null) => {
+          if (!mmpPlayer) return;
+          if (forceShow === true && typeof currentSong !== 'undefined' && currentSong) {
+            mmpPlayer.classList.remove('d-none');
+            mmpPlayer.style.display = 'flex';
+          } else if (forceShow === false) {
+            mmpPlayer.classList.add('d-none');
+            mmpPlayer.style.display = 'none';
+          } else if (forceShow === null && typeof currentSong !== 'undefined' && currentSong) {
+            if (mmpPlayer.classList.contains('d-none')) {
+              mmpPlayer.classList.remove('d-none');
+              mmpPlayer.style.display = 'flex';
+            } else {
+              mmpPlayer.classList.add('d-none');
+              mmpPlayer.style.display = 'none';
+            }
+          }
+        };
+
+        if (mmpClose) mmpClose.addEventListener("click", () => toggleMainMiniPlayer(false));
+
+        const mmpPip = document.getElementById("mmp-pip");
+        if (mmpPip) {
+          mmpPip.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (typeof handlePipAction === "function") {
+              handlePipAction();
+            } else if (pipBtnDesktop) {
+              pipBtnDesktop.click();
+            }
+          });
+        }
+
+        const mmpSeek = document.getElementById("mmp-seek");
+        if (mmpSeek) {
+          mmpSeek.addEventListener("input", (e) => {
+            if (!audio.duration || !isFinite(audio.duration)) return;
+            const pct = e.target.value;
+            if (mmpProgress) mmpProgress.style.width = `${pct}%`;
+          });
+          mmpSeek.addEventListener("change", (e) => {
+            if (audio.duration && isFinite(audio.duration)) {
+              audio.currentTime = (e.target.value / 100) * audio.duration;
+            }
+          });
+        }
+
+        if (mmpPlayer) {
+          const mmpHeader = document.getElementById("mmp-header");
+          let isDraggingMmp = false, mmpStartX = 0, mmpStartY = 0, mmpInitialLeft = 0, mmpInitialTop = 0;
+
+          const startDragMmp = (e) => {
+            if (e.target.closest("button")) return;
+            isDraggingMmp = true;
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            const rect = mmpPlayer.getBoundingClientRect();
+            mmpStartX = clientX;
+            mmpStartY = clientY;
+            mmpInitialLeft = rect.left;
+            mmpInitialTop = rect.top;
+            mmpPlayer.style.bottom = "auto";
+            mmpPlayer.style.right = "auto";
+            mmpPlayer.style.left = mmpInitialLeft + "px";
+            mmpPlayer.style.top = mmpInitialTop + "px";
+            mmpPlayer.style.transition = "none";
+            e.preventDefault();
+          };
+
+          const moveDragMmp = (e) => {
+            if (!isDraggingMmp) return;
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            
+            let newLeft = mmpInitialLeft + (clientX - mmpStartX);
+            let newTop = mmpInitialTop + (clientY - mmpStartY);
+
+            const maxX = window.innerWidth - mmpPlayer.offsetWidth;
+            const maxY = window.innerHeight - mmpPlayer.offsetHeight;
+            
+            newLeft = Math.max(0, Math.min(newLeft, maxX));
+            newTop = Math.max(0, Math.min(newTop, maxY));
+
+            mmpPlayer.style.left = newLeft + "px";
+            mmpPlayer.style.top = newTop + "px";
+          };
+
+          const stopDragMmp = () => {
+            if (isDraggingMmp) isDraggingMmp = false;
+          };
+
+          mmpHeader.addEventListener("mousedown", startDragMmp);
+          mmpHeader.addEventListener("touchstart", startDragMmp, { passive: false });
+          document.addEventListener("mousemove", moveDragMmp);
+          document.addEventListener("touchmove", moveDragMmp, { passive: false });
+          document.addEventListener("mouseup", stopDragMmp);
+          document.addEventListener("touchend", stopDragMmp);
+        }
+
         const playerElements = {
           art: [
             document.getElementById("player-art-desktop"),
             document.getElementById("player-art-mobile"),
             document.getElementById("player-modal-art"),
             document.getElementById("desktop-player-modal-art"),
-          ],
+            mmpCover
+          ].filter(Boolean),
           title: [
             document.getElementById("player-title-desktop"),
             document.getElementById("player-title-mobile"),
             document.getElementById("player-modal-title"),
             document.getElementById("desktop-player-modal-title"),
-          ],
+            mmpTitle
+          ].filter(Boolean),
           artist: [
             document.getElementById("player-artist-desktop"),
             document.getElementById("player-artist-mobile"),
             document.getElementById("player-modal-artist"),
             document.getElementById("desktop-player-modal-artist"),
-          ],
+            mmpArtist
+          ].filter(Boolean),
           currentTime: [
             document.getElementById("current-time"),
             document.getElementById("player-modal-current-time"),
             document.getElementById("desktop-player-modal-current-time"),
-          ],
+            mmpCurTime
+          ].filter(Boolean),
           timeLeft: [
             document.getElementById("time-left"),
             document.getElementById("player-modal-time-left"),
             document.getElementById("desktop-player-modal-time-left"),
-          ],
+            mmpTimeLeft
+          ].filter(Boolean),
           progress: [
             document.getElementById("progress-bar"),
             document.getElementById("player-modal-progress-bar"),
             document.getElementById("desktop-player-modal-progress-bar"),
-          ],
+            mmpProgress
+          ].filter(Boolean),
           progressContainer: [
             document.getElementById("progress-container"),
             document.getElementById("player-modal-progress-container"),
             document.getElementById("desktop-player-modal-progress-container"),
-          ],
+            mmpProgressContainer
+          ].filter(Boolean),
           playPauseBtn: [
             document.getElementById("play-pause-btn-desktop"),
             document.getElementById("play-pause-btn-mobile"),
             document.getElementById("player-modal-play-pause-btn"),
             document.getElementById("desktop-player-modal-play-pause-btn"),
-          ],
+            mmpPlayPause
+          ].filter(Boolean),
           prevBtn: [
             document.getElementById("prev-btn-desktop"),
             document.getElementById("prev-btn-mobile"),
             document.getElementById("player-modal-prev-btn"),
             document.getElementById("desktop-player-modal-prev-btn"),
-          ],
+            mmpPrev
+          ].filter(Boolean),
           nextBtn: [
             document.getElementById("next-btn-desktop"),
             document.getElementById("next-btn-mobile"),
             document.getElementById("player-modal-next-btn"),
             document.getElementById("desktop-player-modal-next-btn"),
-          ],
+            mmpNext
+          ].filter(Boolean),
           shuffleBtn: [
             document.getElementById("shuffle-btn-desktop"),
             document.getElementById("shuffle-btn-mobile"),
@@ -42631,15 +43127,21 @@ SOFTWARE.</div>
     
         const formatArtistsHTML = (artistString, userId, isCollaborative = 1) => {
           if (!artistString) return escapeHTML("Unknown Artist");
+          
+          const str = String(artistString);
+          const cleanArtistString = str.includes("(id:") ? str.replace(/\s*\(id:\d+\)/gi, "") : str;
+          
           if (isCollaborative == 1) {
-            const artistsList = artistString
+            const artistsList = cleanArtistString
               .split(
                 /\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i,
               )
               .filter((a) => a && a.trim() !== "");
-            // Move icon to the front, and ONLY pass the User ID to the primary (first) artist in the split!
+              
+            const iconHtml = artistsList.length > 1 ? '<i class="bi bi-people-fill text-secondary me-1" title="Official Collaboration" style="font-size: 0.75rem;"></i> ' : '';
+
             return (
-              '<i class="bi bi-people-fill text-secondary me-1" title="Official Collaboration" style="font-size: 0.75rem;"></i> ' +
+              iconHtml +
               artistsList
                 .map(
                   (a, index) =>
@@ -42648,7 +43150,7 @@ SOFTWARE.</div>
                 .join(", ")
             );
           } else {
-            return `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(artistString)}" data-userid="${userId || ""}">${escapeHTML(artistString)}</span>`;
+            return `<span class="artist-link hover-underline" data-artist="${encodeURIComponent(cleanArtistString)}" data-userid="${userId || ""}">${escapeHTML(cleanArtistString)}</span>`;
           }
         };
     
@@ -44417,6 +44919,18 @@ SOFTWARE.</div>
               }
               activeLink = document.querySelector('a[href="#notesSubmenu"]');
               break;
+            case "get_imageditor_projects":
+              const ieFilter = currentView.filter || "all";
+              const ieFilterLink = document.querySelector(`.imageditor-filter-link[data-view="${viewType}"][data-filter="${ieFilter}"]`) || document.querySelector(`.imageditor-filter-link[data-filter="${ieFilter}"]`);
+              if (ieFilterLink) {
+                ieFilterLink.classList.add("active", "text-white");
+                const collapseParent = ieFilterLink.closest(".collapse");
+                if (collapseParent && !collapseParent.classList.contains("show")) {
+                  bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              }
+              activeLink = document.querySelector('a[href="#imageditorSubmenu"]');
+              break;
             case "get_projects":
             case "manage_note_categories":
             case "get_categories":
@@ -44438,6 +44952,15 @@ SOFTWARE.</div>
                 }
               } else if (currentView.filter === "blog") {
                 activeLink = document.querySelector('a[href="#blogsSubmenu"]');
+                const subLink = document.querySelector(navSelector);
+                if (subLink) {
+                  subLink.classList.add("active", "text-white");
+                  const collapseParent = subLink.closest(".collapse");
+                  if (collapseParent && !collapseParent.classList.contains("show"))
+                    bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              } else if (currentView.filter === "imageditor") {
+                activeLink = document.querySelector('a[href="#imageditorSubmenu"]');
                 const subLink = document.querySelector(navSelector);
                 if (subLink) {
                   subLink.classList.add("active", "text-white");
@@ -44564,6 +45087,7 @@ SOFTWARE.</div>
           if (blogOver && blogOver.classList.contains("active")) {
             saveCurrentBlog(true);
             blogOver.classList.remove("active");
+            toggleMainMiniPlayer(false);
           }
     
           if (localRhythmGame) {
@@ -44593,6 +45117,9 @@ SOFTWARE.</div>
           }
           if (typeof hideArtistTooltip === "function") {
             hideArtistTooltip();
+          }
+          if (typeof stopPresenceSync === "function") {
+            stopPresenceSync();
           }
     
           selectedSongs.clear();
@@ -44661,6 +45188,16 @@ SOFTWARE.</div>
     
           const pageHeaderEl = document.querySelector(".page-header");
           const mainContentEl = document.getElementById("main-content");
+          const viewsWithMiniPlayer = ["photo_editor", "get_imageditor_projects", "get_inbox", "audio_editor", "view_blog", "get_notes", "get_tasks", "get_blogs"];
+          
+          if (viewsWithMiniPlayer.includes(currentView.type)) {
+            if (typeof currentSong !== 'undefined' && currentSong) toggleMainMiniPlayer(true);
+          } else if (currentView.type === "rhythm_game") {
+            toggleMainMiniPlayer(false);
+          } else {
+            toggleMainMiniPlayer(false);
+          }
+
           if (
             currentView.type === "get_inbox" ||
             currentView.type === "rhythm_game" ||
@@ -44680,20 +45217,6 @@ SOFTWARE.</div>
               mainContentEl.style.display = "flex";
               mainContentEl.style.flexDirection = "column";
             }
-            if (
-              ["rhythm_game", "photo_editor", "get_inbox"].includes(currentView.type)
-            ) {
-              if (
-                currentView.type === "rhythm_game" &&
-                isPlaying &&
-                typeof togglePlayPause === "function"
-              ) {
-                togglePlayPause();
-              }
-              if (playerBar) playerBar.classList.add("d-none");
-              document.body.classList.remove("player-visible");
-              adjustSidebarPadding();
-            }
           } else {
             if (pageHeaderEl) pageHeaderEl.classList.remove("d-none");
             contentArea.style.padding = "";
@@ -44709,6 +45232,17 @@ SOFTWARE.</div>
               mainContentEl.style.display = "";
               mainContentEl.style.flexDirection = "";
             }
+          }
+
+          // Handle Player Bar Visibility
+          if (viewsWithMiniPlayer.includes(currentView.type) || currentView.type === "rhythm_game") {
+            if (currentView.type === "rhythm_game" && isPlaying && typeof togglePlayPause === "function") {
+              togglePlayPause();
+            }
+            if (playerBar) playerBar.classList.add("d-none");
+            document.body.classList.remove("player-visible");
+            adjustSidebarPadding();
+          } else {
             if (playerBar && currentSong) {
               playerBar.classList.remove("d-none");
               document.body.classList.add("player-visible");
@@ -47368,6 +47902,98 @@ SOFTWARE.</div>
               allContentloaded = true;
               break;
     
+            case "get_imageditor_projects":
+              let ieFilter = currentView.filter || "all";
+              let ieFilterName = ieFilter === "all" ? "All Designs" : ieFilter === "starred" ? "Starred Designs" : "Category Designs";
+              if (ieFilter.startsWith("proj_")) ieFilterName = "Workspace Designs";
+              updateContentTitle(ieFilterName, !!currentUser);
+
+              if (currentUser) {
+                if (!window.imageditorCategories || window.imageditorCategories.length === 0) {
+                  window.imageditorCategories = (await fetchData("?action=get_note_categories&type=imageditor")) || [];
+                }
+                
+                contentArea.innerHTML = `
+                  <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3 mt-2">
+                    <div class="position-relative" style="max-width: 400px; width: 100%;">
+                      <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                      <input type="text" id="imageditor-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search designs..." value="${escapeHTML(currentView.searchQuery || "")}">
+                    </div>
+                    <button class="btn btn-danger rounded-pill px-4 shadow-sm fw-bold ms-2 text-nowrap" onclick="loadView({type: 'photo_editor', param: '', sort: '', filter: '${ieFilter}'})">
+                      <i class="bi bi-plus-lg me-1"></i> New
+                    </button>
+                  </div>
+                  <div id="imageditor-grid" class="notes-grid px-md-3 mb-5" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;"></div>
+                `;
+
+                document.getElementById("imageditor-search-input").addEventListener("input", (e) => {
+                  clearTimeout(window.ieSearchTimeout);
+                  window.ieSearchTimeout = setTimeout(() => {
+                    currentView.searchQuery = e.target.value;
+                    loadView(currentView);
+                  }, 400);
+                });
+
+                if (currentView.searchQuery) pageParams.set("q", currentView.searchQuery);
+                pageParams.set("filter", ieFilter);
+
+                const projects = await fetchData(`?action=get_imageditor_projects&${pageParams.toString()}`);
+                const grid = document.getElementById("imageditor-grid");
+
+                if (projects && projects.length > 0) {
+                  let filteredProjects = projects;
+                  if (currentView.searchQuery) {
+                    const q = currentView.searchQuery.toLowerCase();
+                    filteredProjects = projects.filter(p => (p.title || '').toLowerCase().includes(q));
+                  }
+
+                  if (filteredProjects.length > 0) {
+                    grid.innerHTML = filteredProjects.map(p => {
+                      const catName = p.category_name || "Uncategorized";
+                      return `
+                        <div class="note-card bg-dark text-white border-secondary hover-bg-dark pe-card-item" data-id="${p.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
+                          ${p.starred == 1 ? `<button class="card-star-btn starred pe-star-toggle m-2" data-id="${p.public_id}"><i class="bi bi-star-fill text-warning"></i></button>` : `<button class="card-star-btn pe-star-toggle" data-id="${p.public_id}"><i class="bi bi-star"></i></button>`}
+                          <div class="d-flex align-items-center justify-content-center bg-black rounded mb-3" style="aspect-ratio: 16/9; border: 1px solid rgba(255,255,255,0.05);">
+                            <i class="bi bi-image text-secondary opacity-50" style="font-size: 3rem;"></i>
+                          </div>
+                          <div class="fw-bold fs-5 mb-1 text-truncate pe-4">${escapeHTML(p.title || 'Untitled')}</div>
+                          <div class="text-secondary small mb-2">${p.width} x ${p.height} px</div>
+                          <div class="mt-auto pt-3 d-flex justify-content-between align-items-center border-top border-secondary opacity-75">
+                            <span class="small text-secondary">${new Date(p.updated_at.replace(' ', 'T') + 'Z').toLocaleDateString()}</span>
+                            ${p.category && p.category !== 'all' ? `<span class="note-chip">${escapeHTML(catName)}</span>` : '<span></span>'}
+                          </div>
+                        </div>
+                      `;
+                    }).join("");
+
+                    grid.querySelectorAll('.pe-card-item').forEach(card => {
+                      card.addEventListener('click', (e) => {
+                        if (e.target.closest('.pe-star-toggle')) {
+                          e.stopPropagation();
+                          const icon = e.target.closest('.pe-star-toggle').querySelector('i');
+                          const isStarred = icon.classList.contains('bi-star-fill');
+                          fetchData("?action=toggle_imageditor_star", {
+                            method: "POST",
+                            body: JSON.stringify({ public_id: card.dataset.id, starred: isStarred ? 0 : 1 })
+                          }).then(() => loadView(currentView));
+                          return;
+                        }
+                        loadView({ type: 'photo_editor', param: card.dataset.id, sort: '', filter: ieFilter });
+                      });
+                    });
+                  } else {
+                    grid.innerHTML = '<div class="text-center p-5 text-secondary w-100" style="grid-column: 1/-1;">No designs match your search.</div>';
+                  }
+                } else {
+                  grid.style.display = "block";
+                  grid.innerHTML = '<div class="text-center text-secondary py-5 w-100">No designs found. Click "New" to start creating!</div>';
+                }
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to view your designs.</div>`;
+              }
+              allContentloaded = true;
+              break;
+              
             case "photo_editor":
               updateContentTitle("ImagEditor", !!currentUser);
               if (currentUser) {
@@ -47377,6 +48003,7 @@ SOFTWARE.</div>
                     .pe-header { height: 56px; background-color: #0d0a0b; border-bottom: 1px solid var(--outline-variant); display: flex; align-items: center; justify-content: space-between; padding: 0 12px; z-index: 30; flex-shrink: 0; }
                     @media (min-width: 768px) { .pe-header { padding: 0 20px; } }
                     .pe-header-group { display: flex; align-items: center; gap: 8px; }
+                    .pe-header-group .action-btn { height: 34px; box-sizing: border-box; padding: 0 10px !important; }
                     @media (min-width: 768px) { .pe-header-group { gap: 12px; } }
                     .pe-app-container { flex: 1; display: flex; height: 100%; position: relative; overflow: hidden; }
                     .pe-rail-nav { width: 72px; background-color: #0d0a0b; border-right: 1px solid var(--outline-variant); display: flex; flex-direction: column; padding: 8px; gap: 4px; z-index: 30; flex-shrink: 0; }
@@ -47421,9 +48048,8 @@ SOFTWARE.</div>
                       -webkit-appearance: none;
                       appearance: none;
                       width: 100%;
-                      background: rgba(255, 255, 255, 0.2);
-                      height: 4px;
-                      border-radius: 9999px;
+                      background: transparent;
+                      height: 20px;
                       padding: 0;
                       margin: 0;
                       border: none;
@@ -47432,16 +48058,16 @@ SOFTWARE.</div>
                     .photo-editor-app input[type="range"]::-webkit-slider-runnable-track {
                       width: 100%;
                       height: 4px;
-                      background: transparent;
+                      background: rgba(255, 255, 255, 0.2);
                       border: none;
                       border-radius: 9999px;
                     }
                     .photo-editor-app input[type="range"]::-webkit-slider-thumb {
                       -webkit-appearance: none;
                       appearance: none;
-                      height: 12px;
-                      width: 12px;
-                      margin-top: -4px;
+                      height: 14px;
+                      width: 14px;
+                      margin-top: -5px;
                       border: 2px solid var(--primary);
                       border-radius: 50%;
                       background: var(--primary);
@@ -47455,13 +48081,13 @@ SOFTWARE.</div>
                     .photo-editor-app input[type="range"]::-moz-range-track {
                       width: 100%;
                       height: 4px;
-                      background: transparent;
+                      background: rgba(255, 255, 255, 0.2);
                       border-radius: 9999px;
                       border: none;
                     }
                     .photo-editor-app input[type="range"]::-moz-range-thumb {
-                      height: 12px;
-                      width: 12px;
+                      height: 14px;
+                      width: 14px;
                       border: 2px solid var(--primary);
                       border-radius: 50%;
                       background: var(--primary);
@@ -47478,7 +48104,6 @@ SOFTWARE.</div>
                       <div class="pe-header-group">
                         <div class="pe-header-group" style="gap: 8px;">
                           <div class="brand-mark">IE</div>
-                          <span class="pe-hidden-sm" style="font-weight: 800; font-size: 0.9rem; letter-spacing: -0.02em;">ImagEditor</span>
                         </div>
                         <button class="pe-btn-outline" onclick="imageditor.openProjectsModal()" title="Open Projects Manager">
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--primary);"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
@@ -47488,9 +48113,24 @@ SOFTWARE.</div>
                         <div class="pe-input-wrapper">
                           <input type="text" id="projectTitleInput" class="pe-title-input" value="Untitled Project" onchange="imageditor.updateProjectTitle(this.value)" placeholder="Project Title...">
                         </div>
-                        <button class="pe-btn-outline pe-hidden-md" onclick="imageditor.showModal('resizeModal')">
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px; color: var(--primary);"><rect x="2" y="3" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
-                          <span id="canvasSizeLabel">1080 x 1080 px</span>
+                        <div id="pe-save-status" class="pe-hidden-sm" style="font-size: 0.7rem; color: var(--on-surface-variant); white-space: nowrap; display: flex; align-items: center; gap: 4px;"><i class="bi bi-cloud-check"></i> Saved</div>
+                        <div style="position: relative;" class="custom-opt-dropdown" id="peDropdown">
+                          <button class="action-btn custom-opt-toggle" style="padding: 0 10px; color: var(--primary);" title="Save & Options" type="button">
+                            <i class="bi bi-three-dots-vertical"></i>
+                          </button>
+                          <ul class="dropdown-menu dropdown-menu-dark shadow-lg custom-opt-menu" style="position: absolute; right:0; top:100%; display: none; z-index: 1060; min-width: 200px;">
+                            <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="imageditor.manualSave()"><i class="bi bi-floppy"></i> Save Now</button></li>
+                            <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="imageditor.toggleStar()"><i class="bi bi-star" id="peStarIcon"></i> Toggle Star</button></li>
+                            <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-info fw-bold" onclick="window.populateProjectMoveSelect('imageditor')" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</button></li>
+                            <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
+                            <li class="px-3 py-1"><label class="text-secondary small fw-bold mb-1">Category</label><select id="peCategorySelect" class="form-select form-select-sm bg-dark text-white border-secondary" onchange="imageditor.manualSave()"><option value="all">Uncategorized</option></select></li>
+                          </ul>
+                        </div>
+                        <button class="action-btn pe-hidden-md" style="padding: 0 10px; color: var(--primary);" onclick="imageditor.manualSave()" title="Save Project">
+                          <i class="bi bi-floppy"></i>
+                        </button>
+                        <button class="pe-btn-outline" id="canvasSizeBtn" onclick="imageditor.showModal('resizeModal')" title="Canvas Size: 1080 x 1080 px">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--primary);"><rect x="2" y="3" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
                         </button>
                       </div>
                       <div class="pe-header-group">
@@ -47879,10 +48519,15 @@ SOFTWARE.</div>
                         </div>
                         <div class="drawer-content">
                           <div class="control-group" style="border: none; padding: 0;">
-                            <span class="control-label">Solid Color</span>
-                            <div class="color-picker-wrap">
-                              <input type="color" id="bgColorPicker" class="color-input" value="#0d0809" onchange="imageditor.setCanvasBgColor(this.value)">
-                              <span style="font-size: 0.75rem; font-family: monospace;">Choose Color</span>
+                            <span class="control-label">Solid Color & Transparent</span>
+                            <div class="d-flex gap-2">
+                              <div class="color-picker-wrap flex-grow-1">
+                                <input type="color" id="bgColorPicker" class="color-input" value="#0d0809" onchange="imageditor.setCanvasBgColor(this.value)">
+                                <span style="font-size: 0.75rem; font-family: monospace;">Color</span>
+                              </div>
+                              <button class="action-btn" style="padding: 6px 12px; background-image: linear-gradient(45deg, #333 25%, transparent 25%, transparent 75%, #333 75%, #333), linear-gradient(45deg, #333 25%, transparent 25%, transparent 75%, #333 75%, #333); background-size: 10px 10px; background-position: 0 0, 5px 5px;" onclick="imageditor.setCanvasBgColor(null)" title="Transparent Background">
+                                <i class="bi bi-eraser-fill text-white" style="text-shadow: 0 1px 2px #000;"></i>
+                              </button>
                             </div>
                           </div>
                           <div class="control-group" style="border: none; padding: 0;">
@@ -47894,29 +48539,35 @@ SOFTWARE.</div>
                               <button class="pe-gradient-btn" style="background: linear-gradient(to right, #18181b, #000000);" onclick="imageditor.setCanvasBgGradient('#18181b', '#000000')"></button>
                             </div>
                           </div>
-                          <button class="action-btn" style="width: 100%;" onclick="imageditor.setCanvasBgColor(null)">Set Transparent</button>
                         </div>
                       </div>
                       <main class="pe-workspace" id="workspace">
+                        <div id="imageditorFloatingPresence" class="floating-presence-container" style="bottom: 80px; right: 20px;"></div>
                         <div class="canvas-wrapper-outer" id="canvasContainer">
                           <canvas id="mainCanvas"></canvas>
                           <div class="grid-overlay" id="gridOverlay"></div>
                         </div>
                         <div class="quick-toolbar" id="quickToolbar">
-                          <button class="action-btn" style="padding: 4px 10px; font-size: 0.75rem;" onclick="imageditor.openPropertiesPanel()" title="Settings">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                          <button class="action-btn border-0" style="padding: 6px 12px; font-size: 1rem;" onclick="imageditor.cropActiveImage()" title="Crop Image" id="pe-crop-btn">
+                            <i class="bi bi-crop"></i>
                           </button>
-                          <button class="action-btn" style="padding: 4px 10px; font-size: 0.75rem;" onclick="imageditor.duplicateActive()" title="Duplicate">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                          <button class="action-btn border-0" style="padding: 6px 12px; font-size: 1rem;" onclick="imageditor.openPropertiesPanel()" title="Settings">
+                            <i class="bi bi-sliders"></i>
                           </button>
-                          <button class="action-btn" style="padding: 4px 10px; font-size: 0.75rem;" onclick="imageditor.toggleLockActive()" title="Lock / Unlock">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                          <button class="action-btn border-0" style="padding: 6px 12px; font-size: 1rem;" onclick="imageditor.duplicateActive()" title="Duplicate">
+                            <i class="bi bi-copy"></i>
                           </button>
-                          <button class="action-btn" style="padding: 4px 10px; font-size: 0.75rem;" onclick="imageditor.flipActive('X')" title="Flip Horizontal">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><polyline points="17 3 21 7 17 11"></polyline><path d="M3 7h18"></path><polyline points="7 13 3 17 7 21"></polyline><path d="M21 17H3"></path></svg>
+                          <button class="action-btn border-0" style="padding: 6px 12px; font-size: 1rem;" onclick="imageditor.toggleLockActive()" title="Lock / Unlock">
+                            <i class="bi bi-lock"></i>
                           </button>
-                          <button class="action-btn" style="padding: 4px 10px; font-size: 0.75rem; color: var(--primary);" onclick="imageditor.deleteActive()" title="Delete">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                          <button class="action-btn border-0" style="padding: 6px 12px; font-size: 1rem;" onclick="imageditor.flipActive('X')" title="Flip Horizontal">
+                            <i class="bi bi-symmetry-horizontal"></i>
+                          </button>
+                          <button class="action-btn border-0" style="padding: 6px 12px; font-size: 1rem;" onclick="imageditor.flipActive('Y')" title="Flip Vertical">
+                            <i class="bi bi-symmetry-vertical"></i>
+                          </button>
+                          <button class="action-btn border-0" style="padding: 6px 12px; font-size: 1rem; color: var(--primary);" onclick="imageditor.deleteActive()" title="Delete">
+                            <i class="bi bi-trash"></i>
                           </button>
                         </div>
                         <div class="properties-panel" id="propertiesPanel">
@@ -47966,12 +48617,12 @@ SOFTWARE.</div>
                               <div class="pe-space-y-4" style="gap: 8px;">
                                 <textarea id="prop-text-value" class="input-text" rows="2" oninput="window.imageditor.updateProperty('text', this.value)"></textarea>
                                 <select id="prop-font-family" class="input-select" onchange="window.imageditor.updateProperty('fontFamily', this.value)">
-                                  <option value="Inter">Inter</option>
                                   <option value="Roboto">Roboto</option>
-                                  <option value="Montserrat">Montserrat</option>
-                                  <option value="Oswald">Oswald</option>
-                                  <option value="Playfair Display">Playfair Display</option>
-                                  <option value="Pacifico">Pacifico Script</option>
+                                  <option value="Arial">Arial</option>
+                                  <option value="Impact">Impact</option>
+                                  <option value="Courier New">Courier</option>
+                                  <option value="Georgia">Georgia</option>
+                                  <option value="Times New Roman">Times</option>
                                 </select>
                                 <div class="pe-grid-3">
                                   <button class="action-btn" style="padding: 6px;" id="btn-bold" onclick="window.imageditor.toggleTextProperty('fontWeight', 'bold', 'normal')"><b>B</b></button>
@@ -47992,11 +48643,11 @@ SOFTWARE.</div>
                           </div>
                         </div>
                         <div class="pe-zoom-controls">
-                          <button class="pe-zoom-btn" onclick="imageditor.zoomOut()" title="Zoom Out">-</button>
+                          <button class="pe-zoom-btn" onclick="imageditor.zoomOut()" title="Zoom Out"><i class="bi bi-dash"></i></button>
                           <span id="zoomLevelLabel" class="pe-zoom-label">100%</span>
-                          <button class="pe-zoom-btn" onclick="imageditor.zoomIn()" title="Zoom In">+</button>
+                          <button class="pe-zoom-btn" onclick="imageditor.zoomIn()" title="Zoom In"><i class="bi bi-plus"></i></button>
                           <div class="pe-zoom-divider"></div>
-                          <button class="pe-zoom-fit" onclick="imageditor.zoomFit()">Fit Canvas</button>
+                          <button class="pe-zoom-fit" onclick="imageditor.zoomFit()"><i class="bi bi-fullscreen"></i></button>
                         </div>
                       </main>
                     </div>
@@ -48090,6 +48741,23 @@ SOFTWARE.</div>
                         </div>
                       </div>
                     </div>
+                    <div class="modal-overlay" id="cropModal">
+                      <div class="modal-box" style="padding: 20px; max-width: 600px;">
+                        <div class="pe-modal-header">
+                          <h3 class="pe-modal-title">Crop Image</h3>
+                          <button class="drawer-close" onclick="imageditor.closeModal('cropModal')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                        <div style="width: 100%; max-height: 400px; display: flex; justify-content: center; background: #000; overflow: hidden; margin-bottom: 16px; border-radius: 8px;">
+                          <img id="cropTargetImage" src="" style="max-width: 100%; max-height: 400px; display: block;">
+                        </div>
+                        <div class="pe-modal-footer">
+                          <button class="action-btn" onclick="imageditor.closeModal('cropModal')">Cancel</button>
+                          <button class="action-btn btn-primary" onclick="imageditor.applyCrop()">Apply Crop</button>
+                        </div>
+                      </div>
+                    </div>
                     <div class="modal-overlay" id="projectsModal">
                       <div class="modal-box" style="padding: 20px; max-width: 576px;">
                         <div class="pe-modal-header">
@@ -48120,7 +48788,7 @@ SOFTWARE.</div>
                             </div>
                             <div style="margin-bottom: 12px; padding: 10px; background-color: rgba(69, 26, 3, 0.4); border: 1px solid rgba(120, 53, 15, 0.6); border-radius: 8px; display: flex; gap: 8px; align-items: flex-start; color: #fbbf24;">
                               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; margin-top: 2px; flex-shrink: 0;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-                              <p style="font-size: 0.7rem; line-height: 1.25; color: #fde68a; margin: 0;">Projects are strictly saved in this browser. Clearing browser data will delete them. <b>Always backup!</b></p>
+                              <p style="font-size: 0.7rem; line-height: 1.25; color: #fde68a; margin: 0;">A project with many layers will take a long time to save and load. Please be patient.</p>
                             </div>
                             <div style="display: flex; flex-direction: column; gap: 8px; max-height: 256px; overflow-y: auto; padding-right: 4px;" id="projectsListContainer">
                             </div>
@@ -48505,7 +49173,7 @@ SOFTWARE.</div>
                 if (!document.getElementById("status-manage-modal")) {
                   const modalHtml = `
                           <div class="modal fade" id="status-manage-modal" tabindex="-1">
-                            <div class="modal-dialog modal-dialog-centered modal-lg">
+                            <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
                               <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
                                 <div class="modal-header border-0 pb-2">
                                   <h5 class="modal-title text-white fw-bold"><i class="bi bi-camera-fill text-danger me-2"></i>Create Status</h5>
@@ -49437,6 +50105,7 @@ SOFTWARE.</div>
               let manageTitle = "Manage Note Categories";
               if (mCatType === "task") manageTitle = "Manage Task Categories";
               else if (mCatType === "blog") manageTitle = "Manage Blog Categories";
+              else if (mCatType === "imageditor") manageTitle = "Manage Design Categories";
               updateContentTitle(manageTitle, !!currentUser);
     
               if (currentUser) {
@@ -49452,6 +50121,12 @@ SOFTWARE.</div>
                 ) {
                   window.blogCategories =
                     (await fetchData("?action=get_note_categories&type=blog")) || [];
+                } else if (
+                  mCatType === "imageditor" &&
+                  (!window.imageditorCategories || window.imageditorCategories.length === 0)
+                ) {
+                  window.imageditorCategories =
+                    (await fetchData("?action=get_note_categories&type=imageditor")) || [];
                 } else if (
                   mCatType === "note" &&
                   (!window.noteCategories || window.noteCategories.length === 0)
@@ -51381,19 +52056,23 @@ SOFTWARE.</div>
                   ? "Task Projects"
                   : pType === "blog"
                     ? "Blog Projects"
-                    : "Note Projects";
+                    : pType === "imageditor"
+                      ? "Design Projects"
+                      : "Note Projects";
               const pIcon =
                 pType === "task"
                   ? "bi-check2-square text-success"
                   : pType === "blog"
                     ? "bi-journal-richtext text-info"
-                    : "bi-journal-text text-warning";
-    
+                    : pType === "imageditor"
+                      ? "bi-image text-danger"
+                      : "bi-journal-text text-warning";
+
               updateContentTitle(pTitle, !!currentUser);
               if (currentUser) {
                 contentArea.innerHTML = `
                         <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
-                          <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-briefcase-fill text-danger me-3 fs-3"></i> ${pTitle}</div>
+                          <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi ${pIcon} me-3 fs-3"></i> ${pTitle}</div>
                           <button class="btn btn-info text-dark rounded-pill px-4 fw-bold shadow-sm create-typed-project-btn" data-type="${pType}"><i class="bi bi-plus-lg me-1"></i> New Project</button>
                         </div>
                         <div id="projects-list-container" class="mx-md-3 mb-5 d-flex flex-column gap-3"></div>
@@ -51416,6 +52095,7 @@ SOFTWARE.</div>
                               ${pType === "note" ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_notes" data-filter="proj_${p.id}"><i class="bi bi-journal-text text-warning"></i> ${p.note_count} Notes</button>` : ""}
                               ${pType === "task" ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_tasks" data-filter="proj_${p.id}"><i class="bi bi-check2-square text-success"></i> ${p.task_count} Tasks</button>` : ""}
                               ${pType === "blog" ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_blogs" data-filter="proj_${p.id}"><i class="bi bi-journal-text text-info"></i> ${p.blog_count} Blogs</button>` : ""}
+                              ${pType === "imageditor" ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_imageditor_projects" data-filter="proj_${p.id}"><i class="bi bi-image text-danger"></i> ${p.imageditor_count} Designs</button>` : ""}
                               ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-info text-dark fw-bold invite-project-btn" data-id="${p.id}"><i class="bi bi-people-fill"></i> Manage</button>` : ""}
                             </div>
                           </div>
@@ -52025,9 +52705,11 @@ SOFTWARE.</div>
     
         const updatePlayerUI = () => {
           if (!currentSong) return;
+          const viewsWithMiniPlayerCheck = ["photo_editor", "get_inbox", "audio_editor", "view_blog", "get_notes", "get_tasks", "get_blogs", "get_imageditor_projects"];
           if (
             playerBar.classList.contains("d-none") &&
-            currentView.type !== "rhythm_game"
+            currentView.type !== "rhythm_game" &&
+            !viewsWithMiniPlayerCheck.includes(currentView.type)
           ) {
             playerBar.classList.remove("d-none");
             document.body.classList.add("player-visible");
@@ -52048,38 +52730,13 @@ SOFTWARE.</div>
           playerElements.art.forEach((el) => (el.src = imageUrl));
           updateAppFavicon(imageUrl);
 
-          // Clear previous theme instantly on track change to prevent getting stuck
+          // Ensure player modals stay in dark mode with dark-tinted cover blur
           document.querySelectorAll(".player-modal-content").forEach((modal) => {
             modal.classList.remove("theme-light-bg");
           });
           if (docPipWindow && docPipWindow.document.body) {
             docPipWindow.document.body.classList.remove("theme-light-bg");
           }
-
-          // Dynamically adjust modal text theme based on cover brightness
-          const themeImg = new Image();
-          themeImg.crossOrigin = "anonymous";
-          themeImg.onload = () => {
-            const rgb = getAverageColor(themeImg);
-            const brightness = Math.round(
-              (parseInt(rgb.r) * 299 +
-                parseInt(rgb.g) * 587 +
-                parseInt(rgb.b) * 114) /
-                1000,
-            );
-
-            // If brightness is high (light cover art), trigger light mode for modals only
-            if (brightness > 130) {
-              document.querySelectorAll(".player-modal-content").forEach((modal) => {
-                modal.classList.add("theme-light-bg");
-              });
-              if (docPipWindow && docPipWindow.document.body) {
-                docPipWindow.document.body.classList.add("theme-light-bg");
-              }
-            }
-          };
-          // Append timestamp to bypass stubborn browser caches that prevent onload triggering
-          themeImg.src = imageUrl + "&t=" + new Date().getTime();
 
           const applyMarquee = window.applyMarquee;
 
@@ -52090,6 +52747,15 @@ SOFTWARE.</div>
 
           if (docPipWindow) {
             docPipWindow.document.title = `${currentSong.title} • ${currentSong.artist}`;
+          }
+
+          const activeOverlays = document.querySelectorAll('#editorOverlay.active, #taskEditorOverlay.active, #blogEditorOverlay.active');
+          const viewsWithMiniPlayer = ["photo_editor", "get_imageditor_projects", "get_inbox", "audio_editor", "view_blog", "get_notes", "get_tasks", "get_blogs"];
+          
+          if (viewsWithMiniPlayer.includes(currentView.type) || activeOverlays.length > 0) {
+            if (currentView.type !== 'rhythm_game') {
+              toggleMainMiniPlayer(true);
+            }
           }
 
           if ("mediaSession" in navigator && currentSong) {
@@ -53952,6 +54618,30 @@ SOFTWARE.</div>
           }
         };
     
+        const mobileSearchToggleBtn = document.getElementById("mobile-search-toggle-btn");
+        const mobileSearchBackBtn = document.getElementById("mobile-search-back-btn");
+        const mobileSearchContainer = document.getElementById("mobile-search-container");
+
+        if (mobileSearchToggleBtn && mobileSearchBackBtn && mobileSearchContainer) {
+          mobileSearchToggleBtn.addEventListener("click", () => {
+            mobileSearchContainer.classList.remove("d-none");
+            mobileSearchContainer.classList.add("d-flex");
+            setTimeout(() => {
+              const mobileInput = document.getElementById("search-input-mobile");
+              if (mobileInput) mobileInput.focus();
+            }, 100);
+          });
+          
+          mobileSearchBackBtn.addEventListener("click", () => {
+            mobileSearchContainer.classList.remove("d-flex");
+            mobileSearchContainer.classList.add("d-none");
+            const mobileInput = document.getElementById("search-input-mobile");
+            if (mobileInput) mobileInput.value = "";
+            const mobileDropdown = document.getElementById("search-dropdown-mobile");
+            if (mobileDropdown) mobileDropdown.classList.add("d-none");
+          });
+        }
+
         searchInputDesktop.addEventListener("input", liveSearchHandler);
         searchInputMobile.addEventListener("input", liveSearchHandler);
     
@@ -55354,7 +56044,9 @@ SOFTWARE.</div>
               ? window.taskCategories
               : type === "blog"
                 ? window.blogCategories
-                : window.noteCategories;
+                : type === "imageditor"
+                  ? window.imageditorCategories
+                  : window.noteCategories;
           if (list && catArray) {
             list.innerHTML = catArray
               .map(
@@ -55390,21 +56082,16 @@ SOFTWARE.</div>
               }),
             });
             if (!window.blogCategories) window.blogCategories = [];
-            if (type === "task")
-              window.taskCategories.push({
-                id,
-                name,
-              });
-            else if (type === "blog")
-              window.blogCategories.push({
-                id,
-                name,
-              });
-            else
-              window.noteCategories.push({
-                id,
-                name,
-              });
+            if (!window.imageditorCategories) window.imageditorCategories = [];
+            if (type === "task") {
+              window.taskCategories.push({ id, name });
+            } else if (type === "blog") {
+              window.blogCategories.push({ id, name });
+            } else if (type === "imageditor") {
+              window.imageditorCategories.push({ id, name });
+            } else {
+              window.noteCategories.push({ id, name });
+            }
             input.value = "";
             window.loadManageCategoriesPage(type);
             window.renderNoteCategories();
@@ -55433,7 +56120,9 @@ SOFTWARE.</div>
                   ? window.taskCategories
                   : type === "blog"
                     ? window.blogCategories
-                    : window.noteCategories;
+                    : type === "imageditor"
+                      ? window.imageditorCategories
+                      : window.noteCategories;
               const cat = catArray.find((c) => c.id === editBtn.dataset.id);
               if (cat) cat.name = newName.trim();
               window.loadManageCategoriesPage(type);
@@ -55454,18 +56143,16 @@ SOFTWARE.</div>
                 }),
               });
               if (!window.blogCategories) window.blogCategories = [];
-              if (type === "task")
-                window.taskCategories = window.taskCategories.filter(
-                  (c) => c.id !== delBtn.dataset.id,
-                );
-              else if (type === "blog")
-                window.blogCategories = window.blogCategories.filter(
-                  (c) => c.id !== delBtn.dataset.id,
-                );
-              else
-                window.noteCategories = window.noteCategories.filter(
-                  (c) => c.id !== delBtn.dataset.id,
-                );
+              if (!window.imageditorCategories) window.imageditorCategories = [];
+              if (type === "task") {
+                window.taskCategories = window.taskCategories.filter(c => c.id !== delBtn.dataset.id);
+              } else if (type === "blog") {
+                window.blogCategories = window.blogCategories.filter(c => c.id !== delBtn.dataset.id);
+              } else if (type === "imageditor") {
+                window.imageditorCategories = window.imageditorCategories.filter(c => c.id !== delBtn.dataset.id);
+              } else {
+                window.noteCategories = window.noteCategories.filter(c => c.id !== delBtn.dataset.id);
+              }
               window.loadManageCategoriesPage(type);
               window.renderNoteCategories();
             }
@@ -55523,6 +56210,24 @@ SOFTWARE.</div>
               type: "get_blogs",
               param: "",
               sort: "newest",
+              filter: filter,
+            });
+            hideMobileSidebar();
+          }
+          
+          const ieFilterLink = e.target.closest(".imageditor-filter-link");
+          if (ieFilterLink) {
+            e.preventDefault();
+            e.stopPropagation();
+            const filter = ieFilterLink.dataset.filter;
+            document
+              .querySelectorAll(".imageditor-filter-link")
+              .forEach((el) => el.classList.remove("active", "text-white"));
+            ieFilterLink.classList.add("active", "text-white");
+            loadView({
+              type: "get_imageditor_projects",
+              param: "",
+              sort: "updated_desc",
               filter: filter,
             });
             hideMobileSidebar();
@@ -58029,9 +58734,12 @@ SOFTWARE.</div>
               const songItemEl = document.querySelector(
                 `.song-item[data-song-id="${id}"]`,
               );
-              const songArtist = songItemEl
+              let songArtist = songItemEl
                 ? decodeURIComponent(songItemEl.dataset.songArtist)
                 : "";
+                
+              songArtist = songArtist.replace(/\s*\(id:\d+\)/gi, "");
+              
               document.getElementById("edit-metadata-id").value = id;
               document.getElementById("edit-metadata-title").value =
                 decodeURIComponent(title || "");
@@ -58427,6 +59135,8 @@ SOFTWARE.</div>
           playerElements.progress.forEach(
             (el) => (el.style.width = `${progressPercent}%`),
           );
+          const mmpSeekEl = document.getElementById("mmp-seek");
+          if (mmpSeekEl) mmpSeekEl.value = progressPercent;
           const timeLeft = duration - currentTime;
           playerElements.currentTime.forEach(
             (el) => (el.textContent = formatTime(currentTime)),
@@ -62626,26 +63336,32 @@ SOFTWARE.</div>
             const xhr = new XMLHttpRequest();
     
             xhr.upload.onprogress = (e) => {
-              if (e.lengthComputable) {
-                const percentComplete = Math.round((e.loaded / e.total) * 100);
+              const total = (e.lengthComputable && e.total) ? e.total : file.size;
+              const loaded = e.loaded || 0;
+              if (total > 0) {
+                const percentComplete = Math.round((loaded / total) * 100);
                 const progressBar = document.getElementById(progressId);
                 const progressText = document.getElementById(`${progressId}-text`);
                 if (progressBar) progressBar.style.width = `${percentComplete}%`;
                 if (progressText) progressText.textContent = `${percentComplete}%`;
               }
             };
-    
+
             xhr.open("POST", "?action=upload_song", true);
-    
+
             await new Promise((resolve) => {
               xhr.onload = () => {
                 const progressBar = document.getElementById(progressId);
                 const progressText = document.getElementById(`${progressId}-text`);
                 if (xhr.status === 200) {
-                  if (progressBar)
+                  if (progressBar) {
+                    progressBar.style.width = "100%";
                     progressBar.classList.replace("bg-danger", "bg-success");
-                  if (progressText)
+                  }
+                  if (progressText) {
+                    progressText.textContent = "100%";
                     progressText.classList.replace("text-secondary", "text-success");
+                  }
                 } else {
                   if (progressBar)
                     progressBar.classList.replace("bg-danger", "bg-warning");
@@ -63846,7 +64562,9 @@ SOFTWARE.</div>
               ? "taskFloatingPresence"
               : itemType === "blog"
                 ? "blogFloatingPresence"
-                : "editorFloatingPresence",
+                : itemType === "imageditor"
+                  ? "imageditorFloatingPresence"
+                  : "editorFloatingPresence",
           );
     
           // Use Server-Sent Events (SSE) which acts as a persistent WebSocket replacement without needing CLI
@@ -63954,14 +64672,27 @@ SOFTWARE.</div>
                   if (
                     !window.isSavingItem &&
                     Date.now() - window.lastLocalEditTime >= 1000 &&
-                    res.item_data.items
+                    res.item_data.content
                   ) {
                     try {
-                      window.currentTaskItems = JSON.parse(res.item_data.items);
+                      window.currentTaskItems = JSON.parse(res.item_data.content);
                       window.renderTaskItems();
                     } catch (e) {}
                   }
                   statusIndicator = document.getElementById("taskSaveStatus");
+                } else if (itemType === "imageditor") {
+                  const titleInput = document.getElementById("projectTitleInput");
+                  if (titleInput && titleInput.value !== res.item_data.title) {
+                    titleInput.value = res.item_data.title;
+                    if (window.imageditor) window.imageditor.setProjectTitleQuietly(res.item_data.title);
+                  }
+                  
+                  if (!window.isSavingItem && Date.now() - window.lastLocalEditTime >= 1000 && res.item_data.content) {
+                    try {
+                      if (window.imageditor) window.imageditor.loadStateQuietly(res.item_data.content);
+                    } catch(e) {}
+                  }
+                  statusIndicator = document.getElementById("pe-save-status");
                 }
     
                 if (statusIndicator) {
@@ -63998,15 +64729,15 @@ SOFTWARE.</div>
           if (blogAv) blogAv.innerHTML = "";
         };
     
-        const populateProjectMoveSelect = async (type) => {
+        window.populateProjectMoveSelect = async (type) => {
           const select = document.getElementById("project-move-select");
-          select.innerHTML = '<option value="">ðŸ  Personal (Private)</option>';
+          select.innerHTML = '<option value="">🏠 Personal (Private)</option>';
           const projs = await fetchData(`?action=get_projects&filter=${type}`);
           if (projs && projs.length > 0) {
             projs.forEach((p) => {
               select.insertAdjacentHTML(
                 "beforeend",
-                `<option value="${p.id}">ðŸ“ Project: ${escapeHTML(p.name)}</option>`,
+                `<option value="${p.id}">📁 Project: ${escapeHTML(p.name)}</option>`,
               );
             });
           }
@@ -64043,6 +64774,10 @@ SOFTWARE.</div>
               itemId = document.getElementById("taskEditorId").value;
               itemType = "task";
             }
+            if (currentView.type === 'photo_editor' && window.imageditor) {
+              itemId = window.imageditor.getCurrentProjectId();
+              itemType = "imageditor";
+            }
     
             if (!itemId)
               return showToast("Save the item first before moving it.", "error");
@@ -64069,21 +64804,21 @@ SOFTWARE.</div>
           .getElementById("editorMoveProjectBtn")
           ?.addEventListener("click", () => {
             document.getElementById("editorMoreMenu")?.classList.remove("active");
-            populateProjectMoveSelect("note");
+            window.populateProjectMoveSelect("note");
           });
     
         document
           .getElementById("taskMoveProjectBtn")
           ?.addEventListener("click", () => {
             document.getElementById("taskEditorMoreMenu")?.classList.remove("active");
-            populateProjectMoveSelect("task");
+            window.populateProjectMoveSelect("task");
           });
     
         document
           .getElementById("blogEditorMoveProjectBtn")
           ?.addEventListener("click", () => {
             document.getElementById("blogEditorMoreMenu")?.classList.remove("active");
-            populateProjectMoveSelect("blog");
+            window.populateProjectMoveSelect("blog");
           });
     
         window.activeBlogPublicId = null;
@@ -64825,9 +65560,9 @@ SOFTWARE.</div>
     
           const overlay = document.getElementById("editorOverlay");
           if (overlay) overlay.classList.add("active");
+          if (typeof currentSong !== 'undefined' && currentSong) toggleMainMiniPlayer(true);
     
-          const isCollab =
-            currentView.filter && currentView.filter.startsWith("proj_");
+          const isCollab = currentView.filter && currentView.filter.startsWith("proj_");
           if (note.id && isCollab) {
             lastSyncContentTime = note.updated_at;
             startPresenceSync(note.id, "note");
@@ -65215,9 +65950,9 @@ SOFTWARE.</div>
     
           const overlay = document.getElementById("taskEditorOverlay");
           if (overlay) overlay.classList.add("active");
+          if (typeof currentSong !== 'undefined' && currentSong) toggleMainMiniPlayer(true);
     
-          const isCollab =
-            currentView.filter && currentView.filter.startsWith("proj_");
+          const isCollab = currentView.filter && currentView.filter.startsWith("proj_");
           if (task.id && isCollab) {
             lastSyncContentTime = task.updated_at;
             startPresenceSync(task.id, "task");
@@ -65412,6 +66147,7 @@ SOFTWARE.</div>
               .getElementById("taskFindReplacePanel")
               ?.classList.remove("active");
             document.getElementById("taskEditorOverlay").classList.remove("active");
+            toggleMainMiniPlayer(false);
             if (currentView.type === "get_tasks") loadView(currentView);
           });
     
@@ -65522,6 +66258,7 @@ SOFTWARE.</div>
             await saveCurrentEditorNote(true);
             stopPresenceSync();
             document.getElementById("editorOverlay").classList.remove("active");
+            toggleMainMiniPlayer(false);
             activeEditorNote = null;
             if (currentView.type === "get_notes") loadView(currentView);
           });
@@ -65583,9 +66320,9 @@ SOFTWARE.</div>
           updateBlogEditorWordCount();
     
           document.getElementById("blogEditorOverlay").classList.add("active");
+          if (typeof currentSong !== 'undefined' && currentSong) toggleMainMiniPlayer(true);
     
-          const isCollab =
-            currentView.filter && currentView.filter.startsWith("proj_");
+          const isCollab = currentView.filter && currentView.filter.startsWith("proj_");
           if (blog.id && isCollab) {
             lastSyncContentTime = blog.updated_at;
             startPresenceSync(blog.id, "blog");
@@ -65683,6 +66420,7 @@ SOFTWARE.</div>
             await saveCurrentBlog(true);
             stopPresenceSync();
             document.getElementById("blogEditorOverlay").classList.remove("active");
+            toggleMainMiniPlayer(false);
             if (currentView.type === "get_blogs" || currentView.type === "view_blog")
               loadView(currentView);
           });
@@ -66808,6 +67546,14 @@ SOFTWARE.</div>
                             document.title,
                             window.location.pathname,
                           );
+                          if (res.status === "success") {
+                            loadView({
+                              type: "user_profile",
+                              param: "",
+                              sort: "id_desc",
+                              filter_user_id: "",
+                            });
+                          }
                         }
                       };
     
@@ -67009,12 +67755,14 @@ SOFTWARE.</div>
             if (edOver && edOver.classList.contains("active")) {
               saveCurrentEditorNote(true);
               edOver.classList.remove("active");
+              toggleMainMiniPlayer(false);
               activeEditorNote = null;
               if (currentView.type === "get_notes") loadView(currentView, false);
             }
             if (taskOver && taskOver.classList.contains("active")) {
               window.saveCurrentTask(true);
               taskOver.classList.remove("active");
+              toggleMainMiniPlayer(false);
               if (currentView.type === "get_tasks") loadView(currentView, false);
             }
           }
@@ -73008,11 +73756,12 @@ SOFTWARE.</div>
           let currentWidth = 1080;
           let currentHeight = 1080;
           let zoomLevel = 1;
-          let opfsRoot = null;
-          let autosaveDebounceTimer = null;
-          let currentProjectId = "proj_default";
+          let apiDebounceTimer = null;
+          let currentProjectId = null;
           let currentProjectTitle = "Untitled Project";
           let projectsIndex = [];
+          let cropperInstance = null;
+          let cropTargetObj = null;
           let currentProjectSort = 'modified';
           let currentBrushType = 'dip';
           let symmetryMode = 'none';
@@ -73021,9 +73770,21 @@ SOFTWARE.</div>
           const toastEl = document.getElementById('pe-toast');
           const propertiesPanel = document.getElementById('propertiesPanel');
           const quickToolbar = document.getElementById('quickToolbar');
-  
+
           async function init() {
             if (!document.getElementById('mainCanvas')) return;
+            
+            if (canvas) {
+              try { canvas.dispose(); } catch (e) {}
+              canvas = null;
+            }
+
+            // Move rotate control to the bottom to avoid Quick Toolbar overlap
+            if (fabric.Object.prototype.controls && fabric.Object.prototype.controls.mtr) {
+              fabric.Object.prototype.controls.mtr.y = 0.5;
+              fabric.Object.prototype.controls.mtr.offsetY = 35;
+            }
+            
             canvas = new fabric.Canvas('mainCanvas', {
               preserveObjectStacking: true,
               selection: true,
@@ -73031,7 +73792,7 @@ SOFTWARE.</div>
             });
             setCanvasDimensions(currentWidth, currentHeight);
             setupEvents();
-            await initOPFS();
+            await initDB();
             window.removeEventListener('resize', resizeViewport);
             window.addEventListener('resize', resizeViewport);
             resizeViewport();
@@ -73041,19 +73802,21 @@ SOFTWARE.</div>
           function setCanvasDimensions(width, height) {
             currentWidth = width;
             currentHeight = height;
-            canvas.setWidth(width);
-            canvas.setHeight(height);
-            const label = document.getElementById('canvasSizeLabel');
-            if (label) label.innerText = `${width} x ${height} px`;
+            const btn = document.getElementById('canvasSizeBtn');
+            if (btn) btn.title = `Canvas Size: ${width} x ${height} px`;
             resizeViewport();
           }
-  
+
           function applyZoom() {
             const container = document.getElementById('canvasContainer');
             if (container) {
-              container.style.width = `${currentWidth}px`;
-              container.style.height = `${currentHeight}px`;
-              container.style.transform = `scale(${zoomLevel})`;
+              container.style.width = `${currentWidth * zoomLevel}px`;
+              container.style.height = `${currentHeight * zoomLevel}px`;
+              container.style.transform = `none`;
+            }
+            if (canvas) {
+              canvas.setDimensions({ width: currentWidth * zoomLevel, height: currentHeight * zoomLevel });
+              canvas.setZoom(zoomLevel);
             }
             const zoomLabel = document.getElementById('zoomLevelLabel');
             if (zoomLabel) zoomLabel.innerText = `${Math.round(zoomLevel * 100)}%`;
@@ -73071,98 +73834,174 @@ SOFTWARE.</div>
             applyZoom();
           }
   
-          async function initOPFS() {
-            try {
-              if (navigator.storage && navigator.storage.getDirectory) {
-                opfsRoot = await navigator.storage.getDirectory();
-                await loadProjectsIndex();
-              }
-            } catch (err) {
-              console.warn(err);
+          async function initDB() {
+            if (!window.imageditorCategories || window.imageditorCategories.length === 0) {
+              window.imageditorCategories = await fetchData("?action=get_note_categories&type=imageditor") || [];
             }
+            const catSelect = document.getElementById("peCategorySelect");
+            if (catSelect) {
+              catSelect.innerHTML = '<option value="all">Uncategorized</option>';
+              window.imageditorCategories.forEach(c => {
+                catSelect.insertAdjacentHTML('beforeend', `<option value="${c.id}">${escapeHTML(c.name)}</option>`);
+              });
+            }
+            await loadProjectsIndex();
           }
-  
+
           async function loadProjectsIndex() {
-            if (!opfsRoot) return;
+            if (!currentUser) return;
             try {
-              const handle = await opfsRoot.getFileHandle("projects_index.json", { create: true });
-              const file = await handle.getFile();
-              const text = await file.text();
-              if (text) {
-                projectsIndex = JSON.parse(text);
+              let filterStr = "";
+              if (typeof currentView !== 'undefined' && currentView && currentView.type === 'photo_editor' && currentView.filter) {
+                filterStr = `&filter=${currentView.filter}`;
+              }
+              const res = await fetchData(`?action=get_imageditor_projects${filterStr}`);
+              const paramId = (typeof currentView !== 'undefined' && currentView && currentView.type === 'photo_editor' && currentView.param) ? currentView.param : null;
+              
+              if (res && res.length > 0) {
+                projectsIndex = res;
+                const lastActiveId = paramId || localStorage.getItem('imageditor_last_project');
+                const foundProject = projectsIndex.find(p => p.public_id === lastActiveId);
+                
+                if (foundProject) {
+                  currentProjectId = foundProject.public_id;
+                  currentProjectTitle = foundProject.title;
+                } else if (paramId) {
+                  currentProjectId = paramId;
+                  currentProjectTitle = "Loading...";
+                } else {
+                  currentProjectId = projectsIndex[0].public_id;
+                  currentProjectTitle = projectsIndex[0].title;
+                }
+              } else {
+                projectsIndex = [];
+                if (paramId) {
+                  currentProjectId = paramId;
+                  currentProjectTitle = "Loading...";
+                } else {
+                  await createNewProject("Untitled Project");
+                  return;
+                }
               }
             } catch (err) {
               projectsIndex = [];
             }
-            if (projectsIndex.length === 0) {
-              projectsIndex.push({
-                id: currentProjectId,
-                title: currentProjectTitle,
-                updatedAt: Date.now()
-              });
-              await saveProjectsIndex();
-            } else {
-              const lastActiveId = localStorage.getItem('imageditor_last_project');
-              const foundProject = projectsIndex.find(p => p.id === lastActiveId);
-              if (foundProject) {
-                currentProjectId = foundProject.id;
-                currentProjectTitle = foundProject.title;
-              } else {
-                currentProjectId = projectsIndex[0].id;
-                currentProjectTitle = projectsIndex[0].title;
-              }
-            }
             const projInput = document.getElementById('projectTitleInput');
             if (projInput) projInput.value = currentProjectTitle;
-            await loadProject(currentProjectId);
+            if (currentProjectId) await loadProject(currentProjectId);
           }
-  
-          async function saveProjectsIndex() {
-            if (!opfsRoot) return;
-            try {
-              const handle = await opfsRoot.getFileHandle("projects_index.json", { create: true });
-              const writable = await handle.createWritable();
-              await writable.write(JSON.stringify(projectsIndex));
-              await writable.close();
-            } catch (err) {
-              console.error(err);
+
+          function updateSaveStatus(status) {
+            const statusEl = document.getElementById('pe-save-status');
+            if (!statusEl) return;
+            if (status === 'saving') {
+              statusEl.innerHTML = '<span class="spinner-border spinner-border-sm" style="width: 10px; height: 10px; border-width: 0.1em; margin-right: 4px;"></span> Saving...';
+              statusEl.style.color = 'var(--primary)';
+            } else if (status === 'saved') {
+              statusEl.innerHTML = '<i class="bi bi-cloud-check"></i> Saved';
+              statusEl.style.color = 'var(--green)';
+              setTimeout(() => {
+                if (statusEl.innerHTML.includes('Saved')) {
+                  statusEl.style.color = 'var(--on-surface-variant)';
+                }
+              }, 2000);
+            } else if (status === 'error') {
+              statusEl.innerHTML = '<i class="bi bi-exclamation-triangle"></i> Error';
+              statusEl.style.color = '#f87171';
             }
           }
-  
-          async function saveAutosaveToOPFS() {
-            if (!opfsRoot) return;
+
+          async function saveAutosaveToDB() {
+            if (!currentUser || !currentProjectId) return;
+            window.isSavingItem = true;
+            updateSaveStatus('saving');
             try {
-              const fileHandle = await opfsRoot.getFileHandle(`project_${currentProjectId}.json`, { create: true });
-              const writable = await fileHandle.createWritable();
+              const catSelect = document.getElementById("peCategorySelect");
+              const isStarred = document.getElementById("peStarIcon") && document.getElementById("peStarIcon").classList.contains("bi-star-fill") ? 1 : 0;
+              let projId = null;
+              if (currentView && currentView.filter && currentView.filter.startsWith("proj_")) {
+                projId = currentView.filter.replace("proj_", "");
+              }
+
               const projectData = {
-                id: currentProjectId,
+                public_id: currentProjectId,
                 title: currentProjectTitle,
                 width: currentWidth,
                 height: currentHeight,
-                state: canvas.toJSON()
+                state: JSON.stringify(canvas.toJSON()),
+                category: catSelect ? catSelect.value : 'all',
+                starred: isStarred,
+                project_id: projId
               };
-              await writable.write(JSON.stringify(projectData));
-              await writable.close();
-              const p = projectsIndex.find(item => item.id === currentProjectId);
-              if (p) {
-                p.title = currentProjectTitle;
-                p.updatedAt = Date.now();
-                await saveProjectsIndex();
+              const res = await fetchData("?action=save_imageditor_project", {
+                method: "POST",
+                body: JSON.stringify(projectData)
+              });
+              
+              if (res && res.status === 'success') {
+                const p = projectsIndex.find(item => item.public_id === currentProjectId);
+                if (p) {
+                  p.title = currentProjectTitle;
+                  p.updated_at = new Date().toISOString();
+                }
+                updateSaveStatus('saved');
+              } else {
+                updateSaveStatus('error');
               }
             } catch (err) {
               console.error(err);
+              updateSaveStatus('error');
+            }
+            window.isSavingItem = false;
+            window.lastLocalEditTime = Date.now();
+          }
+
+          function setProjectTitleQuietly(title) {
+            currentProjectTitle = title || "Untitled Project";
+            const p = projectsIndex.find(item => item.public_id === currentProjectId);
+            if (p) {
+              p.title = currentProjectTitle;
             }
           }
-  
+
+          function loadStateQuietly(stateJson) {
+            if (!canvas) return;
+            const currentJson = JSON.stringify(canvas.toJSON());
+            if (currentJson === stateJson) return; 
+            
+            let stateObj = {};
+            try { stateObj = JSON.parse(stateJson); } catch(e) { return; }
+            
+            isProcessingHistory = true;
+            canvas.loadFromJSON(stateObj, function() {
+              try { canvas.renderAll(); } catch(e) {}
+              isProcessingHistory = false;
+              updateLayersList();
+            });
+          }
+
+          function manualSave() {
+            clearTimeout(apiDebounceTimer);
+            saveAutosaveToDB();
+          }
+
           async function loadProject(projId) {
-            if (!opfsRoot) return;
+            if (!currentUser) return;
             try {
-              const fileHandle = await opfsRoot.getFileHandle(`project_${projId}.json`);
-              const file = await fileHandle.getFile();
-              const text = await file.text();
-              if (text) {
-                const data = JSON.parse(text);
-                currentProjectId = data.id;
+              const res = await fetchData(`?action=get_imageditor_project&public_id=${projId}`);
+              if (res && res.status === 'success' && res.project) {
+                const data = res.project;
+                const starIcon = document.getElementById("peStarIcon");
+                if (starIcon) {
+                  starIcon.className = data.starred == 1 ? "bi bi-star-fill text-warning" : "bi bi-star";
+                }
+                const catSelect = document.getElementById("peCategorySelect");
+                if (catSelect) {
+                  catSelect.value = data.category || "all";
+                  const isOwner = !data.user_id || data.user_id == (currentUser ? currentUser.id : null);
+                  catSelect.disabled = !isOwner;
+                }
+                currentProjectId = data.public_id;
                 currentProjectTitle = data.title || "Untitled Project";
                 localStorage.setItem('imageditor_last_project', currentProjectId);
                 const projInput = document.getElementById('projectTitleInput');
@@ -73171,91 +74010,142 @@ SOFTWARE.</div>
                   setCanvasDimensions(data.width, data.height);
                 }
                 isProcessingHistory = true;
-                canvas.loadFromJSON(data.state, function() {
-                  canvas.renderAll();
+                let stateObj = {};
+                try {
+                  stateObj = typeof data.state === 'string' ? JSON.parse(data.state || '{}') : (data.state || {});
+                } catch(e) {
+                  stateObj = {};
+                }
+                try {
+                  canvas.loadFromJSON(stateObj, function() {
+                    try { canvas.renderAll(); } catch(e) {}
+                    isProcessingHistory = false;
+                    history = [JSON.stringify(canvas.toJSON())];
+                    historyIndex = 0;
+                    updateLayersList();
+                    showToast(`Loaded "${currentProjectTitle}"`);
+                  });
+                } catch(e) {
                   isProcessingHistory = false;
-                  history = [];
-                  historyIndex = -1;
+                  try { canvas.renderAll(); } catch(err) {}
                   saveHistory();
-                  showToast(`Loaded "${currentProjectTitle}"`);
-                });
+                }
+
+                const isCollab = (typeof currentView !== 'undefined' && currentView && currentView.filter && currentView.filter.startsWith("proj_")) || (data.project_id && data.project_id != 0);
+                if (data.id && isCollab) {
+                  lastSyncContentTime = data.updated_at;
+                  startPresenceSync(data.id, "imageditor");
+                }
               }
             } catch (err) {
+              isProcessingHistory = false;
               saveHistory();
             }
           }
-  
+
           async function createNewProject(title = "Untitled Project") {
-            currentProjectId = `proj_${Date.now()}`;
-            currentProjectTitle = title;
-            localStorage.setItem('imageditor_last_project', currentProjectId);
-            const projInput = document.getElementById('projectTitleInput');
-            if (projInput) projInput.value = currentProjectTitle;
-            projectsIndex.unshift({
-              id: currentProjectId,
-              title: currentProjectTitle,
-              updatedAt: Date.now()
-            });
-            await saveProjectsIndex();
-            canvas.clear();
-            saveHistory();
-            closeModal('projectsModal');
-            showToast("New project created");
+            if (!currentUser) {
+              showToast("Login required to save projects", "error");
+              return;
+            }
+            try {
+              let projId = null;
+              if (typeof currentView !== 'undefined' && currentView && currentView.filter && currentView.filter.startsWith("proj_")) {
+                projId = currentView.filter.replace("proj_", "");
+              }
+              const projectData = {
+                public_id: '',
+                title: title,
+                width: currentWidth || 1080,
+                height: currentHeight || 1080,
+                state: '{}',
+                project_id: projId
+              };
+              const res = await fetchData("?action=save_imageditor_project", {
+                method: "POST",
+                body: JSON.stringify(projectData)
+              });
+              if (res && res.status === 'success') {
+                currentProjectId = res.public_id;
+                currentProjectTitle = title;
+                localStorage.setItem('imageditor_last_project', currentProjectId);
+                const projInput = document.getElementById('projectTitleInput');
+                if (projInput) projInput.value = currentProjectTitle;
+                
+                let filterStr = "";
+                if (typeof currentView !== 'undefined' && currentView && currentView.type === 'photo_editor' && currentView.filter) {
+                  filterStr = `&filter=${currentView.filter}`;
+                }
+                const idxRes = await fetchData(`?action=get_imageditor_projects${filterStr}`);
+                if (idxRes) projectsIndex = idxRes;
+                
+                canvas.clear();
+                saveHistory();
+                closeModal('projectsModal');
+                showToast("New project created");
+              }
+            } catch (e) {
+              showToast("Failed to create project", "error");
+            }
           }
-  
+
           async function deleteProject(projId, event) {
             if (event) event.stopPropagation();
             if (projectsIndex.length <= 1) {
               showToast("Cannot delete the only project");
               return;
             }
-            projectsIndex = projectsIndex.filter(p => p.id !== projId);
-            await saveProjectsIndex();
+            if (!confirm("Delete this project?")) return;
+            
             try {
-              await opfsRoot.removeEntry(`project_${projId}.json`);
-            } catch (e) {}
-            if (currentProjectId === projId) {
-              await loadProject(projectsIndex[0].id);
-            } else {
-              renderProjectsList();
+              const res = await fetchData("?action=delete_imageditor_project", {
+                method: "POST",
+                body: JSON.stringify({ public_id: projId })
+              });
+              if (res && res.status === 'success') {
+                projectsIndex = projectsIndex.filter(p => p.public_id !== projId);
+                if (currentProjectId === projId) {
+                  await loadProject(projectsIndex[0].public_id);
+                } else {
+                  renderProjectsList();
+                }
+                showToast("Project deleted");
+              }
+            } catch(e) {
+              showToast("Delete failed", "error");
             }
-            showToast("Project deleted");
           }
-  
+
           async function duplicateProject(projId, event) {
             if (event) event.stopPropagation();
-            const sourceIndex = projectsIndex.find(p => p.id === projId);
-            if (!sourceIndex) return;
-            const newId = `proj_${Date.now()}`;
-            const newTitle = `${sourceIndex.title} (Copy)`;
             try {
-              const handle = await opfsRoot.getFileHandle(`project_${projId}.json`);
-              const file = await handle.getFile();
-              const text = await file.text();
-              const newHandle = await opfsRoot.getFileHandle(`project_${newId}.json`, { create: true });
-              const writable = await newHandle.createWritable();
-              const data = JSON.parse(text);
-              data.id = newId;
-              data.title = newTitle;
-              await writable.write(JSON.stringify(data));
-              await writable.close();
-              projectsIndex.unshift({ id: newId, title: newTitle, updatedAt: Date.now() });
-              await saveProjectsIndex();
-              renderProjectsList();
-              showToast("Project duplicated");
-            } catch (e) {
-              showToast("Duplication failed");
+              const res = await fetchData("?action=duplicate_imageditor_project", {
+                method: "POST",
+                body: JSON.stringify({ public_id: projId })
+              });
+              if (res && res.status === 'success') {
+                let filterStr = "";
+                if (typeof currentView !== 'undefined' && currentView && currentView.type === 'photo_editor' && currentView.filter) {
+                  filterStr = `&filter=${currentView.filter}`;
+                }
+                const idxRes = await fetchData(`?action=get_imageditor_projects${filterStr}`);
+                if (idxRes) projectsIndex = idxRes;
+                renderProjectsList();
+                showToast("Project duplicated");
+              }
+            } catch(e) {
+              showToast("Duplication failed", "error");
             }
           }
   
           function updateProjectTitle(newTitle) {
+            window.lastLocalEditTime = Date.now();
             currentProjectTitle = newTitle.trim() || "Untitled Project";
-            const p = projectsIndex.find(item => item.id === currentProjectId);
+            const p = projectsIndex.find(item => item.public_id === currentProjectId);
             if (p) {
               p.title = currentProjectTitle;
-              saveProjectsIndex();
             }
-            saveAutosaveToOPFS();
+            saveAutosaveToDB();
           }
   
           function setProjectSort(sortType) {
@@ -73271,18 +74161,18 @@ SOFTWARE.</div>
             let sortedProjects = [...projectsIndex];
             
             if (currentProjectSort === 'modified') {
-              sortedProjects.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+              sortedProjects.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
             } else {
               sortedProjects.sort((a, b) => {
-                const timeA = parseInt(a.id.split('_')[1]) || 0;
-                const timeB = parseInt(b.id.split('_')[1]) || 0;
+                const timeA = new Date(a.updated_at || 0).getTime();
+                const timeB = new Date(b.updated_at || 0).getTime();
                 return currentProjectSort === 'newest' ? timeB - timeA : timeA - timeB;
               });
             }
   
             sortedProjects.forEach(proj => {
-              const isActive = proj.id === currentProjectId;
-              const dateStr = new Date(proj.updatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+              const isActive = proj.public_id === currentProjectId;
+              const dateStr = new Date(proj.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
               const item = document.createElement('div');
               const activeStyles = isActive ? 'background: rgba(94, 21, 31, 0.4); border-color: var(--primary);' : 'background: var(--surface-dim); border-color: var(--outline-variant);';
               item.style.cssText = `display: flex; align-items: center; justify-content: space-between; padding: 12px; border-radius: 12px; border: 1px solid; transition: all 0.2s; cursor: pointer; margin-bottom: 8px; ${activeStyles}`;
@@ -73291,7 +74181,7 @@ SOFTWARE.</div>
               item.onmouseout = () => { if (!isActive) item.style.background = 'var(--surface-dim)'; };
               item.onclick = () => {
                 if (!isActive) {
-                  loadProject(proj.id);
+                  loadProject(proj.public_id);
                   closeModal('projectsModal');
                 }
               };
@@ -73299,15 +74189,15 @@ SOFTWARE.</div>
                 <div style="display: flex; align-items: center; gap: 12px;">
                   <div style="width: 32px; height: 32px; border-radius: 8px; background: var(--surface-container-high); display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 0.75rem; color: ${isActive ? 'var(--primary)' : 'var(--on-surface-variant)'};">📄</div>
                   <div>
-                    <h5 style="margin: 0; font-size: 0.8rem; font-weight: 700; color: #fff;">${proj.title}</h5>
+                    <h5 style="margin: 0; font-size: 0.8rem; font-weight: 700; color: #fff;">${escapeHTML(proj.title)}</h5>
                     <p style="margin: 0; font-size: 0.65rem; color: var(--on-surface-variant);">Modified: ${dateStr}</p>
                   </div>
                 </div>
                 <div style="display: flex; align-items: center; gap: 4px;">
-                  <button class="action-btn" style="padding: 6px;" onclick="window.imageditor.duplicateProject('${proj.id}', event)" title="Duplicate Project">
+                  <button class="action-btn" style="padding: 6px;" onclick="window.imageditor.duplicateProject('${proj.public_id}', event)" title="Duplicate Project">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                   </button>
-                  <button class="action-btn" style="padding: 6px; color: var(--primary);" onclick="window.imageditor.deleteProject('${proj.id}', event)" title="Delete Project">
+                  <button class="action-btn" style="padding: 6px; color: var(--primary);" onclick="window.imageditor.deleteProject('${proj.public_id}', event)" title="Delete Project">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                   </button>
                 </div>
@@ -73322,7 +74212,7 @@ SOFTWARE.</div>
           }
   
           async function exportAllProjects() {
-            if (!opfsRoot) return showToast("OPFS not available");
+            if (!currentUser) return showToast("Login required", "error");
             try {
               const backupData = {
                 version: 1,
@@ -73331,10 +74221,10 @@ SOFTWARE.</div>
               };
               for (const proj of projectsIndex) {
                 try {
-                  const fileHandle = await opfsRoot.getFileHandle(`project_${proj.id}.json`);
-                  const file = await fileHandle.getFile();
-                  const text = await file.text();
-                  backupData.projects.push(JSON.parse(text));
+                  const res = await fetchData(`?action=get_imageditor_project&public_id=${proj.public_id}`);
+                  if (res && res.status === 'success' && res.project) {
+                    backupData.projects.push(res.project);
+                  }
                 } catch (e) {}
               }
               const blob = new Blob([JSON.stringify(backupData)], { type: 'application/json' });
@@ -73347,43 +74237,105 @@ SOFTWARE.</div>
               showToast("Backup exported");
             } catch (err) {
               console.error(err);
-              showToast("Export failed");
+              showToast("Export failed", "error");
             }
           }
   
           async function importAllProjects(e) {
             const file = e.target.files[0];
-            if (!file) return;
+            if (!file || !currentUser) return;
             const reader = new FileReader();
             reader.onload = async function(evt) {
               try {
                 const backupData = JSON.parse(evt.target.result);
                 if (!backupData.projects || !Array.isArray(backupData.projects)) {
-                  return showToast("Invalid backup file");
+                  return showToast("Invalid backup file", "error");
                 }
+                
+                showToast("Importing...", "info");
+                let count = 0;
                 for (const projData of backupData.projects) {
-                  const newId = `proj_${Date.now()}_${Math.floor(Math.random()*1000)}`;
-                  projData.id = newId;
-                  const fileHandle = await opfsRoot.getFileHandle(`project_${newId}.json`, { create: true });
-                  const writable = await fileHandle.createWritable();
-                  await writable.write(JSON.stringify(projData));
-                  await writable.close();
-                  projectsIndex.unshift({
-                    id: newId,
-                    title: projData.title || "Imported Project",
-                    updatedAt: Date.now()
-                  });
+                  try {
+                    await fetchData("?action=save_imageditor_project", {
+                      method: "POST",
+                      body: JSON.stringify({
+                        public_id: '',
+                        title: projData.title || "Imported Project",
+                        width: projData.width || 1080,
+                        height: projData.height || 1080,
+                        state: projData.state || '{}'
+                      })
+                    });
+                    count++;
+                  } catch(e) {}
                 }
-                await saveProjectsIndex();
+                
+                const idxRes = await fetchData("?action=get_imageditor_projects");
+                if (idxRes) projectsIndex = idxRes;
+                
                 renderProjectsList();
-                showToast(`${backupData.projects.length} projects imported`);
+                showToast(`${count} projects imported`, "success");
               } catch (err) {
                 console.error(err);
-                showToast("Import failed");
+                showToast("Import failed", "error");
               }
               e.target.value = '';
             };
             reader.readAsText(file);
+          }
+
+          function cropActiveImage() {
+            const active = canvas.getActiveObject();
+            if (!active || active.type !== 'image') return showToast("Select an image to crop", "error");
+            
+            cropTargetObj = active;
+            const cropImgEl = document.getElementById('cropTargetImage');
+            
+            cropImgEl.src = active.getSrc();
+            
+            showModal('cropModal');
+            
+            if (cropperInstance) cropperInstance.destroy();
+            setTimeout(() => {
+              cropperInstance = new Cropper(cropImgEl, {
+                viewMode: 1,
+                dragMode: 'crop',
+                background: false,
+                autoCropArea: 1,
+                responsive: true
+              });
+            }, 150);
+          }
+
+          function applyCrop() {
+            if (!cropperInstance || !cropTargetObj) return;
+            const croppedCanvas = cropperInstance.getCroppedCanvas();
+            const dataUrl = croppedCanvas.toDataURL('image/png', 1.0);
+            
+            const left = cropTargetObj.left;
+            const top = cropTargetObj.top;
+            const scaleX = cropTargetObj.scaleX;
+            const scaleY = cropTargetObj.scaleY;
+            const angle = cropTargetObj.angle;
+            
+            cropTargetObj.setSrc(dataUrl, function(img) {
+              img.set({
+                left: left,
+                top: top,
+                scaleX: scaleX,
+                scaleY: scaleY,
+                angle: angle
+              });
+              canvas.renderAll();
+              saveHistory();
+              closeModal('cropModal');
+              showToast('Image cropped');
+              
+              if (cropperInstance) {
+                cropperInstance.destroy();
+                cropperInstance = null;
+              }
+            });
           }
   
           function setupEvents() {
@@ -73396,15 +74348,21 @@ SOFTWARE.</div>
               if (qToolbar) qToolbar.classList.remove('visible');
             });
             canvas.on('object:modified', () => {
+              if (!isProcessingHistory) window.lastLocalEditTime = Date.now();
               saveHistory();
               updateQuickToolbarPosition();
             });
+            canvas.on('object:added', () => { if (!isProcessingHistory) window.lastLocalEditTime = Date.now(); });
+            canvas.on('object:removed', () => { if (!isProcessingHistory) window.lastLocalEditTime = Date.now(); });
             canvas.on('object:moving', (e) => {
               updateQuickToolbarPosition();
               handleSnapping(e);
             });
+            canvas.on('object:scaling', updateQuickToolbarPosition);
+            canvas.on('object:rotating', updateQuickToolbarPosition);
             canvas.on('mouse:up', clearGuides);
             canvas.on('path:created', function(e) {
+              if (!isProcessingHistory) window.lastLocalEditTime = Date.now();
               if (!e.path) return;
               if (currentBrushType === 'eraser') {
                 e.path.globalCompositeOperation = 'destination-out';
@@ -73461,7 +74419,7 @@ SOFTWARE.</div>
               const propText = document.getElementById('prop-text-value');
               if (propText) propText.value = active.text;
               const propFont = document.getElementById('prop-font-family');
-              if (propFont) propFont.value = active.fontFamily || 'Inter';
+              if (propFont) propFont.value = active.fontFamily || 'Roboto';
             }
             updateLayersList();
           }
@@ -73470,17 +74428,62 @@ SOFTWARE.</div>
             const active = canvas.getActiveObject();
             const qToolbar = document.getElementById('quickToolbar');
             const propsPanel = document.getElementById('propertiesPanel');
+            const cropBtn = document.getElementById('pe-crop-btn');
+
             if (!active || (propsPanel && propsPanel.classList.contains('visible'))) {
               if (qToolbar) qToolbar.classList.remove('visible');
               return;
             }
-            if (qToolbar) qToolbar.classList.add('visible');
-            const bound = active.getBoundingRect();
-            const container = document.getElementById('canvasContainer').getBoundingClientRect();
-            if (qToolbar) {
-              qToolbar.style.top = `${container.top + (bound.top * zoomLevel) - 45}px`;
-              qToolbar.style.left = `${container.left + (bound.left * zoomLevel)}px`;
+
+            if (cropBtn) {
+              if (active.type === 'image') cropBtn.style.display = 'flex';
+              else cropBtn.style.display = 'none';
             }
+
+            const workspace = document.getElementById('workspace');
+            const canvasEl = canvas.getElement();
+
+            if (!workspace || !canvasEl || !qToolbar) return;
+
+            qToolbar.classList.add('visible');
+            active.setCoords();
+
+            const cRect = canvasEl.getBoundingClientRect();
+            const wRect = workspace.getBoundingClientRect();
+
+            // Since we use canvas.setZoom(), getBoundingRect() returns pre-scaled coordinates relative to the canvas!
+            const bound = active.getBoundingRect();
+
+            // Strict viewport offsets relative to workspace
+            const offsetX = cRect.left - wRect.left;
+            const offsetY = cRect.top - wRect.top;
+
+            const objCenterX = offsetX + bound.left + (bound.width / 2);
+            const objTopY = offsetY + bound.top;
+
+            const toolbarWidth = qToolbar.offsetWidth || 240;
+            const toolbarHeight = qToolbar.offsetHeight || 44;
+
+            let toolbarLeft = objCenterX - (toolbarWidth / 2);
+            let toolbarTop = objTopY - toolbarHeight - 12;
+
+            if (isNaN(toolbarLeft)) toolbarLeft = (wRect.width / 2) - (toolbarWidth / 2);
+            if (isNaN(toolbarTop)) toolbarTop = 20;
+
+            // Strict viewport horizontal bounds
+            toolbarLeft = Math.max(12, Math.min(wRect.width - toolbarWidth - 12, toolbarLeft));
+
+            // Strict viewport vertical bounds (flip below object if hitting ceiling)
+            if (toolbarTop < 12) {
+              toolbarTop = offsetY + bound.top + bound.height + 16;
+              // If it also overflows the bottom of the workspace, center it vertically as a last resort fallback
+              if (toolbarTop + toolbarHeight > wRect.height) {
+                 toolbarTop = (wRect.height / 2) - (toolbarHeight / 2);
+              }
+            }
+
+            qToolbar.style.left = `${toolbarLeft}px`;
+            qToolbar.style.top = `${toolbarTop}px`;
           }
 
           function handleSnapping(e) {
@@ -73580,10 +74583,11 @@ SOFTWARE.</div>
               top: currentHeight / 2,
               originX: 'center',
               originY: 'center',
-              fontFamily: 'Inter',
+              fontFamily: 'Roboto',
               fill: '#ffffff',
               cornerColor: '#f2354a',
-              transparentCorners: false
+              transparentCorners: false,
+              lockUniScaling: true
             };
             let textStr = 'Edit Text';
             if (preset === 'heading') { textStr = 'HEADING TITLE'; options.fontSize = 72; options.fontWeight = 'bold'; }
@@ -73594,6 +74598,12 @@ SOFTWARE.</div>
               options.shadow = new fabric.Shadow({ color: '#f2354a', blur: 20 });
             }
             const textObj = new fabric.IText(textStr, options);
+            textObj.setControlsVisibility({
+              mt: false,
+              mb: false,
+              ml: false,
+              mr: false
+            });
             canvas.add(textObj);
             canvas.setActiveObject(textObj);
             closeDrawers();
@@ -74069,13 +75079,14 @@ SOFTWARE.</div>
   
           function saveHistory() {
             if (isProcessingHistory || !canvas) return;
+            window.lastLocalEditTime = Date.now();
             if (historyIndex < history.length - 1) history = history.slice(0, historyIndex + 1);
             if (history.length > 25) history.shift();
             else historyIndex++;
             history.push(JSON.stringify(canvas.toJSON()));
             updateLayersList();
-            clearTimeout(autosaveDebounceTimer);
-            autosaveDebounceTimer = setTimeout(saveAutosaveToOPFS, 800);
+            clearTimeout(apiDebounceTimer);
+            apiDebounceTimer = setTimeout(saveAutosaveToDB, 800);
           }
   
           function undo() {
@@ -74129,7 +75140,13 @@ SOFTWARE.</div>
               showToast("Project file downloaded");
               return;
             }
+            
             canvas.discardActiveObject();
+            
+            // Temporarily reset zoom to 1 for pristine high-res export
+            const currentZoom = canvas.getZoom();
+            canvas.setZoom(1);
+            canvas.setDimensions({ width: currentWidth, height: currentHeight });
             canvas.renderAll();
   
             if (format === 'svg') {
@@ -74141,6 +75158,11 @@ SOFTWARE.</div>
               a.download = `${currentProjectTitle.replace(/\s+/g, '_')}.svg`;
               a.click();
               URL.revokeObjectURL(url);
+              
+              // Restore zoom
+              canvas.setZoom(currentZoom);
+              canvas.setDimensions({ width: currentWidth * currentZoom, height: currentHeight * currentZoom });
+              
               closeModal('exportModal');
               showToast("SVG exported successfully");
               return;
@@ -74151,6 +75173,11 @@ SOFTWARE.</div>
               quality: 0.95,
               multiplier: scale
             });
+            
+            // Restore zoom
+            canvas.setZoom(currentZoom);
+            canvas.setDimensions({ width: currentWidth * currentZoom, height: currentHeight * currentZoom });
+            
             const link = document.createElement('a');
             link.download = `${currentProjectTitle.replace(/\s+/g, '_')}.${format}`;
             link.href = dataURL;
@@ -74283,6 +75310,15 @@ SOFTWARE.</div>
   
           return {
             init,
+            getCurrentProjectId: () => currentProjectId,
+            toggleStar: () => {
+              const icon = document.getElementById("peStarIcon");
+              if (icon) {
+                const isStarred = icon.classList.contains("bi-star-fill");
+                icon.className = isStarred ? "bi bi-star" : "bi bi-star-fill text-warning";
+                imageditor.manualSave();
+              }
+            },
             openPropertiesPanel: () => {
               const propsPanel = document.getElementById('propertiesPanel');
               const qToolbar = document.getElementById('quickToolbar');
@@ -74302,6 +75338,9 @@ SOFTWARE.</div>
             updateProjectTitle,
             exportAllProjects,
             importAllProjects,
+            manualSave,
+            cropActiveImage,
+            applyCrop,
             addShape,
             addText,
             addBadge,
