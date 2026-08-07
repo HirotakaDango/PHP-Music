@@ -393,7 +393,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '8.3');
+define('APP_VERSION', '8.4');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -2085,6 +2085,116 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    if (isset($_POST['edit_admin_song']) && isset($_POST['song_id'])) {
+      $db = get_db();
+      $sid = (int)$_POST['song_id'];
+      $title = trim(htmlspecialchars($_POST['title'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $artist = trim(htmlspecialchars($_POST['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $album = trim(htmlspecialchars($_POST['album'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $genre = trim(htmlspecialchars($_POST['genre'] ?? '', ENT_QUOTES, 'UTF-8'));
+      
+      $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ? WHERE id = ?")->execute([$title, $artist, $album, $genre, $sid]);
+      log_admin_activity($db, $_SESSION['admin_email'], 'Edited Song ID: ' . $sid, 0);
+      
+      $_SESSION['admin_flash_msg'] = "Song metadata updated successfully.";
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['bulk_edit_admin_songs']) && isset($_POST['song_ids']) && is_array($_POST['song_ids'])) {
+      $db = get_db();
+      $title = trim(htmlspecialchars($_POST['title'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $artist = trim(htmlspecialchars($_POST['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $album = trim(htmlspecialchars($_POST['album'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $genre = trim(htmlspecialchars($_POST['genre'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $transfer_to = trim($_POST['transfer_to'] ?? '');
+
+      $updates = [];
+      $params = [];
+
+      if ($title !== '') { $updates[] = "title = ?"; $params[] = $title; }
+      if ($artist !== '') { $updates[] = "artist = ?"; $params[] = $artist; }
+      if ($album !== '') { $updates[] = "album = ?"; $params[] = $album; }
+      if ($genre !== '') { $updates[] = "genre = ?"; $params[] = $genre; }
+
+      if ($transfer_to !== '') {
+        $stmt_u = $db->prepare("SELECT id FROM users WHERE id = ? OR email = ?");
+        $stmt_u->execute([$transfer_to, $transfer_to]);
+        $transfer_user_id = $stmt_u->fetchColumn();
+        if ($transfer_user_id) {
+          $updates[] = "user_id = ?";
+          $params[] = $transfer_user_id;
+        } else {
+          $_SESSION['admin_flash_msg'] = "Transfer failed: User ID or Email not found.";
+          header('Location: ' . $_SERVER['REQUEST_URI']);
+          exit;
+        }
+      }
+
+      if (!empty($updates)) {
+        $sql = "UPDATE music SET " . implode(", ", $updates) . " WHERE id IN (" . implode(',', array_map('intval', $_POST['song_ids'])) . ")";
+        $db->prepare($sql)->execute($params);
+        log_admin_activity($db, $_SESSION['admin_email'], 'Bulk Edited/Transferred Songs: ' . implode(',', $_POST['song_ids']), 0);
+        $_SESSION['admin_flash_msg'] = "Selected songs updated and/or transferred successfully.";
+      }
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['multi_edit_admin_songs']) && isset($_POST['multi_edit_ids']) && is_array($_POST['multi_edit_ids'])) {
+      $db = get_db();
+      $stmt = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, user_id = ? WHERE id = ?");
+      foreach ($_POST['multi_edit_ids'] as $sid) {
+        $sid = (int)$sid;
+        $title = trim(htmlspecialchars($_POST['multi_title'][$sid] ?? '', ENT_QUOTES, 'UTF-8'));
+        $artist = trim(htmlspecialchars($_POST['multi_artist'][$sid] ?? '', ENT_QUOTES, 'UTF-8'));
+        $album = trim(htmlspecialchars($_POST['multi_album'][$sid] ?? '', ENT_QUOTES, 'UTF-8'));
+        $genre = trim(htmlspecialchars($_POST['multi_genre'][$sid] ?? '', ENT_QUOTES, 'UTF-8'));
+        $uid = (int)($_POST['multi_userid'][$sid] ?? 0);
+        $stmt->execute([$title, $artist, $album, $genre, $uid, $sid]);
+      }
+      log_admin_activity($db, $_SESSION['admin_email'], 'Multi-Edited Songs: ' . implode(',', $_POST['multi_edit_ids']), 0);
+      $_SESSION['admin_flash_msg'] = "Selected songs updated successfully.";
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['admin_song_action']) && isset($_POST['song_ids']) && is_array($_POST['song_ids'])) {
+      $db = get_db();
+      $action = $_POST['admin_song_action'];
+      
+      foreach ($_POST['song_ids'] as $sid) {
+        $sid = (int)$sid;
+        
+        if ($action === 'ban') {
+          $db->prepare("UPDATE music SET banned = 1 WHERE id = ?")->execute([$sid]);
+        } elseif ($action === 'unban') {
+          $db->prepare("UPDATE music SET banned = 0 WHERE id = ?")->execute([$sid]);
+        } elseif ($action === 'soft_delete') {
+          $db->prepare("DELETE FROM music WHERE id = ?")->execute([$sid]);
+        } elseif ($action === 'perm_delete') {
+          $stmt = $db->prepare("SELECT file FROM music WHERE id = ?");
+          $stmt->execute([$sid]);
+          $song = $stmt->fetch();
+          if ($song) {
+            $db->prepare("DELETE FROM music WHERE id = ?")->execute([$sid]);
+            $file_path = $song['file'] ?? '';
+            if ($file_path && file_exists(MUSIC_DIR . '/' . $file_path)) {
+              @unlink(MUSIC_DIR . '/' . $file_path);
+            } else {
+              $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
+              if (file_exists($dynamic_path)) @unlink($dynamic_path);
+            }
+          }
+        }
+      }
+      
+      log_admin_activity($db, $_SESSION['admin_email'], "Bulk Action ({$action}) on Songs: " . implode(',', $_POST['song_ids']), 0);
+      $_SESSION['admin_flash_msg'] = "Bulk action executed successfully.";
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
     if (isset($_POST['permanent_delete_user']) && isset($_POST['user_id'])) {
       $db = get_db();
       $del_uid = (int)$_POST['user_id'];
@@ -2189,7 +2299,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground', 'storage']; // Default to all if missing
+  $current_admin_permissions = ['users', 'songs', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground', 'storage']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -2230,6 +2340,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 <?php
   $page_titles = [
     'users' => 'User Management',
+    'songs' => 'Song Management',
     'logs' => 'Activity Logs',
     'reports' => 'Pending Reports',
     'appeals' => 'Ban Appeals',
@@ -2903,7 +3014,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     </div>
     <?php else: ?>
     <div class="app-container">
-      <div class="d-lg-none d-flex align-items-center justify-content-between p-3 border-bottom" style="border-color: var(--ytm-surface-2) !important; background-color: var(--ytm-surface);">
+      <div class="d-lg-none d-flex align-items-center justify-content-between p-3 border-bottom sticky-top" style="border-color: var(--ytm-surface-2) !important; background-color: var(--ytm-surface); z-index: 1040;">
         <div class="logo d-flex align-items-center" style="font-size: 1.25rem; font-weight: 700;">
           <img src="?action=get_app_icon&size=32" alt="Logo" style="height: 28px; width: 28px; margin-right: 8px; border-radius: 6px;">
           Admin<span style="color: var(--ytm-accent);">Panel</span>
@@ -2914,7 +3025,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       </div>
       <nav class="sidebar offcanvas-lg offcanvas-start" tabindex="-1" id="admin-sidebar">
         <div class="offcanvas-header border-bottom d-lg-none" style="border-color: var(--ytm-surface-2) !important;">
-          <h5 class="offcanvas-title logo m-0 fw-bold d-none" style="font-size: 1.25rem;">Menu<span class="fw-light"></span></h5>
+          <div class="logo d-flex align-items-center m-0 p-0" style="font-size: 1.25rem; font-weight: 700;">
+            Admin<span style="color: var(--ytm-accent);">Panel</span>
+          </div>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#admin-sidebar" aria-label="Close"></button>
         </div>
         <div class="offcanvas-body d-flex flex-column p-0 h-100">
           <div class="d-none d-lg-flex align-items-center justify-content-between p-3 border-bottom" style="border-color: var(--ytm-surface-2) !important;">
@@ -2935,6 +3049,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <div class="mb-4 mt-3 d-flex flex-column">
             <?php if ($is_super_admin_check || in_array('users', $current_admin_permissions)): ?>
             <a href="?access=admin" class="nav-link <?php echo (empty($_GET['page']) || $_GET['page'] === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('songs', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=songs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'songs') ? 'active' : ''; ?>"><i class="bi bi-music-note-list"></i><span>Song Management</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('logs', $current_admin_permissions)): ?>
             <a href="?access=admin&page=logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
@@ -3290,6 +3407,272 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <a class="admin-page-btn <?php echo ($app_page >= $total_app_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&p=<?php echo $total_app_pages; ?>">»</a>
             </div>
             <?php endif; ?>
+          </div>
+        <?php elseif (($_GET['page'] ?? '') === 'songs'): ?>
+          <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
+            <h1 class="content-title m-0">Song Management</h1>
+            <?php 
+              $search_songs = $_GET['search'] ?? ''; 
+              $sort_songs = $_GET['sort'] ?? 'newest';
+            ?>
+            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 600px;">
+              <input type="hidden" name="access" value="admin">
+              <input type="hidden" name="page" value="songs">
+              <select name="sort" class="form-select bg-dark text-white border-secondary shadow-sm" style="width: auto;" onchange="this.form.submit()">
+                <option value="newest" <?php echo $sort_songs === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                <option value="oldest" <?php echo $sort_songs === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                <option value="title_asc" <?php echo $sort_songs === 'title_asc' ? 'selected' : ''; ?>>Title (A-Z)</option>
+                <option value="artist_asc" <?php echo $sort_songs === 'artist_asc' ? 'selected' : ''; ?>>Artist (A-Z)</option>
+              </select>
+              <div class="input-group shadow-sm">
+                <input type="text" name="search" class="form-control bg-dark text-white border-secondary" placeholder="Search by title, artist, album, user ID or email..." value="<?php echo htmlspecialchars($search_songs); ?>">
+                <button type="submit" class="btn btn-danger fw-bold px-3"><i class="bi bi-search"></i></button>
+              </div>
+            </form>
+          </div>
+          <div class="content-area-wrapper">
+            <form method="POST" action="" id="admin-songs-form">
+              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+              <div class="mb-3 d-flex flex-wrap gap-2">
+                <button type="button" class="btn btn-sm btn-outline-light fw-bold" onclick="document.querySelectorAll('.song-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Select All</button>
+                <button type="button" class="btn btn-sm btn-outline-info fw-bold" onclick="openAdminMultiEditModal()"><i class="bi bi-pencil-square"></i> Multi-Edit / Transfer</button>
+                
+                <div class="dropdown">
+                  <button class="btn btn-sm btn-outline-warning fw-bold dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                    <i class="bi bi-shield-slash"></i> Ban Control
+                  </button>
+                  <ul class="dropdown-menu dropdown-menu-dark">
+                    <li><button type="submit" name="admin_song_action" value="ban" class="dropdown-item text-warning fw-bold"><i class="bi bi-ban"></i> Ban Selected</button></li>
+                    <li><button type="submit" name="admin_song_action" value="unban" class="dropdown-item text-success fw-bold"><i class="bi bi-check-circle"></i> Unban Selected</button></li>
+                  </ul>
+                </div>
+
+                <div class="dropdown">
+                  <button class="btn btn-sm btn-danger fw-bold dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                    <i class="bi bi-trash2"></i> Delete
+                  </button>
+                  <ul class="dropdown-menu dropdown-menu-dark">
+                    <li><button type="submit" name="admin_song_action" value="soft_delete" class="dropdown-item text-warning fw-bold" onclick="return confirm('Delete from database but keep physical files intact?');"><i class="bi bi-eraser"></i> Soft Delete (DB Only)</button></li>
+                    <li><button type="submit" name="admin_song_action" value="perm_delete" class="dropdown-item text-danger fw-bold" onclick="return confirm('Permanently delete database records AND physically delete files from disk? This cannot be undone.');"><i class="bi bi-trash2-fill"></i> Permanent Delete</button></li>
+                  </ul>
+                </div>
+              </div>
+              <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
+                <table class="table table-dark table-striped m-0 align-middle text-nowrap">
+                  <thead class="border-bottom border-secondary">
+                    <tr>
+                      <th class="py-3 px-3" style="width: 40px;"></th>
+                      <th class="py-3 px-3" style="width: 60px;">Action</th>
+                      <th class="py-3 px-3" style="width: 70px;">ID</th>
+                      <th class="py-3 px-3">Title</th>
+                      <th class="py-3 px-3">Artist</th>
+                      <th class="py-3 px-3">Album</th>
+                      <th class="py-3 px-3">Uploader</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php
+                      $s_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                      $s_limit = ADMIN_PAGE_SIZE;
+                      $s_offset = ($s_page - 1) * $s_limit;
+                      
+                      $where_clauses = [];
+                      $params = [];
+                      if ($search_songs !== '') {
+                        $where_clauses[] = "(m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ? OR u.email LIKE ? OR m.user_id = ?)";
+                        $params = ["%$search_songs%", "%$search_songs%", "%$search_songs%", "%$search_songs%", $search_songs];
+                      }
+                      
+                      $where = '';
+                      if (!empty($where_clauses)) {
+                        $where = "WHERE " . implode(' AND ', $where_clauses);
+                      }
+                      
+                      $sort_map = [
+                        'newest' => 'ORDER BY m.id DESC',
+                        'oldest' => 'ORDER BY m.id ASC',
+                        'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
+                        'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC'
+                      ];
+                      $order_by = $sort_map[$sort_songs] ?? 'ORDER BY m.id DESC';
+
+                      $db = get_db();
+                      $t_stmt = $db->prepare("SELECT COUNT(m.id) FROM music m LEFT JOIN users u ON m.user_id = u.id $where");
+                      $t_stmt->execute($params);
+                      $t_songs = $t_stmt->fetchColumn();
+                      $t_pages = ceil($t_songs / $s_limit);
+                      
+                      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.user_id, u.email FROM music m LEFT JOIN users u ON m.user_id = u.id $where $order_by LIMIT ? OFFSET ?");
+                      $stmt->execute(array_merge($params, [$s_limit, $s_offset]));
+                      $songs = $stmt->fetchAll();
+                      
+                      if (empty($songs)): ?>
+                        <tr><td colspan="7" class="text-center py-4 text-secondary">No songs found.</td></tr>
+                    <?php else: foreach ($songs as $s): ?>
+                      <tr>
+                        <td class="py-3 px-3 text-center"><input type="checkbox" name="song_ids[]" value="<?php echo $s['id']; ?>" class="form-check-input song-cb" style="cursor:pointer; transform: scale(1.2);"></td>
+                        <td class="py-3 px-3">
+                          <button type="button" class="btn btn-sm btn-info text-dark fw-bold rounded-pill shadow-sm" title="Edit Song" onclick="openAdminSongModal(<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>)">
+                            <i class="bi bi-pencil-fill"></i> Edit
+                          </button>
+                        </td>
+                        <td class="py-3 px-3 text-secondary">#<?php echo $s['id']; ?></td>
+                        <td class="py-3 px-3 fw-bold text-white"><?php echo htmlspecialchars($s['title']); ?></td>
+                        <td class="py-3 px-3 text-info"><?php echo htmlspecialchars($s['artist']); ?></td>
+                        <td class="py-3 px-3 text-secondary"><?php echo htmlspecialchars($s['album']); ?></td>
+                        <td class="py-3 px-3 text-secondary">
+                          <div class="small fw-bold">ID: <?php echo $s['user_id']; ?></div>
+                          <div class="small" style="font-size: 0.75rem;"><?php echo htmlspecialchars($s['email'] ?? 'Anonymous'); ?></div>
+                        </td>
+                      </tr>
+                    <?php endforeach; endif; ?>
+                  </tbody>
+                </table>
+              </div>
+              <?php if ($t_pages > 1): ?>
+              <div class="admin-pagination">
+                <a class="admin-page-btn <?php echo ($s_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&p=1">«</a>
+                <a class="admin-page-btn <?php echo ($s_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&p=<?php echo $s_page - 1; ?>">‹</a>
+                <?php
+                  $start_p = max(1, $s_page - 2);
+                  $end_p = min($t_pages, $start_p + 4);
+                  if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                  for ($i = $start_p; $i <= $end_p; $i++):
+                ?>
+                  <a class="admin-page-btn <?php echo ($s_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                <?php endfor; ?>
+                <a class="admin-page-btn <?php echo ($s_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&p=<?php echo $s_page + 1; ?>">›</a>
+                <a class="admin-page-btn <?php echo ($s_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&p=<?php echo $t_pages; ?>">»</a>
+              </div>
+              <?php endif; ?>
+            </form>
+          </div>
+
+          <!-- Admin Edit Song Modal -->
+          <div class="modal fade" id="admin-song-modal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
+                <div class="modal-header border-0 pb-2">
+                  <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info me-2"></i> Edit Song Metadata</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body p-4 pt-2 text-start">
+                  <form method="POST" action="">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="song_id" id="admin-song-id">
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">TITLE</label>
+                      <input type="text" name="title" id="admin-song-title" class="form-control bg-dark text-white border-secondary" required>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">ARTIST</label>
+                      <input type="text" name="artist" id="admin-song-artist" class="form-control bg-dark text-white border-secondary" required>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">ALBUM</label>
+                      <input type="text" name="album" id="admin-song-album" class="form-control bg-dark text-white border-secondary">
+                    </div>
+                    <div class="mb-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">GENRE</label>
+                      <input type="text" name="genre" id="admin-song-genre" class="form-control bg-dark text-white border-secondary">
+                    </div>
+                    <button type="submit" name="edit_admin_song" class="btn btn-info text-dark fw-bold w-100 rounded-pill py-2 shadow-sm">Save Changes</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+          <script>
+          function openAdminSongModal(song) {
+            document.getElementById('admin-song-id').value = song.id;
+            document.getElementById('admin-song-title').value = song.title || '';
+            document.getElementById('admin-song-artist').value = song.artist || '';
+            document.getElementById('admin-song-album').value = song.album || '';
+            document.getElementById('admin-song-genre').value = song.genre || '';
+            new bootstrap.Modal(document.getElementById('admin-song-modal')).show();
+          }
+
+          function openAdminMultiEditModal() {
+            const checkedBoxes = document.querySelectorAll('.song-cb:checked');
+            if (checkedBoxes.length === 0) {
+              alert('Please select at least one song to edit.');
+              return;
+            }
+            
+            const container = document.getElementById('admin-multi-edit-container');
+            container.innerHTML = '';
+            
+            checkedBoxes.forEach(cb => {
+              const row = cb.closest('tr');
+              const id = cb.value;
+              const title = row.cells[3].innerText.trim();
+              const artist = row.cells[4].innerText.trim();
+              const album = row.cells[5].innerText.trim();
+              // Extract ID from the Uploader cell format
+              const uidText = row.cells[6].innerText.trim();
+              const uidMatch = uidText.match(/ID:\s*(\d+)/);
+              const uid = uidMatch ? uidMatch[1] : '';
+
+              const fieldset = document.createElement('div');
+              fieldset.style.border = '1px solid #4d4d4d';
+              fieldset.style.padding = '1.25rem';
+              fieldset.style.borderRadius = '8px';
+              fieldset.style.background = '#1a1a1a';
+              fieldset.style.marginBottom = '1rem';
+              
+              fieldset.innerHTML = `
+                <h6 class="text-danger fw-bold mb-3">Editing Song #${id}</h6>
+                <input type="hidden" name="multi_edit_ids[]" value="${id}">
+                <div class="row g-2">
+                  <div class="col-12 col-md-6 mb-2">
+                    <label class="form-label text-secondary small fw-bold mb-1">Title</label>
+                    <input type="text" name="multi_title[${id}]" class="form-control bg-dark text-white border-secondary" value="${title.replace(/"/g, '&quot;')}">
+                  </div>
+                  <div class="col-12 col-md-6 mb-2">
+                    <label class="form-label text-secondary small fw-bold mb-1">Artist</label>
+                    <input type="text" name="multi_artist[${id}]" class="form-control bg-dark text-white border-secondary" value="${artist.replace(/"/g, '&quot;')}">
+                  </div>
+                  <div class="col-12 col-md-6 mb-2">
+                    <label class="form-label text-secondary small fw-bold mb-1">Album</label>
+                    <input type="text" name="multi_album[${id}]" class="form-control bg-dark text-white border-secondary" value="${album.replace(/"/g, '&quot;')}">
+                  </div>
+                  <div class="col-6 col-md-3 mb-2">
+                    <label class="form-label text-secondary small fw-bold mb-1">Genre</label>
+                    <input type="text" name="multi_genre[${id}]" class="form-control bg-dark text-white border-secondary" value="">
+                  </div>
+                  <div class="col-6 col-md-3 mb-2">
+                    <label class="form-label text-warning small fw-bold mb-1">Transfer UID</label>
+                    <input type="number" name="multi_userid[${id}]" class="form-control bg-dark text-warning border-warning" value="${uid}">
+                  </div>
+                </div>
+              `;
+              container.appendChild(fieldset);
+            });
+            
+            document.getElementById('multi-edit-count').textContent = checkedBoxes.length;
+            new bootstrap.Modal(document.getElementById('admin-multi-edit-modal')).show();
+          }
+          </script>
+
+          <!-- Admin Multi-Edit DBManager Style Modal -->
+          <div class="modal fade" id="admin-multi-edit-modal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-scrollable modal-lg modal-dialog-centered">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
+                <div class="modal-header border-0 pb-2">
+                  <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info me-2"></i> Multi-Edit <span id="multi-edit-count" class="badge bg-danger rounded-pill fs-6 ms-2">0</span> Songs</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body p-4 pt-2 text-start">
+                  <form method="POST" action="">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <div id="admin-multi-edit-container" style="max-height: 60vh; overflow-y: auto; padding-right: 10px;"></div>
+                    <div class="mt-4 pt-3 border-top border-secondary">
+                      <button type="submit" name="multi_edit_admin_songs" class="btn btn-info text-dark fw-bold w-100 rounded-pill py-2 shadow-sm">Save All Changes</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'logs'): ?>
           <div class="page-header"><h1 class="content-title m-0">Admin Activity Logs</h1></div>
@@ -14069,6 +14452,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </div>
                 <div class="col-12 col-md-6">
                   <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="songs" id="perm-songs">
+                    <label class="form-check-label text-white fw-medium" for="perm-songs">Song Management</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
                     <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="logs" id="perm-logs">
                     <label class="form-check-label text-white fw-medium" for="perm-logs">Activity Logs</label>
                   </div>
@@ -14691,6 +15080,7 @@ function init_db($db) {
     if (!in_array('bitrate', $music_columns)) $db->exec("ALTER TABLE music ADD COLUMN bitrate INTEGER;");
     if (!in_array('lyrics', $music_columns)) $db->exec("ALTER TABLE music ADD COLUMN lyrics TEXT;");
     if (!in_array('replaygain', $music_columns)) $db->exec("ALTER TABLE music ADD COLUMN replaygain REAL DEFAULT 0;");
+    if (!in_array('banned', $music_columns)) $db->exec("ALTER TABLE music ADD COLUMN banned INTEGER DEFAULT 0;");
   }
   
   $db->exec("
@@ -17625,11 +18015,11 @@ HTML;
           
       $session_user_artist = $_SESSION['user_artist'] ?? '';
       if (!empty($session_user_artist)) {
-        $where_clauses[] = "(m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, ?) = 1 OR {$is_super_admin} = 1)";
+        $where_clauses[] = "(m.banned = 0 AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, ?) = 1 OR {$is_super_admin} = 1))";
         $params[] = $user_id;
         $params[] = $session_user_artist;
       } else {
-        $where_clauses[] = "(m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)";
+        $where_clauses[] = "(m.banned = 0 AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1))";
         $params[] = $user_id;
       }
       
@@ -25456,7 +25846,19 @@ function perform_cover_scan($db) {
       }
 
       .offcanvas .offcanvas-header {
-        padding: 0.75rem 1.5rem;
+        padding: 0 1.5rem;
+        background-color: rgba(18, 18, 18, 0.85) !important;
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        height: var(--header-height-mobile);
+        min-height: var(--header-height-mobile);
+        max-height: var(--header-height-mobile);
+        display: flex;
+        align-items: center;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      }
+      .offcanvas .offcanvas-header .logo.d-none {
+        display: block !important;
       }
 
       .page-header {
@@ -26494,6 +26896,12 @@ function perform_cover_scan($db) {
           backdrop-filter: blur(15px);
           -webkit-backdrop-filter: blur(15px);
           border-bottom-color: var(--ytm-surface-2);
+        }
+
+        .mobile-header.solid-bg {
+          background-color: var(--ytm-bg) !important;
+          backdrop-filter: none !important;
+          -webkit-backdrop-filter: none !important;
         }
 
         .search-bar.input-group {
@@ -30274,32 +30682,46 @@ function perform_cover_scan($db) {
           display: none !important;
         }
         body.sidebar-minimized .sidebar .collapse.show {
-          display: block !important;
-          position: absolute;
-          left: 80px;
-          width: 220px;
-          background-color: var(--ytm-surface-2);
-          border: 1px solid var(--ytm-border);
-          border-radius: 0 12px 12px 0;
-          box-shadow: 10px 5px 20px rgba(0,0,0,0.8);
-          z-index: 2000;
-          padding: 0.5rem 0;
+          display: flex !important;
+          flex-direction: column;
+          align-items: center;
+          position: relative;
+          left: auto;
+          width: 100%;
+          background-color: transparent;
+          border: none;
+          border-radius: 0;
+          box-shadow: none;
+          z-index: auto;
+          padding: 0.5rem 0 0 0;
         }
         body.sidebar-minimized .sidebar .collapse.show .list-unstyled {
           margin-left: 0 !important;
           padding-left: 0 !important;
+          display: flex;
+          flex-direction: column;
+          gap: 0.5rem;
+          width: 100%;
+          align-items: center;
+        }
+        body.sidebar-minimized .sidebar .collapse.show hr {
+          display: none !important;
         }
         body.sidebar-minimized .sidebar .collapse.show .nav-link {
-          justify-content: flex-start !important;
-          padding: 0.5rem 1rem !important;
-          margin: 0.2rem 0.5rem !important;
+          justify-content: center !important;
+          padding: 0 !important;
+          margin: 0 auto !important;
+          width: 44px;
+          height: 44px;
+          border-radius: 50% !important;
+          font-size: 0 !important;
         }
         body.sidebar-minimized .sidebar .collapse.show .nav-link span {
-          display: inline !important;
+          display: none !important;
         }
         body.sidebar-minimized .sidebar .collapse.show .nav-link .bi {
-          font-size: 1.1rem !important;
-          margin-right: 0.75rem !important;
+          font-size: 1.25rem !important;
+          margin-right: 0 !important;
         }
       }
       
@@ -30547,7 +30969,7 @@ function perform_cover_scan($db) {
               </ul>
             </div>
             <a href="#notesSubmenu" data-bs-toggle="collapse" class="nav-link collapsed">
-              <i class="bi bi-journal-text" style="font-size:1.25rem;width:24px;text-align:center;"></i>
+              <i class="bi bi-journal-album" style="font-size:1.25rem;width:24px;text-align:center;"></i>
               <span>Personal Notes</span>
               <i class="bi bi-chevron-down ms-auto" style="font-size: 0.8rem; transition: transform 0.2s;"></i>
             </a>
@@ -37727,6 +38149,18 @@ SOFTWARE.</div>
       });
     
       document.addEventListener("DOMContentLoaded", () => {
+        // Main Site: Mobile Header Offcanvas Background Logic
+        const mainOffcanvasEl = document.getElementById('main-nav-offcanvas');
+        const mobileHeaderEl = document.querySelector('.mobile-header');
+        if (mainOffcanvasEl && mobileHeaderEl) {
+          mainOffcanvasEl.addEventListener('show.bs.offcanvas', () => {
+            mobileHeaderEl.classList.add('solid-bg');
+          });
+          mainOffcanvasEl.addEventListener('hide.bs.offcanvas', () => {
+            mobileHeaderEl.classList.remove('solid-bg');
+          });
+        }
+
         // Main Sidebar Toggle Logic
         const mainSidebarToggle = document.getElementById('main-desktop-sidebar-toggle');
         if (mainSidebarToggle) {
@@ -38212,7 +38646,7 @@ SOFTWARE.</div>
                       actionText = isReply
                         ? `<span class="fw-bold">${escapeHTML(item.commenter_name)}</span> replied to your comment on <span class="text-info">${escapeHTML(item.song_title)}</span>${unreadBadge}`
                         : `<span class="fw-bold">${escapeHTML(item.commenter_name)}</span> commented on your blog <span class="text-info">${escapeHTML(item.song_title)}</span>${unreadBadge}`;
-                      iconHTML = `<i class="bi bi-journal-text text-warning fs-5"></i>`;
+                      iconHTML = `<i class="bi bi-journal-album text-warning fs-5"></i>`;
                       replyBtnHTML = `<button class="btn btn-sm btn-outline-light notif-blog-reply-btn" data-blog-id="${item.blog_public_id}" data-comment-id="${item.comment_id}" data-username="${escapeHTML(item.commenter_name)}"><i class="bi bi-reply-fill"></i> Reply</button>`;
                     } else {
                       actionText = isReply
@@ -45188,7 +45622,7 @@ SOFTWARE.</div>
     
           const pageHeaderEl = document.querySelector(".page-header");
           const mainContentEl = document.getElementById("main-content");
-          const viewsWithMiniPlayer = ["photo_editor", "get_imageditor_projects", "get_inbox", "audio_editor", "view_blog", "get_notes", "get_tasks", "get_blogs"];
+          const viewsWithMiniPlayer = ["photo_editor", "get_imageditor_projects", "get_inbox", "audio_editor", "view_blog", "get_notes", "get_tasks", "get_blogs", "manage_note_categories", "get_categories", "get_projects"];
           
           if (viewsWithMiniPlayer.includes(currentView.type)) {
             if (typeof currentSong !== 'undefined' && currentSong) toggleMainMiniPlayer(true);
@@ -52092,9 +52526,9 @@ SOFTWARE.</div>
                               <span><i class="bi bi-people"></i> ${p.member_count} Members</span>
                             </div>
                             <div class="d-flex gap-2 mt-3">
-                              ${pType === "note" ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_notes" data-filter="proj_${p.id}"><i class="bi bi-journal-text text-warning"></i> ${p.note_count} Notes</button>` : ""}
+                              ${pType === "note" ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_notes" data-filter="proj_${p.id}"><i class="bi bi-journal-album text-warning"></i> ${p.note_count} Notes</button>` : ""}
                               ${pType === "task" ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_tasks" data-filter="proj_${p.id}"><i class="bi bi-check2-square text-success"></i> ${p.task_count} Tasks</button>` : ""}
-                              ${pType === "blog" ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_blogs" data-filter="proj_${p.id}"><i class="bi bi-journal-text text-info"></i> ${p.blog_count} Blogs</button>` : ""}
+                              ${pType === "blog" ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_blogs" data-filter="proj_${p.id}"><i class="bi bi-journal-album text-info"></i> ${p.blog_count} Blogs</button>` : ""}
                               ${pType === "imageditor" ? `<button class="btn btn-sm btn-outline-light flex-grow-1 fw-bold project-nav-btn" data-target="get_imageditor_projects" data-filter="proj_${p.id}"><i class="bi bi-image text-danger"></i> ${p.imageditor_count} Designs</button>` : ""}
                               ${p.owner_id == currentUser.id ? `<button class="btn btn-sm btn-info text-dark fw-bold invite-project-btn" data-id="${p.id}"><i class="bi bi-people-fill"></i> Manage</button>` : ""}
                             </div>
@@ -52705,7 +53139,7 @@ SOFTWARE.</div>
     
         const updatePlayerUI = () => {
           if (!currentSong) return;
-          const viewsWithMiniPlayerCheck = ["photo_editor", "get_inbox", "audio_editor", "view_blog", "get_notes", "get_tasks", "get_blogs", "get_imageditor_projects"];
+          const viewsWithMiniPlayerCheck = ["photo_editor", "get_imageditor_projects", "get_inbox", "audio_editor", "view_blog", "get_notes", "get_tasks", "get_blogs", "manage_note_categories", "get_categories", "get_projects"];
           if (
             playerBar.classList.contains("d-none") &&
             currentView.type !== "rhythm_game" &&
@@ -52750,7 +53184,7 @@ SOFTWARE.</div>
           }
 
           const activeOverlays = document.querySelectorAll('#editorOverlay.active, #taskEditorOverlay.active, #blogEditorOverlay.active');
-          const viewsWithMiniPlayer = ["photo_editor", "get_imageditor_projects", "get_inbox", "audio_editor", "view_blog", "get_notes", "get_tasks", "get_blogs"];
+          const viewsWithMiniPlayer = ["photo_editor", "get_imageditor_projects", "get_inbox", "audio_editor", "view_blog", "get_notes", "get_tasks", "get_blogs", "manage_note_categories", "get_categories", "get_projects"];
           
           if (viewsWithMiniPlayer.includes(currentView.type) || activeOverlays.length > 0) {
             if (currentView.type !== 'rhythm_game') {
