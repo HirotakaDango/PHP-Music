@@ -393,11 +393,23 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '8.4');
+define('APP_VERSION', '8.5');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
 $auto_scan = true; // Auto scan songs during empty or new files
+
+// Disable auto scan if super admin does not exist to enforce setup page
+try {
+  $db_check = get_db();
+  $admin_exists = $db_check->query("SELECT COUNT(id) FROM users WHERE status = 'super_admin'")->fetchColumn();
+  if (empty($admin_exists)) {
+    $auto_scan = false;
+  }
+} catch (Exception $e) {
+  // If tables do not exist yet, disable auto scan to prioritize setup UI
+  $auto_scan = false;
+}
 
 // PHPBoard Configuration
 define('PHPBOARD_ALLOWED_CHANNELS', ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'gif', 'h', 'hr', 'k', 'm', 'o', 'p', 'r', 's', 't', 'u', 'v', 'vg', 'vm', 'vmg', 'vr', 'vrpg', 'vst', 'w', 'wg', 'i', 'ic', 'r9k', 's4s', 'vip', 'qa', 'cm', 'hm', 'lgbt', 'mlp', 'news', 'out', 'po', 'pw', 'qst', 'sp', 'trv', 'tv', 'vp', 'wsg', 'wsr', 'x', 'y', '3', 'aco', 'adv', 'an', 'bant', 'biz', 'cgl', 'ck', 'co', 'diy', 'fa', 'fit', 'gd', 'hc', 'his', 'int', 'jp', 'lit', 'mu', 'n', 'pol', 'sci', 'soc', 'tg', 'toy', 'vt', 'xs', 'art', 'tech', 'food', 'movies', 'music', 'books', 'news2', 'dev', 'meta', 'diy2', 'crypto', 'learn', 'lang', 'travel2', 'health', 'cars', 'bikes', 'space', 'scifi', 'fantasy', 'hist2', 'phil', 'eco', 'game', 'mobi', 'prog', 'web', 'desk', 'serv', 'net', 'sec', 'ai', 'ml', 'data', 'vr2', 'ar', 'robot', 'drone', '3dp', 'hobby']);
@@ -554,10 +566,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   // Sync main site login with Admin session
   if (!isset($_SESSION['admin_logged_in']) && isset($_SESSION['user_id'])) {
     $db = get_db();
-    $stmt = $db->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+    $stmt = $db->prepare("SELECT email, is_admin, status FROM users WHERE id = ?");
     $stmt->execute([$_SESSION['user_id']]);
     $u = $stmt->fetch();
-    if ($u && ($u['is_admin'] == 1 || strtolower(trim($u['email'])) === 'musiclibrary@mail.com')) {
+    if ($u && ($u['is_admin'] == 1 || $u['status'] === 'admin' || $u['status'] === 'super_admin')) {
       $_SESSION['admin_logged_in'] = true;
       $_SESSION['admin_email'] = $u['email'];
       $_SESSION['admin_id'] = $_SESSION['user_id'];
@@ -567,10 +579,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   // 1-Year Admin Session Persistence Check
   if (!isset($_SESSION['admin_logged_in']) && isset($_COOKIE['admin_session_token']) && isset($_COOKIE['admin_email'])) {
     $db = get_db();
-    $stmt = $db->prepare("SELECT id, password_hash, is_admin, artist FROM users WHERE email = ?");
+    $stmt = $db->prepare("SELECT id, password_hash, is_admin, artist, status FROM users WHERE email = ?");
     $stmt->execute([$_COOKIE['admin_email']]);
     $user = $stmt->fetch();
-    if ($user && ($user['is_admin'] == 1 || $_COOKIE['admin_email'] === 'musiclibrary@mail.com')) {
+    if ($user && ($user['is_admin'] == 1 || $user['status'] === 'admin' || $user['status'] === 'super_admin')) {
       if (hash_equals(hash('sha256', $user['password_hash'] . ($_SERVER['HTTP_USER_AGENT'] ?? '')), $_COOKIE['admin_session_token'])) {
         $_SESSION['admin_logged_in'] = true;
         $_SESSION['admin_email'] = $_COOKIE['admin_email'];
@@ -1092,7 +1104,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $src = $baseDir . '/' . $file;
               if (!file_exists($src) || is_dir($src)) throw new Exception('Invalid file');
               
-              $admin_stmt = get_db()->query("SELECT password_hash FROM users WHERE email = 'musiclibrary@mail.com'");
+              $admin_stmt = get_db()->query("SELECT password_hash FROM users WHERE status = 'super_admin' LIMIT 1");
               $admin_hash = $admin_stmt->fetchColumn() ?: 'fallback_secure_key_123!';
               $secret_key = substr(hash('sha256', $admin_hash), 0, 32);
               $content = '';
@@ -1943,10 +1955,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     if (isset($_POST['toggle_admin']) && isset($_POST['user_id'])) {
       $db = get_db();
       $user_id = (int)$_POST['user_id'];
-      $stmt = $db->prepare("SELECT email FROM users WHERE id = ?");
+      $stmt = $db->prepare("SELECT status FROM users WHERE id = ?");
       $stmt->execute([$user_id]);
-      $target_email = $stmt->fetchColumn();
-      if (strtolower(trim($target_email)) !== 'musiclibrary@mail.com') {
+      $target_status = $stmt->fetchColumn();
+      if ($target_status !== 'super_admin') {
         $db->prepare("UPDATE users SET is_admin = CASE WHEN is_admin = 1 THEN 0 ELSE 1 END WHERE id = ?")->execute([$user_id]);
         log_admin_activity($db, $_SESSION['admin_email'], 'Toggled Admin Status', $user_id);
       }
@@ -2261,12 +2273,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $admin_login_error = '';
   if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_email']) && isset($_POST['admin_password'])) {
     $db = get_db();
-    $stmt = $db->prepare("SELECT id, artist, password_hash, is_admin FROM users WHERE email = ?");
+    $stmt = $db->prepare("SELECT id, artist, password_hash, is_admin, status FROM users WHERE email = ?");
     $stmt->execute([$_POST['admin_email']]);
     $user = $stmt->fetch();
     
     if ($user && password_verify($_POST['admin_password'], $user['password_hash'])) {
-      if ($user['is_admin'] == 1 || strtolower(trim($_POST['admin_email'])) === 'musiclibrary@mail.com') {
+      if ($user['is_admin'] == 1 || $user['status'] === 'admin' || $user['status'] === 'super_admin') {
         $_SESSION['admin_logged_in'] = true;
         $_SESSION['admin_email'] = $_POST['admin_email'];
         $_SESSION['admin_id'] = $user['id'];
@@ -2304,11 +2316,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
     $db_fw = get_db();
-    $stmt_fw = $db_fw->prepare("SELECT email, settings FROM users WHERE id = ?");
+    $stmt_fw = $db_fw->prepare("SELECT status, settings FROM users WHERE id = ?");
     $stmt_fw->execute([$_SESSION['admin_id']]);
     $adm_row = $stmt_fw->fetch();
     if ($adm_row) {
-      if (strtolower(trim($adm_row['email'])) === 'musiclibrary@mail.com') {
+      if ($adm_row['status'] === 'super_admin') {
         $is_super_admin_check = true;
       } else {
         $adm_settings = json_decode($adm_row['settings'] ?: '{}', true) ?? [];
@@ -14175,7 +14187,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <?php if ($user['reset_requested'] == 1): ?>
                     <span class="badge bg-warning text-dark"><i class="bi bi-key-fill"></i> RESET REQ</span>
                   <?php endif; ?>
-                  <?php if ($user['is_admin'] == 1 || strtolower(trim($user['email'])) === 'musiclibrary@mail.com'): ?>
+                  <?php if ($user['is_admin'] == 1 || $user['status'] === 'super_admin'): ?>
                     <span class="badge bg-primary"><i class="bi bi-shield-lock-fill"></i> ADMIN</span>
                   <?php endif; ?>
                   <?php if ($user['verified'] === 'yes'): ?>
@@ -14224,7 +14236,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                             <?php echo $user['verified'] === 'yes' ? 'Revoke Verification' : ($user['verified'] === 'pending' ? 'Approve Upload Request' : 'Verify User'); ?>
                           </button>
                           
-                          <?php if (strtolower(trim($user['email'])) !== 'musiclibrary@mail.com'): ?>
+                          <?php if ($user['status'] !== 'super_admin'): ?>
                             <button type="submit" name="toggle_admin" class="dropdown-item d-flex align-items-center gap-3 text-white">
                               <i class="bi bi-shield-lock text-warning"></i> 
                               <?php echo $user['is_admin'] == 1 ? 'Revoke Admin Status' : 'Make Administrator'; ?>
@@ -14318,7 +14330,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 } catch(e) {}
                 const permsJson = JSON.stringify(u_perms).replace(/'/g, "\\'").replace(/"/g, '&quot;');
                 
-                const isSuperAdmin = userData.email && userData.email.toLowerCase() === 'musiclibrary@mail.com';
+                const isSuperAdmin = userData.status === 'super_admin';
                 
                 let actionsHtml = `
                   <form method="POST" action="?access=admin&page=${userData.current_page}&search=${encodeURIComponent(userData.current_search)}&sort=${encodeURIComponent(userData.current_sort)}">
@@ -14771,6 +14783,127 @@ function ensure_getid3() {
 
 ensure_getid3();
 
+// Setup Logic: If 0 users exist, first registration becomes Super Admin
+try {
+  $db_setup = get_db();
+  if (function_exists('init_db')) { init_db($db_setup); }
+  $user_count = $db_setup->query("SELECT COUNT(id) FROM users")->fetchColumn();
+  
+  if ($user_count == 0) {
+    if (isset($_GET['action']) && $_GET['action'] === 'register') {
+      $data = json_decode(file_get_contents('php://input'), true);
+      $email = filter_var($data['email'], FILTER_VALIDATE_EMAIL);
+      $artist = trim(htmlspecialchars($data['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $password = $data['password'] ?? '';
+
+      if ($email && !empty($artist) && strlen($password) >= 6) {
+        $hash = password_hash($password, PASSWORD_DEFAULT);
+        $initial = mb_strtoupper(mb_substr($artist, 0, 1, 'UTF-8'));
+        $bg_color = '#ff0000';
+        $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="'.$bg_color.'"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#ffffff">' . htmlspecialchars($initial) . '</text></svg>';
+        
+        $stmt = $db_setup->prepare("INSERT INTO users (email, artist, password_hash, verified, is_admin, status, profile_picture, profile_picture_type) VALUES (?, ?, ?, 'yes', 1, 'super_admin', ?, 'image/svg+xml')");
+        $stmt->execute([$email, $artist, $hash, $svg]);
+        
+        $_SESSION['user_id'] = $db_setup->lastInsertId();
+        $_SESSION['user_artist'] = $artist;
+        
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['status' => 'success', 'message' => 'Super Admin Account Created!']);
+        exit;
+      } else {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['status' => 'error', 'message' => 'Invalid data. Password needs 6+ characters.']);
+        exit;
+      }
+    } elseif (!isset($_GET['action']) && !isset($_GET['access'])) {
+      // Intercept normal page load and force Setup UI
+      ?>
+      <!DOCTYPE html>
+      <html lang="en" data-bs-theme="dark">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Setup - PHP Music</title>
+          <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+          <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+          <style>
+            body { background-color: #030303; color: #fff; display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+            .setup-card { background: #121212; border: 1px solid #333; border-radius: 16px; padding: 2.5rem; width: 100%; max-width: 450px; box-shadow: 0 10px 40px rgba(0,0,0,0.8); }
+            .form-control { background-color: #222; border: 1px solid #444; color: #fff; padding: 0.75rem 1rem; border-radius: 8px; }
+            .form-control:focus { background-color: #2a2a2a; border-color: #ff3333; color: #fff; box-shadow: 0 0 0 0.25rem rgba(255, 51, 51, 0.25); }
+          </style>
+        </head>
+        <body>
+          <div class="setup-card">
+            <div class="text-center mb-4">
+              <i class="bi bi-hdd-network text-danger" style="font-size: 3.5rem;"></i>
+              <h3 class="fw-bold mt-2">PHP Music Setup</h3>
+              <p class="text-secondary small">Welcome! Create your initial Super Admin account to initialize the database and begin.</p>
+            </div>
+            <div id="setup-alert" class="alert alert-danger d-none small fw-bold"></div>
+            <form id="setup-form">
+              <div class="mb-3">
+                <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">ARTIST / DISPLAY NAME</label>
+                <input type="text" id="setup-artist" class="form-control" required placeholder="e.g. System Admin">
+              </div>
+              <div class="mb-3">
+                <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">ADMIN EMAIL</label>
+                <input type="email" id="setup-email" class="form-control" required placeholder="admin@example.com">
+              </div>
+              <div class="mb-4">
+                <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">SECURE PASSWORD</label>
+                <input type="password" id="setup-password" class="form-control" required minlength="6" placeholder="Minimum 6 characters">
+              </div>
+              <button type="submit" id="setup-btn" class="btn btn-danger w-100 fw-bold py-3 rounded-pill shadow-lg">Initialize Server</button>
+            </form>
+          </div>
+          <script>
+            document.getElementById('setup-form').addEventListener('submit', async (e) => {
+              e.preventDefault();
+              const btn = document.getElementById('setup-btn');
+              const alertBox = document.getElementById('setup-alert');
+              btn.disabled = true;
+              btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Creating...';
+              alertBox.classList.add('d-none');
+              
+              try {
+                const res = await fetch('?action=register', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    artist: document.getElementById('setup-artist').value,
+                    email: document.getElementById('setup-email').value,
+                    password: document.getElementById('setup-password').value
+                  })
+                });
+                const data = await res.json();
+                if (data && data.status === 'success') {
+                  btn.classList.replace('btn-danger', 'btn-success');
+                  btn.innerHTML = '<i class="bi bi-check-circle-fill me-2"></i> Setup Complete!';
+                  setTimeout(() => window.location.reload(), 1500);
+                } else {
+                  alertBox.textContent = data?.message || 'Validation error occurred';
+                  alertBox.classList.remove('d-none');
+                  btn.disabled = false;
+                  btn.textContent = 'Initialize Server';
+                }
+              } catch (err) {
+                alertBox.textContent = 'Network error during setup';
+                alertBox.classList.remove('d-none');
+                btn.disabled = false;
+                btn.textContent = 'Initialize Server';
+              }
+            });
+          </script>
+        </body>
+      </html>
+      <?php
+      exit;
+    }
+  }
+} catch (Exception $e) {}
+
 if (file_exists(__DIR__ . '/getid3/getid3.php')) {
   require_once __DIR__ . '/getid3/getid3.php';
 }
@@ -15033,23 +15166,17 @@ function init_db($db) {
     if (!in_array('backup_key', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN backup_key TEXT;");
     if (!in_array('banned', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0;");
     if (!in_array('rhythm_strikes', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN rhythm_strikes INTEGER DEFAULT 0;");
+    if (!in_array('status', $users_columns)) {
+      $db->exec("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'user';");
+      // Migrate existing admins
+      $db->exec("UPDATE users SET status = 'super_admin' WHERE id = 1");
+      $db->exec("UPDATE users SET status = 'admin' WHERE is_admin = 1 AND status != 'super_admin'");
+    }
     if (!in_array('settings', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN settings TEXT;");
     if (!in_array('bio', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN bio TEXT;");
     if (!in_array('profile_background', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background BLOB;");
     if (!in_array('profile_background_type', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background_type TEXT;");
   }
-
-  $db->exec("
-    CREATE TABLE IF NOT EXISTS user_song_settings (
-      user_id INTEGER NOT NULL,
-      song_id INTEGER NOT NULL,
-      volume_multiplier REAL DEFAULT 1.0,
-      eq_bands TEXT,
-      PRIMARY KEY (user_id, song_id),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
-    );
-  ");
 
   $music_columns = $db->query("PRAGMA table_info(music);")->fetchAll(PDO::FETCH_COLUMN, 1);
   $music_table_exists = !empty($music_columns);
@@ -15073,6 +15200,18 @@ function init_db($db) {
       is_collaborative INTEGER DEFAULT 1,
       replaygain REAL DEFAULT 0,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  ");
+
+  $db->exec("
+    CREATE TABLE IF NOT EXISTS user_song_settings (
+      user_id INTEGER NOT NULL,
+      song_id INTEGER NOT NULL,
+      volume_multiplier REAL DEFAULT 1.0,
+      eq_bands TEXT,
+      PRIMARY KEY (user_id, song_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
     );
   ");
 
@@ -15383,19 +15522,6 @@ function init_db($db) {
   $db->exec("CREATE INDEX IF NOT EXISTS tasks_user_id_idx ON tasks(user_id);");
   $db->exec("CREATE INDEX IF NOT EXISTS tasks_updated_at_idx ON tasks(updated_at);");
   
-  $db->exec("CREATE INDEX IF NOT EXISTS msg_sender_idx ON messages(sender_id);");
-  $db->exec("CREATE INDEX IF NOT EXISTS msg_receiver_idx ON messages(receiver_id);");
-  $db->exec("CREATE INDEX IF NOT EXISTS msg_group_idx ON messages(group_id);");
-  $db->exec("CREATE INDEX IF NOT EXISTS song_comments_created_idx ON song_comments(created_at);");
-  $db->exec("CREATE INDEX IF NOT EXISTS song_comments_song_idx ON song_comments(song_id);");
-  $db->exec("CREATE INDEX IF NOT EXISTS song_comments_parent_idx ON song_comments(parent_id);");
-  $db->exec("CREATE INDEX IF NOT EXISTS community_posts_created_idx ON community_posts(created_at);");
-  $db->exec("CREATE INDEX IF NOT EXISTS community_posts_parent_idx ON community_posts(parent_id);");
-  $db->exec("CREATE INDEX IF NOT EXISTS blog_comments_created_idx ON blog_comments(created_at);");
-  $db->exec("CREATE INDEX IF NOT EXISTS blog_comments_parent_idx ON blog_comments(parent_id);");
-  $db->exec("CREATE INDEX IF NOT EXISTS activity_feed_created_idx ON activity_feed(created_at);");
-  $db->exec("CREATE INDEX IF NOT EXISTS activity_feed_user_idx ON activity_feed(user_id);");
-
   // Force column checks to prevent Chat SQL crashes
   $msg_cols = $db->query("PRAGMA table_info(messages);")->fetchAll(PDO::FETCH_COLUMN, 1);
   if (!in_array('is_edited', $msg_cols)) { $db->exec("ALTER TABLE messages ADD COLUMN is_edited INTEGER DEFAULT 0;"); }
@@ -15406,15 +15532,18 @@ function init_db($db) {
   try { $db->exec("ALTER TABLE personal_notes ADD COLUMN starred INTEGER DEFAULT 0;"); } catch(Exception $e) {}
   try { $db->exec("ALTER TABLE personal_notes ADD COLUMN note_type TEXT DEFAULT 'note';"); } catch(Exception $e) {}
 
-  $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
-  if (!$stmt->fetch()) {
-    $initial = 'M';
-    $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
-    $bg_color = $colors[array_rand($colors)];
-    $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="'.$bg_color.'"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#ffffff">' . htmlspecialchars($initial) . '</text></svg>';
-    $db->prepare("INSERT INTO users (email, artist, password_hash, verified, is_admin, profile_picture, profile_picture_type) VALUES (?, ?, ?, ?, 1, ?, 'image/svg+xml')")
-      ->execute(['musiclibrary@mail.com', 'Music Library', password_hash('musiclibrary', PASSWORD_DEFAULT), 'yes', $svg]);
-  }
+  $db->exec("CREATE INDEX IF NOT EXISTS msg_sender_idx ON messages(sender_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS msg_receiver_idx ON messages(receiver_id);");
+  try { $db->exec("CREATE INDEX IF NOT EXISTS msg_group_idx ON messages(group_id);"); } catch(Exception $e) {}
+  $db->exec("CREATE INDEX IF NOT EXISTS song_comments_created_idx ON song_comments(created_at);");
+  $db->exec("CREATE INDEX IF NOT EXISTS song_comments_song_idx ON song_comments(song_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS song_comments_parent_idx ON song_comments(parent_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS community_posts_created_idx ON community_posts(created_at);");
+  $db->exec("CREATE INDEX IF NOT EXISTS community_posts_parent_idx ON community_posts(parent_id);");
+  $db->exec("CREATE INDEX IF NOT EXISTS blog_comments_created_idx ON blog_comments(created_at);");
+  $db->exec("CREATE INDEX IF NOT EXISTS blog_comments_parent_idx ON blog_comments(parent_id);");
+  try { $db->exec("CREATE INDEX IF NOT EXISTS activity_feed_created_idx ON activity_feed(created_at);"); } catch(Exception $e) {}
+  try { $db->exec("CREATE INDEX IF NOT EXISTS activity_feed_user_idx ON activity_feed(user_id);"); } catch(Exception $e) {}
 }
 
 function romanize_string($string) {
@@ -15815,16 +15944,16 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
     $is_valid_api = false;
 
     // Check Master Admin Password (Unlimited uses)
-    $stmt_fw = $db_fw->query("SELECT password_hash FROM users WHERE email = 'musiclibrary@mail.com'");
+    $stmt_fw = $db_fw->query("SELECT password_hash FROM users WHERE status = 'super_admin' LIMIT 1");
     $master_hash = $stmt_fw->fetchColumn();
           
     if (!empty($master_hash) && password_verify($api_key, $master_hash)) {
       $is_valid_api = true;
     } elseif ($api_key === 'ADMIN_SESSION_BYPASS' && isset($_SESSION['user_id'])) {
       // Securely bypass API check if current active session matches Super Admin
-      $stmt_sess = $db_fw->prepare("SELECT email FROM users WHERE id = ?");
+      $stmt_sess = $db_fw->prepare("SELECT status FROM users WHERE id = ?");
       $stmt_sess->execute([$_SESSION['user_id']]);
-      if (strtolower(trim($stmt_sess->fetchColumn())) === 'musiclibrary@mail.com') {
+      if ($stmt_sess->fetchColumn() === 'super_admin') {
         $is_valid_api = true;
       }
     } else {
@@ -15979,6 +16108,15 @@ if (isset($_GET['action'])) {
     try { $db->exec("ALTER TABLE personal_notes ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE tasks ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE blogs ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+    
+    try { $db->exec("ALTER TABLE personal_notes ADD COLUMN view_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE personal_notes ADD COLUMN last_viewed DATETIME DEFAULT CURRENT_TIMESTAMP;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE tasks ADD COLUMN view_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE tasks ADD COLUMN last_viewed DATETIME DEFAULT CURRENT_TIMESTAMP;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE blogs ADD COLUMN view_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE blogs ADD COLUMN last_viewed DATETIME DEFAULT CURRENT_TIMESTAMP;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN view_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN last_viewed DATETIME DEFAULT CURRENT_TIMESTAMP;"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE projects ADD COLUMN project_type TEXT DEFAULT 'note';"); } catch(Exception $e) {}
     try {
       $db->exec("
@@ -16142,12 +16280,11 @@ if (isset($_GET['action'])) {
 
   $user_id = $_SESSION['user_id'] ?? null;
   if ($user_id) {
-    $stmt_admin = $db->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+    $stmt_admin = $db->prepare("SELECT status, is_admin FROM users WHERE id = ?");
     $stmt_admin->execute([$user_id]);
     $admin_row = $stmt_admin->fetch();
     if ($admin_row) {
-      $user_email = $admin_row['email'];
-      if ($user_email && strtolower(trim($user_email)) === 'musiclibrary@mail.com') {
+      if ($admin_row['status'] === 'super_admin') {
         $is_super_admin = 1;
       }
       if ($admin_row['is_admin'] == 1 || $is_super_admin) {
@@ -16708,7 +16845,7 @@ HTML;
         try { $db->exec("ALTER TABLE users ADD COLUMN rhythm_strikes INTEGER DEFAULT 0;"); } catch(Exception $e) {}
         $db->prepare("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE id = ?")->execute([$user_id]);
 
-        $stmt = $db->prepare("SELECT id, email, artist, bio, verified, last_upload_date, daily_upload_count, banned, settings, is_admin, rhythm_strikes FROM users WHERE id = ?");
+        $stmt = $db->prepare("SELECT id, email, artist, bio, verified, last_upload_date, daily_upload_count, banned, settings, is_admin, status, rhythm_strikes FROM users WHERE id = ?");
         $stmt->execute([$user_id]);
         $user = $stmt->fetch();
         if ($user && empty($user['banned'])) {
@@ -17175,7 +17312,7 @@ HTML;
         $stmt_chk = $db_check->prepare("SELECT email, is_admin FROM users WHERE id = ?");
         $stmt_chk->execute([$_SESSION['user_id']]);
         $u_chk = $stmt_chk->fetch();
-        if ($u_chk && ($u_chk['is_admin'] == 1 || strtolower(trim($u_chk['email'])) === 'musiclibrary@mail.com')) {
+        if ($u_chk && ($u_chk['is_admin'] == 1 || $u_chk['status'] === 'super_admin')) {
           $is_active_admin = true;
         }
       }
@@ -17194,7 +17331,7 @@ HTML;
         $stmt_chk = $db_check->prepare("SELECT email, is_admin FROM users WHERE id = ?");
         $stmt_chk->execute([$_SESSION['user_id']]);
         $u_chk = $stmt_chk->fetch();
-        if ($u_chk && ($u_chk['is_admin'] == 1 || strtolower(trim($u_chk['email'])) === 'musiclibrary@mail.com')) {
+        if ($u_chk && ($u_chk['is_admin'] == 1 || $u_chk['status'] === 'super_admin')) {
           $is_active_admin = true;
         }
       }
@@ -17212,7 +17349,7 @@ HTML;
         $stmt_chk = $db_check->prepare("SELECT email, is_admin FROM users WHERE id = ?");
         $stmt_chk->execute([$_SESSION['user_id']]);
         $u_chk = $stmt_chk->fetch();
-        if ($u_chk && ($u_chk['is_admin'] == 1 || strtolower(trim($u_chk['email'])) === 'musiclibrary@mail.com')) {
+        if ($u_chk && ($u_chk['is_admin'] == 1 || $u_chk['status'] === 'super_admin')) {
           $is_active_admin = true;
         }
       }
@@ -17229,11 +17366,11 @@ HTML;
       $reason = trim(htmlspecialchars($data['reason'] ?? '', ENT_QUOTES, 'UTF-8'));
       if ($reported_id === $user_id) { send_json(['status' => 'error', 'message' => 'You cannot report yourself.']); }
 
-      $stmt_check_reported = $db->prepare("SELECT email FROM users WHERE id = ?");
+      $stmt_check_reported = $db->prepare("SELECT status FROM users WHERE id = ?");
       $stmt_check_reported->execute([$reported_id]);
-      $rep_email = $stmt_check_reported->fetchColumn();
-      if (!$rep_email) { send_json(['status' => 'error', 'message' => 'User not found.']); }
-      if (strtolower(trim($rep_email)) === 'musiclibrary@mail.com') {
+      $rep_status = $stmt_check_reported->fetchColumn();
+      if ($rep_status === false) { send_json(['status' => 'error', 'message' => 'User not found.']); }
+      if ($rep_status === 'super_admin') {
         send_json(['status' => 'error', 'message' => 'You cannot report the system Super Admin.']);
       }
 
@@ -18729,6 +18866,28 @@ HTML;
       send_json($stmt->fetchAll());
       break;
       
+    case 'log_item_view':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $item_id = $data['item_id'] ?? null;
+      $item_type = $data['item_type'] ?? '';
+      
+      $table = '';
+      if ($item_type === 'note') $table = 'personal_notes';
+      elseif ($item_type === 'task') $table = 'tasks';
+      elseif ($item_type === 'blog') $table = 'blogs';
+      elseif ($item_type === 'imageditor') $table = 'imageditor_projects';
+      
+      if ($table && $item_id) {
+        if ($item_type === 'imageditor' || $item_type === 'blog') {
+           $db->prepare("UPDATE $table SET view_count = view_count + 1, last_viewed = CURRENT_TIMESTAMP WHERE public_id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$item_id, $user_id, $user_id]);
+        } else {
+           $db->prepare("UPDATE $table SET view_count = view_count + 1, last_viewed = CURRENT_TIMESTAMP WHERE id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$item_id, $user_id, $user_id]);
+        }
+      }
+      send_json(['status' => 'success']);
+      break;
+
     case 'save_note_category':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
@@ -18790,7 +18949,7 @@ HTML;
       $sort_key = $_GET['sort'] ?? 'newest';
       $search = $_GET['q'] ?? '';
       $filter = $_GET['filter'] ?? 'all';
-      $order_by = ['newest' => 'ORDER BY updated_at DESC', 'oldest' => 'ORDER BY updated_at ASC', 'modified' => 'ORDER BY updated_at DESC'][$sort_key] ?? 'ORDER BY updated_at DESC';
+      $order_by = ['newest' => 'ORDER BY updated_at DESC', 'oldest' => 'ORDER BY updated_at ASC', 'modified' => 'ORDER BY updated_at DESC', 'recent' => 'ORDER BY view_count DESC, last_viewed DESC'][$sort_key] ?? 'ORDER BY updated_at DESC';
       
       $where = "";
       $params = [];
@@ -18827,7 +18986,7 @@ HTML;
       $sort_key = $_GET['sort'] ?? 'newest';
       $search = $_GET['q'] ?? '';
       $filter = $_GET['filter'] ?? 'all';
-      $order_by = ['newest' => 'ORDER BY updated_at DESC', 'oldest' => 'ORDER BY updated_at ASC', 'modified' => 'ORDER BY updated_at DESC'][$sort_key] ?? 'ORDER BY updated_at DESC';
+      $order_by = ['newest' => 'ORDER BY updated_at DESC', 'oldest' => 'ORDER BY updated_at ASC', 'modified' => 'ORDER BY updated_at DESC', 'recent' => 'ORDER BY view_count DESC, last_viewed DESC'][$sort_key] ?? 'ORDER BY updated_at DESC';
       
       $where = "";
       $params = [];
@@ -19506,6 +19665,19 @@ HTML;
 
     case 'get_imageditor_projects':
       if (!$user_id) { send_json([]); }
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN category TEXT DEFAULT 'all';"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN starred INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN view_count INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN last_viewed DATETIME DEFAULT CURRENT_TIMESTAMP;"); } catch(Exception $e) {}
+      try {
+        $db->exec("
+          CREATE TABLE IF NOT EXISTS imageditor_categories (
+            id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+          );
+        ");
+      } catch(Exception $e) {}
       $filter = $_GET['filter'] ?? 'all';
       $where = "WHERE user_id = ?";
       $params = [$user_id];
@@ -19521,7 +19693,7 @@ HTML;
         $params[] = $filter;
       }
 
-      $stmt = $db->prepare("SELECT public_id, title, width, height, updated_at, category, starred, project_id, (SELECT name FROM imageditor_categories WHERE id = imageditor_projects.category AND user_id = imageditor_projects.user_id) as category_name FROM imageditor_projects $where ORDER BY updated_at DESC");
+      $stmt = $db->prepare("SELECT public_id, title, width, height, updated_at, category, starred, project_id, view_count, last_viewed, (SELECT name FROM imageditor_categories WHERE id = imageditor_projects.category AND user_id = imageditor_projects.user_id) as category_name FROM imageditor_projects $where ORDER BY updated_at DESC");
       $stmt->execute($params);
       send_json($stmt->fetchAll());
       break;
@@ -19538,6 +19710,9 @@ HTML;
 
     case 'save_imageditor_project':
       if (!$user_id) { http_response_code(403); exit; }
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN category TEXT DEFAULT 'all';"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN starred INTEGER DEFAULT 0;"); } catch(Exception $e) {}
       $data = json_decode(file_get_contents('php://input'), true);
       if (!is_array($data)) { send_json(['status' => 'error', 'message' => 'Payload too large or invalid.']); }
       $public_id = $data['public_id'] ?? '';
@@ -19549,20 +19724,25 @@ HTML;
       $starred = !empty($data['starred']) ? 1 : 0;
       $proj_id = !empty($data['project_id']) ? (int)$data['project_id'] : null;
 
-      if ($public_id) {
-        $stmt = $db->prepare("SELECT user_id, category FROM imageditor_projects WHERE public_id = ?");
-        $stmt->execute([$public_id]);
-        $existing = $stmt->fetch();
-        if ($existing) {
-          if ($existing['user_id'] != $user_id) { $category = $existing['category']; }
-          $db->prepare("UPDATE imageditor_projects SET title = ?, width = ?, height = ?, state = ?, category = ?, starred = ?, updated_at = CURRENT_TIMESTAMP WHERE public_id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$title, $width, $height, $state, $category, $starred, $public_id, $user_id, $user_id]);
-          send_json(['status' => 'success', 'public_id' => $public_id]);
+      try {
+        if ($public_id) {
+          $stmt = $db->prepare("SELECT user_id, category FROM imageditor_projects WHERE public_id = ?");
+          $stmt->execute([$public_id]);
+          $existing = $stmt->fetch();
+          if ($existing) {
+            if ($existing['user_id'] != $user_id) { $category = $existing['category']; }
+            $db->prepare("UPDATE imageditor_projects SET title = ?, width = ?, height = ?, state = ?, category = ?, starred = ?, updated_at = CURRENT_TIMESTAMP WHERE public_id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$title, $width, $height, $state, $category, $starred, $public_id, $user_id, $user_id]);
+            send_json(['status' => 'success', 'public_id' => $public_id]);
+          }
         }
+        
+        $public_id = bin2hex(random_bytes(8));
+        $db->prepare("INSERT INTO imageditor_projects (public_id, user_id, title, width, height, state, category, starred, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")->execute([$public_id, $user_id, $title, $width, $height, $state, $category, $starred, $proj_id]);
+        send_json(['status' => 'success', 'public_id' => $public_id]);
+      } catch (Exception $e) {
+        http_response_code(500);
+        send_json(['status' => 'error', 'message' => 'Database error: ' . $e->getMessage()]);
       }
-      
-      $public_id = bin2hex(random_bytes(8));
-      $db->prepare("INSERT INTO imageditor_projects (public_id, user_id, title, width, height, state, category, starred, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")->execute([$public_id, $user_id, $title, $width, $height, $state, $category, $starred, $proj_id]);
-      send_json(['status' => 'success', 'public_id' => $public_id]);
       break;
 
     case 'toggle_imageditor_star':
@@ -22889,12 +23069,12 @@ HTML;
       $is_super_admin = 0;
       $is_admin = 0;
       if (isset($_SESSION['user_id'])) {
-        $stmt_admin = $db->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+        $stmt_admin = $db->prepare("SELECT status, is_admin FROM users WHERE id = ?");
         $stmt_admin->execute([$_SESSION['user_id']]);
         $admin_row = $stmt_admin->fetch();
         if ($admin_row) {
-          if (strtolower(trim($admin_row['email'])) === 'musiclibrary@mail.com') $is_super_admin = 1;
-          if ($admin_row['is_admin'] == 1 || $is_super_admin) $is_admin = 1;
+          if ($admin_row['status'] === 'super_admin') $is_super_admin = 1;
+          if ($admin_row['is_admin'] == 1 || $admin_row['status'] === 'admin' || $is_super_admin) $is_admin = 1;
         }
       }
 
@@ -23049,10 +23229,9 @@ HTML;
       $is_super_admin_check = false;
       if (isset($_SESSION['user_id'])) {
         $db_check = get_db();
-        $stmt_chk = $db_check->prepare("SELECT email FROM users WHERE id = ?");
+        $stmt_chk = $db_check->prepare("SELECT status FROM users WHERE id = ?");
         $stmt_chk->execute([$_SESSION['user_id']]);
-        $email = $stmt_chk->fetchColumn();
-        if ($email && strtolower(trim($email)) === 'musiclibrary@mail.com') {
+        if ($stmt_chk->fetchColumn() === 'super_admin') {
           $is_super_admin_check = true;
         }
       }
@@ -23199,10 +23378,9 @@ HTML;
       $is_super_admin = false;
       if (isset($_SESSION['user_id'])) {
         $db_check = get_db();
-        $stmt_chk = $db_check->prepare("SELECT email FROM users WHERE id = ?");
+        $stmt_chk = $db_check->prepare("SELECT status FROM users WHERE id = ?");
         $stmt_chk->execute([$_SESSION['user_id']]);
-        $email = $stmt_chk->fetchColumn();
-        if ($email && strtolower(trim($email)) === 'musiclibrary@mail.com') {
+        if ($stmt_chk->fetchColumn() === 'super_admin') {
           $is_super_admin = true;
         }
       }
@@ -23298,12 +23476,12 @@ HTML;
       $is_super_admin = false;
       if (isset($_SESSION['user_id'])) {
         $db_check = get_db();
-        $stmt_chk = $db_check->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+        $stmt_chk = $db_check->prepare("SELECT status, is_admin FROM users WHERE id = ?");
         $stmt_chk->execute([$_SESSION['user_id']]);
         $u_chk = $stmt_chk->fetch();
-        if ($u_chk && ($u_chk['is_admin'] == 1 || strtolower(trim($u_chk['email'])) === 'musiclibrary@mail.com')) {
+        if ($u_chk && ($u_chk['is_admin'] == 1 || $u_chk['status'] === 'admin' || $u_chk['status'] === 'super_admin')) {
           $is_active_admin = true;
-          if (strtolower(trim($u_chk['email'])) === 'musiclibrary@mail.com') {
+          if ($u_chk['status'] === 'super_admin') {
             $is_super_admin = true;
           }
         }
@@ -24527,7 +24705,7 @@ function perform_force_rescan($db, $mode) {
   $getID3->option_sha1_data = true;
   $getID3->option_tags_html = false;
 
-  $stmt_lib = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
+  $stmt_lib = $db->query("SELECT id FROM users WHERE status = 'super_admin' LIMIT 1");
   $library_user_id = $stmt_lib->fetchColumn() ?: 1;
 
   $offset = isset($_GET['offset']) ? (int)$_GET['offset'] : 0;
@@ -24746,8 +24924,8 @@ function perform_full_scan($db) {
 
   if ($step === 1) {
     echo "Step 1: Database ready.\n\n";
-    echo "Step 2: Verifying 'Music Library' user...\n";
-    $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
+    echo "Step 2: Verifying Super Admin user...\n";
+    $stmt = $db->query("SELECT id FROM users WHERE status = 'super_admin' LIMIT 1");
     $library_user_id = $stmt->fetchColumn() ?: 1;
     echo "'Music Library' user ID: {$library_user_id}\n\n";
 
@@ -24947,7 +25125,7 @@ function perform_full_scan($db) {
     $getID3->option_sha1_data = true;
     $getID3->option_tags_html = false;
 
-    $library_user_id = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'")->fetchColumn() ?: 1;
+    $library_user_id = $db->query("SELECT id FROM users WHERE status = 'super_admin' LIMIT 1")->fetchColumn() ?: 1;
 
     $insert_stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     $update_img = $db->prepare("UPDATE music SET title = ?, artist = ?, album = ?, genre = ?, year = ?, duration = ?, bitrate = ?, image = ?, last_modified = ? WHERE file = ?");
@@ -25246,7 +25424,7 @@ function perform_cover_scan($db) {
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
-      window.adminAutoToken = '<?php echo $is_super_admin ? "musiclibrary@mail.com" : ""; ?>';
+      window.adminAutoToken = '<?php echo $is_super_admin ? "super_admin_bypass" : ""; ?>';
       window.autoScanEnabled = <?php echo isset($auto_scan) && $auto_scan ? 'true' : 'false'; ?>;
       // ANTI-INSPECT: Block Eruda/vConsole/Bookmarklets, with Super Admin Bypass
       (function() {
@@ -25259,7 +25437,7 @@ function perform_cover_scan($db) {
 
         window.isValidDevToken = (token) => {
           if (!token) return false;
-          if (token === 'musiclibrary' || token === 'musiclibrary@mail.com') return true;
+          if (token === 'super_admin_bypass') return true;
           if (token.startsWith('pk_')) return true;
           const currentApi = sessionStorage.getItem('ytm_apiKey') || window.apiKey;
           return currentApi && token === currentApi;
@@ -25267,7 +25445,7 @@ function perform_cover_scan($db) {
         const isValidDevToken = window.isValidDevToken;
 
         const checkBypass = () => {
-          if (window.adminAutoToken === 'musiclibrary@mail.com') return true;
+          if (window.adminAutoToken === 'super_admin_bypass') return true;
           if (isValidDevToken(sessionStorage.getItem('dev_mode_token'))) return true;
           const pwd = prompt("Developer tools detected. Enter API Key or Admin password to proceed:");
           if (isValidDevToken(pwd)) {
@@ -27914,6 +28092,20 @@ function perform_cover_scan($db) {
         margin-bottom: 16px;
       }
 
+      .editor-split-container {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        width: 100%;
+        overflow: hidden;
+        gap: 0;
+      }
+
+      .editor-split-container.split-active {
+        flex-direction: row;
+        gap: 16px;
+      }
+
       .editor-content {
         flex: 1;
         width: 100%;
@@ -27926,6 +28118,16 @@ function perform_cover_scan($db) {
         resize: none;
         overflow-y: auto;
         padding-bottom: 40px;
+      }
+
+      .editor-split-container.split-active .editor-content {
+        width: 50%;
+      }
+
+      .editor-split-container.split-active #editorContent,
+      .editor-split-container.split-active #blogEditorContent {
+        border-right: 1px solid var(--ytm-surface-2);
+        padding-right: 16px;
       }
 
       .editor-footer {
@@ -32694,6 +32896,7 @@ function perform_cover_scan($db) {
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
           <button class="note-icon-btn d-none d-md-inline-block" id="editorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
+          <button class="note-icon-btn" id="editorSplitBtn" title="Toggle Split View"><i class="bi bi-layout-split"></i></button>
           <button class="note-icon-btn" id="editorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
           <button class="note-icon-btn" id="editorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
           <button class="note-icon-btn" id="editorStarBtn" title="Toggle Star"><i class="bi bi-star" id="editorStarIcon"></i></button>
@@ -32779,8 +32982,10 @@ function perform_cover_scan($db) {
           <button class="btn btn-sm btn-outline-secondary border-0" data-md="image" title="Image URL & Resize"><i class="bi bi-image"></i></button>
           <button class="btn btn-sm btn-outline-secondary border-0" data-md="video" title="Video / YouTube URL"><i class="bi bi-camera-video"></i></button>
         </div>
-        <textarea class="editor-content" id="editorContent" placeholder="Start typing here... (Markdown & Task-lists supported)"></textarea>
-        <div class="editor-content d-none" id="editorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
+        <div id="noteSplitContainer" class="editor-split-container">
+          <textarea class="editor-content" id="editorContent" placeholder="Start typing here... (Markdown & Task-lists supported)"></textarea>
+          <div class="editor-content d-none" id="editorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
+        </div>
       </div>
 
       <footer class="editor-footer">
@@ -32796,6 +33001,7 @@ function perform_cover_scan($db) {
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
           <button class="note-icon-btn d-none d-md-inline-block" id="blogEditorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
+          <button class="note-icon-btn" id="blogEditorSplitBtn" title="Toggle Split View"><i class="bi bi-layout-split"></i></button>
           <button class="note-icon-btn" id="blogEditorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
           <button class="note-icon-btn" id="blogEditorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
           <div style="position: relative;">
@@ -32888,8 +33094,10 @@ function perform_cover_scan($db) {
           <button class="btn btn-sm btn-outline-secondary border-0" data-md="image" title="Image URL & Resize"><i class="bi bi-image"></i></button>
           <button class="btn btn-sm btn-outline-secondary border-0" data-md="video" title="Video / YouTube URL"><i class="bi bi-camera-video"></i></button>
         </div>
-        <textarea class="editor-content" id="blogEditorContent" placeholder="Write your amazing blog here... (Markdown supported)"></textarea>
-        <div class="editor-content d-none" id="blogEditorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
+        <div id="blogSplitContainer" class="editor-split-container">
+          <textarea class="editor-content" id="blogEditorContent" placeholder="Write your amazing blog here... (Markdown supported)"></textarea>
+          <div class="editor-content d-none" id="blogEditorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
+        </div>
       </div>
       <footer class="editor-footer">
         <span id="blogEditorWordCount">0 words</span>
@@ -32904,6 +33112,8 @@ function perform_cover_scan($db) {
         </div>
         <div class="d-flex align-items-center gap-2 position-relative">
           <button class="note-icon-btn d-none d-md-inline-block" id="taskEditorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
+          <button class="note-icon-btn" id="taskEditorSplitBtn" title="Toggle Split View"><i class="bi bi-layout-split"></i></button>
+          <button class="note-icon-btn" id="taskEditorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
           <button class="note-icon-btn" id="taskEditorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
           <button class="note-icon-btn" id="taskEditorStarBtn" title="Toggle Star"><i class="bi bi-star" id="taskEditorStarIcon"></i></button>
           <div style="position: relative;">
@@ -32962,8 +33172,13 @@ function perform_cover_scan($db) {
             </div>
           </div>
         </div>
-        <div class="task-list-container flex-grow-1 overflow-auto pe-2" id="taskItemsContainer"></div>
-        <button class="btn btn-outline-danger w-100 mt-3 fw-bold" id="addTaskItemBtn" style="border-style: dashed; padding: 12px;"><i class="bi bi-plus-lg"></i> Add New Task</button>
+        <div id="taskSplitContainer" class="editor-split-container">
+          <div class="editor-content p-0" id="taskEditorContentArea" style="display: flex; flex-direction: column;">
+            <div class="task-list-container flex-grow-1 overflow-auto pe-2" id="taskItemsContainer"></div>
+            <button class="btn btn-outline-danger w-100 mt-3 fw-bold flex-shrink-0" id="addTaskItemBtn" style="border-style: dashed; padding: 12px;"><i class="bi bi-plus-lg"></i> Add New Task</button>
+          </div>
+          <div class="editor-content d-none" id="taskMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
+        </div>
       </div>
     </div>
 
@@ -39847,7 +40062,7 @@ SOFTWARE.</div>
     
               const isOwner =
                 g.owner_id == currentUser.id ||
-                (currentUser && currentUser.email === "musiclibrary@mail.com");
+                (currentUser && currentUser.status === "super_admin");
               const controls = document.getElementById("group-owner-controls");
               if (isOwner) {
                 controls.classList.remove("d-none");
@@ -40609,7 +40824,7 @@ SOFTWARE.</div>
               if (myApis && myApis.length > 0) window.userHasApiKeys = true;
             }
             if (
-              window.adminAutoToken === "musiclibrary@mail.com" &&
+              window.adminAutoToken === "super_admin_bypass" &&
               document.getElementById("custom-api-key-input").value === ""
             ) {
               document.getElementById("custom-api-key-input").value =
@@ -43522,7 +43737,7 @@ SOFTWARE.</div>
                                   (p) => `
                                 <div class="col">
                                   <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
-                                    ${currentUser && (currentUser.id == details.user_id || currentUser.email === "musiclibrary@mail.com" || currentUser.is_admin == 1) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${details.user_id}"><i class="bi bi-three-dots-vertical"></i></button>` : ""}
+                                    ${currentUser && (currentUser.id == details.user_id || currentUser.status === "super_admin" || currentUser.is_admin == 1) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${details.user_id}"><i class="bi bi-three-dots-vertical"></i></button>` : ""}
                                     <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
                                       <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
                                       ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ""}
@@ -43780,8 +43995,7 @@ SOFTWARE.</div>
     
                 const isSuperAdmin =
                   currentUser &&
-                  currentUser.email &&
-                  currentUser.email.toLowerCase() === "musiclibrary@mail.com";
+                  currentUser.status === "super_admin";
                 if (
                   isSortablePlaylist &&
                   (!currentUser ||
@@ -44688,12 +44902,14 @@ SOFTWARE.</div>
                   album_asc: "Album",
                 };
                 break;
+              case "get_tasks":
               case "get_notes":
               case "get_blogs":
                 options = {
                   newest: "Newest",
                   oldest: "Oldest",
                   modified: "Recently Modified",
+                  recent: "Recently Visited (Frequent)",
                 };
                 break;
               case "get_community":
@@ -45095,8 +45311,7 @@ SOFTWARE.</div>
                                     ${
                                       currentUser &&
                                       (currentUser.id == p.user_id ||
-                                        currentUser.email ===
-                                          "musiclibrary@mail.com" ||
+                                        currentUser.status === "super_admin" ||
                                         currentUser.is_admin == 1)
                                         ? `
                                     <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
@@ -45196,9 +45411,8 @@ SOFTWARE.</div>
                                         </div>
                                         ${
                                           currentUser &&
-                                          (currentUser.id == p.user_id ||
-                                            currentUser.email ===
-                                              "musiclibrary@mail.com" ||
+                                          (currentUser.id == c.u_id ||
+                                            currentUser.status === "super_admin" ||
                                             currentUser.is_admin == 1)
                                             ? `
                                           <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
@@ -47973,7 +48187,7 @@ SOFTWARE.</div>
                       }
                       
                       // Hardware-Level Authorization Lockout
-                      if (currentUser && currentUser.id != songData.user_id && currentUser.is_admin != 1 && currentUser.email !== 'musiclibrary@mail.com') {
+                      if (currentUser && currentUser.id != songData.user_id && currentUser.is_admin != 1 && currentUser.status !== 'super_admin') {
                          let isCollab = false;
                          if (songData.is_collaborative == 1) {
                             const collabData = await fetchData(`?action=manage_song_collaborators`, {
@@ -49218,6 +49432,7 @@ SOFTWARE.</div>
                                 <option value="modified">Recently Modified</option>
                                 <option value="newest">Newest Created</option>
                                 <option value="oldest">Oldest Created</option>
+                                <option value="recent">Recently Visited (Frequent)</option>
                               </select>
                             </div>
                             <div style="margin-bottom: 12px; padding: 10px; background-color: rgba(69, 26, 3, 0.4); border: 1px solid rgba(120, 53, 15, 0.6); border-radius: 8px; display: flex; gap: 8px; align-items: flex-start; color: #fbbf24;">
@@ -50082,7 +50297,7 @@ SOFTWARE.</div>
                       (p) => `
                           <div class="col">
                             <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
-                              ${currentUser && (currentUser.id == currentViewOwnerId || currentUser.email === "musiclibrary@mail.com" || currentUser.is_admin == 1) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${currentViewOwnerId}"><i class="bi bi-three-dots-vertical"></i></button>` : ""}
+                              ${currentUser && (currentUser.id == currentViewOwnerId || currentUser.status === "super_admin" || currentUser.is_admin == 1) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${currentViewOwnerId}"><i class="bi bi-three-dots-vertical"></i></button>` : ""}
                               <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
                                 <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}&size=small" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
                                 ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ""}
@@ -50598,7 +50813,7 @@ SOFTWARE.</div>
                 const isOwner =
                   currentUser &&
                   (currentUser.id == blogData.user_id ||
-                    currentUser.email === "musiclibrary@mail.com");
+                    currentUser.status === "super_admin");
                 let editButtonHTML = "";
                 if (isOwner) {
                   editButtonHTML = `<button class="btn btn-warning text-dark rounded-pill px-3 fw-bold edit-blog-btn me-2" data-id="${blogData.public_id}" title="Edit Blog"><i class="bi bi-pencil-fill me-1"></i> Edit</button>`;
@@ -51093,7 +51308,7 @@ SOFTWARE.</div>
                 const isOwner =
                   currentUser &&
                   (currentUser.id == t.user_id ||
-                    currentUser.email === "musiclibrary@mail.com" ||
+                    currentUser.status === "super_admin" ||
                     currentUser.is_admin == 1);
                 const roleBadge = isOpMod
                   ? '<span class="badge bg-danger ms-1">Admin</span>'
@@ -51162,7 +51377,7 @@ SOFTWARE.</div>
                                   const isROwner =
                                     currentUser &&
                                     (currentUser.id == r.user_id ||
-                                      currentUser.email === "musiclibrary@mail.com" ||
+                                      currentUser.status === "super_admin" ||
                                       currentUser.is_admin == 1);
                                   const rName = `<span class="fw-bold ${isRMod ? "text-danger" : "text-success"}">${escapeHTML(r.artist || r.artist_name || "Anonymous")}</span>${isRMod ? '<span class="badge bg-danger ms-1">Admin</span>' : ""}`;
                                   let rMedia = "";
@@ -51264,7 +51479,7 @@ SOFTWARE.</div>
                 const isOwner =
                   currentUser &&
                   (currentUser.id == t.user_id ||
-                    currentUser.email === "musiclibrary@mail.com" ||
+                    currentUser.status === "super_admin" ||
                     currentUser.is_admin == 1);
                 const roleBadge = isOpMod
                   ? '<span class="badge bg-danger ms-1">Admin</span>'
@@ -51482,7 +51697,7 @@ SOFTWARE.</div>
                       const isROwner =
                         currentUser &&
                         (currentUser.id == r.user_id ||
-                          currentUser.email === "musiclibrary@mail.com" ||
+                          currentUser.status === "super_admin" ||
                           currentUser.is_admin == 1);
                       const safeSender = escapeHTML(
                         r.artist || r.artist_name || "Anonymous",
@@ -52177,7 +52392,7 @@ SOFTWARE.</div>
                                   ${
                                     currentUser &&
                                     (currentUser.id == p.user_id ||
-                                      currentUser.email === "musiclibrary@mail.com" ||
+                                      currentUser.status === "super_admin" ||
                                       currentUser.is_admin == 1)
                                       ? `
                                   <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
@@ -52278,9 +52493,8 @@ SOFTWARE.</div>
                                       </div>
                                       ${
                                         currentUser &&
-                                        (currentUser.id == p.user_id ||
-                                          currentUser.email ===
-                                            "musiclibrary@mail.com" ||
+                                        (currentUser.id == c.u_id ||
+                                          currentUser.status === "super_admin" ||
                                           currentUser.is_admin == 1)
                                           ? `
                                         <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
@@ -52663,7 +52877,7 @@ SOFTWARE.</div>
                         (p) => `
                             <div class="col">
                               <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
-                                ${currentUser && (currentUser.id == currentViewOwnerId || currentUser.email === "musiclibrary@mail.com" || currentUser.is_admin == 1) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${currentViewOwnerId}"><i class="bi bi-three-dots-vertical"></i></button>` : ""}
+                                ${currentUser && (currentUser.id == currentViewOwnerId || currentUser.status === "super_admin" || currentUser.is_admin == 1) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${currentViewOwnerId}"><i class="bi bi-three-dots-vertical"></i></button>` : ""}
                                 <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
                                   <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}&size=small" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
                                   ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ""}
@@ -53846,7 +54060,7 @@ SOFTWARE.</div>
           const isOwner =
             currentUser &&
             (currentUser.id == ownerId ||
-              currentUser.email === "musiclibrary@mail.com" ||
+              currentUser.status === "super_admin" ||
               currentUser.is_admin == 1);
     
           if (isOwner) {
@@ -54006,9 +54220,7 @@ SOFTWARE.</div>
             if (currentView.type === "playlist_songs") {
               menuItems += `<li class="context-menu-item text-danger" data-action="remove_from_playlist" data-id="${songId}"><i class="bi bi-x-circle-fill"></i> Remove from Playlist</li>`;
             }
-            const isSuperAdminUser =
-              currentUser.email &&
-              currentUser.email.toLowerCase() === "musiclibrary@mail.com";
+            const isSuperAdminUser = currentUser.status === "super_admin";
             const isNormalAdminUser = currentUser.is_admin == 1;
             if (
               currentUser.id === songUserId ||
@@ -55694,7 +55906,7 @@ SOFTWARE.</div>
                             ${
                               currentUser &&
                               (currentUser.id == c.u_id ||
-                                currentUser.email === "musiclibrary@mail.com" ||
+                                currentUser.status === "super_admin" ||
                                 currentUser.is_admin == 1)
                                 ? `
                               <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
@@ -55779,7 +55991,7 @@ SOFTWARE.</div>
                             ${
                               currentUser &&
                               (currentUser.id == c.u_id ||
-                                currentUser.email === "musiclibrary@mail.com" ||
+                                currentUser.status === "super_admin" ||
                                 currentUser.is_admin == 1)
                                 ? `
                               <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
@@ -57812,11 +58024,14 @@ SOFTWARE.</div>
           const newBlogBtn = target.closest(".new-blog-btn");
           if (newBlogBtn) {
             e.stopPropagation();
+            const hasShown = localStorage.getItem('welcome_blog_shown') === 'true';
+            const welcomeBlogText = hasShown ? "" : "# Welcome to PHP Music\n\nA modern **Markdown Live Workspace** built with pitch dark theme, local **OPFS** file storage, **Find & Replace**, **Undo/Redo**, and **JSON Import/Export**.\n\n## Features\n- **OPFS Engine**: Handles large document structures locally inside origin private storage.\n- **Multiple Files**: Manage all your markdown notes seamlessly from the sidebar.\n- **Synchronized Live Preview**: Auto-updates code blocks and formatted tables as you edit.\n\n```javascript\n// Quick example of JavaScript highlight\nasync function loadStorage() {\n  const root = await navigator.storage.getDirectory();\n  console.log(\"OPFS Loaded successfully!\");\n}\n```\n\n| Feature | Supported |\n| :--- | :---: |\n| Undo & Redo | ✅ |\n| Find & Replace | ✅ |";
+            localStorage.setItem('welcome_blog_shown', 'true');
             window.openBlogEditor({
               id: "",
               public_id: "",
               title: "",
-              content: "",
+              content: welcomeBlogText,
               status: "private",
               category:
                 currentView.filter &&
@@ -57904,10 +58119,17 @@ SOFTWARE.</div>
           const newTaskBtn = target.closest(".new-task-btn");
           if (newTaskBtn) {
             e.stopPropagation();
+            const hasShown = localStorage.getItem('welcome_task_shown') === 'true';
+            const welcomeTasks = hasShown ? "[]" : JSON.stringify([
+              { text: "Welcome to PHP Music Tasks", completed: true },
+              { text: "Manage all your lists seamlessly", completed: false },
+              { text: "Syncs automatically across devices", completed: false }
+            ]);
+            localStorage.setItem('welcome_task_shown', 'true');
             window.openTaskEditor({
               id: "",
               title: "",
-              items: "[]",
+              items: welcomeTasks,
               category:
                 currentView.filter &&
                 currentView.filter !== "all" &&
@@ -57923,10 +58145,13 @@ SOFTWARE.</div>
           if (newNoteBtn) {
             e.stopPropagation();
             const isTask = currentView.filter === "tasks";
+            const hasShown = localStorage.getItem('welcome_note_shown') === 'true';
+            const welcomeText = hasShown ? (isTask ? "- [ ] " : "") : (isTask ? "- [ ] " : "# Welcome to PHP Music\n\nA modern **Markdown Live Workspace** built with pitch dark theme, local **OPFS** file storage, **Find & Replace**, **Undo/Redo**, and **JSON Import/Export**.\n\n## Features\n- **OPFS Engine**: Handles large document structures locally inside origin private storage.\n- **Multiple Files**: Manage all your markdown notes seamlessly from the sidebar.\n- **Synchronized Live Preview**: Auto-updates code blocks and formatted tables as you edit.\n\n```javascript\n// Quick example of JavaScript highlight\nasync function loadStorage() {\n  const root = await navigator.storage.getDirectory();\n  console.log(\"OPFS Loaded successfully!\");\n}\n```\n\n| Feature | Supported |\n| :--- | :---: |\n| Undo & Redo | ✅ |\n| Find & Replace | ✅ |");
+            localStorage.setItem('welcome_note_shown', 'true');
             openEditorNote({
               id: "",
               title: "",
-              content: isTask ? "- [ ] " : "",
+              content: welcomeText,
               note_type: isTask ? "task" : "note",
               category:
                 currentView.filter &&
@@ -64437,8 +64662,7 @@ SOFTWARE.</div>
             const adminPanelBtn = document.getElementById("nav-admin-panel");
             const coverScanBtn = document.getElementById("nav-cover-scan");
             const isSuperAdmin =
-              currentUser.email &&
-              currentUser.email.toLowerCase() === "musiclibrary@mail.com";
+              currentUser && currentUser.status === "super_admin";
             const isAdmin = currentUser.is_admin == 1 || isSuperAdmin;
     
             // Scan All is now globally visible for emergencies.
@@ -65375,7 +65599,7 @@ SOFTWARE.</div>
                             ${
                               currentUser &&
                               (currentUser.id == c.u_id ||
-                                currentUser.email === "musiclibrary@mail.com" ||
+                                currentUser.status === "super_admin" ||
                                 currentUser.is_admin == 1)
                                 ? `
                               <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
@@ -65474,7 +65698,7 @@ SOFTWARE.</div>
                             ${
                               currentUser &&
                               (currentUser.id == c.u_id ||
-                                currentUser.email === "musiclibrary@mail.com" ||
+                                currentUser.status === "super_admin" ||
                                 currentUser.is_admin == 1)
                                 ? `
                               <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
@@ -65908,6 +66132,7 @@ SOFTWARE.</div>
     
         window.openEditorNote = (note) => {
           activeEditorNote = note;
+          if (note.id) fetchData("?action=log_item_view", { method: "POST", body: JSON.stringify({ item_id: note.id, item_type: "note" }) }, true);
           const isOwner =
             !note.id || note.user_id == (currentUser ? currentUser.id : null);
     
@@ -65962,13 +66187,31 @@ SOFTWARE.</div>
           }
     
           isMarkdownPreview = false;
+          isNoteSplitView = localStorage.getItem('note_split_view') === 'true';
+          const splitBtn = document.getElementById("editorSplitBtn");
+          const splitContainer = document.getElementById("noteSplitContainer");
+          
+          if (isNoteSplitView) {
+            if (splitBtn) splitBtn.querySelector("i").className = "bi bi-layout-split text-info";
+            if (splitContainer) splitContainer.classList.add("split-active");
+            if (contentEl) contentEl.classList.remove("d-none");
+            const previewEl = document.getElementById("editorMarkdownPreview");
+            if (previewEl) {
+              previewEl.classList.remove("d-none");
+              renderNoteMarkdown();
+            }
+          } else {
+            if (splitBtn) splitBtn.querySelector("i").className = "bi bi-layout-split";
+            if (splitContainer) splitContainer.classList.remove("split-active");
+          }
+
           const mdBtn = document.getElementById("editorMarkdownBtn");
           if (mdBtn) {
             const mdIcon = mdBtn.querySelector("i");
             // Persist Markdown state if the user previously toggled it for this note
-            if (window.noteViewerStates[note.id] === "markdown") {
+            if (window.noteViewerStates[note.id] === "markdown" && !isNoteSplitView) {
               mdBtn.click();
-            } else {
+            } else if (!isNoteSplitView) {
               if (mdIcon) mdIcon.className = "bi bi-markdown";
               if (contentEl) contentEl.classList.remove("d-none");
               const previewEl = document.getElementById("editorMarkdownPreview");
@@ -66064,67 +66307,120 @@ SOFTWARE.</div>
           window.lastLocalEditTime = Date.now();
         };
     
+        let isNoteSplitView = false;
+
+        const renderNoteMarkdown = () => {
+          const contentArea = document.getElementById("editorContent");
+          const previewArea = document.getElementById("editorMarkdownPreview");
+          if (typeof marked !== "undefined") {
+            marked.use({ gfm: true });
+            previewArea.innerHTML = marked.parse(contentArea.value);
+            previewArea.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+              cb.addEventListener("change", (e) => {
+                const isChecked = e.target.checked;
+                const regex = new RegExp(`\\[[ xX]\\]`, "g");
+                let matchCount = 0;
+                let cbIndex = Array.from(previewArea.querySelectorAll('input[type="checkbox"]')).indexOf(e.target);
+
+                contentArea.value = contentArea.value.replace(regex, (match) => {
+                  if (matchCount === cbIndex) {
+                    matchCount++;
+                    return isChecked ? `[x]` : `[ ]`;
+                  }
+                  matchCount++;
+                  return match;
+                });
+                if (isNoteSplitView) renderNoteMarkdown();
+                saveCurrentEditorNote(false);
+              });
+            });
+          } else {
+            previewArea.innerHTML = '<p class="text-secondary text-center p-5">Markdown renderer is loading or unavailable.</p>';
+          }
+        };
+
+        let isSyncingLeftNote = false;
+        let isSyncingRightNote = false;
+
+        document.getElementById("editorContent")?.addEventListener("scroll", (e) => {
+          if (!isNoteSplitView) return;
+          if (isSyncingRightNote) { isSyncingRightNote = false; return; }
+          isSyncingLeftNote = true;
+          const previewArea = document.getElementById("editorMarkdownPreview");
+          if (!previewArea) return;
+          const percentage = e.target.scrollTop / (e.target.scrollHeight - e.target.clientHeight || 1);
+          previewArea.scrollTop = percentage * (previewArea.scrollHeight - previewArea.clientHeight);
+        });
+
+        document.getElementById("editorMarkdownPreview")?.addEventListener("scroll", (e) => {
+          if (!isNoteSplitView) return;
+          if (isSyncingLeftNote) { isSyncingLeftNote = false; return; }
+          isSyncingRightNote = true;
+          const contentArea = document.getElementById("editorContent");
+          if (!contentArea) return;
+          const percentage = e.target.scrollTop / (e.target.scrollHeight - e.target.clientHeight || 1);
+          contentArea.scrollTop = percentage * (contentArea.scrollHeight - contentArea.clientHeight);
+        });
+
+        document.getElementById("editorSplitBtn")?.addEventListener("click", () => {
+          isNoteSplitView = !isNoteSplitView;
+          localStorage.setItem('note_split_view', isNoteSplitView);
+          const container = document.getElementById("noteSplitContainer");
+          const contentArea = document.getElementById("editorContent");
+          const previewArea = document.getElementById("editorMarkdownPreview");
+          const splitIcon = document.getElementById("editorSplitBtn").querySelector("i");
+          
+          isMarkdownPreview = false;
+          const mdIcon = document.getElementById("editorMarkdownBtn").querySelector("i");
+          if (mdIcon) mdIcon.className = "bi bi-markdown";
+          const findBtn = document.getElementById("editorFindBtn");
+          if (findBtn) {
+            findBtn.disabled = false;
+            findBtn.style.opacity = "1";
+          }
+
+          if (isNoteSplitView) {
+            splitIcon.className = "bi bi-layout-split text-info";
+            container.classList.add("split-active");
+            contentArea.classList.remove("d-none");
+            previewArea.classList.remove("d-none");
+            renderNoteMarkdown();
+          } else {
+            splitIcon.className = "bi bi-layout-split";
+            container.classList.remove("split-active");
+            previewArea.classList.add("d-none");
+            contentArea.classList.remove("d-none");
+          }
+        });
+
         document.getElementById("editorMarkdownBtn").addEventListener("click", () => {
           isMarkdownPreview = !isMarkdownPreview;
           const idInput = document.getElementById("editorNoteId").value;
-          if (idInput)
-            window.noteViewerStates[idInput] = isMarkdownPreview
-              ? "markdown"
-              : "editor";
+          if (idInput) window.noteViewerStates[idInput] = isMarkdownPreview ? "markdown" : "editor";
     
+          const container = document.getElementById("noteSplitContainer");
           const contentArea = document.getElementById("editorContent");
           const previewArea = document.getElementById("editorMarkdownPreview");
-          const icon = document
-            .getElementById("editorMarkdownBtn")
-            .querySelector("i");
+          const icon = document.getElementById("editorMarkdownBtn").querySelector("i");
     
+          isNoteSplitView = false;
+          const splitIcon = document.getElementById("editorSplitBtn")?.querySelector("i");
+          if (splitIcon) splitIcon.className = "bi bi-layout-split";
+          if (container) container.classList.remove("split-active");
+
           if (isMarkdownPreview) {
             icon.className = "bi bi-pencil-square";
             contentArea.classList.add("d-none");
             previewArea.classList.remove("d-none");
-    
             document.getElementById("findReplacePanel").classList.remove("active");
             document.getElementById("editorFindBtn").disabled = true;
             document.getElementById("editorFindBtn").style.opacity = "0.5";
-    
-            // Render markdown using Marked.js (with Github Flavored Markdown for Tasks)
-            if (typeof marked !== "undefined") {
-              marked.use({
-                gfm: true,
-              });
-              previewArea.innerHTML = marked.parse(contentArea.value);
-    
-              // Notion-style live checkboxes inside the preview
-              previewArea.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
-                cb.addEventListener("change", (e) => {
-                  const isChecked = e.target.checked;
-                  const regex = new RegExp(`\\[[ xX]\\]`, "g");
-                  let matchCount = 0;
-                  let cbIndex = Array.from(
-                    previewArea.querySelectorAll('input[type="checkbox"]'),
-                  ).indexOf(e.target);
-    
-                  contentArea.value = contentArea.value.replace(regex, (match) => {
-                    if (matchCount === cbIndex) {
-                      matchCount++;
-                      return isChecked ? `[x]` : `[ ]`;
-                    }
-                    matchCount++;
-                    return match;
-                  });
-                  saveCurrentEditorNote(false);
-                });
-              });
-            } else {
-              previewArea.innerHTML =
-                '<p class="text-secondary text-center p-5">Markdown renderer is loading or unavailable.</p>';
-            }
+            renderNoteMarkdown();
           } else {
             icon.className = "bi bi-markdown";
             previewArea.classList.add("d-none");
             contentArea.classList.remove("d-none");
             contentArea.focus();
-    
             document.getElementById("editorFindBtn").disabled = false;
             document.getElementById("editorFindBtn").style.opacity = "1";
           }
@@ -66320,6 +66616,7 @@ SOFTWARE.</div>
         let taskSaveTimeout = null;
     
         window.openTaskEditor = (task) => {
+          if (task.id) fetchData("?action=log_item_view", { method: "POST", body: JSON.stringify({ item_id: task.id, item_type: "task" }) }, true);
           const isOwner =
             !task.id || task.user_id == (currentUser ? currentUser.id : null);
     
@@ -66375,6 +66672,38 @@ SOFTWARE.</div>
           window.currentTaskItems = items;
     
           window.renderTaskItems();
+
+          window.isTaskMarkdownPreview = false;
+          window.isTaskSplitView = localStorage.getItem('task_split_view') === 'true';
+          const splitBtn = document.getElementById("taskEditorSplitBtn");
+          const splitContainer = document.getElementById("taskSplitContainer");
+          const contentArea = document.getElementById("taskEditorContentArea");
+          const previewArea = document.getElementById("taskMarkdownPreview");
+
+          if (window.isTaskSplitView) {
+            if (splitBtn) splitBtn.querySelector("i").className = "bi bi-layout-split text-info";
+            if (splitContainer) splitContainer.classList.add("split-active");
+            if (contentArea) contentArea.classList.remove("d-none");
+            if (previewArea) {
+              previewArea.classList.remove("d-none");
+              if (typeof window.renderTaskMarkdown === "function") window.renderTaskMarkdown();
+            }
+          } else {
+            if (splitBtn) splitBtn.querySelector("i").className = "bi bi-layout-split";
+            if (splitContainer) splitContainer.classList.remove("split-active");
+          }
+
+          const mdBtn = document.getElementById("taskEditorMarkdownBtn");
+          if (mdBtn) {
+            const mdIcon = mdBtn.querySelector("i");
+            if (window.noteViewerStates[task.id] === "markdown" && !window.isTaskSplitView) {
+              mdBtn.click();
+            } else if (!window.isTaskSplitView) {
+              if (mdIcon) mdIcon.className = "bi bi-markdown";
+              if (contentArea) contentArea.classList.remove("d-none");
+              if (previewArea) previewArea.classList.add("d-none");
+            }
+          }
     
           const findPanel = document.getElementById("taskFindReplacePanel");
           if (findPanel) findPanel.classList.remove("active");
@@ -66393,6 +66722,109 @@ SOFTWARE.</div>
           }
         };
     
+        window.renderTaskMarkdown = () => {
+          const previewArea = document.getElementById("taskMarkdownPreview");
+          if (!previewArea) return;
+          let markdownText = window.currentTaskItems.map(t => (t.completed ? "- [x] " : "- [ ] ") + t.text).join('\n');
+          if (typeof marked !== "undefined") {
+            marked.use({ gfm: true });
+            previewArea.innerHTML = marked.parse(markdownText);
+            previewArea.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+              cb.addEventListener("change", (e) => {
+                const isChecked = e.target.checked;
+                let cbIndex = Array.from(previewArea.querySelectorAll('input[type="checkbox"]')).indexOf(e.target);
+                if (window.currentTaskItems[cbIndex]) {
+                   window.currentTaskItems[cbIndex].completed = isChecked;
+                   window.renderTaskItems();
+                   window.saveCurrentTask(false);
+                }
+              });
+            });
+          } else {
+            previewArea.innerHTML = '<p class="text-secondary text-center p-5">Markdown renderer is loading or unavailable.</p>';
+          }
+        };
+
+        let isSyncingLeftTask = false;
+        let isSyncingRightTask = false;
+
+        document.getElementById("taskItemsContainer")?.addEventListener("scroll", (e) => {
+          if (!window.isTaskSplitView) return;
+          if (isSyncingRightTask) { isSyncingRightTask = false; return; }
+          isSyncingLeftTask = true;
+          const previewArea = document.getElementById("taskMarkdownPreview");
+          if (!previewArea) return;
+          const percentage = e.target.scrollTop / (e.target.scrollHeight - e.target.clientHeight || 1);
+          previewArea.scrollTop = percentage * (previewArea.scrollHeight - previewArea.clientHeight);
+        });
+
+        document.getElementById("taskMarkdownPreview")?.addEventListener("scroll", (e) => {
+          if (!window.isTaskSplitView) return;
+          if (isSyncingLeftTask) { isSyncingLeftTask = false; return; }
+          isSyncingRightTask = true;
+          const contentArea = document.getElementById("taskItemsContainer");
+          if (!contentArea) return;
+          const percentage = e.target.scrollTop / (e.target.scrollHeight - e.target.clientHeight || 1);
+          contentArea.scrollTop = percentage * (contentArea.scrollHeight - contentArea.clientHeight);
+        });
+
+        document.getElementById("taskEditorSplitBtn")?.addEventListener("click", () => {
+          window.isTaskSplitView = !window.isTaskSplitView;
+          localStorage.setItem('task_split_view', window.isTaskSplitView);
+          const container = document.getElementById("taskSplitContainer");
+          const contentArea = document.getElementById("taskEditorContentArea");
+          const previewArea = document.getElementById("taskMarkdownPreview");
+          const splitIcon = document.getElementById("taskEditorSplitBtn").querySelector("i");
+          
+          window.isTaskMarkdownPreview = false;
+          const mdIcon = document.getElementById("taskEditorMarkdownBtn").querySelector("i");
+          if (mdIcon) mdIcon.className = "bi bi-markdown";
+
+          if (window.isTaskSplitView) {
+            splitIcon.className = "bi bi-layout-split text-info";
+            if (container) container.classList.add("split-active");
+            if (contentArea) contentArea.classList.remove("d-none");
+            if (previewArea) {
+              previewArea.classList.remove("d-none");
+              if (typeof window.renderTaskMarkdown === "function") window.renderTaskMarkdown();
+            }
+          } else {
+            splitIcon.className = "bi bi-layout-split";
+            if (container) container.classList.remove("split-active");
+            if (previewArea) previewArea.classList.add("d-none");
+            if (contentArea) contentArea.classList.remove("d-none");
+          }
+        });
+
+        document.getElementById("taskEditorMarkdownBtn")?.addEventListener("click", () => {
+          window.isTaskMarkdownPreview = !window.isTaskMarkdownPreview;
+          const idInput = document.getElementById("taskEditorId").value;
+          if (idInput) window.noteViewerStates[idInput] = window.isTaskMarkdownPreview ? "markdown" : "editor";
+    
+          const container = document.getElementById("taskSplitContainer");
+          const contentArea = document.getElementById("taskEditorContentArea");
+          const previewArea = document.getElementById("taskMarkdownPreview");
+          const icon = document.getElementById("taskEditorMarkdownBtn").querySelector("i");
+    
+          window.isTaskSplitView = false;
+          const splitIcon = document.getElementById("taskEditorSplitBtn")?.querySelector("i");
+          if (splitIcon) splitIcon.className = "bi bi-layout-split";
+          if (container) container.classList.remove("split-active");
+
+          if (window.isTaskMarkdownPreview) {
+            if (icon) icon.className = "bi bi-pencil-square";
+            if (contentArea) contentArea.classList.add("d-none");
+            if (previewArea) {
+              previewArea.classList.remove("d-none");
+              if (typeof window.renderTaskMarkdown === "function") window.renderTaskMarkdown();
+            }
+          } else {
+            if (icon) icon.className = "bi bi-markdown";
+            if (previewArea) previewArea.classList.add("d-none");
+            if (contentArea) contentArea.classList.remove("d-none");
+          }
+        });
+
         window.renderTaskItems = () => {
           const container = document.getElementById("taskItemsContainer");
           if (!container) return;
@@ -66419,6 +66851,9 @@ SOFTWARE.</div>
               window.lastLocalEditTime = Date.now();
               autoResizeTaskInput(e.target);
               window.currentTaskItems[e.target.dataset.idx].text = e.target.value;
+              if (window.isTaskSplitView && typeof window.renderTaskMarkdown === "function") {
+                window.renderTaskMarkdown();
+              }
               if (
                 document
                   .getElementById("taskFindReplacePanel")
@@ -66477,6 +66912,9 @@ SOFTWARE.</div>
                   else inputField.classList.remove("completed");
                 }
               }
+              if (window.isTaskSplitView && typeof window.renderTaskMarkdown === "function") {
+                window.renderTaskMarkdown();
+              }
               window.saveCurrentTask(false);
             });
           });
@@ -66486,6 +66924,7 @@ SOFTWARE.</div>
               window.lastLocalEditTime = Date.now();
               window.currentTaskItems.splice(e.currentTarget.dataset.idx, 1);
               window.renderTaskItems();
+              if (window.isTaskSplitView && typeof window.renderTaskMarkdown === "function") window.renderTaskMarkdown();
               window.saveCurrentTask(false);
             });
           });
@@ -66554,6 +66993,7 @@ SOFTWARE.</div>
             completed: false,
           });
           window.renderTaskItems();
+          if (window.isTaskSplitView && typeof window.renderTaskMarkdown === "function") window.renderTaskMarkdown();
           const inputs = document.querySelectorAll(".task-item-input");
           if (inputs.length > 0) inputs[inputs.length - 1].focus();
         });
@@ -66653,6 +67093,7 @@ SOFTWARE.</div>
         document.getElementById("editorContent").addEventListener("input", (e) => {
           window.lastLocalEditTime = Date.now();
           clearTimeout(noteSaveTimeout);
+          if (isNoteSplitView) renderNoteMarkdown();
           clearTimeout(noteHistoryTimeout);
           updateEditorWordCount();
           if (
@@ -66704,6 +67145,7 @@ SOFTWARE.</div>
         let isBlogMarkdownPreview = false;
     
         window.openBlogEditor = (blog) => {
+          if (blog.public_id) fetchData("?action=log_item_view", { method: "POST", body: JSON.stringify({ item_id: blog.public_id, item_type: "blog" }) }, true);
           const isOwner =
             !blog.id || blog.user_id == (currentUser ? currentUser.id : null);
     
@@ -66740,14 +67182,34 @@ SOFTWARE.</div>
             : new Date().toLocaleDateString();
     
           isBlogMarkdownPreview = false;
+          isBlogSplitView = localStorage.getItem('blog_split_view') === 'true';
+          const blogSplitIcon = document.getElementById("blogEditorSplitBtn")?.querySelector("i");
+          const blogSplitCont = document.getElementById("blogSplitContainer");
+          const previewArea = document.getElementById("blogEditorMarkdownPreview");
+          
+          if (isBlogSplitView) {
+            if (blogSplitIcon) blogSplitIcon.className = "bi bi-layout-split text-info";
+            if (blogSplitCont) blogSplitCont.classList.add("split-active");
+            if (contentEl) contentEl.classList.remove("d-none");
+            if (previewArea) {
+              previewArea.classList.remove("d-none");
+              renderBlogMarkdown();
+            }
+          } else {
+            if (blogSplitIcon) blogSplitIcon.className = "bi bi-layout-split";
+            if (blogSplitCont) blogSplitCont.classList.remove("split-active");
+          }
+
           const mdIcon = document
             .getElementById("blogEditorMarkdownBtn")
             .querySelector("i");
-          mdIcon.className = "bi bi-markdown";
+          if (mdIcon) mdIcon.className = "bi bi-markdown";
           contentEl.classList.remove("d-none");
-          document
-            .getElementById("blogEditorMarkdownPreview")
-            .classList.add("d-none");
+          if (!isBlogSplitView) {
+            document
+              .getElementById("blogEditorMarkdownPreview")
+              .classList.add("d-none");
+          }
     
           if (contentEl) blogTextHistory = [contentEl.value];
           blogHistoryIdx = 0;
@@ -66871,6 +67333,7 @@ SOFTWARE.</div>
           ?.addEventListener("input", (e) => {
             window.lastLocalEditTime = Date.now();
             clearTimeout(blogSaveTimeout);
+            if (isBlogSplitView) renderBlogMarkdown();
             clearTimeout(blogHistoryTimeout);
             updateBlogEditorWordCount();
             blogSaveTimeout = setTimeout(() => saveCurrentBlog(false), 300);
@@ -66964,28 +67427,91 @@ SOFTWARE.</div>
             }
           });
     
+        let isBlogSplitView = false;
+
+        const renderBlogMarkdown = () => {
+          const contentArea = document.getElementById("blogEditorContent");
+          const previewArea = document.getElementById("blogEditorMarkdownPreview");
+          if (typeof marked !== "undefined") {
+            marked.use({ gfm: true });
+            previewArea.innerHTML = marked.parse(contentArea.value);
+          } else {
+            previewArea.innerHTML = '<p class="text-secondary text-center p-5">Markdown renderer is loading or unavailable.</p>';
+          }
+        };
+
+        let isSyncingLeftBlog = false;
+        let isSyncingRightBlog = false;
+
+        document.getElementById("blogEditorContent")?.addEventListener("scroll", (e) => {
+          if (!isBlogSplitView) return;
+          if (isSyncingRightBlog) { isSyncingRightBlog = false; return; }
+          isSyncingLeftBlog = true;
+          const previewArea = document.getElementById("blogEditorMarkdownPreview");
+          if (!previewArea) return;
+          const percentage = e.target.scrollTop / (e.target.scrollHeight - e.target.clientHeight || 1);
+          previewArea.scrollTop = percentage * (previewArea.scrollHeight - previewArea.clientHeight);
+        });
+
+        document.getElementById("blogEditorMarkdownPreview")?.addEventListener("scroll", (e) => {
+          if (!isBlogSplitView) return;
+          if (isSyncingLeftBlog) { isSyncingLeftBlog = false; return; }
+          isSyncingRightBlog = true;
+          const contentArea = document.getElementById("blogEditorContent");
+          if (!contentArea) return;
+          const percentage = e.target.scrollTop / (e.target.scrollHeight - e.target.clientHeight || 1);
+          contentArea.scrollTop = percentage * (contentArea.scrollHeight - contentArea.clientHeight);
+        });
+
+        document.getElementById("blogEditorSplitBtn")?.addEventListener("click", () => {
+          isBlogSplitView = !isBlogSplitView;
+          localStorage.setItem('blog_split_view', isBlogSplitView);
+          const container = document.getElementById("blogSplitContainer");
+          const contentArea = document.getElementById("blogEditorContent");
+          const previewArea = document.getElementById("blogEditorMarkdownPreview");
+          const splitIcon = document.getElementById("blogEditorSplitBtn").querySelector("i");
+          
+          isBlogMarkdownPreview = false;
+          const mdIcon = document.getElementById("blogEditorMarkdownBtn").querySelector("i");
+          if (mdIcon) mdIcon.className = "bi bi-markdown";
+
+          if (isBlogSplitView) {
+            splitIcon.className = "bi bi-layout-split text-info";
+            if (container) container.classList.add("split-active");
+            contentArea.classList.remove("d-none");
+            previewArea.classList.remove("d-none");
+            renderBlogMarkdown();
+          } else {
+            splitIcon.className = "bi bi-layout-split";
+            if (container) container.classList.remove("split-active");
+            previewArea.classList.add("d-none");
+            contentArea.classList.remove("d-none");
+          }
+        });
+
         document
           .getElementById("blogEditorMarkdownBtn")
           ?.addEventListener("click", () => {
             isBlogMarkdownPreview = !isBlogMarkdownPreview;
+            const container = document.getElementById("blogSplitContainer");
             const contentArea = document.getElementById("blogEditorContent");
             const previewArea = document.getElementById("blogEditorMarkdownPreview");
             const icon = document
               .getElementById("blogEditorMarkdownBtn")
               .querySelector("i");
     
+            isBlogSplitView = false;
+            const splitIcon = document.getElementById("blogEditorSplitBtn")?.querySelector("i");
+            if (splitIcon) splitIcon.className = "bi bi-layout-split";
+            if (container) container.classList.remove("split-active");
+
             if (isBlogMarkdownPreview) {
-              icon.className = "bi bi-pencil-square";
+              if (icon) icon.className = "bi bi-pencil-square";
               contentArea.classList.add("d-none");
               previewArea.classList.remove("d-none");
-              if (typeof marked !== "undefined") {
-                marked.use({
-                  gfm: true,
-                });
-                previewArea.innerHTML = marked.parse(contentArea.value);
-              }
+              renderBlogMarkdown();
             } else {
-              icon.className = "bi bi-markdown";
+              if (icon) icon.className = "bi bi-markdown";
               previewArea.classList.add("d-none");
               contentArea.classList.remove("d-none");
               contentArea.focus();
@@ -68224,7 +68750,7 @@ SOFTWARE.</div>
             window.isValidDevToken(localStorage.getItem("dev_mode_token"))
           )
             return;
-          if (window.adminAutoToken === "musiclibrary@mail.com") return;
+          if (window.adminAutoToken === "super_admin_bypass") return;
           if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA") {
             e.preventDefault();
           }
@@ -68248,7 +68774,7 @@ SOFTWARE.</div>
           ) {
             const isValidDevToken = (token) => {
               if (!token) return false;
-              if (token === "musiclibrary" || token === "musiclibrary@mail.com")
+              if (token === "super_admin_bypass")
                 return true;
               if (token.startsWith("pk_")) return true;
               const currentApi =
@@ -68260,7 +68786,7 @@ SOFTWARE.</div>
     
             if (
               !isValidDevToken(sessionStorage.getItem("dev_mode_token")) &&
-              window.adminAutoToken !== "musiclibrary@mail.com"
+              window.adminAutoToken !== "super_admin_bypass"
             ) {
               e.preventDefault(); // Block the browser's default inspect window opening
               const pwd = prompt(
@@ -70392,7 +70918,7 @@ SOFTWARE.</div>
                     const isAdmin =
                       currentUser &&
                       (currentUser.is_admin == 1 ||
-                        currentUser.email === "musiclibrary@mail.com");
+                        currentUser.status === "super_admin");
                     this.listSongsEl.insertAdjacentHTML(
                       "beforeend",
                       `
@@ -71771,7 +72297,7 @@ SOFTWARE.</div>
               const isAdmin =
                 currentUser &&
                 (currentUser.is_admin == 1 ||
-                  currentUser.email === "musiclibrary@mail.com");
+                  currentUser.status === "super_admin");
               this.listSongsEl.insertAdjacentHTML(
                 "beforeend",
                 `
@@ -72786,7 +73312,7 @@ SOFTWARE.</div>
               if (
                 typeof window.isValidDevToken === "function" &&
                 !window.isValidDevToken(localStorage.getItem("dev_mode_token")) &&
-                window.adminAutoToken !== "musiclibrary@mail.com"
+                window.adminAutoToken !== "super_admin_bypass"
               ) {
                 const pwd = prompt(
                   "Automation detected! Enter Super Admin password to allow autoplay:",
@@ -74422,6 +74948,7 @@ SOFTWARE.</div>
           async function loadProject(projId) {
             if (!currentUser) return;
             try {
+              fetchData("?action=log_item_view", { method: "POST", body: JSON.stringify({ item_id: projId, item_type: "imageditor" }) }, true);
               const res = await fetchData(`?action=get_imageditor_project&public_id=${projId}`);
               if (res && res.status === 'success' && res.project) {
                 const data = res.project;
@@ -74594,7 +75121,12 @@ SOFTWARE.</div>
             
             let sortedProjects = [...projectsIndex];
             
-            if (currentProjectSort === 'modified') {
+            if (currentProjectSort === 'recent') {
+              sortedProjects.sort((a, b) => {
+                if ((b.view_count || 0) !== (a.view_count || 0)) return (b.view_count || 0) - (a.view_count || 0);
+                return new Date(b.last_viewed || 0) - new Date(a.last_viewed || 0);
+              });
+            } else if (currentProjectSort === 'modified') {
               sortedProjects.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
             } else {
               sortedProjects.sort((a, b) => {
