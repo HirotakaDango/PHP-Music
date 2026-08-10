@@ -344,12 +344,30 @@ self.addEventListener('fetch', event => {
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
+  const chatId = event.notification.data ? event.notification.data.chatId : null;
+  const chatType = event.notification.data ? event.notification.data.chatType : 'user';
+  const chatName = event.notification.data ? event.notification.data.chatName : 'User';
+
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(windowClients => {
       for (let client of windowClients) {
-        if (client.url && 'focus' in client) return client.focus();
+        if ('focus' in client) {
+          client.focus();
+          if (chatId) {
+            client.postMessage({ action: 'open_chat', chatId: chatId, chatType: chatType, chatName: chatName });
+          }
+          return;
+        }
       }
-      if (clients.openWindow) return clients.openWindow('/');
+      if (clients.openWindow) {
+        const url = new URL('./', self.location.origin);
+        if (chatId) {
+          url.searchParams.set('open_chat_id', chatId);
+          url.searchParams.set('open_chat_type', chatType);
+          url.searchParams.set('open_chat_name', chatName);
+        }
+        return clients.openWindow(url.href);
+      }
     })
   );
 });
@@ -382,7 +400,7 @@ $is_super_admin = 0;
 $is_admin = 0;
 
 // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
-$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment', 'post_phpboard', 'delete_phpboard_post', 'inspect_audio', 'save_audio_editor'];
+$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment', 'post_phpboard', 'delete_phpboard_post', 'inspect_audio', 'save_audio_editor', 'send_message', 'edit_message', 'delete_message', 'toggle_message_reaction', 'toggle_star_message', 'post_status', 'delete_status', 'create_chat_group', 'edit_chat_group', 'delete_chat_group', 'leave_chat_group', 'upload_art', 'edit_art', 'delete_art', 'toggle_art_favorite', 'add_art_comment', 'edit_art_comment', 'delete_art_comment'];
 $current_action = $_GET['action'] ?? '';
 
 if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
@@ -393,7 +411,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '8.5');
+define('APP_VERSION', '8.6');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -15934,7 +15952,7 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
   // 3. Global API Firewall: Require API Key for ALL external requests
   $api_extracted_action = $_GET['action'] ?? '';
   
-  $public_media_actions = ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon'];
+  $public_media_actions = ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon', 'get_art_image'];
   if (!in_array($api_extracted_action, $public_media_actions)) {
     $api_key = $_GET['api_key'] ?? '';
     
@@ -16064,6 +16082,81 @@ if (isset($_GET['action'])) {
         )
       ");
     } catch(Exception $e) {}
+
+    // PHPShares (ArtCODE) Schema Initialization
+    try {
+      $db->exec("
+        CREATE TABLE IF NOT EXISTS art_series (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          public_id TEXT UNIQUE NOT NULL,
+          user_id INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          description TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS arts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          public_id TEXT UNIQUE NOT NULL,
+          user_id INTEGER NOT NULL,
+          series_id INTEGER DEFAULT NULL,
+          title TEXT NOT NULL,
+          description TEXT,
+          tags TEXT,
+          parodies TEXT,
+          characters TEXT,
+          groups_name TEXT,
+          type TEXT DEFAULT 'image', /* 'image' or 'manga' */
+          nsfw INTEGER DEFAULT 0,
+          views INTEGER DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (series_id) REFERENCES art_series(id) ON DELETE SET NULL
+        );
+        CREATE TABLE IF NOT EXISTS art_files (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          art_id INTEGER NOT NULL,
+          file_path TEXT NOT NULL,
+          thumb_path TEXT,
+          sort_order INTEGER DEFAULT 0,
+          FOREIGN KEY (art_id) REFERENCES arts(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS art_favorites (
+          user_id INTEGER NOT NULL,
+          art_id INTEGER NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (user_id, art_id),
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (art_id) REFERENCES arts(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS art_comments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          art_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          parent_id INTEGER DEFAULT NULL,
+          reply_to_id INTEGER DEFAULT NULL,
+          content TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (art_id) REFERENCES arts(id) ON DELETE CASCADE,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS art_comment_reactions (
+          user_id INTEGER NOT NULL, comment_id INTEGER NOT NULL, reaction TEXT,
+          PRIMARY KEY (user_id, comment_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (comment_id) REFERENCES art_comments(id) ON DELETE CASCADE
+        );
+      ");
+    } catch(Exception $e) {}
+    
+    // Safely execute each migration so if one fails, the others continue
+    try { $db->exec("ALTER TABLE arts ADD COLUMN series_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE arts ADD COLUMN parodies TEXT;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE arts ADD COLUMN characters TEXT;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE arts ADD COLUMN groups_name TEXT;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE arts ADD COLUMN nsfw INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE art_files ADD COLUMN thumb_path TEXT;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE art_comments ADD COLUMN parent_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE art_comments ADD COLUMN reply_to_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
 
     // Build the blog_categories table
     try {
@@ -19360,6 +19453,583 @@ HTML;
       send_json(['status' => 'success']);
       break;
 
+    case 'get_art_comments':
+      $public_id = $_GET['public_id'] ?? '';
+      $stmt_a = $db->prepare("SELECT id FROM arts WHERE public_id = ?");
+      $stmt_a->execute([$public_id]);
+      $art_id = $stmt_a->fetchColumn();
+      if (!$art_id) send_json(['comments' => [], 'total_comments' => 0]);
+      
+      $sort = $_GET['sort'] ?? 'newest';
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * 25;
+      
+      $order_by = "ORDER BY c.created_at DESC";
+      if ($sort === 'oldest') $order_by = "ORDER BY c.created_at ASC";
+      if ($sort === 'most_liked') $order_by = "ORDER BY like_count DESC, c.created_at DESC";
+
+      $root_stmt = $db->prepare("
+        SELECT c.*, u.profile_picture_type, u.id as u_id,
+        CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as artist,
+        CASE WHEN u.banned = 1 OR u.email LIKE 'deleted_%' THEN 1 ELSE 0 END as is_disabled,
+        (SELECT c2.content FROM art_comments c2 WHERE c2.id = c.reply_to_id) as reply_content,
+        (SELECT COALESCE(u2.artist, 'Anonymous') FROM art_comments c2 LEFT JOIN users u2 ON c2.user_id = u2.id WHERE c2.id = c.reply_to_id) as reply_sender,
+        (SELECT COUNT(*) FROM art_comment_reactions WHERE comment_id = c.id AND reaction = 'like') as like_count,
+        (SELECT COUNT(*) FROM art_comment_reactions WHERE comment_id = c.id AND reaction = 'dislike') as dislike_count,
+        (SELECT reaction FROM art_comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
+        FROM art_comments c JOIN users u ON c.user_id = u.id 
+        WHERE c.art_id = ? AND c.parent_id IS NULL $order_by LIMIT 25 OFFSET ?
+      ");
+      $root_stmt->execute([$user_id ?? 0, $art_id, $offset]);
+      $roots = $root_stmt->fetchAll();
+
+      $root_ids = array_column($roots, 'id');
+      $replies_filtered = [];
+      if (!empty($root_ids)) {
+        $placeholders = implode(',', array_fill(0, count($root_ids), '?'));
+        $reply_stmt = $db->prepare("
+          SELECT c.*, u.profile_picture_type, u.id as u_id,
+          CASE WHEN u.banned = 1 THEN 'Banned User' WHEN u.email LIKE 'deleted_%' THEN 'Deleted User' ELSE u.artist END as artist,
+          CASE WHEN u.banned = 1 OR u.email LIKE 'deleted_%' THEN 1 ELSE 0 END as is_disabled,
+          (SELECT c2.content FROM art_comments c2 WHERE c2.id = c.reply_to_id) as reply_content,
+          (SELECT COALESCE(u2.artist, 'Anonymous') FROM art_comments c2 LEFT JOIN users u2 ON c2.user_id = u2.id WHERE c2.id = c.reply_to_id) as reply_sender,
+          (SELECT COUNT(*) FROM art_comment_reactions WHERE comment_id = c.id AND reaction = 'like') as like_count,
+          (SELECT COUNT(*) FROM art_comment_reactions WHERE comment_id = c.id AND reaction = 'dislike') as dislike_count,
+          (SELECT reaction FROM art_comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
+          FROM art_comments c JOIN users u ON c.user_id = u.id 
+          WHERE c.art_id = ? AND c.parent_id IN ($placeholders)
+          ORDER BY c.created_at ASC
+        ");
+        $params = array_merge([$user_id ?? 0, $art_id], $root_ids);
+        $reply_stmt->execute($params);
+        $all_replies = $reply_stmt->fetchAll();
+
+        $rcounts = [];
+        foreach ($all_replies as $r) {
+          $pid = $r['parent_id'];
+          if (!isset($rcounts[$pid])) $rcounts[$pid] = 0;
+          if ($rcounts[$pid] < 25) {
+            $replies_filtered[] = $r;
+            $rcounts[$pid]++;
+          }
+        }
+      }
+
+      $total_count_stmt = $db->prepare("SELECT COUNT(*) FROM art_comments WHERE art_id = ?");
+      $total_count_stmt->execute([$art_id]);
+      $total_comments = $total_count_stmt->fetchColumn();
+      
+      send_json(['comments' => array_merge($roots, $replies_filtered), 'total_comments' => $total_comments]);
+      break;
+
+    case 'add_art_comment':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $public_id = $data['public_id'] ?? '';
+      $stmt_a = $db->prepare("SELECT id FROM arts WHERE public_id = ?");
+      $stmt_a->execute([$public_id]);
+      $art_id = $stmt_a->fetchColumn();
+      if ($art_id) {
+        $content = format_user_text($data['content'] ?? '');
+        $parent_id = empty($data['parent_id']) ? null : intval($data['parent_id']);
+        $reply_to_id = empty($data['reply_to_id']) ? null : intval($data['reply_to_id']);
+        $db->prepare("INSERT INTO art_comments (user_id, art_id, parent_id, reply_to_id, content) VALUES (?, ?, ?, ?, ?)")->execute([$user_id, $art_id, $parent_id, $reply_to_id, $content]);
+        send_json(['status' => 'success']);
+      }
+      break;
+
+    case 'edit_art_comment':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $content = format_user_text($data['content']);
+      $db->prepare("UPDATE art_comments SET content = ? WHERE id = ? AND user_id = ?")->execute([$content, intval($data['comment_id']), $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'delete_art_comment':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $db->prepare("DELETE FROM art_comments WHERE id = ? AND (user_id = ? OR {$is_admin} = 1)")->execute([intval($data['comment_id']), $user_id]);
+      send_json(['status' => 'success']);
+      break;
+
+    case 'toggle_art_comment_reaction':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $comment_id = intval($data['comment_id'] ?? 0);
+      $reaction = $data['reaction'] ?? '';
+      $existing = $db->prepare("SELECT reaction FROM art_comment_reactions WHERE user_id = ? AND comment_id = ?");
+      $existing->execute([$user_id, $comment_id]);
+      if ($existing->fetchColumn() === $reaction) {
+        $db->prepare("DELETE FROM art_comment_reactions WHERE user_id = ? AND comment_id = ?")->execute([$user_id, $comment_id]);
+      } else {
+        $db->prepare("REPLACE INTO art_comment_reactions (user_id, comment_id, reaction) VALUES (?, ?, ?)")->execute([$user_id, $comment_id, $reaction]);
+      }
+      send_json(['status' => 'success']);
+      break;
+
+    case 'get_arts_metadata_index':
+      $meta_type = $_GET['meta'] ?? 'tags'; 
+      $allowed = ['tags', 'characters', 'parodies', 'groups_name', 'series'];
+      if (!in_array($meta_type, $allowed)) { send_json([]); }
+      
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * 50;
+
+      if ($meta_type === 'series') {
+        $stmt = $db->query("SELECT title as name, COUNT(a.id) as count FROM art_series s JOIN arts a ON s.id = a.series_id GROUP BY s.id ORDER BY count DESC LIMIT 50 OFFSET $offset");
+        send_json($stmt->fetchAll());
+        break;
+      }
+      
+      // Fetch all entries to aggregate counts locally since SQLite split aggregation is complex
+      $stmt = $db->query("SELECT $meta_type FROM arts WHERE $meta_type IS NOT NULL AND $meta_type != ''");
+      $counts = [];
+      $actual_names = [];
+      while ($row = $stmt->fetch()) {
+        $items = explode(',', $row[$meta_type]);
+        foreach ($items as $item) {
+          $trimmed = trim($item);
+          if ($trimmed !== '') {
+            $lower = mb_strtolower($trimmed, 'UTF-8');
+            if (!isset($counts[$lower])) {
+              $counts[$lower] = 0;
+              $actual_names[$lower] = $trimmed;
+            }
+            $counts[$lower]++;
+          }
+        }
+      }
+      arsort($counts); // Sort by count descending
+      $result = [];
+      foreach ($counts as $lower => $count) {
+        $result[] = ['name' => $actual_names[$lower], 'count' => $count];
+      }
+      $sliced = array_slice($result, $offset, 50);
+      send_json($sliced);
+      break;
+
+    case 'toggle_art_favorite':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $public_id = $data['public_id'];
+      
+      $stmt = $db->prepare("SELECT id FROM arts WHERE public_id = ?");
+      $stmt->execute([$public_id]);
+      $art_id = $stmt->fetchColumn();
+      
+      if ($art_id) {
+        $check = $db->prepare("SELECT 1 FROM art_favorites WHERE user_id = ? AND art_id = ?");
+        $check->execute([$user_id, $art_id]);
+        if ($check->fetchColumn()) {
+          $db->prepare("DELETE FROM art_favorites WHERE user_id = ? AND art_id = ?")->execute([$user_id, $art_id]);
+          send_json(['status' => 'removed']);
+        } else {
+          $db->prepare("INSERT INTO art_favorites (user_id, art_id) VALUES (?, ?)")->execute([$user_id, $art_id]);
+          send_json(['status' => 'added']);
+        }
+      }
+      break;
+
+    case 'add_art_comment':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $stmt = $db->prepare("SELECT id FROM arts WHERE public_id = ?");
+      $stmt->execute([$data['public_id']]);
+      $art_id = $stmt->fetchColumn();
+      if ($art_id) {
+        $content = format_user_text($data['content'] ?? '');
+        $parent_id = empty($data['parent_id']) ? null : intval($data['parent_id']);
+        $reply_to_id = empty($data['reply_to_id']) ? null : intval($data['reply_to_id']);
+        $db->prepare("INSERT INTO art_comments (user_id, art_id, parent_id, reply_to_id, content) VALUES (?, ?, ?, ?, ?)")->execute([$user_id, $art_id, $parent_id, $reply_to_id, $content]);
+        send_json(['status' => 'success']);
+      }
+      break;
+
+    case 'delete_art':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $stmt = $db->prepare("SELECT id, user_id FROM arts WHERE public_id = ?");
+      $stmt->execute([$data['public_id']]);
+      $art = $stmt->fetch();
+      
+      if ($art && ($art['user_id'] == $user_id || $is_admin)) {
+        $stmt_files = $db->prepare("SELECT file_path, thumb_path FROM art_files WHERE art_id = ?");
+        $stmt_files->execute([$art['id']]);
+        while($f = $stmt_files->fetch()) {
+          @unlink(MUSIC_DIR . '/' . $f['file_path']);
+          if ($f['thumb_path']) @unlink(MUSIC_DIR . '/' . $f['thumb_path']);
+        }
+        $db->prepare("DELETE FROM arts WHERE id = ?")->execute([$art['id']]);
+        send_json(['status' => 'success']);
+      } else {
+        http_response_code(403); send_json(['status' => 'error']);
+      }
+      break;
+
+    case 'get_arts_explore':
+      $stmt_tags = $db->query("SELECT tags FROM arts WHERE tags IS NOT NULL AND tags != ''");
+      $counts = [];
+      $actual_names = [];
+      while ($row = $stmt_tags->fetch()) {
+        $items = explode(',', $row['tags']);
+        foreach ($items as $item) {
+          $trimmed = trim($item);
+          if ($trimmed !== '') {
+            $lower = mb_strtolower($trimmed, 'UTF-8');
+            if (!isset($counts[$lower])) {
+              $counts[$lower] = 0;
+              $actual_names[$lower] = $trimmed;
+            }
+            $counts[$lower]++;
+          }
+        }
+      }
+      arsort($counts);
+      $popular_tags = array_slice(array_values($actual_names), 0, 15);
+
+      $fetch_arts = function($where, $order, $limit) use ($db) {
+        $stmt = $db->prepare("
+          SELECT a.public_id, a.title, a.type, a.views, a.created_at, a.nsfw, u.artist as author, u.id as author_id,
+          (SELECT COALESCE(thumb_path, file_path) FROM art_files WHERE art_id = a.id ORDER BY sort_order ASC LIMIT 1) as cover_image,
+          (SELECT COUNT(*) FROM art_files WHERE art_id = a.id) as page_count,
+          (SELECT COUNT(*) FROM art_favorites WHERE art_id = a.id) as fav_count
+          FROM arts a JOIN users u ON a.user_id = u.id
+          WHERE $where $order LIMIT $limit
+        ");
+        $stmt->execute();
+        return $stmt->fetchAll();
+      };
+
+      $show_nsfw = false;
+      if ($user_id) {
+        $stmt_set = $db->prepare("SELECT settings FROM users WHERE id = ?");
+        $stmt_set->execute([$user_id]);
+        $u_settings = json_decode($stmt_set->fetchColumn(), true);
+        if (isset($u_settings['showNSFW']) && $u_settings['showNSFW']) $show_nsfw = true;
+      }
+      $is_super_admin_check = 0;
+      if ($user_id) {
+        $stmt_adm = $db->prepare("SELECT status FROM users WHERE id = ?");
+        $stmt_adm->execute([$user_id]);
+        if ($stmt_adm->fetchColumn() === 'super_admin') $is_super_admin_check = 1;
+      }
+      
+      $nsfw_cond = (!$show_nsfw && !$is_super_admin_check) ? "a.nsfw = 0" : "1=1";
+
+      send_json([
+        'tags' => $popular_tags,
+        'slider' => $fetch_arts("$nsfw_cond", "ORDER BY a.views DESC, a.created_at DESC", 10),
+        'popular_arts' => $fetch_arts("a.type = 'image' AND $nsfw_cond", "ORDER BY a.views DESC, a.created_at DESC", 6),
+        'popular_manga' => $fetch_arts("a.type = 'manga' AND $nsfw_cond", "ORDER BY a.views DESC, a.created_at DESC", 6)
+      ]);
+      break;
+
+    case 'get_arts':
+      $sort = $_GET['sort'] ?? 'newest';
+      $type_filter = $_GET['type_filter'] ?? 'all';
+      $search = $_GET['q'] ?? '';
+      $target_artist_id = isset($_GET['artist_id']) ? (int)$_GET['artist_id'] : null;
+      $filter_exact = $_GET['exact_filter'] ?? null;
+      $filter_val = $_GET['exact_val'] ?? null;
+
+      $show_nsfw = false;
+      if ($user_id) {
+        $stmt_set = $db->prepare("SELECT settings FROM users WHERE id = ?");
+        $stmt_set->execute([$user_id]);
+        $u_settings = json_decode($stmt_set->fetchColumn(), true);
+        if (isset($u_settings['showNSFW']) && $u_settings['showNSFW']) $show_nsfw = true;
+      }
+      
+      $order_by = "ORDER BY a.created_at DESC";
+      if ($sort === 'oldest') $order_by = "ORDER BY a.created_at ASC";
+      elseif ($sort === 'popular') $order_by = "ORDER BY a.views DESC, a.created_at DESC";
+      elseif ($sort === 'most_liked') $order_by = "ORDER BY (SELECT COUNT(*) FROM art_favorites WHERE art_id = a.id) DESC, a.created_at DESC";
+      $limit = 24;
+      $offset = ($page - 1) * $limit;
+      $limit_clause = " LIMIT " . $limit . " OFFSET " . $offset;
+
+      $where_clauses = ["1=1"];
+      $params = [];
+      
+      if (!$show_nsfw && !$is_super_admin) {
+        $where_clauses[] = "a.nsfw = 0";
+      }
+
+      if ($type_filter === 'my_favorites' && $user_id) {
+        $where_clauses[] = "a.id IN (SELECT art_id FROM art_favorites WHERE user_id = ?)";
+        $params[] = $user_id;
+      } elseif ($type_filter === 'image' || $type_filter === 'manga') {
+        $where_clauses[] = "a.type = ?";
+        $params[] = $type_filter;
+      }
+      
+      if ($target_artist_id) {
+        $where_clauses[] = "a.user_id = ?";
+        $params[] = $target_artist_id;
+      }
+
+      if ($filter_exact && $filter_val) {
+        if ($filter_exact === 'series') {
+          $where_clauses[] = "a.series_id IN (SELECT id FROM art_series WHERE title = ?)";
+          $params[] = $filter_val;
+        } else {
+          $where_clauses[] = "match_text(a." . preg_replace('/[^a-z_]/', '', $filter_exact) . ", ?) = 1";
+          $params[] = $filter_val;
+        }
+      }
+      
+      if ($search !== '') {
+        $where_clauses[] = "(match_text(a.title, ?) = 1 OR match_text(a.tags, ?) = 1 OR match_text(a.characters, ?) = 1 OR match_text(a.parodies, ?) = 1 OR match_text(a.groups_name, ?) = 1)";
+        $params[] = $search; $params[] = $search; $params[] = $search; $params[] = $search; $params[] = $search;
+      }
+      
+      $where_sql = implode(' AND ', $where_clauses);
+      
+      $stmt = $db->prepare("
+        SELECT a.public_id, a.title, a.type, a.views, a.created_at, a.nsfw, u.artist as author, u.id as author_id,
+        (SELECT COALESCE(thumb_path, file_path) FROM art_files WHERE art_id = a.id ORDER BY sort_order ASC LIMIT 1) as cover_image,
+        (SELECT COUNT(*) FROM art_files WHERE art_id = a.id) as page_count,
+        (SELECT COUNT(*) FROM art_favorites WHERE art_id = a.id) as fav_count
+        FROM arts a
+        JOIN users u ON a.user_id = u.id
+        WHERE $where_sql
+        $order_by $limit_clause
+      ");
+      $stmt->execute($params);
+      $items = $stmt->fetchAll();
+
+      $count_stmt = $db->prepare("SELECT COUNT(*) FROM arts a WHERE $where_sql");
+      $count_stmt->execute($params);
+      $total = $count_stmt->fetchColumn();
+
+      send_json(['items' => $items, 'total' => $total]);
+      break;
+
+    case 'get_art':
+      $public_id = $_GET['public_id'] ?? '';
+      
+      try { $db->exec("CREATE TABLE IF NOT EXISTS art_series (id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT UNIQUE NOT NULL, user_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);"); } catch(Exception $e){}
+      
+      if (!isset($_SESSION['viewed_art_' . $public_id])) {
+        $db->prepare("UPDATE arts SET views = views + 1 WHERE public_id = ?")->execute([$public_id]);
+        $_SESSION['viewed_art_' . $public_id] = true;
+      }
+      
+      try {
+        $stmt = $db->prepare("
+          SELECT a.id, a.public_id, a.user_id, a.series_id, a.title, a.description, a.tags, a.parodies, a.characters, a.groups_name, a.type, a.nsfw, a.views, a.created_at, 
+          u.artist as author, u.profile_picture_type,
+          (SELECT COUNT(*) FROM art_favorites WHERE art_id = a.id) as fav_count,
+          (SELECT 1 FROM art_favorites WHERE art_id = a.id AND user_id = ?) as is_favorited,
+          (SELECT title FROM art_series WHERE id = a.series_id) as series_name
+          FROM arts a
+          JOIN users u ON a.user_id = u.id
+          WHERE a.public_id = ?
+        ");
+        $stmt->execute([$user_id ?? 0, $public_id]);
+        $art = $stmt->fetch();
+      } catch (Exception $e) {
+        $stmt = $db->prepare("
+          SELECT a.id, a.public_id, a.user_id, a.title, a.description, a.tags, a.type, a.nsfw, a.views, a.created_at, 
+          u.artist as author, u.profile_picture_type,
+          (SELECT COUNT(*) FROM art_favorites WHERE art_id = a.id) as fav_count,
+          (SELECT 1 FROM art_favorites WHERE art_id = a.id AND user_id = ?) as is_favorited,
+          '' as series_name
+          FROM arts a
+          JOIN users u ON a.user_id = u.id
+          WHERE a.public_id = ?
+        ");
+        $stmt->execute([$user_id ?? 0, $public_id]);
+        $art = $stmt->fetch();
+      }
+      
+      if ($art) {
+        $stmt_files = $db->prepare("SELECT id, file_path, thumb_path, sort_order FROM art_files WHERE art_id = ? ORDER BY sort_order ASC");
+        $stmt_files->execute([$art['id']]);
+        $art['files'] = $stmt_files->fetchAll();
+        send_json($art);
+      } else {
+        http_response_code(404); send_json(['status' => 'error', 'message' => 'Not found']);
+      }
+      break;
+
+    case 'upload_art':
+      if (!$user_id) { http_response_code(403); exit; }
+      $public_id = bin2hex(random_bytes(8));
+      $title = trim(htmlspecialchars($_POST['title'] ?? 'Untitled', ENT_QUOTES, 'UTF-8'));
+      $description = format_user_text($_POST['description'] ?? '');
+      $tags = trim(htmlspecialchars($_POST['tags'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $parodies = trim(htmlspecialchars($_POST['parodies'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $characters = trim(htmlspecialchars($_POST['characters'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $groups_name = trim(htmlspecialchars($_POST['groups'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $nsfw = isset($_POST['nsfw']) && $_POST['nsfw'] == '1' ? 1 : 0;
+      $type = (isset($_POST['type']) && $_POST['type'] === 'manga') ? 'manga' : 'image';
+      
+      $series_name = trim(htmlspecialchars($_POST['series'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $series_id = null;
+      if ($series_name !== '') {
+        $stmt_s = $db->prepare("SELECT id FROM art_series WHERE title = ? COLLATE NOCASE");
+        $stmt_s->execute([$series_name]);
+        $series_id = $stmt_s->fetchColumn();
+        if (!$series_id) {
+          try { $db->exec("CREATE TABLE IF NOT EXISTS art_series (id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT UNIQUE NOT NULL, user_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);"); } catch(Exception $e){}
+          $db->prepare("INSERT INTO art_series (title, user_id, public_id) VALUES (?, ?, ?)")->execute([$series_name, $user_id, bin2hex(random_bytes(8))]);
+          $series_id = $db->lastInsertId();
+        }
+      }
+      
+      if (!isset($_FILES['files']) || empty($_FILES['files']['name'][0])) {
+        send_json(['status' => 'error', 'message' => 'No files uploaded.']);
+      }
+      
+      $db->beginTransaction();
+      try {
+        $stmt = $db->prepare("INSERT INTO arts (public_id, user_id, series_id, title, description, tags, parodies, characters, groups_name, type, nsfw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$public_id, $user_id, $series_id, $title, $description, $tags, $parodies, $characters, $groups_name, $type, $nsfw]);
+        $art_id = $db->lastInsertId();
+        
+        $upload_dir = MUSIC_DIR . '/phpshares/uid_' . $user_id . '/data/imageid-' . $art_id . '/imageassets_' . $public_id;
+        if (!is_dir($upload_dir)) {
+          @mkdir($upload_dir, 0755, true);
+        }
+        
+        $files = $_FILES['files'];
+        $count = count($files['name']);
+        $stmt_file = $db->prepare("INSERT INTO art_files (art_id, file_path, thumb_path, sort_order) VALUES (?, ?, ?, ?)");
+        
+        for ($i = 0; $i < $count; $i++) {
+          if (isset($files['error'][$i]) && $files['error'][$i] === UPLOAD_ERR_OK) {
+            $ext = strtolower(pathinfo($files['name'][$i], PATHINFO_EXTENSION));
+            if (!in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif'])) continue;
+            
+            $tmp_name = $files['tmp_name'][$i];
+            $imageData = @file_get_contents($tmp_name);
+            
+            $webpData = $imageData ? process_image_to_webp($imageData, 1920, 85, false) : null;
+            $thumbData = $imageData ? process_image_to_webp($imageData, 400, 75, true) : null;
+            
+            $filename = $public_id . '_i' . $i . '.' . $ext;
+            $thumbname = 'thumb_' . $filename;
+            
+            if ($webpData && $thumbData) {
+              $filename = $public_id . '_i' . $i . '.webp';
+              $thumbname = 'thumb_' . $filename;
+              @file_put_contents($upload_dir . '/' . $filename, $webpData);
+              @file_put_contents($upload_dir . '/' . $thumbname, $thumbData);
+            } else {
+              move_uploaded_file($tmp_name, $upload_dir . '/' . $filename);
+              @copy($upload_dir . '/' . $filename, $upload_dir . '/' . $thumbname);
+            }
+            
+            $rel_path = 'phpshares/uid_' . $user_id . '/data/imageid-' . $art_id . '/imageassets_' . $public_id . '/' . $filename;
+            $rel_thumb = 'phpshares/uid_' . $user_id . '/data/imageid-' . $art_id . '/imageassets_' . $public_id . '/' . $thumbname;
+            $stmt_file->execute([$art_id, $rel_path, $rel_thumb, $i]);
+          }
+        }
+        
+        $db->commit();
+        send_json(['status' => 'success', 'public_id' => $public_id]);
+      } catch (Exception $e) {
+        $db->rollBack();
+        send_json(['status' => 'error', 'message' => 'Database error during upload: ' . $e->getMessage()]);
+      }
+      break;
+
+    case 'edit_art':
+      if (!$user_id) { http_response_code(403); exit; }
+      $public_id = $_POST['public_id'] ?? '';
+      
+      $stmt = $db->prepare("SELECT id, user_id FROM arts WHERE public_id = ?");
+      $stmt->execute([$public_id]);
+      $art = $stmt->fetch();
+      if (!$art || ($art['user_id'] != $user_id && !$is_admin)) { http_response_code(403); send_json(['status'=>'error', 'message'=>'Unauthorized']); exit; }
+      
+      $art_id = $art['id'];
+      
+      $title = trim(htmlspecialchars($_POST['title'] ?? 'Untitled', ENT_QUOTES, 'UTF-8'));
+      $description = format_user_text($_POST['description'] ?? '');
+      $tags = trim(htmlspecialchars($_POST['tags'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $parodies = trim(htmlspecialchars($_POST['parodies'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $characters = trim(htmlspecialchars($_POST['characters'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $groups_name = trim(htmlspecialchars($_POST['groups'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $nsfw = isset($_POST['nsfw']) && $_POST['nsfw'] == '1' ? 1 : 0;
+      
+      $series_name = trim(htmlspecialchars($_POST['series'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $series_id = null;
+      if ($series_name !== '') {
+        $stmt_s = $db->prepare("SELECT id FROM art_series WHERE title = ? COLLATE NOCASE");
+        $stmt_s->execute([$series_name]);
+        $series_id = $stmt_s->fetchColumn();
+        if (!$series_id) {
+          try { $db->exec("CREATE TABLE IF NOT EXISTS art_series (id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT UNIQUE NOT NULL, user_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);"); } catch(Exception $e){}
+          $db->prepare("INSERT INTO art_series (title, user_id, public_id) VALUES (?, ?, ?)")->execute([$series_name, $user_id, bin2hex(random_bytes(8))]);
+          $series_id = $db->lastInsertId();
+        }
+      }
+
+      $db->prepare("UPDATE arts SET series_id=?, title=?, description=?, tags=?, parodies=?, characters=?, groups_name=?, nsfw=?, updated_at=CURRENT_TIMESTAMP WHERE public_id=?")->execute([$series_id, $title, $description, $tags, $parodies, $characters, $groups_name, $nsfw, $public_id]);
+
+      $deleted_files = json_decode($_POST['deleted_files'] ?? '[]', true);
+      if (!empty($deleted_files) && is_array($deleted_files)) {
+        $placeholders = implode(',', array_fill(0, count($deleted_files), '?'));
+        $stmt_del = $db->prepare("SELECT file_path, thumb_path FROM art_files WHERE art_id = ? AND id IN ($placeholders)");
+        $params = array_merge([$art_id], $deleted_files);
+        $stmt_del->execute($params);
+        while ($f = $stmt_del->fetch()) {
+          @unlink(MUSIC_DIR . '/' . $f['file_path']);
+          if ($f['thumb_path']) @unlink(MUSIC_DIR . '/' . $f['thumb_path']);
+        }
+        $db->prepare("DELETE FROM art_files WHERE art_id = ? AND id IN ($placeholders)")->execute($params);
+      }
+
+      if (isset($_FILES['replace_files'])) {
+        $upload_dir = MUSIC_DIR . '/phpshares/uid_' . $art['user_id'] . '/data/imageid-' . $art_id . '/imageassets_' . $public_id;
+        if (!is_dir($upload_dir)) @mkdir($upload_dir, 0755, true);
+        
+        $files = $_FILES['replace_files'];
+        foreach ($files['name'] as $file_id => $name) {
+          if ($files['error'][$file_id] === UPLOAD_ERR_OK) {
+            $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+            if (!in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif'])) continue;
+            
+            $tmp_name = $files['tmp_name'][$file_id];
+            $imageData = @file_get_contents($tmp_name);
+            
+            $webpData = $imageData ? process_image_to_webp($imageData, 1920, 85, false) : null;
+            $thumbData = $imageData ? process_image_to_webp($imageData, 400, 75, true) : null;
+            
+            $filename = $public_id . '_i' . $file_id . '_' . time() . '.' . $ext;
+            $thumbname = 'thumb_' . $filename;
+            
+            if ($webpData && $thumbData) {
+              $filename = $public_id . '_i' . $file_id . '_' . time() . '.webp';
+              $thumbname = 'thumb_' . $filename;
+              @file_put_contents($upload_dir . '/' . $filename, $webpData);
+              @file_put_contents($upload_dir . '/' . $thumbname, $thumbData);
+            } else {
+              move_uploaded_file($tmp_name, $upload_dir . '/' . $filename);
+              @copy($upload_dir . '/' . $filename, $upload_dir . '/' . $thumbname);
+            }
+            
+            $rel_path = 'phpshares/uid_' . $art['user_id'] . '/data/imageid-' . $art_id . '/imageassets_' . $public_id . '/' . $filename;
+            $rel_thumb = 'phpshares/uid_' . $art['user_id'] . '/data/imageid-' . $art_id . '/imageassets_' . $public_id . '/' . $thumbname;
+            
+            $stmt_old = $db->prepare("SELECT file_path, thumb_path FROM art_files WHERE id = ? AND art_id = ?");
+            $stmt_old->execute([$file_id, $art_id]);
+            $old = $stmt_old->fetch();
+            if ($old) {
+              @unlink(MUSIC_DIR . '/' . $old['file_path']);
+              if ($old['thumb_path']) @unlink(MUSIC_DIR . '/' . $old['thumb_path']);
+              $db->prepare("UPDATE art_files SET file_path = ?, thumb_path = ? WHERE id = ?")->execute([$rel_path, $rel_thumb, $file_id]);
+            }
+          }
+        }
+      }
+      
+      send_json(['status' => 'success']);
+      break;
+
     case 'get_blogs':
       $sort_key = $_GET['sort'] ?? 'newest';
       $search = $_GET['q'] ?? '';
@@ -20208,80 +20878,95 @@ HTML;
       $target_id = intval($_POST['target_id'] ?? 0);
       $chat_type = $_POST['chat_type'] ?? 'dm';
       $reply_to_id = !empty($_POST['reply_to_id']) ? intval($_POST['reply_to_id']) : null;
-      $content = trim(htmlspecialchars($_POST['content'] ?? '', ENT_QUOTES, 'UTF-8'));
-      
-      if (mb_strlen($content, 'UTF-8') > 50000) {
+      $raw_content = trim($_POST['content'] ?? '');
+
+      if ($target_id <= 0) {
+        send_json(['status' => 'error', 'message' => 'Invalid recipient or group selected.']);
+      }
+
+      if (mb_strlen($raw_content, 'UTF-8') > 50000) {
         send_json(['status' => 'error', 'message' => 'Message exceeds 50,000 characters limit.']);
       }
-      
-      if ($chat_type === 'dm') {
-        $stmt_block = $db->prepare("SELECT 1 FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)");
-        $stmt_block->execute([$user_id, $target_id, $target_id, $user_id]);
-        if ($stmt_block->fetch()) { send_json(['status' => 'error', 'message' => 'Cannot send message. A block is active.']); }
-      } else {
-        $stmt_mem = $db->prepare("SELECT 1 FROM chat_group_members WHERE group_id = ? AND user_id = ?");
-        $stmt_mem->execute([$target_id, $user_id]);
-        if (!$stmt_mem->fetch() && !$is_super_admin) { send_json(['status' => 'error', 'message' => 'You are not a member of this group.']); }
-      }
-      
-      $mediaData = null;
-      $mediaType = 'image/webp';
-      
-      if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
-        if ($_FILES['image']['size'] > 50 * 1024 * 1024) {
-          send_json(['status' => 'error', 'message' => 'File exceeds 50MB limit.']);
+
+      try {
+        if ($chat_type === 'dm') {
+          $stmt_user_check = $db->prepare("SELECT id FROM users WHERE id = ?");
+          $stmt_user_check->execute([$target_id]);
+          if (!$stmt_user_check->fetch()) {
+            send_json(['status' => 'error', 'message' => 'Recipient user account does not exist.']);
+          }
+
+          $stmt_block = $db->prepare("SELECT 1 FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)");
+          $stmt_block->execute([$user_id, $target_id, $target_id, $user_id]);
+          if ($stmt_block->fetch()) { send_json(['status' => 'error', 'message' => 'Cannot send message. A block is active.']); }
+        } else {
+          $stmt_mem = $db->prepare("SELECT 1 FROM chat_group_members WHERE group_id = ? AND user_id = ?");
+          $stmt_mem->execute([$target_id, $user_id]);
+          if (!$stmt_mem->fetch() && !$is_super_admin) { send_json(['status' => 'error', 'message' => 'You are not a member of this group.']); }
         }
-        
-        $mime = strtolower($_FILES['image']['type'] ?? '');
-        if (empty($mime) && function_exists('mime_content_type')) {
-          $mime = strtolower(mime_content_type($_FILES['image']['tmp_name']));
-        }
-        
-        if (strpos($mime, 'image/') === 0 || strpos($mime, 'video/') === 0 || strpos($mime, 'audio/') === 0) {
-          $mediaType = $mime;
-          $ext = 'bin';
-          if (strpos($mime, 'image/') === 0) $ext = 'jpg';
-          if (strpos($mime, 'video/mp4') !== false) $ext = 'mp4';
-          if (strpos($mime, 'video/webm') !== false) $ext = 'webm';
-          if (strpos($mime, 'audio/') === 0) $ext = 'mp3';
 
-          $shard = substr(md5(uniqid()), 0, 2);
-          $media_dir = MUSIC_DIR . '/uploads/media/' . $shard;
-          $thumb_dir = MUSIC_DIR . '/thumbnails/' . $shard;
-          if (!is_dir($media_dir)) @mkdir($media_dir, 0755, true);
-          if (!is_dir($thumb_dir)) @mkdir($thumb_dir, 0755, true);
+        $mediaData = null;
+        $mediaType = 'image/webp';
 
-          $filename = uniqid('msg_') . '.' . $ext;
-          $dest_path = $media_dir . '/' . $filename;
-          $rel_path = 'uploads/media/' . $shard . '/' . $filename;
+        if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
+          if ($_FILES['image']['size'] > 50 * 1024 * 1024) {
+            send_json(['status' => 'error', 'message' => 'File exceeds 50MB limit.']);
+          }
 
-          if (move_uploaded_file($_FILES['image']['tmp_name'], $dest_path)) {
-            $mediaData = $rel_path;
-            
-            // Generate Thumbnail for Images to optimize (Setting $crop to false maintains aspect ratio)
-            if (strpos($mime, 'image/') === 0) {
-              $thumb_data = process_image_to_webp(file_get_contents($dest_path), 400, 70, false);
-              if ($thumb_data) {
-                file_put_contents($thumb_dir . '/' . $filename . '.webp', $thumb_data);
+          $mime = strtolower($_FILES['image']['type'] ?? '');
+          if (empty($mime) && function_exists('mime_content_type')) {
+            $mime = strtolower(mime_content_type($_FILES['image']['tmp_name']));
+          }
+
+          if (strpos($mime, 'image/') === 0 || strpos($mime, 'video/') === 0 || strpos($mime, 'audio/') === 0) {
+            $mediaType = $mime;
+            $ext = 'bin';
+            if (strpos($mime, 'image/') === 0) $ext = 'jpg';
+            if (strpos($mime, 'video/mp4') !== false) $ext = 'mp4';
+            if (strpos($mime, 'video/webm') !== false) $ext = 'webm';
+            if (strpos($mime, 'audio/') === 0) $ext = 'mp3';
+
+            $shard = substr(md5(uniqid()), 0, 2);
+            $media_dir = MUSIC_DIR . '/uploads/media/' . $shard;
+            $thumb_dir = MUSIC_DIR . '/thumbnails/' . $shard;
+            if (!is_dir($media_dir)) @mkdir($media_dir, 0755, true);
+            if (!is_dir($thumb_dir)) @mkdir($thumb_dir, 0755, true);
+
+            $filename = uniqid('msg_') . '.' . $ext;
+            $dest_path = $media_dir . '/' . $filename;
+            $rel_path = 'uploads/media/' . $shard . '/' . $filename;
+
+            if (move_uploaded_file($_FILES['image']['tmp_name'], $dest_path)) {
+              $mediaData = $rel_path;
+
+              if (strpos($mime, 'image/') === 0) {
+                $thumb_data = process_image_to_webp(file_get_contents($dest_path), 400, 70, false);
+                if ($thumb_data) {
+                  file_put_contents($thumb_dir . '/' . $filename . '.webp', $thumb_data);
+                }
               }
+            } else {
+              send_json(['status' => 'error', 'message' => 'Failed to save media file.']);
             }
           } else {
-            send_json(['status' => 'error', 'message' => 'Failed to save media file.']);
+            send_json(['status' => 'error', 'message' => 'Invalid file format. Only Images, Audio, and Video are allowed.']);
           }
-        } else {
-          send_json(['status' => 'error', 'message' => 'Invalid file format. Only Images, Audio, and Video are allowed.']);
         }
-      }
-      
-      if ($content !== '' || $mediaData !== null) {
-        if ($chat_type === 'group') {
-          $db->prepare("INSERT INTO messages (sender_id, receiver_id, group_id, reply_to_id, content, image, media_type) VALUES (?, ?, ?, ?, ?, ?, ?)")->execute([$user_id, $user_id, $target_id, $reply_to_id, format_user_text($content), $mediaData, $mediaType]);
+
+        if ($raw_content !== '' || $mediaData !== null) {
+          $formatted_content = format_user_text($raw_content);
+          if ($chat_type === 'group') {
+            $db->prepare("INSERT INTO messages (sender_id, receiver_id, group_id, reply_to_id, content, image, media_type) VALUES (?, ?, ?, ?, ?, ?, ?)")->execute([$user_id, $user_id, $target_id, $reply_to_id, $formatted_content, $mediaData, $mediaType]);
+          } else {
+            $db->prepare("INSERT INTO messages (sender_id, receiver_id, reply_to_id, content, image, media_type) VALUES (?, ?, ?, ?, ?, ?)")->execute([$user_id, $target_id, $reply_to_id, $formatted_content, $mediaData, $mediaType]);
+          }
+          send_json(['status' => 'success']);
         } else {
-          $db->prepare("INSERT INTO messages (sender_id, receiver_id, reply_to_id, content, image, media_type) VALUES (?, ?, ?, ?, ?, ?)")->execute([$user_id, $target_id, $reply_to_id, format_user_text($content), $mediaData, $mediaType]);
+          send_json(['status' => 'error', 'message' => 'Empty message.']);
         }
-        send_json(['status' => 'success']);
-      } else {
-        send_json(['status' => 'error', 'message' => 'Empty message.']);
+      } catch (Exception $e) {
+        http_response_code(500);
+        send_json(['status' => 'error', 'message' => 'Database error: ' . $e->getMessage()]);
       }
       break;
 
@@ -20481,6 +21166,23 @@ HTML;
       if ($img) {
         header('Content-Type: image/webp');
         echo $img;
+        exit;
+      }
+      http_response_code(404); exit;
+
+    case 'get_art_image':
+      header('Cache-Control: public, max-age=31536000, immutable');
+      $path = $_GET['path'] ?? '';
+      $file_path = MUSIC_DIR . '/' . $path;
+      // Secure traversal prevention and enforce arts directory
+      if ($path && (strpos($path, 'uploads/arts/') === 0 || strpos($path, 'phpshares/') === 0) && strpos($path, '..') === false && file_exists($file_path)) {
+        $ext = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
+        $mime = 'image/jpeg';
+        if ($ext === 'png') $mime = 'image/png';
+        elseif ($ext === 'gif') $mime = 'image/gif';
+        elseif ($ext === 'webp') $mime = 'image/webp';
+        header('Content-Type: ' . $mime);
+        readfile($file_path);
         exit;
       }
       http_response_code(404); exit;
@@ -29796,9 +30498,12 @@ function perform_cover_scan($db) {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        background: #121212;
+        background: rgba(18, 18, 18, 0.95);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
         z-index: 1050;
         border-bottom: 1px solid #2a2a2a;
+        box-shadow: 0 4px 15px -3px rgba(0, 0, 0, 0.4);
       }
 
       .chat-messages {
@@ -29833,18 +30538,26 @@ function perform_cover_scan($db) {
         display: flex;
         flex-direction: column;
         z-index: 10;
-        margin-bottom: 4px;
+        margin-bottom: 8px;
       }
 
       .chat-input-wrapper {
         display: flex;
         align-items: center;
         gap: 8px;
-        background: #1e1e1e;
+        background: #1a1a1a;
         border-radius: 28px;
-        padding: 4px 16px;
+        padding: 10px 16px;
         border: 1px solid #333;
+        min-height: 44px;
         box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+      }
+
+      .chat-input-wrapper:focus-within {
+        border-color: #e11d48;
+        box-shadow: 0 0 0 2px rgba(225, 29, 72, 0.2);
+        background: #222;
       }
 
       .chat-input-wrapper textarea {
@@ -29852,15 +30565,19 @@ function perform_cover_scan($db) {
         background: transparent;
         color: #fff;
         flex-grow: 1;
-        padding: 12px 0;
+        padding: 0;
+        margin: 0;
         outline: none;
-        font-size: 1rem;
+        font-size: 0.95rem;
         resize: none;
-        min-height: 48px;
+        height: 22px;
+        min-height: 22px;
         max-height: 120px;
         overflow-y: auto;
-        line-height: 1.4;
+        line-height: 22px;
         scrollbar-width: none;
+        align-self: center;
+        display: block;
       }
 
       .chat-input-wrapper textarea::-webkit-scrollbar {
@@ -29871,62 +30588,53 @@ function perform_cover_scan($db) {
         color: #777;
       }
 
-      /* FIXED: Increased bottom padding (28px) to give the timestamp more vertical breathing room */
+      /* Modern Smooth Chat Bubbles */
       .chat-bubble {
-        max-width: 85%;
+        max-width: 78%;
         min-width: 100px;
-        padding: 8px 38px 28px 12px;
-        border-radius: 12px;
+        padding: 12px 16px 26px 16px;
+        border-radius: 20px;
         position: relative;
         font-size: 1.05rem;
-        line-height: 1.4;
+        line-height: 1.45;
         overflow-wrap: break-word;
         word-break: break-word;
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+        transition: transform 0.1s ease, box-shadow 0.2s ease;
+        animation: slideInMsg 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+      }
+
+      @keyframes slideInMsg {
+        from { opacity: 0; transform: translateY(12px) scale(0.98); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+      }
+
+      .chat-bubble:active {
+        transform: scale(0.98);
       }
 
       .chat-bubble img {
         max-width: 100%;
         height: auto;
-        border-radius: 6px;
-        margin-top: 2px;
+        border-radius: 12px;
+        margin-top: 4px;
+        margin-bottom: 4px;
       }
 
       .chat-bubble.me {
         align-self: flex-end;
-        background-color: #dc2626;
+        background: linear-gradient(135deg, #e11d48 0%, #be123c 100%);
         color: #fff;
-        border-top-right-radius: 0;
-      }
-
-      .chat-bubble.me::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        right: -8px;
-        width: 0;
-        height: 0;
-        border-top: 12px solid #dc2626;
-        border-right: 12px solid transparent;
+        border-bottom-right-radius: 4px;
       }
 
       .chat-bubble.other {
         align-self: flex-start;
-        background-color: var(--ytm-surface-2);
+        background: #1e1e1e;
         color: var(--ytm-primary-text);
-        border-top-left-radius: 0;
-        border: 1px solid #333;
-      }
-
-      .chat-bubble.other::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: -8px;
-        width: 0;
-        height: 0;
-        border-top: 12px solid var(--ytm-surface-2);
-        border-left: 12px solid transparent;
+        border: 1px solid #2a2a2a;
+        border-bottom-left-radius: 4px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
       }
 
       .chat-reply-quote {
@@ -29981,44 +30689,12 @@ function perform_cover_scan($db) {
       /* FIXED: Adjusted bottom and right positions for cleaner padding */
       .msg-time-stamp {
         position: absolute;
-        bottom: 8px;
-        right: 12px;
+        bottom: 6px;
+        right: 14px;
         font-size: 0.65rem;
         opacity: 0.75;
         text-align: right;
         user-select: none;
-      }
-
-      /* Dropdown Action Menu Trigger */
-      /* FIXED: Always on the top right, Z-INDEX bumped */
-      .msg-dropdown {
-        position: absolute;
-        top: 4px;
-        right: 4px;
-        opacity: 0;
-        transition: opacity 0.2s;
-        z-index: 25;
-      }
-
-      .chat-bubble:hover .msg-dropdown {
-        opacity: 1;
-      }
-
-      .msg-opt-btn {
-        width: 24px;
-        height: 24px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: rgba(255, 255, 255, 0.8) !important;
-        background: rgba(0, 0, 0, 0.25) !important;
-        border-radius: 50%;
-        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-      }
-
-      .msg-opt-btn:hover {
-        color: #fff !important;
-        background: rgba(0, 0, 0, 0.6) !important;
       }
 
       #chat-info-btn {
@@ -31128,6 +31804,27 @@ function perform_cover_scan($db) {
               <i class="bi bi-people"></i>
               <span>Community</span>
             </a>
+            <a href="#artsSubmenu" data-bs-toggle="collapse" class="nav-link collapsed">
+              <i class="bi bi-images" style="font-size:1.25rem;width:24px;text-align:center;"></i>
+              <span>PHPShares</span>
+              <i class="bi bi-chevron-down ms-auto" style="font-size: 0.8rem; transition: transform 0.2s;"></i>
+            </a>
+            <div class="collapse" id="artsSubmenu">
+              <ul class="list-unstyled ms-4 mb-0 pb-2">
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-filter-link" data-view="get_arts" data-filter="all"><i class="bi bi-asterisk"></i> All Artworks</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-filter-link" data-view="get_arts" data-filter="image"><i class="bi bi-image"></i> Illustrations</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-filter-link" data-view="get_arts" data-filter="manga"><i class="bi bi-book"></i> Manga / Comics</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-filter-link" data-view="get_arts" data-filter="my_favorites"><i class="bi bi-heart text-danger"></i> Favorites</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-profile-link" onclick="if(currentUser) { loadView({type: 'user_profile', param: '', sort: 'id_desc', filter_user_id: ''}); setTimeout(() => document.getElementById('arts-tab')?.click(), 500); } else { showToast('Please login', 'error'); }"><i class="bi bi-person"></i> My Artworks</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0" data-view="upload_art_page"><i class="bi bi-upload text-info"></i> Upload Artwork</a></li>
+                <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-meta-link" data-view="arts_meta" data-meta="tags"><i class="bi bi-tags"></i> Tags</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-meta-link" data-view="arts_meta" data-meta="characters"><i class="bi bi-person-hearts"></i> Characters</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-meta-link" data-view="arts_meta" data-meta="parodies"><i class="bi bi-controller"></i> Parodies</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-meta-link" data-view="arts_meta" data-meta="groups_name"><i class="bi bi-people"></i> Groups</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-meta-link" data-view="arts_meta" data-meta="series"><i class="bi bi-collection"></i> Series</a></li>
+              </ul>
+            </div>
             <a href="#" class="nav-link" data-view="get_inbox">
               <i class="bi bi-chat-dots-fill"></i>
               <span>Messages</span>
@@ -31421,6 +32118,52 @@ function perform_cover_scan($db) {
         <div id="content-area" class="content-area-wrapper"></div>
         <div id="infinite-scroll-loader" class="loader d-none">Loading more...</div>
       </main>
+    </div>
+
+    <!-- Edit Art Comment Modal -->
+    <div class="modal fade" id="edit-art-comment-modal" tabindex="-1" data-bs-backdrop="static">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px;">
+          <div class="modal-header border-0 pb-2 px-4 pt-4">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info me-2"></i>Edit Comment</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body px-4 pb-4">
+            <form id="edit-art-comment-form">
+              <input type="hidden" id="edit-art-comment-id">
+              <div class="rich-input-container" data-target-id="edit-art-comment-input">
+                <textarea id="edit-art-comment-input" class="form-control bg-dark text-white border-secondary shadow-none modern-custom-scroll rounded-4 p-3 mb-3" placeholder="Type your comment..." required rows="5" style="resize: none;"></textarea>
+              </div>
+              <div class="d-flex justify-content-end align-items-center">
+                <button type="submit" class="btn btn-info text-dark fw-bold rounded-pill px-5 py-2 shadow-sm">Save Changes</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Art Comment Reply Modal -->
+    <div class="modal fade" id="reply-art-comment-modal" tabindex="-1" data-bs-backdrop="static" style="z-index: 1065;">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px;">
+          <div class="modal-header border-0 pb-2 px-4 pt-4">
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-reply-fill text-info me-2"></i>Reply to Comment</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body px-4 pb-4">
+            <div id="reply-art-comment-preview" class="p-3 mb-3 rounded-4" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.03);"></div>
+            <div class="rich-input-container" data-target-id="reply-art-comment-input-real">
+              <form id="reply-art-comment-form" class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner mb-3" style="border: 1px solid rgba(255,255,255,0.12);">
+                <textarea id="reply-art-comment-input-real" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Type your reply..." required rows="4" style="resize: none;"></textarea>
+                <div class="d-flex justify-content-end align-items-center mt-2">
+                  <button type="submit" class="btn btn-info text-dark fw-bold rounded-pill px-4 shadow-sm">Post Reply</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="modal fade" id="console-modal" tabindex="-1">
@@ -32537,7 +33280,7 @@ function perform_cover_scan($db) {
                         <p id="player-modal-artist" class="artist text-white m-0 marquee-content" style="font-size: 1.1rem; opacity: 0.85;">Artist Name</p>
                       </div>
                     </div>
-                    <button class="btn p-0 border-0" id="player-modal-favorite-btn" style="background: transparent; flex-shrink: 0;">
+                    <button class="btn p-0 border-0 logged-in-only" id="player-modal-favorite-btn" style="background: transparent; flex-shrink: 0;">
                       <i class="bi bi-heart"></i>
                     </button>
                   </div>
@@ -34396,6 +35139,14 @@ function perform_cover_scan($db) {
                     <button type="button" class="btn btn-outline-light w-50 fw-bold" id="btn-export-user-data"><i class="bi bi-box-arrow-up me-2"></i>Export</button>
                     <button type="button" class="btn btn-outline-light w-50 fw-bold" id="btn-import-user-data-trigger"><i class="bi bi-box-arrow-in-down me-2"></i>Import</button>
                     <input type="file" id="import-user-data-file" accept=".json" class="d-none">
+                  </div>
+                </div>
+
+                <div class="phpmusic-settings-section">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-eye-slash-fill text-danger"></i> Content Filtering</h6>
+                  <div class="form-check form-switch mb-2 d-flex align-items-center gap-3">
+                    <input class="form-check-input fs-4 m-0" type="checkbox" id="toggle-nsfw-arts">
+                    <label class="form-check-label text-white m-0" for="toggle-nsfw-arts">Show NSFW Content (18+)<br><small class="text-secondary fw-normal">Display sensitive artworks in PHPShares</small></label>
                   </div>
                 </div>
 
@@ -38311,7 +39062,7 @@ SOFTWARE.</div>
         <!-- Title, Artist & Timeline (Matching IDE style) -->
         <div style="padding: 8px 12px; background: linear-gradient(to top, rgba(0,0,0,0.85), transparent);">
           <div id="mmp-title" class="fw-bold text-truncate text-white text-center mb-0" style="font-size: 0.8rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">Track Title</div>
-          <div id="mmp-artist" class="text-truncate text-white-50 text-center mb-1" style="font-size: 0.7rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">Artist Name</div>
+          <div id="mmp-artist" class="text-truncate text-white-50 text-center mb-1 hover-underline" style="font-size: 0.7rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8); cursor: pointer;">Artist Name</div>
           <div style="position: relative; height: 10px; display: flex; align-items: center;">
             <div style="width: 100%; height: 4px; background: rgba(255,255,255,0.3); border-radius: 2px; pointer-events: none;">
               <div id="mmp-progress" style="width: 0%; height: 100%; background: #ff0000; border-radius: 2px;"></div>
@@ -39435,33 +40186,6 @@ SOFTWARE.</div>
                             .replace(/\r/g, "")
                         : "";
     
-                      // Build Dropdown Action Menu (Fixes double click bug & overlapping)
-                      // Added data-bs-boundary="window" to prevent clipping inside overflow container
-                      let actionHtml = `
-                          <div class="dropdown msg-dropdown">
-                            <button class="btn btn-link p-0 border-0 msg-opt-btn" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" aria-expanded="false">
-                              <i class="bi bi-chevron-down"></i>
-                            </button>
-                            <ul class="dropdown-menu shadow-lg border-0" style="background-color: #1e1e1e; min-width: 180px; z-index: 9999; border-radius: 12px; padding: 0.5rem 0;">
-                              <li class="px-3 py-2 d-flex justify-content-between mb-1" style="background: rgba(255,255,255,0.05);">
-                                ${["ðŸ‘", "â¤ï¸", "ðŸ˜‚", "ðŸ˜®", "ðŸ˜¢"].map((em) => `<button class="btn btn-link p-0 text-decoration-none fs-5" style="transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'" onclick="window.toggleMsgReaction(${m.id}, '${em}')">${em}</button>`).join("")}
-                              </li>
-                              <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.toggleStarMsg(${m.id})"><i class="bi ${m.is_starred ? "bi-star-fill text-warning" : "bi-star text-secondary"} fs-5"></i> ${m.is_starred ? "Unstar" : "Star"}</button></li>
-                              <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.setChatReply(${m.id}, '${safeSender}', '${safeContent}')"><i class="bi bi-reply-fill text-info fs-5"></i> Reply</button></li>
-                              <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.copyChatMsg(${m.id})"><i class="bi bi-copy text-secondary fs-5"></i> Copy Text</button></li>
-                              ${
-                                isMe
-                                  ? `
-                              <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
-                              <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" onclick="window.editChatMsg(${m.id}, '${safeContent}')"><i class="bi bi-pencil text-secondary fs-5"></i> Edit</button></li>
-                              <li><button class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger fw-bold" onclick="window.delChatMsg(${m.id})"><i class="bi bi-trash2 text-danger fs-5"></i> Delete</button></li>
-                              `
-                                  : ""
-                              }
-                            </ul>
-                          </div>
-                        `;
-    
                       // Format standard readable time (e.g. 10:45 AM)
                       const dateObj = m.created_at
                         ? new Date(m.created_at.replace(" ", "T") + "Z")
@@ -39471,9 +40195,15 @@ SOFTWARE.</div>
                         minute: "2-digit",
                       });
     
+                      // Set data attributes directly on the wrapper so we can catch interactions dynamically
                       return `
-                          <div class="chat-bubble ${bubbleClass} msg-anchor-${m.id}">
-                            ${actionHtml}
+                          <div class="chat-bubble ${bubbleClass} msg-anchor-${m.id} chat-bubble-interact"
+                               data-msg-id="${m.id}" 
+                               data-is-me="${isMe ? 1 : 0}" 
+                               data-is-starred="${m.is_starred ? 1 : 0}" 
+                               data-sender="${encodeURIComponent(safeSender)}" 
+                               data-content="${encodeURIComponent(safeContent)}"
+                               style="cursor: pointer;">
                             ${senderNameHtml}
                             ${replyHtml}
                             ${mediaHtml}
@@ -39500,6 +40230,47 @@ SOFTWARE.</div>
                   setTimeout(scrollBottom, 300); // 300ms accounts for late image/video renders expanding height
                   window.forceScrollToBottomNext = false;
                 }
+
+                // Bind Right-Click and Long-Press to chat bubbles
+                listEl.querySelectorAll('.chat-bubble-interact:not(.bound)').forEach(bubble => {
+                  bubble.classList.add('bound');
+                  let pressTimer;
+                  let startX = 0, startY = 0;
+
+                  const doToggle = (e) => {
+                    if (e && e.preventDefault) e.preventDefault();
+                    window.buildAndShowChatContextMenu(bubble);
+                  };
+
+                  const startTouch = (e) => {
+                    if (e.target.closest('a') || e.target.closest('button')) return;
+                    if (e.touches && e.touches.length > 0) {
+                      startX = e.touches[0].clientX;
+                      startY = e.touches[0].clientY;
+                    }
+                    pressTimer = setTimeout(() => {
+                      doToggle(e);
+                      if (navigator.vibrate) navigator.vibrate(50);
+                    }, 400);
+                  };
+                  const cancelTouch = () => clearTimeout(pressTimer);
+                  const moveTouch = (e) => {
+                    if (!e.touches) return;
+                    const dx = Math.abs(e.touches[0].clientX - startX);
+                    const dy = Math.abs(e.touches[0].clientY - startY);
+                    if (dx > 10 || dy > 10) clearTimeout(pressTimer);
+                  };
+
+                  bubble.addEventListener("touchstart", startTouch, { passive: true });
+                  bubble.addEventListener("touchend", cancelTouch);
+                  bubble.addEventListener("touchcancel", cancelTouch);
+                  bubble.addEventListener("touchmove", moveTouch, { passive: true });
+                  bubble.addEventListener("contextmenu", (e) => {
+                    if (e.target.closest('a') || e.target.closest('button')) return;
+                    doToggle(e);
+                  });
+                });
+
               } else {
                 listEl.innerHTML =
                   '<div class="text-center text-secondary p-4 mt-auto mb-auto">Start the conversation!</div>';
@@ -40016,8 +40787,10 @@ SOFTWARE.</div>
     
           window.handleChatInputGlob = (e) => {
             if (e.target.id === "chat-input") {
-              e.target.style.height = "auto";
-              e.target.style.height = e.target.scrollHeight + "px";
+              e.target.style.height = "22px";
+              if (e.target.scrollHeight > 26) {
+                e.target.style.height = e.target.scrollHeight + "px";
+              }
             }
           };
           document.addEventListener("input", window.handleChatInputGlob);
@@ -40307,7 +41080,12 @@ SOFTWARE.</div>
               const input = doc.getElementById("chat-input");
               const imgInput = doc.getElementById("chat-image-input");
               const replyId = doc.getElementById("chat-reply-id").value;
-    
+
+              if (!activeChatConfig || !activeChatConfig.id || !activeChatConfig.type) {
+                showToast("Please select a chat conversation first.", "error");
+                return;
+              }
+
               if (!input.value.trim() && imgInput.files.length === 0) return;
     
               const formData = new FormData();
@@ -40351,12 +41129,13 @@ SOFTWARE.</div>
                   try {
                     const result = JSON.parse(xhr.responseText);
                     if (result && result.status === "success") {
+                      requestCache.clear();
                       input.value = "";
-                      input.style.height = "auto"; // Reset textarea height
+                      input.style.height = "22px"; // Reset textarea height
                       window.clearChatImage(doc);
                       window.clearChatReply(doc);
-                      window.forceScrollToBottomNext = true; // Snap viewport to bottom for new sent message
-                      await window.refreshChatFull();
+                      window.forceScrollToBottomNext = true;
+                      await window.refreshChatFull(true);
                     } else {
                       showToast(result.message || "Failed to send", "error");
                     }
@@ -41739,6 +42518,7 @@ SOFTWARE.</div>
         let enableNormalization = true;
         let isEQEnabled = false;
         let isSpatialEnabled = false;
+        let showNSFW = false;
         let globalVolumeMultiplier = 1.0;
         let globalEQBands = [0, 0, 0, 0, 0];
         let crossfadeDuration = 3.0;
@@ -41762,6 +42542,7 @@ SOFTWARE.</div>
                 enableNormalization: enableNormalization,
                 isEQEnabled: isEQEnabled,
                 isSpatialEnabled: isSpatialEnabled,
+                showNSFW: showNSFW,
                 globalVolumeMultiplier: parseFloat(globalVolumeMultiplier),
                 globalEQBands: globalEQBands.map((b) => parseFloat(b)),
                 crossfadeDuration: parseFloat(crossfadeDuration),
@@ -41909,6 +42690,14 @@ SOFTWARE.</div>
     
           applyAudioSettings();
         };
+    
+        const toggleNsfwEl = document.getElementById("toggle-nsfw-arts");
+        if (toggleNsfwEl) {
+          toggleNsfwEl.addEventListener("change", (e) => {
+            showNSFW = e.target.checked;
+            saveGlobalAudioSettings();
+          });
+        }
     
         // UI Event Listeners for Global Audio Settings
         document.getElementById("toggle-spatial").addEventListener("change", (e) => {
@@ -42696,12 +43485,13 @@ SOFTWARE.</div>
     
         const fetchData = async (url, options = {}, silent = false) => {
           const isGet = !options.method || options.method === "GET";
+          const bypassCache = options.noCache || url.includes("get_chat") || url.includes("get_inbox") || url.includes("get_unread_notif_count") || url.includes("get_activity_feed") || url.includes("get_statuses") || url.includes("get_starred_messages");
           const cacheKey = url;
-    
+
           // Invalidate cache on any POST/Mutation request to ensure fresh data mapping
           if (!isGet) {
             requestCache.clear();
-          } else if (requestCache.has(cacheKey)) {
+          } else if (!bypassCache && requestCache.has(cacheKey)) {
             const cached = requestCache.get(cacheKey);
             if (Date.now() - cached.timestamp < 300000) {
               // 5 minutes TTL
@@ -42728,7 +43518,7 @@ SOFTWARE.</div>
               data = await response.text();
             }
     
-            if (isGet) {
+            if (isGet && !bypassCache) {
               // Deep clone the object to prevent reference pollution when caching DOM lists
               requestCache.set(cacheKey, {
                 timestamp: Date.now(),
@@ -43618,39 +44408,89 @@ SOFTWARE.</div>
             const isUser = details.is_user || type === "profile";
             if (isUser) {
               setTimeout(async () => {
+                // Fetch Blogs
                 const bPane = document.getElementById("blogs-pane");
-                if (!bPane) return;
-                const bData = await fetchData(
-                  `?action=get_blogs&artist_id=${details.user_id}&sort=newest`,
-                );
-                window.artistBlogsData = bData || [];
-                if (bData && bData.length > 0) {
-                  bPane.innerHTML =
-                    `<div class="notes-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">` +
-                    bData
-                      .map(
-                        (b) => `
-                          <div class="note-card bg-dark text-white border-secondary hover-bg-dark blog-card-item" data-id="${b.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
-                            <div class="d-flex justify-content-between mb-2">
-                              <span class="badge bg-primary text-white">Public Blog</span>
-                              <span class="small text-secondary">${new Date(b.updated_at.replace(" ", "T") + "Z").toLocaleDateString()}</span>
+                if (bPane) {
+                  const bData = await fetchData(`?action=get_blogs&artist_id=${details.user_id}&sort=newest`);
+                  window.artistBlogsData = bData || [];
+                  if (bData && bData.length > 0) {
+                    bPane.innerHTML = `<div class="notes-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">` +
+                      bData.map(b => `
+                        <div class="note-card bg-dark text-white border-secondary hover-bg-dark blog-card-item" data-id="${b.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
+                          <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(b.title && b.title.trim() !== "" ? decodeHTML(b.title) : "Untitled")}</div>
+                          <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(decodeHTML(b.content).replace(/<[^>]*>?/gm, ""))}</div>
+                        </div>
+                      `).join("") + `</div>`;
+                  } else {
+                    bPane.innerHTML = `<div class="text-center p-5 text-secondary">No public blogs found.</div>`;
+                  }
+                }
+                
+                // Fetch Arts
+                const artPane = document.getElementById("arts-pane");
+                if (artPane) {
+                  const aData = await fetchData(`?action=get_arts&artist_id=${details.user_id}&sort=newest`);
+                  window.artistArtsData = aData?.items || [];
+                  const renderArtistArts = () => {
+                    const sInp = document.getElementById("artist-arts-search-input");
+                    const query = sInp ? sInp.value.toLowerCase().trim() : "";
+                    let filtered = [...(window.artistArtsData || [])];
+                    if (query) {
+                      filtered = filtered.filter(a => a.title.toLowerCase().includes(query) || (a.tags && a.tags.toLowerCase().includes(query)));
+                    }
+                    const gridHtml = filtered.length > 0 ? `<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px;">` +
+                      filtered.map(a => `
+                        <div class="card bg-transparent border-0 overflow-hidden position-relative art-card-item h-100" data-id="${a.public_id}" style="border-radius: 6px; cursor: pointer;">
+                          <img src="?action=get_art_image&path=${encodeURIComponent(a.cover_image)}" style="width: 100%; aspect-ratio: 1/1; object-fit: cover; display: block;">
+                          
+                          ${a.page_count > 1 ? `<div class="position-absolute top-0 start-0 m-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold shadow-sm" style="font-size: 0.75rem; backdrop-filter: blur(4px);"><i class="bi bi-images"></i> ${a.page_count}</div>` : ''}
+                          
+                          <button class="btn btn-sm btn-link text-white position-absolute top-0 end-0 p-1 art-more-btn m-1" data-id="${a.public_id}" style="text-shadow: 0 1px 3px #000; z-index: 2;"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                          
+                          <div class="position-absolute bottom-0 start-0 w-100 p-2 d-flex justify-content-between align-items-end" style="background: linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 100%);">
+                            <div class="d-flex align-items-center gap-1 text-white user-profile-link" data-userid="${a.author_id}" data-artist="${encodeURIComponent(a.author)}" style="z-index: 2;">
+                              <img src="?action=get_profile_picture&id=${a.author_id}" class="rounded-circle" style="width: 20px; height: 20px; object-fit: cover; border: 1px solid rgba(255,255,255,0.2);">
+                              <span class="text-truncate fw-medium" style="max-width: 90px; font-size: 0.8rem; text-shadow: 1px 1px 3px #000;">${escapeHTML(a.author)}</span>
                             </div>
-                            <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(b.title && b.title.trim() !== "" ? decodeHTML(b.title) : "Untitled")}</div>
-                            <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(
-                              decodeHTML(b.content)
-                                .replace(/<[^>]*>?/gm, "")
-                                .replace(/[^a-zA-Z0-9\s.,!?]/g, ""),
-                            )}</div>
-                            <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
-                              ${b.category && b.category !== "all" ? `<span class="note-chip">${escapeHTML(b.category_name || "Uncategorized")}</span>` : "<span></span>"}
+                            <div class="d-flex flex-column align-items-end gap-1">
+                              ${a.nsfw === 1 ? `<span class="badge bg-danger rounded-pill px-1" style="font-size: 0.6rem;">R-18</span>` : ''}
+                              <div class="d-flex gap-2 text-white fw-bold" style="font-size: 0.75rem; text-shadow: 1px 1px 3px #000;">
+                                <span><i class="bi bi-eye-fill"></i> ${a.views || 0}</span>
+                                <span><i class="bi bi-heart-fill text-danger"></i> ${a.fav_count || 0}</span>
+                              </div>
                             </div>
                           </div>
-                        `,
-                      )
-                      .join("") +
-                    `</div>`;
-                } else {
-                  bPane.innerHTML = `<div class="text-center p-5 text-secondary">No public blogs found.</div>`;
+                        </div>
+                      `).join("") + `</div>` : `<div class="text-center p-5 text-secondary">No artworks found.</div>`;
+                      
+                    const targetGrid = document.getElementById("artist-arts-grid");
+                    if (targetGrid) {
+                      targetGrid.innerHTML = gridHtml;
+                      targetGrid.querySelectorAll('.art-card-item:not(.bound)').forEach(card => {
+                        card.classList.add("bound");
+                        card.addEventListener('click', (e) => {
+                          if (e.target.closest('.art-more-btn') || e.target.closest('.user-profile-link')) return;
+                          loadView({type: 'view_art', param: card.dataset.id, sort: '', filter: ''});
+                        });
+                      });
+                    }
+                  };
+
+                  artPane.innerHTML = `
+                    <div class="d-flex w-100 mb-4 px-1 mt-2">
+                      <div class="position-relative w-100" style="max-width: 400px;">
+                        <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                        <input type="text" id="artist-arts-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search artworks...">
+                      </div>
+                    </div>
+                    <div id="artist-arts-grid"></div>
+                  `;
+                  
+                  document.getElementById("artist-arts-search-input").addEventListener("input", () => {
+                    clearTimeout(window.artistArtsSearchTimeout);
+                    window.artistArtsSearchTimeout = setTimeout(renderArtistArts, 400);
+                  });
+                  renderArtistArts();
                 }
               }, 300);
             }
@@ -43718,6 +44558,9 @@ SOFTWARE.</div>
                           </li>
                           <li class="nav-item" role="presentation">
                             <button class="nav-link" id="blogs-tab" data-bs-toggle="tab" data-bs-target="#blogs-pane" type="button" role="tab">Blogs</button>
+                          </li>
+                          <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="arts-tab" data-bs-toggle="tab" data-bs-target="#arts-pane" type="button" role="tab">Artworks</button>
                           </li>`
                               : ""
                           }
@@ -43757,6 +44600,9 @@ SOFTWARE.</div>
                           </div>
                           <div class="tab-pane fade" id="blogs-pane" role="tabpanel">
                              <div class="text-center p-5 text-secondary" id="artist-blogs-loader"><span class="spinner-border spinner-border-sm"></span> Loading blogs...</div>
+                          </div>
+                          <div class="tab-pane fade" id="arts-pane" role="tabpanel">
+                             <div class="text-center p-5 text-secondary" id="artist-arts-loader"><span class="spinner-border spinner-border-sm"></span> Loading images...</div>
                           </div>`
                               : ""
                           }
@@ -44967,6 +45813,14 @@ SOFTWARE.</div>
                   modified: "Recently Modified",
                 };
                 break;
+              case "get_arts":
+                options = {
+                  newest: "Newest",
+                  oldest: "Oldest",
+                  most_liked: "Most Favorited",
+                  popular: "Most Viewed"
+                };
+                break;
             }
     
             sortSelect.innerHTML = Object.entries(options)
@@ -45036,6 +45890,37 @@ SOFTWARE.</div>
               data = await fetchData(`?action=${type}&${params.toString()}`);
               if (capturedLoadId !== viewLoadCounter) return;
               renderSongs(data, true);
+              break;
+            case "get_arts":
+              if (currentView.searchQuery) params.set("q", currentView.searchQuery);
+              if (currentView.filter && currentView.filter !== 'all') params.set("type_filter", currentView.filter);
+              data = await fetchData(`?action=get_arts&${params.toString()}`);
+              if (capturedLoadId !== viewLoadCounter) return;
+              if (data && data.length > 0) {
+                const grid = document.getElementById("arts-grid");
+                if (grid) {
+                  const html = data.map(a => `
+                    <div class="card bg-dark border-0 overflow-hidden shadow-sm position-relative art-card-item" data-id="${a.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
+                      <img src="${a.cover_image}" style="width: 100%; aspect-ratio: 4/5; object-fit: cover;" loading="lazy">
+                      ${a.page_count > 1 ? `<span class="position-absolute top-0 end-0 m-2 badge bg-dark bg-opacity-75 text-white border border-secondary"><i class="bi bi-files"></i> ${a.page_count}</span>` : ''}
+                      <div class="position-absolute bottom-0 start-0 w-100 p-3" style="background: linear-gradient(to top, rgba(0,0,0,0.9), transparent);">
+                        <div class="fw-bold text-white text-truncate mb-1">${escapeHTML(a.title)}</div>
+                        <div class="d-flex justify-content-between align-items-center">
+                          <small class="text-secondary"><i class="bi bi-person-fill"></i> ${escapeHTML(a.author)}</small>
+                          <small class="text-white fw-bold"><i class="bi bi-heart-fill text-danger"></i> ${a.fav_count}</small>
+                        </div>
+                      </div>
+                    </div>
+                  `).join('');
+                  grid.insertAdjacentHTML("beforeend", html);
+                  grid.querySelectorAll('.art-card-item:not(.bound)').forEach(card => {
+                    card.classList.add("bound");
+                    card.addEventListener('click', () => {
+                      loadView({type: 'view_art', param: card.dataset.id, sort: '', filter: ''});
+                    });
+                  });
+                }
+              }
               break;
             case "get_offline_songs":
               if (offlineViewSongsData && offlineViewSongsData.length > 0) {
@@ -45579,6 +46464,18 @@ SOFTWARE.</div>
               }
               activeLink = document.querySelector('a[href="#imageditorSubmenu"]');
               break;
+            case "get_arts":
+              const aFilter = currentView.filter || "all";
+              const aFilterLink = document.querySelector(`.arts-filter-link[data-filter="${aFilter}"]`);
+              if (aFilterLink) {
+                aFilterLink.classList.add("active", "text-white");
+                const collapseParent = aFilterLink.closest(".collapse");
+                if (collapseParent && !collapseParent.classList.contains("show")) {
+                  bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              }
+              activeLink = document.querySelector('a[href="#artsSubmenu"]');
+              break;
             case "get_projects":
             case "manage_note_categories":
             case "get_categories":
@@ -45790,7 +46687,7 @@ SOFTWARE.</div>
           }
     
           mainContent.scrollTop = savedScrollTop;
-          currentPage = 1;
+          currentPage = viewConfig.page || 1;
           allContentloaded = false;
           isLoadingMore = false;
           currentViewOwnerId = null;
@@ -45824,9 +46721,11 @@ SOFTWARE.</div>
             "manage_note_categories",
             "get_projects",
             "get_my_apis",
+            "upload_art_page",
+            "edit_art_page",
           ];
     
-          if (!currentUser && authRequiredViews.includes(currentView.type)) {
+          if (!currentUser && (authRequiredViews.includes(currentView.type) || (currentView.type === 'get_arts' && currentView.filter === 'my_favorites'))) {
             setTimeout(() => {
               const authModalEl = document.getElementById("auth-required-modal");
               if (authModalEl)
@@ -49537,12 +50436,11 @@ SOFTWARE.</div>
                               <div class="d-flex align-items-center gap-2 ms-auto">
                                 <button class="btn btn-link text-secondary hover-white p-0 border-0 d-none align-items-center justify-content-center" id="chat-info-btn" style="width: 44px; height: 44px; text-decoration: none;" title="Details"><i class="bi bi-info-circle fs-5"></i></button>
                                 <button class="btn btn-link text-secondary hover-white p-0 border-0 d-none d-md-flex align-items-center justify-content-center" id="chat-pip-btn" style="width: 44px; height: 44px; text-decoration: none;" title="Pop Out Chat"><i class="bi bi-pip fs-5"></i></button>
-                                <div class="dropdown d-none" id="chat-header-dropdown">
-                                  <button class="btn btn-link text-white p-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" aria-expanded="false" style="width: 44px; height: 44px;" title="Options">
+                                <div class="position-relative flex-shrink-0 d-none custom-opt-dropdown" id="chat-header-dropdown">
+                                  <button class="btn btn-link text-white p-0 border-0 custom-opt-toggle" type="button" style="width: 44px; height: 44px;" title="Options">
                                     <i class="bi bi-three-dots-vertical fs-5"></i>
                                   </button>
-                                  <!-- FIXED: Bumped header dropdown z-index to 1060 so it cleanly covers bubble dropdowns -->
-                                  <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary" style="background-color: var(--ytm-surface-2); border-radius: 12px; z-index: 1060;">
+                                  <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; background-color: #1e1e1e; border-radius: 16px; z-index: 1060;">
                                     <li><a class="dropdown-item text-white d-flex align-items-center gap-3 py-2" href="#" id="chat-opt-search"><i class="bi bi-search text-secondary"></i> Search Messages</a></li>
                                     <li><a class="dropdown-item text-white d-flex align-items-center gap-3 py-2" href="#" id="chat-opt-info"><i class="bi bi-info-circle text-info"></i> View Details</a></li>
                                   </ul>
@@ -49582,14 +50480,14 @@ SOFTWARE.</div>
                                  </div>
                               </div>
     
-                              <form id="chat-form-full" class="d-flex gap-2 w-100 position-relative align-items-center">
+                              <form id="chat-form-full" class="d-flex gap-2 w-100 position-relative align-items-end">
                                 <input type="hidden" id="chat-reply-id">
-                                <div class="chat-input-wrapper flex-grow-1">
+                                <div class="chat-input-wrapper flex-grow-1 mb-0">
                                   <div class="dropup d-flex align-items-center justify-content-center">
                                     <button class="btn btn-link text-secondary p-0 border-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" aria-expanded="false" style="width: 28px; height: 28px; transition: color 0.2s;" onmouseover="this.style.color='var(--ytm-primary-text)'" onmouseout="this.style.color='var(--ytm-secondary-text)'" title="Attach Media">
                                       <i class="bi bi-paperclip fs-4"></i>
                                     </button>
-                                    <ul class="dropdown-menu dropdown-menu-dark shadow-lg mb-2" style="background-color: var(--ytm-surface-2); border: 1px solid var(--ytm-border); border-radius: 12px; min-width: 150px; padding: 0.5rem 0; z-index: 1070;">
+                                    <ul class="dropdown-menu dropdown-menu-dark shadow-lg mb-2" style="background-color: #1e1e1e; border: 1px solid #333; border-radius: 16px; min-width: 160px; padding: 0.5rem 0; z-index: 1070;">
                                       <li>
                                         <a class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" href="#" onclick="document.getElementById('chat-image-input').accept='image/*'; document.getElementById('chat-image-input').click(); return false;">
                                           <i class="bi bi-image fs-5 text-info"></i> Photo
@@ -49611,9 +50509,9 @@ SOFTWARE.</div>
                                     <i class="bi bi-at fs-4"></i>
                                   </button>
                                   <input type="file" id="chat-image-input" class="d-none">
-                                  <textarea id="chat-input" placeholder="Type a message..." autocomplete="off" maxlength="50000"></textarea>
+                                  <textarea id="chat-input" placeholder="Type a message..." autocomplete="off" maxlength="50000" rows="1" style="height: 22px;"></textarea>
                                 </div>
-                                <button type="submit" class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 shadow-sm mb-1" id="chat-submit-btn" style="width: 42px; height: 42px;"><i class="bi bi-send-fill fs-5" style="margin-left: -2px;"></i></button>
+                                <button type="submit" class="btn btn-danger rounded-circle d-flex align-items-center justify-content-center flex-shrink-0 my-auto" id="chat-submit-btn" style="width: 44px; height: 44px; box-shadow: 0 4px 12px rgba(225, 29, 72, 0.4); transition: all 0.2s ease;" onmouseover="this.style.transform='scale(1.08)';" onmouseout="this.style.transform='scale(1)';"><i class="bi bi-send-fill fs-5" style="margin-left: -2px;"></i></button>
                               </form>
                             </div>
                           </div>
@@ -49684,22 +50582,22 @@ SOFTWARE.</div>
     
                         const cacheBuster = Math.floor(Date.now() / 60000);
                         return `
-                            <div class="list-group-item bg-transparent text-white border-secondary px-3 py-3 d-flex align-items-center gap-3 rounded mb-1" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'" onclick="window.openChatFull(${m.target_id}, '${m.chat_type}', '${escapeHTML(m.name).replace(/&#39;/g, "\\'")}')">
-                              <div class="position-relative">
-                                ${isGroup ? `<div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary overflow-hidden" style="width: 50px; height: 50px;"><img src="?action=get_group_image&id=${m.target_id}&v=${cacheBuster}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-info fs-4\\'></i>'" style="width: 100%; height: 100%; object-fit: cover;"></div>` : `<img src="?action=get_profile_picture&id=${m.target_id}&v=${cacheBuster}" class="rounded-circle shadow-sm" style="width: 50px; height: 50px; object-fit: cover;">`}
+                            <div class="list-group-item bg-transparent text-white border-0 px-3 py-3 d-flex align-items-center gap-3 rounded-4 mb-2" style="cursor: pointer; transition: all 0.2s ease;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.05)'; this.style.transform='translateY(-1px)';" onmouseout="this.style.backgroundColor='transparent'; this.style.transform='none';" onclick="window.openChatFull(${m.target_id}, '${m.chat_type}', '${escapeHTML(m.name).replace(/&#39;/g, "\\'")}')">
+                              <div class="position-relative flex-shrink-0">
+                                ${isGroup ? `<div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary overflow-hidden shadow-sm" style="width: 52px; height: 52px;"><img src="?action=get_group_image&id=${m.target_id}&v=${cacheBuster}" onerror="this.outerHTML='<i class=\\'bi bi-people-fill text-info fs-4\\'></i>'" style="width: 100%; height: 100%; object-fit: cover;"></div>` : `<img src="?action=get_profile_picture&id=${m.target_id}&v=${cacheBuster}" class="rounded-circle shadow-sm" style="width: 52px; height: 52px; object-fit: cover; border: 2px solid rgba(255,255,255,0.05);">`}
                                 ${activeHtml}
                               </div>
                               <div class="flex-grow-1 overflow-hidden">
-                                <div class="d-flex justify-content-between align-items-center">
-                                  <span class="fw-bold text-truncate">${escapeHTML(m.name)}${isGroup && m.member_count ? ` <small class="text-secondary fw-normal">(${m.member_count} members)</small>` : ""}</span>
-                                  <small class="text-secondary" style="font-size: 0.7rem;">${timeAgo(m.created_at)}</small>
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                  <span class="fw-bold text-truncate" style="font-size: 1.05rem;">${escapeHTML(m.name)}${isGroup && m.member_count ? ` <small class="text-secondary fw-normal" style="font-size: 0.8rem;">(${m.member_count})</small>` : ""}</span>
+                                  <small class="text-secondary" style="font-size: 0.75rem;">${timeAgo(m.created_at)}</small>
                                 </div>
-                                <div class="text-secondary small text-truncate ${m.unread_count > 0 ? "text-white fw-bold" : ""}">
+                                <div class="text-secondary small text-truncate ${m.unread_count > 0 ? "text-white fw-bold" : ""}" style="font-size: 0.85rem;">
                                    ${isGroup && !isMe && m.content ? `<span class="text-info">${m.sender_name || "Someone"}:</span> ` : ""}
                                    ${isMe && !isGroup ? "You: " : ""}${m.has_image ? '<i class="bi bi-image"></i> ' : ""}${escapeHTML(previewText) || "New Chat"}
                                 </div>
                               </div>
-                              ${m.unread_count > 0 ? `<span class="badge bg-danger rounded-pill">${m.unread_count}</span>` : ""}
+                              ${m.unread_count > 0 ? `<span class="badge bg-danger rounded-pill shadow-sm py-1 px-2" style="font-size: 0.75rem;">${m.unread_count}</span>` : ""}
                             </div>
                           `;
                       })
@@ -49738,9 +50636,9 @@ SOFTWARE.</div>
                                 users
                                   .map(
                                     (u) => `
-                                      <div class="list-group-item bg-transparent text-white border-secondary px-3 py-2 d-flex align-items-center gap-3 rounded mb-1" style="cursor: pointer;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'" onclick="window.openChatFull(${u.id}, 'dm', '${escapeHTML(u.name).replace(/&#39;/g, "\\'")}')">
-                                        <img src="?action=get_profile_picture&id=${u.id}&v=${Math.floor(Date.now() / 60000)}" class="rounded-circle" style="width: 40px; height: 40px; object-fit: cover;">
-                                        <span class="fw-bold">${escapeHTML(u.name)}</span>
+                                      <div class="list-group-item bg-transparent text-white border-0 px-3 py-2 d-flex align-items-center gap-3 rounded-4 mb-2" style="cursor: pointer; transition: all 0.2s ease;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.05)'; this.style.transform='translateY(-1px)';" onmouseout="this.style.backgroundColor='transparent'; this.style.transform='none';" onclick="window.openChatFull(${u.id}, 'dm', '${escapeHTML(u.name).replace(/&#39;/g, "\\'")}')">
+                                        <img src="?action=get_profile_picture&id=${u.id}&v=${Math.floor(Date.now() / 60000)}" class="rounded-circle shadow-sm" style="width: 46px; height: 46px; object-fit: cover; border: 2px solid rgba(255,255,255,0.05);">
+                                        <span class="fw-bold" style="font-size: 1.05rem;">${escapeHTML(u.name)}</span>
                                       </div>
                                    `,
                                   )
@@ -52055,6 +52953,976 @@ SOFTWARE.</div>
               }
               break;
     
+            case "arts_meta":
+              updateContentTitle(currentView.param.toUpperCase() || "Index", !!currentUser);
+              contentArea.innerHTML = `
+                <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3 mt-4">
+                  <h4 class="text-white fw-bold m-0"><i class="bi bi-hash text-info me-2"></i> ${currentView.param.toUpperCase()}</h4>
+                </div>
+                <div id="arts-meta-grid" class="mx-md-3 mb-5 d-flex flex-wrap gap-2"></div>
+              `;
+              
+              const metaData = await fetchData(`?action=get_arts_metadata_index&meta=${currentView.param}`);
+              const metaGrid = document.getElementById("arts-meta-grid");
+              if (metaData && metaData.length > 0) {
+                metaGrid.innerHTML = metaData.map(m => `
+                  <button class="btn btn-outline-light rounded-pill mb-2 px-3 fw-bold border-secondary" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: '${currentView.param}', exact_val: '${escapeHTML(m.name)}'})">
+                    ${escapeHTML(m.name)} <span class="badge bg-secondary ms-1">${m.count}</span>
+                  </button>
+                `).join('');
+              } else {
+                metaGrid.innerHTML = '<div class="text-center w-100 p-5 text-secondary">No tags found.</div>';
+              }
+              allContentloaded = true;
+              break;
+    
+            case "get_arts":
+              const artFilter = currentView.filter || 'all';
+              let artsPageTitle = "PHPShares";
+              if (artFilter === 'image') artsPageTitle = "Illustrations";
+              else if (artFilter === 'manga') artsPageTitle = "Manga & Comics";
+              else if (artFilter === 'my_favorites') artsPageTitle = "My Favorite Artworks";
+              updateContentTitle(artsPageTitle, false);
+
+              if (artFilter === 'my_profile' && currentUser) {
+                pageParams.set("artist_id", currentUser.id);
+              }
+              const isDefaultExplore = (artFilter === 'all' && !currentView.searchQuery && !currentView.exact_filter && currentPage === 1 && !pageParams.has("artist_id"));
+              
+              let exploreHtml = '';
+              if (isDefaultExplore) {
+                const exploreData = await fetchData("?action=get_arts_explore");
+                if (exploreData) {
+                  let sliderBg = exploreData.slider.length > 0 ? `?action=get_art_image&path=${encodeURIComponent(exploreData.slider[0].cover_image)}` : '';
+                  let sliderHtml = `
+                      <div class="w-100 position-relative bg-black d-flex align-items-center justify-content-center overflow-hidden mb-4" style="height: 35vh; min-height: 250px; border-radius: 12px;">
+                        <div class="position-absolute w-100 h-100" style="background-image: url('${sliderBg}'); background-size: cover; background-position: center; filter: blur(30px) brightness(0.4); transform: scale(1.1); z-index: 0;"></div>
+                        <div class="d-flex w-100 h-100 align-items-center position-relative z-1" style="overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none;">
+                          ${exploreData.slider.map(a => `
+                            <div class="h-100 flex-shrink-0 art-card-item position-relative" data-id="${a.public_id}" style="width: auto; scroll-snap-align: center; padding: 10px; cursor: pointer;">
+                              <img src="?action=get_art_image&path=${encodeURIComponent(a.cover_image)}" style="height: 100%; width: auto; object-fit: contain; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.6);">
+                              <div class="position-absolute bottom-0 start-0 w-100 p-3" style="background: linear-gradient(to top, rgba(0,0,0,0.9), transparent);">
+                                <div class="d-flex justify-content-between align-items-center w-100 px-2">
+                                  <span class="text-white fw-bold text-truncate me-3">${escapeHTML(a.title)}</span>
+                                  <div class="d-flex gap-2 text-white small fw-bold">
+                                    <span><i class="bi bi-eye-fill"></i> ${a.views || 0}</span>
+                                    <span><i class="bi bi-heart-fill text-danger"></i> ${a.fav_count || 0}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          `).join('')}
+                        </div>
+                      </div>
+                    `;
+
+                  exploreHtml = `
+                      <div class="px-md-3 mb-4 mt-2">
+                        <div class="d-flex align-items-center justify-content-between mb-3">
+                          <h6 class="fw-bold m-0 text-white"><i class="bi bi-tags-fill text-secondary me-2"></i> Popular Tags</h6>
+                        </div>
+                        <div class="d-flex flex-wrap gap-2 mb-4">
+                          ${exploreData.tags.map(t => `<button class="btn btn-dark border-secondary rounded-pill btn-sm text-white fw-medium" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: 'tags', exact_val: '${escapeHTML(t)}'})"><i class="bi bi-tag-fill me-1 text-secondary"></i> ${escapeHTML(t)}</button>`).join('')}
+                        </div>
+                        ${sliderHtml}
+                      </div>
+                    `;
+                }
+              }
+
+              let exactFilterHtml = '';
+              if (currentView.exact_filter && currentView.exact_val) {
+                let filterPrefix = currentView.exact_filter.charAt(0).toUpperCase() + currentView.exact_filter.slice(1);
+                if (currentView.exact_filter === 'groups_name') filterPrefix = 'Group';
+                else if (currentView.exact_filter === 'parodies') filterPrefix = 'Series';
+                else if (currentView.exact_filter === 'characters') filterPrefix = 'Character';
+                else if (currentView.exact_filter === 'tags') filterPrefix = 'Tag';
+                exactFilterHtml = `<div class="mb-2 px-3 w-100 text-center"><span class="badge bg-info text-dark fs-6 px-3 py-2 rounded-pill shadow-sm"><i class="bi bi-funnel-fill me-1"></i> ${filterPrefix}: ${escapeHTML(currentView.exact_val)} <i class="bi bi-x-circle ms-2" style="cursor:pointer;" onclick="loadView({type: 'get_arts', param: '', sort: '${currentView.sort || 'newest'}', filter: '${artFilter}'})"></i></span></div>`;
+              }
+
+              let tagsHtml = '';
+              if (isDefaultExplore) {
+                const exploreData = await fetchData("?action=get_arts_explore");
+                if (exploreData && exploreData.tags) {
+                  tagsHtml = `
+                    <div class="px-md-3 mb-4 mt-4">
+                      <div class="d-flex flex-wrap gap-2 justify-content-center modern-custom-scroll" style="max-height: 120px; overflow-y: auto;">
+                        ${exploreData.tags.map(t => `<button class="btn btn-dark border-secondary rounded-pill btn-sm text-white fw-medium flex-shrink-0" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: 'tags', exact_val: '${escapeHTML(t)}'})"><i class="bi bi-tag-fill me-1 text-secondary"></i> ${escapeHTML(t)}</button>`).join('')}
+                      </div>
+                    </div>
+                  `;
+                }
+              }
+
+              contentArea.innerHTML = `
+                <div class="px-3 mb-4 mt-4 d-flex flex-wrap gap-3 align-items-center justify-content-between w-100">
+                  <div class="position-relative" style="max-width: 400px; width: 100%; flex-grow: 1;">
+                    <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                    <input type="text" id="arts-adv-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search titles, tags, parodies..." value="${escapeHTML(currentView.searchQuery || "")}">
+                  </div>
+                  <div class="d-flex align-items-center gap-2">
+                    <label for="arts-sort-select" class="text-secondary small d-none d-md-block">Sort by</label>
+                    <select id="arts-sort-select" class="form-select form-select-sm bg-dark text-white border-secondary" style="width: auto; border-radius: 20px;">
+                      <option value="newest" ${currentView.sort === "newest" ? "selected" : ""}>Newest</option>
+                      <option value="oldest" ${currentView.sort === "oldest" ? "selected" : ""}>Oldest</option>
+                      <option value="most_liked" ${currentView.sort === "most_liked" ? "selected" : ""}>Most Favorited</option>
+                      <option value="popular" ${currentView.sort === "popular" ? "selected" : ""}>Most Viewed</option>
+                    </select>
+                  </div>
+                </div>
+                
+                ${tagsHtml}
+                ${exactFilterHtml}
+
+                <div id="arts-grid" class="row row-cols-2 row-cols-sm-2 row-cols-md-4 row-cols-lg-6 g-2 px-md-3 mb-4 mt-2"></div>
+                <div id="arts-pagination" class="d-flex justify-content-center mb-5"></div>
+              `;
+              
+              document.getElementById("arts-adv-search-input").addEventListener("input", (e) => {
+                clearTimeout(window.artAdvSearchTimeout);
+                window.artAdvSearchTimeout = setTimeout(() => {
+                  currentView.searchQuery = e.target.value;
+                  currentView.page = 1;
+                  loadView(currentView);
+                }, 400);
+              });
+
+              document.getElementById("arts-sort-select").addEventListener("change", (e) => {
+                currentView.sort = e.target.value;
+                currentView.page = 1;
+                loadView(currentView);
+              });
+
+              if (currentView.searchQuery) pageParams.set("q", currentView.searchQuery);
+              if (currentView.exact_filter) pageParams.set("exact_filter", currentView.exact_filter);
+              if (currentView.exact_val) pageParams.set("exact_val", currentView.exact_val);
+              if (artFilter === 'image' || artFilter === 'manga' || artFilter === 'my_favorites') pageParams.set("type_filter", artFilter);
+              
+              const rawData = await fetchData(`?action=get_arts&${pageParams.toString()}`);
+              const dataList = rawData.items || [];
+              const totalArts = rawData.total || 0;
+              
+              const bindArtCards = () => {
+                document.querySelectorAll('.art-card-item:not(.bound)').forEach(card => {
+                  card.classList.add('bound');
+                  card.addEventListener('click', (e) => {
+                    if (e.target.closest('.art-more-btn') || e.target.closest('.user-profile-link')) return;
+                    loadView({type: 'view_art', param: card.dataset.id, sort: '', filter: ''});
+                  });
+                });
+              };
+
+              const artGrid = document.getElementById("arts-grid");
+              if (dataList.length > 0) {
+                artGrid.innerHTML = dataList.map(a => `
+                  <div class="col">
+                    <div class="card bg-transparent border-0 overflow-hidden position-relative art-card-item h-100" data-id="${a.public_id}" style="border-radius: 6px; cursor: pointer;">
+                      <img src="?action=get_art_image&path=${encodeURIComponent(a.cover_image)}" style="width: 100%; aspect-ratio: ${artFilter === 'manga' ? '9/16' : '1/1'}; object-fit: cover; display: block;">
+                      
+                      ${a.page_count > 1 ? `<div class="position-absolute top-0 start-0 m-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold shadow-sm" style="font-size: 0.75rem; backdrop-filter: blur(4px);"><i class="bi bi-images"></i> ${a.page_count}</div>` : ''}
+                      
+                      <button class="btn btn-sm btn-link text-white position-absolute top-0 end-0 p-1 art-more-btn m-1" data-id="${a.public_id}" style="text-shadow: 0 1px 3px #000; z-index: 2;"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                      
+                      <div class="position-absolute bottom-0 start-0 w-100 p-2 d-flex flex-column justify-content-end" style="background: linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.5) 60%, transparent 100%);">
+                        <div class="fw-bold text-white text-truncate mb-1" style="font-size: 0.85rem; text-shadow: 1px 1px 3px #000;">${escapeHTML(a.title)}</div>
+                        <div class="d-flex justify-content-between align-items-center">
+                          <div class="d-flex align-items-center gap-1 text-white user-profile-link" data-userid="${a.author_id}" data-artist="${encodeURIComponent(a.author)}" onclick="event.stopPropagation()">
+                            <img src="?action=get_profile_picture&id=${a.author_id}" class="rounded-circle" style="width: 18px; height: 18px; object-fit: cover; border: 1px solid rgba(255,255,255,0.2);">
+                            <span class="text-truncate fw-medium" style="max-width: 80px; font-size: 0.75rem; text-shadow: 1px 1px 3px #000;">${escapeHTML(a.author)}</span>
+                          </div>
+                          <div class="d-flex gap-1 text-white fw-bold" style="font-size: 0.7rem; text-shadow: 1px 1px 2px #000;">
+                            ${a.nsfw === 1 ? `<span class="badge bg-danger rounded-pill px-1" style="font-size: 0.6rem;">R-18</span>` : ''}
+                            <span><i class="bi bi-eye-fill"></i> ${a.views || 0}</span>
+                            <span><i class="bi bi-heart-fill text-danger"></i> ${a.fav_count || 0}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                `).join('');
+                bindArtCards();
+
+                const totalPages = Math.ceil(totalArts / 24);
+                if (totalPages > 1) {
+                  let paginationHTML = `<ul class="pagination pagination-sm m-0" style="gap: 5px;">`;
+                  let startPage = Math.max(1, currentPage - 2);
+                  let endPage = Math.min(totalPages, currentPage + 2);
+                  
+                  if (currentPage > 1) {
+                    paginationHTML += `<li class="page-item"><button class="page-link rounded bg-dark border-secondary text-white" onclick="currentView.page=${currentPage-1}; loadView(currentView)">&laquo;</button></li>`;
+                  }
+                  for (let i = startPage; i <= endPage; i++) {
+                    paginationHTML += `<li class="page-item ${i === currentPage ? 'active' : ''}"><button class="page-link rounded bg-dark border-secondary text-white ${i === currentPage ? 'bg-primary border-primary' : ''}" onclick="currentView.page=${i}; loadView(currentView)">${i}</button></li>`;
+                  }
+                  if (currentPage < totalPages) {
+                    paginationHTML += `<li class="page-item"><button class="page-link rounded bg-dark border-secondary text-white" onclick="currentView.page=${currentPage+1}; loadView(currentView)">&raquo;</button></li>`;
+                  }
+                  paginationHTML += `</ul>`;
+                  document.getElementById("arts-pagination").innerHTML = paginationHTML;
+                }
+              } else {
+                artGrid.style.display = "block";
+                if (artFilter === 'my_favorites') {
+                  artGrid.innerHTML = '<div class="text-center p-5 text-secondary w-100"><i class="bi bi-heart-break fs-1 d-block mb-3"></i>You haven\'t favorited any artworks yet.</div>';
+                } else {
+                  artGrid.innerHTML = '<div class="text-center p-5 text-secondary w-100">No artworks found matching your criteria.</div>';
+                }
+              }
+              allContentloaded = true;
+              break;
+
+            case "view_art":
+              updateContentTitle("View Art", false);
+              const artData = await fetchData(`?action=get_art&public_id=${currentView.param}`);
+              if (!artData) {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Artwork not found.</div>`;
+                allContentloaded = true;
+                break;
+              }
+
+              document.title = `${artData.title} - PHP Music`;
+              window.activeArtPublicId = currentView.param;
+
+              // Fetch artist works for Prev/Next navigation
+              const artistWorks = await fetchData(`?action=get_arts&artist_id=${artData.user_id}&sort=newest`);
+              let prevArtId = null;
+              let nextArtId = null;
+              if (artistWorks && artistWorks.items) {
+                const idx = artistWorks.items.findIndex(a => a.public_id === artData.public_id);
+                if (idx !== -1) {
+                  if (idx > 0) nextArtId = artistWorks.items[idx - 1].public_id; // newer
+                  if (idx < artistWorks.items.length - 1) prevArtId = artistWorks.items[idx + 1].public_id; // older
+                }
+              }
+
+              let navButtonsHtml = ''; // Removed from top left
+
+              let editDelButtons = "";
+              if (currentUser && (currentUser.id == artData.user_id || currentUser.status === 'super_admin')) {
+                editDelButtons = `
+                  <div class="position-relative custom-opt-dropdown ms-3">
+                    <button class="btn btn-link text-white p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-4"></i></button>
+                    <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                      <li><button class="dropdown-item" onclick="loadView({type: 'edit_art_page', param: '${artData.public_id}'})"><i class="bi bi-pencil me-2"></i> Edit</button></li>
+                      <li><button class="dropdown-item text-danger" onclick="if(confirm('Delete this artwork permanently?')) { fetchData('?action=delete_art', {method: 'POST', body: JSON.stringify({public_id: '${artData.public_id}'})}).then(() => loadView({type: 'get_arts'})); }"><i class="bi bi-trash2 me-2"></i> Delete</button></li>
+                    </ul>
+                  </div>
+                `;
+              }
+
+              window.changeMainArtImage = (src, index, total) => {
+                document.getElementById('main-art-image-view').src = src;
+                const counter = document.getElementById('main-art-image-counter');
+                if (counter) counter.innerHTML = `<i class="bi bi-images"></i> ${index}/${total}`;
+              };
+
+              // Pixiv style layout with Main Viewer and bottom thumbnail slider
+              let sliderHtml = `
+                <div class="d-flex flex-column w-100 py-3" style="background: transparent;">
+                  <div class="position-relative w-100" style="background: var(--ytm-surface-2); border-radius: 12px; overflow: hidden; display: flex; align-items: center; justify-content: center; min-height: 50vh; cursor: pointer;" onclick="loadView({type: 'view_art_full', param: '${artData.public_id}'})" title="Click to view all images in full size">
+                    <img id="main-art-image-view" src="?action=get_art_image&path=${encodeURIComponent(artData.files[0].file_path)}" style="max-width: 100%; max-height: 75vh; object-fit: contain; display: block;">
+                    ${artData.files.length > 1 ? `<div id="main-art-image-counter" class="position-absolute top-0 end-0 m-3 px-3 py-1 bg-dark bg-opacity-75 text-white rounded-pill fw-bold border border-secondary" style="font-size: 0.85rem; backdrop-filter: blur(4px);"><i class="bi bi-images"></i> 1/${artData.files.length}</div>` : ''}
+                  </div>
+                  
+                  ${artData.files.length > 1 ? `
+                  <div class="w-100 mt-3 d-flex gap-2 pb-2 modern-custom-scroll" style="overflow-x: auto; padding: 5px;">
+                    ${artData.files.map((f, i) => `
+                      <img src="?action=get_art_image&path=${encodeURIComponent(f.thumb_path || f.file_path)}" class="rounded shadow-sm flex-shrink-0" style="height: 80px; width: 80px; object-fit: cover; cursor: pointer; border: 2px solid transparent; transition: border-color 0.2s;" onmouseover="this.style.borderColor='var(--ytm-accent)'" onmouseout="this.style.borderColor='transparent'" onclick="window.changeMainArtImage('?action=get_art_image&path=${encodeURIComponent(f.file_path)}', ${i+1}, ${artData.files.length})">
+                    `).join('')}
+                  </div>
+                  <button class="btn btn-outline-light rounded-pill px-5 py-2 mt-2 fw-bold w-100" onclick="loadView({type: 'view_art_full', param: '${artData.public_id}'})"><i class="bi bi-arrows-fullscreen me-2"></i> View Full Gallery (${artData.files.length} Images)</button>
+                  ` : ''}
+                </div>
+              `;
+
+              const mapTagsHTML = (str, typeKey, iconClass) => {
+                if (!str || str.trim() === '') return '';
+                return str.split(',').filter(t => t.trim() !== '').map(t => {
+                  let prefix = "";
+                  if (typeKey === 'characters') prefix = "Character: ";
+                  if (typeKey === 'parodies') prefix = "Series: ";
+                  if (typeKey === 'groups_name') prefix = "Group: ";
+                  return `<span class="badge bg-dark border border-secondary text-light px-3 py-2 rounded-pill hover-white" style="cursor: pointer; font-size: 0.85rem;" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: '${typeKey}', exact_val: '${escapeHTML(t.trim())}'});"><i class="bi ${iconClass} me-1 opacity-75"></i> <span class="opacity-50 me-1">${prefix}</span>${escapeHTML(t.trim())}</span>`;
+                }).join('');
+              };
+
+              let prevNextHtml = `
+                <div class="d-flex justify-content-between align-items-center mb-4 pt-3 border-top border-secondary">
+                  <button class="btn btn-outline-light rounded-pill px-4 fw-bold" ${nextArtId ? `onclick="loadView({type: 'view_art', param: '${nextArtId}'})"` : 'disabled'}><i class="bi bi-chevron-left me-2"></i>Next</button>
+                  <button class="btn btn-outline-light rounded-pill px-4 fw-bold" ${prevArtId ? `onclick="loadView({type: 'view_art', param: '${prevArtId}'})"` : 'disabled'}>Prev<i class="bi bi-chevron-right ms-2"></i></button>
+                </div>
+              `;
+
+              contentArea.innerHTML = `
+                <div class="d-flex flex-column w-100 pb-5 h-100">
+                  <div class="d-flex align-items-center justify-content-between p-3 flex-shrink-0" style="margin-bottom: -1rem;">
+                    <div class="d-flex align-items-center">
+                      <button class="btn btn-link text-white text-decoration-none p-0" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all'})"><i class="bi bi-arrow-left fs-4"></i></button>
+                    </div>
+                  </div>
+
+                  <div class="container-fluid px-0 px-lg-4 mt-2 flex-grow-1">
+                    <div class="row g-0 g-lg-4 m-0 h-100">
+                      
+                      <!-- Main Media Viewer Column -->
+                      <div class="col-12 col-lg-8 position-relative p-0" style="min-height: 50vh;">
+                        ${sliderHtml}
+                      </div>
+
+                      <!-- Details & Comments Column -->
+                      <div class="col-12 col-lg-4 px-3 px-lg-2 mt-4 mt-lg-3 d-flex flex-column" style="border: none !important;">
+                        <div class="d-flex justify-content-between align-items-center mb-4">
+                          <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${artData.user_id}" data-artist="${encodeURIComponent(artData.author)}" style="cursor: pointer;">
+                            <img src="?action=get_profile_picture&id=${artData.user_id}" class="rounded-circle" style="width: 48px; height: 48px; object-fit: cover;">
+                            <div>
+                              <h5 class="m-0 fw-bold text-white hover-underline">${escapeHTML(artData.author)}</h5>
+                              <div class="text-secondary small">${new Date(artData.created_at.replace(' ','T')+'Z').toLocaleDateString()}</div>
+                            </div>
+                          </div>
+                          <div class="d-flex align-items-center gap-2">
+                            <div class="d-flex align-items-center gap-3 text-secondary fw-bold">
+                              <span><i class="bi bi-eye-fill"></i> <span id="art-views">${artData.views}</span></span>
+                              <span><i class="bi bi-heart-fill text-danger"></i> <span id="art-fav-count">${artData.fav_count}</span></span>
+                            </div>
+                            ${editDelButtons}
+                          </div>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2 mb-4">
+                          <button class="btn btn-danger rounded-pill px-4 fw-bold flex-grow-1" id="art-fav-btn"><i class="bi ${artData.is_favorited ? 'bi-heart-fill' : 'bi-heart'}"></i> ${artData.is_favorited ? 'Favorited' : 'Favorite'}</button>
+                          <button class="btn btn-outline-light rounded-pill px-4 fw-bold flex-grow-1 share-view-btn" data-share-type="art" data-share-id="${artData.public_id}"><i class="bi bi-share-fill"></i> Share</button>
+                        </div>
+
+                        <h4 class="text-white fw-bold mb-3">${escapeHTML(artData.title)}</h4>
+                        <div class="text-light mb-4" style="font-size: 1rem; line-height: 1.6;">${parseUserText(decodeHTML(artData.description || ''))}</div>
+
+                        ${prevNextHtml}
+
+                        <div class="mb-4 mt-2">
+                          <div class="d-flex flex-wrap gap-2">
+                            ${mapTagsHTML(artData.tags, "tags", "bi-tag-fill")}
+                            ${mapTagsHTML(artData.characters, "characters", "bi-person-fill")}
+                            ${mapTagsHTML(artData.parodies, "parodies", "bi-controller")}
+                            ${mapTagsHTML(artData.groups_name, "groups_name", "bi-people-fill")}
+                          </div>
+                        </div>
+
+                        <h6 class="text-white fw-bold mb-3 mt-4 pt-3 border-top border-secondary"><i class="bi bi-chat-dots-fill"></i> Comments (<span id="total-art-comments">0</span>)</h6>
+                        <form id="art-comment-form" class="bg-transparent position-relative mb-4">
+                          <input type="hidden" id="art-comment-parent-id" value="">
+                          <input type="hidden" id="art-comment-reply-to-id" value="">
+                          <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                            <div class="d-flex align-items-end">
+                              <textarea id="art-comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Add a comment... (Markdown & @mentions supported)" maxlength="5000" rows="3" required style="resize: none; min-height: 80px; padding: 10px 14px; font-size: 1rem; line-height: 1.5;"></textarea>
+                              <button type="submit" class="btn btn-danger rounded-pill d-flex align-items-center justify-content-center m-1 flex-shrink-0 shadow-sm fw-bold text-dark" style="transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-send-fill"></i></button>
+                            </div>
+                          </div>
+                        </form>
+
+                        <div id="art-comments-list" class="d-flex flex-column gap-3 mb-5">
+                          <div class="text-center p-3 text-secondary"><div class="spinner-border spinner-border-sm"></div></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              `;
+
+              const favBtn = document.getElementById("art-fav-btn");
+              const favIcon = favBtn.querySelector('i');
+              const favCount = document.getElementById("art-fav-count");
+
+              favBtn.onclick = async () => {
+                if (!currentUser) return showToast("Please log in", "error");
+                const res = await fetchData("?action=toggle_art_favorite", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    public_id: artData.public_id
+                  })
+                });
+                if (res) {
+                  const currentCount = parseInt(favCount.textContent);
+                  if (res.status === 'added') {
+                    favIcon.className = "bi bi-heart-fill";
+                    favBtn.innerHTML = `<i class="bi bi-heart-fill"></i> Favorited`;
+                    favCount.textContent = currentCount + 1;
+                  } else {
+                    favIcon.className = "bi bi-heart";
+                    favBtn.innerHTML = `<i class="bi bi-heart"></i> Favorite`;
+                    favCount.textContent = Math.max(0, currentCount - 1);
+                  }
+                }
+              };
+
+              // Re-attach comments rendering Logic
+              window.refreshArtComments = async () => {
+                const commData = await fetchData(`?action=get_art_comments&public_id=${artData.public_id}`);
+                const commList = document.getElementById("art-comments-list");
+                if (!commList || !commData) return;
+
+                const buildTree = (comments, parent = null) => {
+                  const children = comments.filter((c) => c.parent_id == parent);
+                  if (children.length === 0) return "";
+          
+                  const renderContent = (raw) => {
+                    let decoded = decodeHTML(raw || "");
+                    let parsed = parseUserText(decoded);
+                    if (typeof marked !== "undefined") {
+                      try {
+                        parsed = marked.parse(parsed);
+                      } catch (e) {}
+                    }
+                    return `<div class="rich-comment-box" style="font-size: 0.95rem; line-height: 1.6; word-break: break-word; color: #f1f1f1;">${parsed}</div>`;
+                  };
+
+                  const styleInjection = parent === null ? `
+                    <style>
+                      .rich-comment-box img, .rich-comment-box video, .rich-comment-box iframe { max-width: 100%; max-height: 400px; border-radius: 12px; margin: 10px 0; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); object-fit: contain; background: #000; transition: transform 0.3s ease; }
+                      .rich-comment-box img:hover { transform: scale(1.02); }
+                      .rich-comment-box a { color: #3ea6ff; text-decoration: none; font-weight: 500; padding: 2px 4px; border-radius: 4px; transition: all 0.2s ease; }
+                      .rich-comment-box a:hover { color: #fff; background: rgba(62,166,255,0.2); }
+                      .rich-comment-box blockquote { border-left: 4px solid #ff0055; padding: 12px 20px; margin: 16px 0; background: linear-gradient(90deg, rgba(255,0,85,0.1) 0%, transparent 100%); border-radius: 0 12px 12px 0; color: #ddd; font-style: italic; font-size: 1.05rem; }
+                      .rich-comment-box pre { background: #080808; padding: 16px; border-radius: 12px; border: 1px solid #222; overflow-x: auto; margin: 16px 0; box-shadow: inset 0 4px 10px rgba(0,0,0,0.5); }
+                      .rich-comment-box code { font-family: 'Consolas', 'Courier New', monospace; background: rgba(255,255,255,0.08); padding: 3px 6px; border-radius: 6px; font-size: 0.85em; color: #ff8888; }
+                      .rich-comment-box ul, .rich-comment-box ol { padding-left: 24px; margin-bottom: 12px; }
+                      .rich-comment-box li { margin-bottom: 6px; }
+                      .rich-comment-box p { margin-bottom: 12px; }
+                      .rich-comment-box p:last-child { margin-bottom: 0; }
+                      .rich-comment-box .mention-link { color: #ff4da6; background: rgba(255,77,166,0.15); padding: 2px 8px; border-radius: 12px; transition: 0.2s; border: 1px solid rgba(255,77,166,0.3); display: inline-block; font-weight: bold; }
+                      .rich-comment-box .mention-link:hover { background: rgba(255,77,166,0.3); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,77,166,0.3); }
+                      .phpmusic-comments-action-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 50px; padding: 6px 16px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255,255,255,0.05); color: #aaa; border: 1px solid rgba(255,255,255,0.02); cursor: pointer; backdrop-filter: blur(4px); }
+                      .phpmusic-comments-action-btn:hover { background: rgba(255,255,255,0.15); color: #fff; transform: scale(1.05); border-color: rgba(255,255,255,0.1); }
+                      .phpmusic-comments-action-btn:active { transform: scale(0.95); }
+                      .phpmusic-comments-action-btn.active-like { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
+                      .phpmusic-comments-action-btn.active-dislike { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
+                      @keyframes slideFadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+                    </style>
+                  ` : "";
+
+                  if (parent === null) {
+                    return styleInjection + children.map(c => `
+                      <div class="d-flex gap-3 mb-4 position-relative" style="animation: slideFadeIn 0.4s ease forwards;">
+                        <div class="d-flex flex-column align-items-center" style="width: 50px; flex-shrink: 0;">
+                          <div class="position-relative">
+                            <img src="?action=get_profile_picture&id=${c.u_id}"
+                                 class="rounded-circle shadow-lg ${c.is_disabled ? "" : "user-profile-link"}"
+                                 data-userid="${c.u_id}"
+                                 data-artist="${encodeURIComponent(c.artist)}"
+                                 style="width:50px; height:50px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 2px solid rgba(255,255,255,0.08); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s;"
+                                 onmouseover="this.style.transform='scale(1.15) rotate(5deg)'; this.style.borderColor='var(--ytm-accent)';"
+                                 onmouseout="this.style.transform='scale(1) rotate(0deg)'; this.style.borderColor='rgba(255,255,255,0.08)';">
+                            ${c.u_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ""}
+                          </div>
+                        </div>
+                        <div class="flex-grow-1" style="min-width: 0;">
+                          <div class="d-flex justify-content-between align-items-start mb-2">
+                            <div class="d-flex align-items-center flex-wrap gap-2">
+                              <span class="fw-bolder text-white ${c.is_disabled ? "" : "user-profile-link"}"
+                                    data-userid="${c.u_id}"
+                                    data-artist="${encodeURIComponent(c.artist)}"
+                                    style="font-size: 1rem; cursor:${c.is_disabled ? "default" : "pointer"}; letter-spacing: 0.3px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"
+                                    onmouseover="this.style.textDecoration='underline'"
+                                    onmouseout="this.style.textDecoration='none'">
+                                ${escapeHTML(c.artist)}
+                              </span>
+                              <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.75rem; opacity: 0.8; background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 50px;">
+                                <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
+                              </span>
+                            </div>
+                            ${currentUser && (currentUser.id == c.u_id || currentUser.status === "super_admin" || currentUser.is_admin == 1) ? `
+                              <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                                <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                                <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                                  <li><button class="dropdown-item edit-art-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                                  <li><button class="dropdown-item text-danger delete-art-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
+                                </ul>
+                              </div>
+                            ` : ""}
+                          </div>
+                          <div class="p-3 mb-3 rounded-4" style="background: rgba(255,255,255,0.03);">
+                            ${renderContent(c.content)}
+                          </div>
+                          ${currentUser ? `
+                          <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                            <button class="phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" title="Like">
+                              <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-5"></i>
+                              <span>${c.like_count || 0}</span>
+                            </button>
+                            <button class="phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" title="Dislike">
+                              <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-5"></i>
+                              <span>${c.dislike_count || 0}</span>
+                            </button>
+                            <button class="phpmusic-comments-action-btn art-reply-btn" data-id="${c.id}" data-root-id="${c.id}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" title="Reply to ${escapeHTML(c.artist)}">
+                              <i class="bi bi-chat-left-text fs-5"></i> Reply ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == c.id).length})` : ""}
+                            </button>
+                          </div>
+                          ` : `
+                          <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.9rem;">
+                            <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-info fs-5"></i> ${c.like_count || 0}</span>
+                            <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-danger fs-5"></i> ${c.dislike_count || 0}</span>
+                          </div>
+                          `}
+                          <div class="mt-4">${buildTree(comments, c.id)}</div>
+                        </div>
+                      </div>
+                    `).join("");
+                  } else {
+                    return children.map(c => {
+                      let replyQuoteHtml = "";
+                      if (c.reply_to_id && c.reply_content && c.reply_to_id != parent) {
+                        const cleanRep = decodeHTML(c.reply_content).replace(/<[^>]*>?/gm, "");
+                        replyQuoteHtml = `
+                          <div class="chat-reply-quote mb-2" onclick="const target=document.querySelector('.reply-anchor-${c.reply_to_id}'); if(target) target.scrollIntoView({behavior:'smooth', block:'center'});" title="Click to jump to post" style="background: rgba(0,0,0,0.2); border-left: 3px solid var(--ytm-accent); padding: 6px 10px; border-radius: 0 6px 6px 0; font-size: 0.85rem; cursor: pointer;">
+                            <strong class="text-info">${escapeHTML(c.reply_sender || "Someone")}</strong><br>
+                            <span class="text-truncate d-block text-secondary">${escapeHTML(cleanRep)}</span>
+                          </div>
+                        `;
+                      }
+                      return `
+                        <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-dark border-2 rounded-4 p-2 reply-anchor-${c.id}" style="animation: slideFadeIn 0.3s ease forwards; --bs-border-opacity: .5;">
+                          <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
+                            <img src="?action=get_profile_picture&id=${c.u_id}"
+                                 class="rounded-circle shadow-sm ${c.is_disabled ? "" : "user-profile-link"}"
+                                 data-userid="${c.u_id}"
+                                 data-artist="${encodeURIComponent(c.artist)}"
+                                 style="width:36px; height:36px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
+                                 onmouseover="this.style.transform='scale(1.15)'"
+                                 onmouseout="this.style.transform='scale(1)'">
+                            ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `<div class="mt-2" style="width: 2px; flex-grow: 1; background: linear-gradient(to bottom, rgba(255,255,255,0.1), transparent); border-radius: 2px;"></div>` : ""}
+                          </div>
+                          <div class="flex-grow-1" style="min-width: 0;">
+                            <div class="d-flex justify-content-between align-items-start mb-1">
+                              <div class="d-flex align-items-center flex-wrap gap-2">
+                                <span class="fw-bold text-white ${c.is_disabled ? "" : "user-profile-link"}"
+                                      data-userid="${c.u_id}"
+                                      data-artist="${encodeURIComponent(c.artist)}"
+                                      style="font-size: 0.9rem; cursor:${c.is_disabled ? "default" : "pointer"}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
+                                      onmouseover="this.style.textDecoration='underline'"
+                                      onmouseout="this.style.textDecoration='none'">
+                                  ${escapeHTML(c.artist)}
+                                </span>
+                                <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.7;">
+                                  <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
+                                </span>
+                              </div>
+                              ${currentUser && (currentUser.id == c.u_id || currentUser.status === "super_admin" || currentUser.is_admin == 1) ? `
+                                <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                                  <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                                  <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                                    <li><button class="dropdown-item edit-art-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                                    <li><button class="dropdown-item text-danger delete-art-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
+                                  </ul>
+                                </div>
+                              ` : ""}
+                            </div>
+                            <div class="p-2 mb-2">
+                              ${replyQuoteHtml}
+                              ${renderContent(c.content)}
+                            </div>
+                            ${currentUser ? `
+                            <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                              <button class="phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" style="padding: 4px 12px; font-size: 0.85rem;">
+                                <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-6"></i>
+                                <span>${c.like_count || 0}</span>
+                              </button>
+                              <button class="phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" style="padding: 4px 12px; font-size: 0.85rem;">
+                                <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-6"></i>
+                                <span>${c.dislike_count || 0}</span>
+                              </button>
+                              <button class="phpmusic-comments-action-btn art-reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" style="padding: 4px 12px; font-size: 0.85rem;">
+                                <i class="bi bi-chat-left-text fs-6"></i> Reply
+                              </button>
+                            </div>
+                            ` : `
+                            <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.8rem;">
+                              <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-white"></i> ${c.like_count || 0}</span>
+                              <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-white"></i> ${c.dislike_count || 0}</span>
+                            </div>
+                            `}
+                            <div class="mt-3">${buildTree(comments, c.id)}</div>
+                          </div>
+                        </div>
+                      `;
+                    }).join("");
+                  };
+                };
+
+                const newHtml = buildTree(commData.comments) || '<p class="text-secondary text-center p-3">No comments yet. Be the first to comment!</p>';
+                preserveReplyState(newHtml, "art-comments-list");
+                document.getElementById('total-art-comments').textContent = commData.total_comments || 0;
+              };
+
+              const commForm = document.getElementById("art-comment-form");
+              if (commForm) {
+                commForm.onsubmit = async (e) => {
+                  e.preventDefault();
+                  if (!currentUser) return showToast("Please login", "error");
+                  const inp = document.getElementById("art-comment-input");
+                  if (!inp.value.trim()) return;
+                  await fetchData("?action=add_art_comment", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      public_id: artData.public_id,
+                      parent_id: document.getElementById("art-comment-parent-id").value || null,
+                      reply_to_id: document.getElementById("art-comment-reply-to-id").value || null,
+                      content: inp.value
+                    })
+                  });
+                  inp.value = "";
+                  document.getElementById("art-comment-parent-id").value = "";
+                  document.getElementById("art-comment-reply-to-id").value = "";
+                  window.refreshArtComments();
+                };
+              }
+              window.refreshArtComments();
+
+              allContentloaded = true;
+              break;
+
+            case "view_art_full":
+              updateContentTitle("Artwork Gallery", false);
+              const fullArtData = await fetchData(`?action=get_art&public_id=${currentView.param}`);
+              if (!fullArtData) {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Artwork not found.</div>`;
+                allContentloaded = true;
+                break;
+              }
+              window.activeArtPublicId = currentView.param;
+              window.fullArtFiles = fullArtData.files;
+              window.fullArtPage = 1;
+
+              const renderFullArtImages = () => {
+                const limit = 25;
+                const start = (window.fullArtPage - 1) * limit;
+                const end = start + limit;
+                const slice = window.fullArtFiles.slice(start, end);
+                const container = document.getElementById("full-art-images-container");
+                if (slice.length > 0) {
+                  container.insertAdjacentHTML('beforeend', slice.map(f => `
+                    <img src="?action=get_art_image&path=${encodeURIComponent(f.file_path)}" style="max-width: 100%; height: auto; display: block; margin: 0 auto 16px auto; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
+                  `).join(''));
+                }
+                const btn = document.getElementById("load-more-full-art-btn");
+                if (end >= window.fullArtFiles.length) {
+                  if (btn) btn.remove();
+                } else if (btn) {
+                  btn.innerHTML = `<i class="bi bi-chevron-down me-2"></i> Load More (${window.fullArtFiles.length - end} remaining)`;
+                  btn.disabled = false;
+                }
+              };
+
+              contentArea.innerHTML = `
+                <div class="d-flex flex-column w-100 pb-5">
+                  <div class="d-flex align-items-center justify-content-between p-3 position-fixed top-0 start-0 w-100 z-3" style="pointer-events: none;">
+                    <button class="btn btn-dark rounded-circle d-flex align-items-center justify-content-center shadow-lg" style="width: 44px; height: 44px; background: rgba(0,0,0,0.6); border: none; pointer-events: auto;" onclick="window.loadView({type: 'view_art', param: '${fullArtData.public_id}'})"><i class="bi bi-arrow-left fs-4 text-white"></i></button>
+                    ${fullArtData.files.length > 1 ? `<span class="badge bg-dark bg-opacity-75 text-white fs-6 px-3 py-2 rounded-pill shadow-lg" id="full-art-counter" style="pointer-events: auto;">1 / ${fullArtData.files.length}</span>` : ''}
+                  </div>
+                  <div class="mt-5 pt-3 px-0 px-md-2" style="background: transparent;">
+                    <div id="full-art-images-container" class="w-100 d-flex flex-column align-items-center"></div>
+                    ${fullArtData.files.length > 25 ? `<div class="text-center mt-3"><button id="load-more-full-art-btn" class="btn btn-outline-light rounded-pill px-5 py-2 fw-bold"><i class="bi bi-chevron-down me-2"></i> Load More</button></div>` : ''}
+                  </div>
+                </div>
+              `;
+
+              const updateCounter = () => {
+                const images = document.querySelectorAll('.full-art-img-item');
+                const counter = document.getElementById('full-art-counter');
+                if (!counter) return;
+                let visibleIndex = 1;
+                images.forEach((img, idx) => {
+                  const rect = img.getBoundingClientRect();
+                  if (rect.top <= window.innerHeight / 2 && rect.bottom >= window.innerHeight / 2) {
+                    visibleIndex = idx + 1;
+                  }
+                });
+                counter.innerText = `${visibleIndex} / ${fullArtData.files.length}`;
+              };
+              
+              document.getElementById("main-content").addEventListener("scroll", updateCounter);
+
+              const originalRenderFullArtImages = renderFullArtImages;
+              const renderFullArtImagesUpdate = () => {
+                const limit = 25;
+                const start = (window.fullArtPage - 1) * limit;
+                const end = start + limit;
+                const slice = window.fullArtFiles.slice(start, end);
+                const container = document.getElementById("full-art-images-container");
+                if (slice.length > 0) {
+                  container.insertAdjacentHTML('beforeend', slice.map(f => `
+                    <img src="?action=get_art_image&path=${encodeURIComponent(f.file_path)}" class="full-art-img-item" style="max-width: 100%; height: auto; display: block; margin: 0 auto 16px auto; border-radius: 0; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
+                  `).join(''));
+                }
+                const btn = document.getElementById("load-more-full-art-btn");
+                if (end >= window.fullArtFiles.length) {
+                  if (btn) btn.remove();
+                } else if (btn) {
+                  btn.innerHTML = `<i class="bi bi-chevron-down me-2"></i> Load More (${window.fullArtFiles.length - end} remaining)`;
+                  btn.disabled = false;
+                }
+                setTimeout(updateCounter, 100);
+              };
+
+              renderFullArtImagesUpdate();
+              
+              const loadBtn = document.getElementById("load-more-full-art-btn");
+              if (loadBtn) {
+                loadBtn.addEventListener("click", () => {
+                  loadBtn.disabled = true;
+                  loadBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Loading...';
+                  window.fullArtPage++;
+                  setTimeout(renderFullArtImagesUpdate, 300);
+                });
+              }
+              
+              allContentloaded = true;
+              break;
+
+            case "upload_art_page":
+              updateContentTitle("Upload Artwork", !!currentUser);
+              if (currentUser) {
+                contentArea.innerHTML = `
+                  <style>
+                    /* Basic toggle switch colors */
+                    .form-check-input:checked { background-color: var(--ytm-accent) !important; border-color: var(--ytm-accent) !important; }
+                  </style>
+                  <div class="container-fluid px-3 px-md-4 mt-4 mb-5">
+                    <h3 class="text-white fw-bold mb-4"><i class="bi bi-cloud-arrow-up text-primary me-2"></i> Upload Artwork</h3>
+                    <form id="page-upload-art-form">
+                      <div class="row g-4">
+                        <!-- Left Column: Image Dropzone & Preview -->
+                        <div class="col-12 col-lg-5">
+                          <div id="art-dropzone" class="p-4 text-center rounded-4 h-100 d-flex flex-column align-items-center justify-content-center" style="border: 2px dashed rgba(255,255,255,0.15); background: var(--ytm-surface-2); cursor: pointer; min-height: 400px; transition: all 0.2s;">
+                            <div id="art-preview-container" class="w-100 h-100 d-flex flex-column align-items-center justify-content-center">
+                              <i class="bi bi-images text-secondary mb-3" style="font-size: 4rem;"></i>
+                              <h5 class="text-white fw-bold">Click or Drag & Drop Images Here</h5>
+                              <p class="text-secondary small mb-0">Select multiple files for Manga/Comics. (Max 50MB total)</p>
+                            </div>
+                            <input type="file" id="art-files-input" multiple accept="image/jpeg, image/png, image/gif, image/webp" class="d-none">
+                          </div>
+                        </div>
+                        
+                        <!-- Right Column: Details Form -->
+                        <div class="col-12 col-lg-7">
+                          <div class="p-4 rounded-4" style="background: var(--ytm-surface-2);">
+                            
+                            <div class="row g-3 mb-4">
+                              <div class="col-md-8">
+                                <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">TITLE</label>
+                                <input type="text" id="art-title" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" required placeholder="Artwork title">
+                              </div>
+                              <div class="col-md-4">
+                                <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">POST TYPE</label>
+                                <select id="art-type" class="form-select bg-dark text-white border-0 py-2 px-3 rounded-3">
+                                  <option value="image">Illustration</option>
+                                  <option value="manga">Manga / Comic</option>
+                                </select>
+                              </div>
+                            </div>
+                            
+                            <div class="mb-4">
+                              <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">TAGS</label>
+                              <input type="text" id="art-tags" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" placeholder="anime, original, highres (comma separated)">
+                            </div>
+
+                            <div id="art-manga-fields" class="d-none">
+                              <div class="row g-3 mb-4">
+                                <div class="col-md-6">
+                                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">CHARACTERS</label>
+                                  <input type="text" id="art-characters" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" placeholder="Comma separated">
+                                </div>
+                                <div class="col-md-6">
+                                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">PARODIES</label>
+                                  <input type="text" id="art-parodies" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" placeholder="Comma separated">
+                                </div>
+                              </div>
+                              <div class="row g-3 mb-4">
+                                <div class="col-md-6">
+                                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">GROUPS</label>
+                                  <input type="text" id="art-groups" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" placeholder="Comma separated">
+                                </div>
+                                <div class="col-md-6">
+                                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">SERIES</label>
+                                  <input type="text" id="art-series" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" placeholder="Series name">
+                                </div>
+                              </div>
+                            </div>
+
+                            <div class="mb-4">
+                              <div class="form-check form-switch d-flex align-items-center gap-2">
+                                <input class="form-check-input fs-4 m-0" type="checkbox" id="art-nsfw">
+                                <label class="form-check-label text-white fw-bold ms-2" style="margin-top: 4px;" for="art-nsfw">NSFW (18+)</label>
+                              </div>
+                            </div>
+                            
+                            <div class="mb-4">
+                              <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">DESCRIPTION</label>
+                              <textarea id="art-desc" class="form-control bg-dark text-white border-0 p-3 rounded-3 modern-custom-scroll" rows="4" placeholder="Tell us about your creation..."></textarea>
+                            </div>
+                            
+                            <div class="progress mb-3 d-none rounded-pill" id="art-upload-progress-container" style="height: 10px; background: rgba(0,0,0,0.5);">
+                              <div id="art-upload-progress" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: 0%;"></div>
+                            </div>
+
+                            <button type="submit" class="btn btn-info text-dark fw-bold w-100 py-3 rounded-pill fs-6 shadow-sm" id="art-submit-btn" style="transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">Publish Artwork</button>
+                            
+                          </div>
+                        </div>
+                      </div>
+                    </form>
+                  </div>
+                `;
+                window.artFilesToUpload = [];
+
+                const dropzone = document.getElementById('art-dropzone');
+                const fileInput = document.getElementById('art-files-input');
+
+                dropzone.addEventListener('click', (e) => {
+                  if (e.target !== fileInput && !e.target.closest('button')) {
+                    fileInput.click();
+                  }
+                });
+
+                dropzone.addEventListener('dragover', (e) => {
+                  e.preventDefault();
+                  dropzone.style.borderColor = 'var(--ytm-accent)';
+                  dropzone.style.background = 'rgba(255,255,255,0.05)';
+                });
+
+                dropzone.addEventListener('dragleave', (e) => {
+                  e.preventDefault();
+                  dropzone.style.borderColor = 'rgba(255,255,255,0.15)';
+                  dropzone.style.background = 'var(--ytm-surface-2)';
+                });
+
+                dropzone.addEventListener('drop', (e) => {
+                  e.preventDefault();
+                  dropzone.style.borderColor = 'rgba(255,255,255,0.15)';
+                  dropzone.style.background = 'var(--ytm-surface-2)';
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+                    window.artFilesToUpload = files;
+                    if (window.renderArtPreviews) window.renderArtPreviews();
+                  }
+                });
+
+                window.renderArtPreviews = () => {
+                  const container = document.getElementById("art-preview-container");
+                  if (!container) return;
+                  if (window.artFilesToUpload.length === 0) {
+                    container.innerHTML = `
+                      <i class="bi bi-images text-secondary mb-3" style="font-size: 4rem;"></i>
+                      <h5 class="text-white fw-bold">Click or Drag & Drop Images Here</h5>
+                      <p class="text-secondary small mb-0">Select multiple files for Manga/Comics. (Max 50MB total)</p>
+                    `;
+                    container.classList.add("flex-column");
+                    return;
+                  }
+                  container.classList.remove("flex-column");
+                  container.innerHTML = `<div class="d-flex flex-wrap gap-3 justify-content-center w-100 p-2" style="max-height: 350px; overflow-y: auto;">` + window.artFilesToUpload.map((f, idx) => `
+                    <div class="position-relative shadow-sm rounded-3" style="width: 120px; height: 120px; overflow: hidden; border: 2px solid var(--ytm-surface-hover);" onclick="event.stopPropagation()">
+                      <img src="${URL.createObjectURL(f)}" style="width: 100%; height: 100%; object-fit: cover;">
+                      <button type="button" class="btn btn-sm btn-danger position-absolute top-0 end-0 m-1 rounded-circle d-flex align-items-center justify-content-center" style="width: 24px; height: 24px;" onclick="window.removeArtFile(${idx})"><i class="bi bi-x"></i></button>
+                    </div>
+                  `).join('') + `</div>`;
+                };
+
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to upload artworks.</div>`;
+              }
+              allContentloaded = true;
+              break;
+
+            case "edit_art_page":
+              updateContentTitle("Edit Artwork", !!currentUser);
+              if (currentUser) {
+                const artData = await fetchData(`?action=get_art&public_id=${currentView.param}`);
+                if (!artData || (currentUser.id != artData.user_id && currentUser.status !== 'super_admin')) {
+                  contentArea.innerHTML = `<div class="text-center p-5 text-danger">Unauthorized or not found.</div>`;
+                  allContentloaded = true;
+                  break;
+                }
+
+                contentArea.innerHTML = `
+                  <style>
+                    .form-check-input:checked { background-color: var(--ytm-accent) !important; border-color: var(--ytm-accent) !important; }
+                  </style>
+                  <div class="container-fluid px-3 px-md-4 mt-4 mb-5">
+                    <div class="d-flex justify-content-between align-items-center mb-4">
+                      <h3 class="text-white fw-bold m-0"><i class="bi bi-pencil-square text-warning me-2"></i> Edit Artwork</h3>
+                      <button class="btn btn-outline-light btn-sm rounded-pill px-4 fw-bold" onclick="loadView({type: 'view_art', param: '${artData.public_id}'})">Cancel</button>
+                    </div>
+                    
+                    <form id="page-edit-art-form">
+                      <div class="row g-4">
+                        <div class="col-12 col-lg-5">
+                          <div class="p-4 text-center rounded-4 h-100 d-flex flex-column align-items-center justify-content-center" style="background: var(--ytm-surface-2); min-height: 400px;">
+                            <img src="?action=get_art_image&path=${encodeURIComponent(artData.files[0].file_path)}" style="max-width: 100%; max-height: 350px; object-fit: contain; border-radius: 8px;">
+                            <p class="text-secondary small mt-3">File replacement is not supported in edit mode. Delete and re-upload if needed.</p>
+                          </div>
+                        </div>
+                        
+                        <div class="col-12 col-lg-7">
+                          <div class="p-4 rounded-4" style="background: var(--ytm-surface-2);">
+                            <input type="hidden" id="edit-art-public-id" value="${artData.public_id}">
+                            
+                            <div class="mb-4">
+                              <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">TITLE</label>
+                              <input type="text" id="edit-art-title" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" required value="${escapeHTML(decodeHTML(artData.title))}">
+                            </div>
+                            
+                            <div class="mb-4">
+                              <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">TAGS</label>
+                              <input type="text" id="edit-art-tags" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" value="${escapeHTML(decodeHTML(artData.tags || ''))}">
+                            </div>
+
+                            <div id="edit-art-manga-fields" class="${artData.type === 'manga' ? '' : 'd-none'}">
+                              <div class="row g-3 mb-4">
+                                <div class="col-md-6">
+                                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">CHARACTERS</label>
+                                  <input type="text" id="edit-art-characters" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" value="${escapeHTML(decodeHTML(artData.characters || ''))}">
+                                </div>
+                                <div class="col-md-6">
+                                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">PARODIES</label>
+                                  <input type="text" id="edit-art-parodies" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" value="${escapeHTML(decodeHTML(artData.parodies || ''))}">
+                                </div>
+                              </div>
+                              <div class="row g-3 mb-4">
+                                <div class="col-md-6">
+                                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">GROUPS</label>
+                                  <input type="text" id="edit-art-groups" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" value="${escapeHTML(decodeHTML(artData.groups_name || ''))}">
+                                </div>
+                                <div class="col-md-6">
+                                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">SERIES</label>
+                                  <input type="text" id="edit-art-series" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" value="${escapeHTML(decodeHTML(artData.series_name || ''))}">
+                                </div>
+                              </div>
+                            </div>
+
+                            <div class="mb-4">
+                              <div class="form-check form-switch d-flex align-items-center gap-2">
+                                <input class="form-check-input fs-4 m-0" type="checkbox" id="edit-art-nsfw" ${artData.nsfw == 1 ? 'checked' : ''}>
+                                <label class="form-check-label text-white fw-bold ms-2" style="margin-top: 4px;" for="edit-art-nsfw">NSFW (18+)</label>
+                              </div>
+                            </div>
+                            
+                            <div class="mb-4">
+                              <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">DESCRIPTION</label>
+                              <textarea id="edit-art-desc" class="form-control bg-dark text-white border-0 p-3 rounded-3 modern-custom-scroll" rows="5">${escapeHTML(decodeHTML(artData.description || ''))}</textarea>
+                            </div>
+                            
+                            <button type="submit" class="btn btn-warning text-dark fw-bold w-100 py-3 rounded-pill fs-6 shadow-sm" id="edit-art-submit-btn">Save Changes</button>
+                          </div>
+                        </div>
+                      </div>
+                    </form>
+                  </div>
+                `;
+              } else {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to edit artworks.</div>`;
+              }
+              allContentloaded = true;
+              break;
+
             case "get_community":
               updateContentTitle("Community", !!currentUser);
               if (currentUser) {
@@ -54142,6 +56010,49 @@ SOFTWARE.</div>
           positionContextMenu(buttonEl);
         };
     
+        window.buildAndShowChatContextMenu = (bubbleEl) => {
+          if (contextMenu.style.display === "block" && contextMenuItemEl === bubbleEl) {
+            contextMenu.style.display = "none";
+            return;
+          }
+          contextMenuItemEl = bubbleEl;
+          const msgId = bubbleEl.dataset.msgId;
+          const isMe = bubbleEl.dataset.isMe === "1";
+          const isStarred = bubbleEl.dataset.isStarred === "1";
+          const sender = bubbleEl.dataset.sender;
+          const content = bubbleEl.dataset.content;
+
+          const reactionsArr = ["👍", "❤️", "😂", "😮", "😢"];
+          const reactionHtml = reactionsArr.map(em => `<button class="btn btn-link p-0 text-decoration-none fs-5" style="transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'" onclick="window.toggleMsgReaction(${msgId}, '${em}')">${em}</button>`).join("");
+
+          let menuItems = `
+            <li class="px-3 py-2 d-flex justify-content-between mb-1" style="background: rgba(255,255,255,0.05); border-radius: 8px; margin: 0 8px;">
+              ${reactionHtml}
+            </li>
+            <li class="context-menu-item" data-action="chat_star" data-id="${msgId}"><i class="bi ${isStarred ? "bi-star-fill text-warning" : "bi-star text-secondary"}"></i> ${isStarred ? "Unstar" : "Star"}</li>
+            <li class="context-menu-item" data-action="chat_reply" data-id="${msgId}" data-sender="${sender}" data-content="${content}"><i class="bi bi-reply-fill text-info"></i> Reply</li>
+            <li class="context-menu-item" data-action="chat_copy" data-id="${msgId}"><i class="bi bi-copy text-secondary"></i> Copy Text</li>
+          `;
+
+          if (isMe) {
+            menuItems += `
+              <hr class="dropdown-divider bg-secondary mx-2 my-1">
+              <li class="context-menu-item" data-action="chat_edit" data-id="${msgId}" data-content="${content}"><i class="bi bi-pencil"></i> Edit</li>
+              <li class="context-menu-item text-danger fw-bold" data-action="chat_delete" data-id="${msgId}"><i class="bi bi-trash2"></i> Delete</li>
+            `;
+          }
+
+          menuItems += `
+            <hr class="dropdown-divider bg-secondary mx-2 my-1">
+            <li class="context-menu-item" data-action="close_menu"><i class="bi bi-x-lg"></i> Close Menu</li>
+          `;
+
+          contextMenu.innerHTML = menuItems;
+          contextMenu.style.display = "block";
+          
+          positionContextMenu(bubbleEl);
+        };
+
         const buildAndShowSongContextMenu = (buttonEl, songData) => {
           if (
             contextMenu.style.display === "block" &&
@@ -55699,8 +57610,9 @@ SOFTWARE.</div>
                 if (artistsModal) artistsModal.show();
               }
             } else {
-              // FIX: Close all modals so the artist view is visible immediately
+              // FIX: Close all modals so the artist view is immediately visible
               closeOpenModals();
+              hideMobileSidebar();
               loadView({
                 type: "artist_songs",
                 param: artistRaw,
@@ -56874,6 +58786,24 @@ SOFTWARE.</div>
               type: "get_imageditor_projects",
               param: "",
               sort: "updated_desc",
+              filter: filter,
+            });
+            hideMobileSidebar();
+          }
+
+          const artFilterLink = e.target.closest(".arts-filter-link");
+          if (artFilterLink) {
+            e.preventDefault();
+            e.stopPropagation();
+            const filter = artFilterLink.dataset.filter;
+            document
+              .querySelectorAll(".arts-filter-link")
+              .forEach((el) => el.classList.remove("active", "text-white"));
+            artFilterLink.classList.add("active", "text-white");
+            loadView({
+              type: "get_arts",
+              param: "",
+              sort: "newest",
               filter: filter,
             });
             hideMobileSidebar();
@@ -58612,9 +60542,35 @@ SOFTWARE.</div>
           const { action, name, id, publicId, userid, title, artist, album, genre } =
             item.dataset;
           contextMenu.style.display = "none";
-    
+
           switch (action) {
             case "close_menu":
+              break;
+            case "edit_art":
+              loadView({type: "edit_art_page", param: publicId});
+              break;
+            case "delete_art":
+              if(confirm("Delete this artwork permanently?")) {
+                fetchData('?action=delete_art', {method: 'POST', body: JSON.stringify({public_id: publicId})}).then(() => {
+                  showToast("Artwork deleted", "success");
+                  loadView(currentView);
+                });
+              }
+              break;
+            case "chat_star":
+              window.toggleStarMsg(id);
+              break;
+            case "chat_reply":
+              window.setChatReply(id, decodeURIComponent(item.dataset.sender), decodeURIComponent(item.dataset.content));
+              break;
+            case "chat_copy":
+              window.copyChatMsg(id);
+              break;
+            case "chat_edit":
+              window.editChatMsg(id, decodeURIComponent(item.dataset.content));
+              break;
+            case "chat_delete":
+              window.delChatMsg(id);
               break;
             case "play_next":
               if (queueIndex !== -1) {
@@ -60344,14 +62300,13 @@ SOFTWARE.</div>
                   "pip-progress-container",
                 ),
                 seekSlider: docPipWindow.document.getElementById("pip-seek-slider"),
-                playPauseBtn:
-                  docPipWindow.document.getElementById("pip-play-pause-btn"),
+                playPauseBtn: docPipWindow.document.getElementById("pip-play-pause-btn"),
                 prevBtn: docPipWindow.document.getElementById("pip-prev-btn"),
                 nextBtn: docPipWindow.document.getElementById("pip-next-btn"),
                 shuffleBtn: docPipWindow.document.getElementById("pip-shuffle-btn"),
                 repeatBtn: docPipWindow.document.getElementById("pip-repeat-btn"),
               };
-    
+
               playerElements.art.push(pipEls.art);
               playerElements.title.push(pipEls.title);
               playerElements.artist.push(pipEls.artist);
@@ -60364,21 +62319,21 @@ SOFTWARE.</div>
               playerElements.nextBtn.push(pipEls.nextBtn);
               playerElements.shuffleBtn.push(pipEls.shuffleBtn);
               playerElements.repeatBtn.push(pipEls.repeatBtn);
-    
+
               pipEls.playPauseBtn.addEventListener("click", togglePlayPause);
               setupHoldToSkip([pipEls.prevBtn], "prev", playPrev);
               setupHoldToSkip([pipEls.nextBtn], "next", playNext);
               pipEls.shuffleBtn.addEventListener("click", toggleShuffle);
               pipEls.repeatBtn.addEventListener("click", () => {
                 repeatMode =
-                  repeatMode === "none"
-                    ? "all"
-                    : repeatMode === "all"
-                      ? "one"
-                      : "none";
+                  repeatMode === "none" ?
+                  "all" :
+                  repeatMode === "all" ?
+                  "one" :
+                  "none";
                 updateRepeatIcons();
               });
-    
+
               pipEls.artist.style.cursor = "pointer";
               pipEls.artist.addEventListener(
                 "mouseenter",
@@ -60388,11 +62343,11 @@ SOFTWARE.</div>
                 "mouseleave",
                 () => (pipEls.artist.style.textDecoration = "none"),
               );
-    
+
               pipEls.artist.addEventListener("click", (e) => {
                 e.stopPropagation();
                 if (!currentSong) return;
-    
+
                 const artistRaw = currentSong.artist;
                 const userId = currentSong.user_id || "";
                 const artistsList = artistRaw
@@ -60400,18 +62355,19 @@ SOFTWARE.</div>
                     /\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i,
                   )
                   .filter((a) => a && a.trim() !== "");
-    
+
                 if (artistsList.length > 1) {
                   if (artistsModalBody) {
                     artistsModalBody.innerHTML = `
-                              <div class="list-group list-group-flush rounded">
-                                ${artistsList.map((a) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userId}">${a}</button>`).join("")}
-                              </div>
-                            `;
+                          <div class="list-group list-group-flush rounded">
+                            ${artistsList.map((a) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${userId}">${a}</button>`).join("")}
+                          </div>
+                        `;
                     if (artistsModal) artistsModal.show();
                   }
                 } else {
                   closeOpenModals();
+                  hideMobileSidebar();
                   loadView({
                     type: "artist_songs",
                     param: artistRaw,
@@ -60420,7 +62376,7 @@ SOFTWARE.</div>
                   });
                 }
               });
-    
+
               let isSeekingPip = false;
               pipEls.seekSlider.addEventListener("input", (e) => {
                 isSeekingPip = true;
@@ -60438,7 +62394,7 @@ SOFTWARE.</div>
                 }
                 isSeekingPip = false;
               });
-    
+
               const updateSliderPip = () => {
                 if (!isSeekingPip && docPipWindow && isFinite(audio.duration)) {
                   const percent = (audio.currentTime / audio.duration) * 100;
@@ -61034,6 +62990,47 @@ SOFTWARE.</div>
           });
         }
     
+        window.artFilesToUpload = [];
+
+        document.addEventListener("change", (e) => {
+          if (e.target.id === "art-files-input") {
+            const files = Array.from(e.target.files);
+            window.artFilesToUpload = window.artFilesToUpload.concat(files);
+            if (window.renderArtPreviews) window.renderArtPreviews();
+          }
+          if (e.target.id === "art-type" || e.target.id === "edit-art-type") {
+            const mangaFields = document.getElementById(e.target.id.replace("type", "manga-fields"));
+            if (mangaFields) {
+              if (e.target.value === 'manga') {
+                mangaFields.classList.remove('d-none');
+              } else {
+                mangaFields.classList.add('d-none');
+                const prefix = e.target.id.split('-')[0];
+                if (document.getElementById(prefix === "edit" ? "edit-art-characters" : "art-characters")) document.getElementById(prefix === "edit" ? "edit-art-characters" : "art-characters").value = "";
+                if (document.getElementById(prefix === "edit" ? "edit-art-parodies" : "art-parodies")) document.getElementById(prefix === "edit" ? "edit-art-parodies" : "art-parodies").value = "";
+                if (document.getElementById(prefix === "edit" ? "edit-art-groups" : "art-groups")) document.getElementById(prefix === "edit" ? "edit-art-groups" : "art-groups").value = "";
+                if (document.getElementById(prefix === "edit" ? "edit-art-series" : "art-series")) document.getElementById(prefix === "edit" ? "edit-art-series" : "art-series").value = "";
+              }
+            }
+          }
+        });
+
+        window.renderArtPreviews = () => {
+          const container = document.getElementById("art-preview-container");
+          if (!container) return;
+          container.innerHTML = window.artFilesToUpload.map((f, idx) => `
+            <div class="position-relative shadow-sm rounded" style="width: 80px; height: 80px; overflow: hidden; border: 1px solid #555;">
+              <img src="${URL.createObjectURL(f)}" style="width: 100%; height: 100%; object-fit: cover;">
+              <button type="button" class="btn btn-sm btn-danger position-absolute top-0 end-0 m-1 rounded-circle" style="padding: 2px 6px; font-size: 0.6rem;" onclick="window.removeArtFile(${idx})"><i class="bi bi-x-lg"></i></button>
+            </div>
+          `).join('');
+        };
+
+        window.removeArtFile = (idx) => {
+          window.artFilesToUpload.splice(idx, 1);
+          if (window.renderArtPreviews) window.renderArtPreviews();
+        };
+
         createPlaylistForm.addEventListener("submit", async (e) => {
           e.preventDefault();
           const name = document.getElementById("playlist-name-input").value;
@@ -64516,7 +66513,7 @@ SOFTWARE.</div>
           }
         };
     
-        const showNativeNotification = (title, body) => {
+        const showNativeNotification = (title, body, chatId = null, chatType = 'dm', chatName = '') => {
           if (!("Notification" in window) || Notification.permission !== "granted")
             return;
     
@@ -64525,6 +66522,7 @@ SOFTWARE.</div>
             icon: "?action=get_app_icon&size=192",
             badge: "?action=get_app_icon&size=192",
             vibrate: [200, 100, 200],
+            data: { chatId, chatType, chatName }
           };
     
           if ("serviceWorker" in navigator && navigator.serviceWorker.ready) {
@@ -64535,6 +66533,10 @@ SOFTWARE.</div>
             const n = new Notification(title, opts);
             n.onclick = () => {
               window.focus();
+              if (chatId) {
+                loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' });
+                setTimeout(() => window.openChatFull(chatId, chatType, chatName), 800);
+              }
             };
           }
         };
@@ -64577,12 +66579,12 @@ SOFTWARE.</div>
                   let previewText = window.getPreviewText(m.content);
                   if (m.has_image) {
                     if (m.media_type && m.media_type.startsWith("video/"))
-                      previewText = "ðŸ“¹ Video";
+                      previewText = "🎥 Video";
                     else if (m.media_type && m.media_type.startsWith("audio/"))
-                      previewText = "ðŸŽµ Audio";
-                    else previewText = "ðŸ“· Photo";
+                      previewText = "🎵 Audio";
+                    else previewText = "📷 Photo";
                   }
-                  showNativeNotification(`New message from ${m.name}`, previewText);
+                  showNativeNotification(`New message from ${m.name}`, previewText, m.target_id, m.chat_type, m.name);
                 }
               });
             }
@@ -64731,6 +66733,10 @@ SOFTWARE.</div>
                 isEQEnabled = s.isEQEnabled !== undefined ? s.isEQEnabled : false;
                 isSpatialEnabled =
                   s.isSpatialEnabled !== undefined ? s.isSpatialEnabled : false;
+                showNSFW = s.showNSFW !== undefined ? s.showNSFW : false;
+                
+                const nsfwToggleEl = document.getElementById("toggle-nsfw-arts");
+                if (nsfwToggleEl) nsfwToggleEl.checked = showNSFW;
                 globalVolumeMultiplier =
                   s.globalVolumeMultiplier !== undefined
                     ? parseFloat(s.globalVolumeMultiplier)
@@ -65979,10 +67985,222 @@ SOFTWARE.</div>
             }
             return;
           }
+
+          const editArtCommentBtn = e.target.closest(".edit-art-comment-btn");
+          if (editArtCommentBtn) {
+            e.stopPropagation();
+            document.getElementById("edit-art-comment-id").value = editArtCommentBtn.dataset.id;
+            document.getElementById("edit-art-comment-input").value = decodeHTML(editArtCommentBtn.dataset.content);
+            bootstrap.Modal.getOrCreateInstance(document.getElementById("edit-art-comment-modal")).show();
+            return;
+          }
+
+          const deleteArtCommentBtn = e.target.closest(".delete-art-comment-btn");
+          if (deleteArtCommentBtn) {
+            e.stopPropagation();
+            if (confirm("Delete this comment?")) {
+              fetchData("?action=delete_art_comment", {
+                method: "POST",
+                body: JSON.stringify({ comment_id: deleteArtCommentBtn.dataset.id }),
+              }).then(() => window.refreshArtComments());
+            }
+            return;
+          }
+
+          /* --- NEW PHPSHARES CLICK LISTENERS --- */
+          const artCommentReactBtn = e.target.closest(".art-comment-react-btn");
+          if (artCommentReactBtn) {
+            e.stopPropagation();
+            if (!currentUser) return showToast("Please login", "error");
+            fetchData("?action=toggle_art_comment_reaction", {
+              method: "POST",
+              body: JSON.stringify({
+                comment_id: artCommentReactBtn.dataset.id,
+                reaction: artCommentReactBtn.dataset.reaction,
+              }),
+            }).then(() => window.refreshArtComments());
+            return;
+          }
+          
+          const artReplyBtn = e.target.closest(".art-reply-btn");
+          if (artReplyBtn) {
+            document.getElementById("reply-art-comment-parent-id")?.remove();
+            document.getElementById("reply-art-comment-reply-to-id")?.remove();
+            
+            const form = document.getElementById("reply-art-comment-form");
+            form.insertAdjacentHTML('beforeend', `<input type="hidden" id="reply-art-comment-parent-id" value="${artReplyBtn.dataset.rootId || artReplyBtn.dataset.id}">`);
+            form.insertAdjacentHTML('beforeend', `<input type="hidden" id="reply-art-comment-reply-to-id" value="${artReplyBtn.dataset.id}">`);
+            
+            const input = document.getElementById("reply-art-comment-input-real");
+            const preview = document.getElementById("reply-art-comment-preview");
+            const username = artReplyBtn.dataset.username;
+            const content = artReplyBtn.dataset.content || "";
+            if (preview) {
+              preview.innerHTML = `<strong class="text-white">Replying to ${escapeHTML(username)}:</strong><br><span class="text-secondary text-truncate d-block">${escapeHTML(content).replace(/<[^>]*>?/gm, "")}</span>`;
+            }
+            if (username) {
+              input.value = `@${username.replace(/\s+/g, "")} `;
+            } else {
+              input.value = "";
+            }
+            bootstrap.Modal.getOrCreateInstance(document.getElementById("reply-art-comment-modal")).show();
+            setTimeout(() => input.focus(), 500);
+            return;
+          }
+
+          const artsMetaLink = e.target.closest(".arts-meta-link");
+          if (artsMetaLink) {
+            e.preventDefault();
+            e.stopPropagation();
+            const meta = artsMetaLink.dataset.meta;
+            loadView({ type: "arts_meta", param: meta, sort: "", filter: "" });
+            hideMobileSidebar();
+            return;
+          }
+
+          const artContextBtn = e.target.closest(".art-more-btn");
+          if (artContextBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            const pId = artContextBtn.dataset.id;
+            const contextMenu = document.getElementById("context-menu");
+            if (contextMenu.style.display === "block" && window.contextMenuItemEl === artContextBtn) {
+              contextMenu.style.display = "none";
+              return;
+            }
+            window.contextMenuItemEl = artContextBtn;
+            let menuItems = `
+              <li class="context-menu-item" data-action="edit_art" data-public-id="${pId}"><i class="bi bi-pencil-fill text-warning"></i> Edit Artwork</li>
+              <li class="context-menu-item text-danger fw-bold" data-action="delete_art" data-public-id="${pId}"><i class="bi bi-trash2-fill"></i> Delete Artwork</li>
+              <hr class="dropdown-divider bg-secondary mx-2 my-1">
+              <li class="context-menu-item" data-action="close_menu"><i class="bi bi-x-lg"></i> Close Menu</li>
+            `;
+            contextMenu.innerHTML = menuItems;
+            contextMenu.style.display = "block";
+            
+            positionContextMenu(artContextBtn);
+            return;
+          }
         });
-    
+
         document.addEventListener("submit", async (e) => {
-          if (e.target.id === "blog-comment-form") {
+          if (e.target.id === "page-upload-art-form") {
+            e.preventDefault();
+            if (window.artFilesToUpload.length === 0) return showToast("Select at least one image.", "error");
+            
+            const btn = document.getElementById("art-submit-btn");
+            const originalText = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Uploading...';
+            
+            const progContainer = document.getElementById("art-upload-progress-container");
+            const progBar = document.getElementById("art-upload-progress");
+            progContainer.classList.remove("d-none");
+            progBar.style.width = "0%";
+            progBar.textContent = "0%";
+            
+            const fd = new FormData();
+            fd.append("title", document.getElementById("art-title").value);
+            fd.append("type", document.getElementById("art-type").value);
+            fd.append("tags", document.getElementById("art-tags").value);
+            fd.append("description", document.getElementById("art-desc").value);
+            fd.append("characters", document.getElementById("art-characters").value);
+            fd.append("parodies", document.getElementById("art-parodies").value);
+            fd.append("groups", document.getElementById("art-groups").value);
+            fd.append("series", document.getElementById("art-series").value);
+            fd.append("nsfw", document.getElementById("art-nsfw").checked ? "1" : "0");
+            
+            window.artFilesToUpload.forEach(f => fd.append("files[]", f));
+            
+            const xhr = new XMLHttpRequest();
+            xhr.upload.onprogress = (evt) => {
+              if (evt.lengthComputable) {
+                const pct = Math.round((evt.loaded / evt.total) * 100);
+                progBar.style.width = pct + "%";
+                progBar.textContent = pct + "%";
+              }
+            };
+            xhr.open("POST", "?action=upload_art", true);
+            xhr.onload = () => {
+              btn.disabled = false;
+              progContainer.classList.add("d-none");
+              if (xhr.status === 200) {
+                try {
+                  const result = JSON.parse(xhr.responseText);
+                  if (result && result.status === "success") {
+                    showToast("Artwork published!", "success");
+                    window.artFilesToUpload = [];
+                    loadView({type: 'view_art', param: result.public_id, sort: '', filter: ''});
+                  } else {
+                    showToast(result.message || "Upload failed.", "error");
+                    btn.innerHTML = originalText;
+                  }
+                } catch(e) {
+                  showToast("Server error.", "error");
+                  btn.innerHTML = originalText;
+                }
+              }
+            };
+            xhr.send(fd);
+          } else if (e.target.id === "page-edit-art-form") {
+            e.preventDefault();
+            const btn = e.target.querySelector('button[type="submit"]');
+            const origHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
+            
+            const fd = new FormData();
+            fd.append("public_id", document.getElementById("edit-art-public-id").value);
+            fd.append("title", document.getElementById("edit-art-title").value);
+            fd.append("tags", document.getElementById("edit-art-tags").value);
+            fd.append("description", document.getElementById("edit-art-desc").value);
+            fd.append("characters", document.getElementById("edit-art-characters").value);
+            fd.append("parodies", document.getElementById("edit-art-parodies").value);
+            fd.append("groups", document.getElementById("edit-art-groups").value);
+            fd.append("series", document.getElementById("edit-art-series").value);
+            fd.append("nsfw", document.getElementById("edit-art-nsfw").checked ? "1" : "0");
+
+            const res = await fetch("?action=edit_art", { method: "POST", body: fd });
+            const result = await res.json();
+            
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+            
+            if (result && result.status === "success") {
+              showToast("Artwork updated!", "success");
+              loadView({type: 'view_art', param: document.getElementById("edit-art-public-id").value, sort: '', filter: ''});
+            } else {
+              showToast(result.message || "Failed to update", "error");
+            }
+          } else if (e.target.id === "edit-art-comment-form") {
+            e.preventDefault();
+            const id = document.getElementById("edit-art-comment-id").value;
+            const content = document.getElementById("edit-art-comment-input").value;
+            await fetchData("?action=edit_art_comment", {
+              method: "POST",
+              body: JSON.stringify({ comment_id: id, content: content }),
+            });
+            bootstrap.Modal.getInstance(document.getElementById("edit-art-comment-modal")).hide();
+            window.refreshArtComments();
+          } else if (e.target.id === "reply-art-comment-form") {
+            e.preventDefault();
+            if (!currentUser) return showToast("Please login", "error");
+            const input = document.getElementById("reply-art-comment-input-real");
+            const parentId = document.getElementById("reply-art-comment-parent-id").value;
+            const replyToId = document.getElementById("reply-art-comment-reply-to-id").value;
+            await fetchData("?action=add_art_comment", {
+              method: "POST",
+              body: JSON.stringify({
+                public_id: window.activeArtPublicId,
+                parent_id: parentId || null,
+                reply_to_id: replyToId || null,
+                content: input.value,
+              }),
+            });
+            input.value = "";
+            bootstrap.Modal.getInstance(document.getElementById("reply-art-comment-modal"))?.hide();
+            window.refreshArtComments();
+          } else if (e.target.id === "blog-comment-form") {
             e.preventDefault();
             if (!currentUser) return showToast("Please login", "error");
             const input = document.getElementById("blog-comment-input");
@@ -68307,7 +70525,18 @@ SOFTWARE.</div>
           if ("serviceWorker" in navigator) {
             navigator.serviceWorker
               .register("?pwa=sw")
+              .then(reg => {
+                 window.serviceWorkerReg = reg;
+              })
               .catch((err) => console.error("SW registration failed:", err));
+
+            navigator.serviceWorker.addEventListener('message', event => {
+              if (event.data && event.data.action === 'open_chat') {
+                const { chatId, chatType, chatName } = event.data;
+                loadView({ type: 'get_inbox', param: '', sort: '', filter_user_id: '' });
+                setTimeout(() => window.openChatFull(chatId, chatType, chatName), 800);
+              }
+            });
           }
     
           window.addEventListener("offline", () => {
@@ -68390,6 +70619,16 @@ SOFTWARE.</div>
             }
           }
     
+          const openChatId = urlParams.get("open_chat_id");
+          if (openChatId) {
+            const openChatType = urlParams.get("open_chat_type") || 'dm';
+            const openChatName = urlParams.get("open_chat_name") || 'Chat';
+            window.history.replaceState({}, document.title, window.location.pathname);
+            loadView({ type: "get_inbox", param: "", sort: "", filter_user_id: "" });
+            setTimeout(() => window.openChatFull(openChatId, openChatType, openChatName), 800);
+            return;
+          }
+
           const resetToken = urlParams.get("reset_token");
           if (resetToken) {
             document.getElementById("reset-token-input").value = resetToken;
@@ -76345,6 +78584,14 @@ SOFTWARE.</div>
           };
         })();
     
+        window.openAdvancedArtSearch = () => {
+           const query = prompt("Enter specific tags to search (e.g. anime, landscape):");
+           if (query && query.trim() !== '') {
+             loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', searchQuery: query});
+           }
+           hideMobileSidebar();
+        };
+
         init();
       });
     </script>
