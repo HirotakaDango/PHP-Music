@@ -66,11 +66,23 @@ Options -Indexes
 # 3. Prevent raw folder browsing & redirect direct media downloads into the secure Drive Manager
 <IfModule mod_rewrite.c>
   RewriteEngine On
+  RewriteBase /
 
-  # Exclude loop matches
+  # --- RULE A: Match files inside subfolders (e.g., screenshots/7.png) ---
   RewriteCond %{REQUEST_URI} !^/index\.php$
   RewriteCond %{ENV:REDIRECT_STATUS} ^$
-  RewriteRule ^(uploads/.*|getid3/.*|.*\.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif))$ index.php?access=admin&page=drive&path=$1 [R=302,L,QSA]
+  # First, ensure the file is within allowed paths or has an allowed extension
+  RewriteCond $0 ^(uploads/.*|getid3/.*|.*\.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif))$
+  # Extract the folder path into $1, pass the full path as $0 to the 'edit' parameter
+  RewriteRule ^(.*)/([^/]+)$ /index.php?access=admin&page=drive&path=$1&edit=$0 [R=302,L,QSA]
+
+  # --- RULE B: Match files directly in the root folder (e.g., 7.png) ---
+  RewriteCond %{REQUEST_URI} !^/index\.php$
+  RewriteCond %{ENV:REDIRECT_STATUS} ^$
+  # Only allow specific media extensions if they sit in the root folder
+  RewriteCond $0 \.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif)$
+  # Path is empty, full path goes into the 'edit' parameter
+  RewriteRule ^([^/]+)$ /index.php?access=admin&page=drive&path=&edit=$0 [R=302,L,QSA]
 </IfModule>
 HTACCESS;
   @file_put_contents($htaccess_path, $htaccess_content);
@@ -411,7 +423,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '8.7');
+define('APP_VERSION', '8.8');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);

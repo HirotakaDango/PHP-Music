@@ -29,11 +29,14 @@ A modern self-hosted music player built in PHP, with a clean UI, SQLite backend,
 | **Advanced Audio Routing** | Dual-HTML5 node setup with Web Audio API. Routes audio via gain nodes to biquad filters and dynamic compressors. | Seamless gapless crossfading over an adjustable 3-second period. |
 | **5-Band Graphic Equalizer** | Togglable equalizer directly accessible within the settings panel. | Independent frequency bands at 60Hz, 230Hz, 910Hz, 3.6kHz, and 14kHz. |
 | **Volume Normalization** | Real-time Automatic Gain Control (AGC). | Normalizes varying track volumes using a Web Audio API dynamics compressor. |
+| **Spatial Audio (HRTF)** | 3D surround simulation for headphone users. | Enabled via Web Audio PannerNode with HRTF panning model. |
+| **Per-Song Audio Settings** | Override volume and EQ for individual tracks. | Stored per user in `user_song_settings` table; applied automatically on playback. |
 | **Dynamic Queue Management** | YouTube Music-style "Up Next" queue with "Play Next" and "Add to Queue" actions. | Mobile and desktop player modals include an "Up Next" queue tab with chunked, on-demand infinite scroll. |
 | **Media Session API Integration** | Background controls and metadata mirroring. | Emits lockscreen meta and handles system prev/next/seek keys globally on Android, iOS, Windows, and macOS. |
 | **Infinite Autoplay (Station)** | Appends 15 recommended tracks based on the artist and genre of the last seed song. | Triggers automatically once the active queue is exhausted. |
 | **Draggable Sleep Timer** | Schedule playback to auto-pause. | Features a draggable, floating countdown bubble that locks within screen boundaries and includes a NoSleep.js stay-awake fallback. |
 | **Stay-Awake Guard** | Prevents screen dimming or timeout on mobile browsers while playing. | Uses `NoSleep.js` (under-the-hood silent HTML5 video looping) to lock screen state safely. |
+| **Keyboard Shortcuts** | Full set of keyboard controls for playback, navigation, and actions. | Space (play/pause), arrow keys (seek/volume), numbers for jump, many more. |
 
 ### 2. Library, Curation & Social Ecosystem
 
@@ -52,9 +55,12 @@ A modern self-hosted music player built in PHP, with a clean UI, SQLite backend,
 | **Song & Blog Discussions** | Threaded comments and reaction metrics for tracks and blog posts. | Leverages dedicated comment tables (`song_comments`, `blog_comments`, reactions). Features nested reply trees, edit/delete controls, likes, dislikes, and `@` username tag highlighting. Comments are read-only for non-logged-in guests. |
 | **Blogging & Markdown Platform** | Write, publish, or draft blogs with live Markdown preview, Find & Replace, and multi-format exports. | Uses `blogs` and `blog_categories` tables. Features auto-saving drafts, word/character counter, categories, status toggles (*Public* vs *Private*), multi-select bulk actions (download ZIP/delete), debounced search, and multi-format exports (PDF, HTML, MD, TXT, or ZIP). |
 | **Blog Discussions** | Threaded comments and reaction metrics for blog posts. | Built on the `blog_comments` table. Nested reply trees, reactions (likes/dislikes) and user mentions. Comments are read-only for guests. |
+| **Personal Notes** | Private, encrypted markdown notes with live preview, Find & Replace, Undo/Redo, and export/import. | Uses OPFS (Origin Private File System) for local caching and `personal_notes` table. Supports categories, starring, and real-time collaboration sync via SSE. |
+| **Tasks** | Manage task lists with checkboxes, markdown support, and live preview. | Uses `tasks` table with JSON items. Supports categories, starring, and export/import. |
+| **PHPShares – Artwork & Manga Gallery** | A dedicated art sharing platform for illustrations, manga, and comics. | Upload images, tag with metadata (characters, parodies, groups, series). Supports series collections, NSFW flagging, favorites, comments with threaded replies, and a manga reader with page-by-page navigation. Artwork views are tracked and displayed. |
 | **Upload Collaborators Search** | Choose multiple collaborators using a visual name/email search panel before uploading. | Integrates the exact same professional search dropdown and pill-based list as the edit collaborators modal directly inside the upload form. |
 | **Rhythm Game Engine** | Interactive game utilizing parsed tracks directly from your database. | Uses Web Audio API for fast decodes. Automatically builds note beatmaps via root-mean-square energy checks. Features lane speed scaling (up to 20x), pause states, and global standing leaderboards. |
-| **Advanced Image Editor** | Multi-layered image composition workspace. | Built on the HTML5 Canvas API. Renders text and vector shapes, calculates rotation transformations, applies graphic filters, and exports high-quality PNGs. |
+| **Advanced Image Editor (ImagEditor)** | Multi-layered image composition workspace with brush, text, shapes, filters, and layer management. | Built on Fabric.js and the HTML5 Canvas API. Supports undo/redo, zoom/pan, layer ordering, opacity, blending, and export to PNG, JPEG, WEBP, SVG, or project JSON. |
 
 ### 3. Personal Privacy Controls
 
@@ -80,6 +86,7 @@ A modern self-hosted music player built in PHP, with a clean UI, SQLite backend,
 | Feature | Description | Technical Implementation |
 | :--- | :--- | :--- |
 | **Integrated PHPEditor (IDE)** | Full-fledged code editor for server files directly in the browser. | Built on Ace Editor. Features syntax highlighting, multi-tab support, file tree explorer, auto-saving, file history/rollback, and a terminal console panel. |
+| **PHPAudio – Audio Editor** | Edit audio files directly in your browser: trim, amplify, adjust volume, and update metadata (title, artist, album, cover art). | Uses the Web Audio API for waveform rendering and trimming; getID3 for metadata extraction; supports saving edited tracks back to the library with updated tags and cover images. |
 | **Personal Notes notebook** | Keep private logs, song ideas, lyrics, or personal to-do lists within the app. | Stores note data inside a dedicated `personal_notes` table sandboxed to individual accounts. Allows note creation, edits, deletions, and sorting filters (Newest, Oldest, Recently Modified). |
 | **Interactive Calendar** | Built-in date planner and time referencing tool. | Accessible via the sidebar. Features a live clock, dynamic month/year navigation, and a quick date-picker input. |
 | **1:1 Image Cropper** | Crop profile pictures and song covers. | Integrated 1:1 aspect-ratio cropping canvas with panning/zoom to fill gaps, resizing and converting uploads to WebP/JPEG format. |
@@ -96,6 +103,23 @@ A modern self-hosted music player built in PHP, with a clean UI, SQLite backend,
 | **Administrative Dashboard** | Full-scale administrative manager (`?access=admin`). | Paginated user table, search filters, account verification toggles, ban managers, and complete file/account purging tools. |
 | **Integrated Drive Manager** | Built-in file management backend for server assets. | Features native `.zip` extraction via context menus, dynamic URL deep linking for active files, an optimized 2-column mobile grid, and recursive folder property calculations (displaying total files, subdirectories, and byte size). |
 | **SQLite Backend Zero-Setup** | Completely self-hosted, lightweight architecture. | Auto-initializes SQLite database schemas on first run, with zero complex database setup required. |
+| **PHPDBManager** | Web-based SQLite database manager for admins. | View, edit, insert, delete, export/import tables, run custom SQL queries, and manage database structure directly in the browser. |
+| **API Key Management** | Generate and manage custom API keys for external integrations. | Supports 1,000 requests per month per key, with statuses (pending, active, banned) and expiration dates. |
+| **API Playground** | Interactive API testing interface within the documentation. | Allows live testing of endpoints with real data, and a visual client tester. |
+
+### 6. Developer & Power-User Tools
+
+| Feature | Description | Technical Implementation |
+| :--- | :--- | :--- |
+| **Open API Endpoints** | RESTful JSON API for querying library, streaming, and mutations. | Full documentation available via the "API Documentation" sidebar link. |
+| **API Playground** | Visual interface to test API endpoints, view raw JSON responses, and execute queries. | Integrated iframe client that can be shared via URL hashes. |
+| **Full Library Scan** | One-click scan to import all audio files from the server disk. | Recursively traverses directories, extracts tags with getID3, and populates the database. |
+| **Forced Rescan** | Re-analyze metadata (artists, songs, covers) without waiting for file changes. | Used to fix corrupted tags or update artist mappings. |
+| **Rhythm Chart Rescan** | Regenerate beatmaps for all songs (or per difficulty) with custom density. | Creates deterministic note charts based on song length and difficulty, stored in the `rhythm_charts` table. |
+| **Database VACUUM** | Optimize and reclaim space from the SQLite database. | Executes `VACUUM` command with automatic retry on lock conflicts. |
+| **Export/Import User Data** | Full account backup and restore of followings, notes, tasks, blogs, rhythm favorites, and playlists. | JSON format with versioning for future compatibility. |
+| **Clear Application Cache** | Reset PWA and local storage caches for troubleshooting. | Unregisters service workers, clears caches, and reloads the page. |
+| **Check for Updates** | Compare local code with the latest GitHub version. | Performs a SHA256 hash comparison of `index.php` against the remote repository. |
 
 ---
 
@@ -212,31 +236,40 @@ If you are using **XAMPP** or **LAMPP** and encounter issues with SQLite, follow
 * **Pause & Abort System:** Click the in-game **Pause** button to halt playback immediately. The pause screen will overlay options to **Resume**, **Retry** (which instantly restarts the beatmap without dumping you back to the main menu), or **Quit to Menu**.
 * **Global Leaderboard:** The "Ranks" tab aggregates standings for players globally, ranking users by their total score accumulated across all completed song sessions and displaying their total plays.
 
-### 4. Advanced Image Editor
+### 4. Advanced Image Editor (ImagEditor)
 * **Workspace Setup:** Click **Image Editor** in the sidebar to load the canvas. 
 * **Layer Composition:** Drag, drop, or upload images directly to create **Image Layers**. Click **Text** to append editable text layers, or **Shape** to render vector rectangles or ellipses.
 * **Layer Transform Handles:** Click any layer on the canvas to activate its bounding box transform borders. Drag the handles to dynamically scale, stretch, rotate, or position elements.
 * **Properties Inspector:** Tap **Settings** (or select an element) to reveal the Properties Panel. Here, you can manually type coordinates, adjust opacity, change corner-radius values, reorder layers (bring forward/send back), flip orientations, duplicate, or apply filters (brightness, contrast, and grayscale).
-* **Exporting:** When your design is complete, click **Export** to download your composite artwork as a high-resolution `.png` file.
+* **Brush & Drawing Tools:** The **Draw** panel offers multiple brush engines (dip pen, felt tip, airbrush, calligraphy, neon, spray, eraser) with adjustable size, opacity, and glow intensity. Symmetry modes (vertical, horizontal, quad) help create mirrored illustrations.
+* **Exporting:** When your design is complete, click **Export** to download your composite artwork as a high-resolution `.png`, `.jpg`, `.webp`, `.svg`, or save the project as a JSON file for later editing.
+* **Projects & Templates:** Save your projects in the cloud and access them later. The **Design Presets** drawer provides 25+ ready‑to‑use templates (promo banners, quote cards, cyber posters, vintage, minimal, etc.) to jumpstart your creative process.
 
-### 5. Curation, Social & Custom Music Attributes
-* **Song Community & Inline CRUD:** From a song's context menu, select `View Comments & Likes` to access the discussions. You can like or dislike the track, start threaded conversations, reply directly to previous responses, or update/delete your own submissions. Adding `@username` to comments automatically formats and highlights the handle for visibility.
-* **Community Social Feed:** Use the *Community* feed to post general updates. Posts support reactions (likes and dislikes) and full edit/deletion controls. Filters allow you to sort posts by *Newest*, *Most Liked*, or exclusively from *Following Users*.
-* **Synchronized LRC Lyrics**: Right-click (or tap "..." on mobile) a song and choose "Edit Info" to modify tags and paste synchronized `.lrc` text. Ensure that each timestamp is followed by a space so the parser reads it correctly:
-    * ✅ **Correct:** `[00:15.30] Never gonna give you up`
-    * ❌ **Incorrect:** `[00:15.30]Never gonna give you up`
-* **Private Items**: Toggle private mode when uploading tracks, editing playlists, or writing blogs. These items are strictly invisible to other users. Private songs added to public collaborative playlists are filtered out and remain invisible to everyone except you (and the `musiclibrary@mail.com` super admin).
-* **Downloader**: Open the "Downloader" tool from the sidebar, enter a Playlist ID, and sequentially batch-download every track in that playlist directly to your local drive.
-* **Offline Management**: Drag-and-drop to manually reorder offline lists. Standalone JSON import/export functions let you keep physical backups of your lists.
+### 5. PHPAudio – Audio Editing Tool
+* **Access:** Click **PHPAudio** from the sidebar to open the audio editor workspace.
+* **Open Audio:** Drag and drop or click to browse an audio file (MP3, FLAC, WAV, M4A, OGG, and more). The editor will display a waveform and extract all ID3 metadata.
+* **Trim & Amplify:** Use the sliders to set a start and end point for trimming, and adjust the gain (amplify) to boost or reduce volume.
+* **Playback Controls:** Preview your edits with play/pause, volume control, and playback speed adjustment.
+* **Edit Metadata:** Update title, artist, album, and cover art. The cover can be cropped with a 1:1 aspect ratio.
+* **Save to Library:** Save the edited audio directly to your music library. If you opened a song already in the library, you can save over it or create a new entry. The system updates the database and writes the new ID3 tags into the file.
+* **Rollback:** If you save changes to an existing song, a version history is kept, allowing you to restore the previous version at any time.
 
-### 6. Developer & Power-User Tools
+### 6. PHPShares – Artwork & Manga Gallery
+* **Access:** The **PHPShares** submenu in the sidebar lets you explore all artworks, illustrations, and manga/comics uploaded by the community.
+* **Browsing:** Filter by **All**, **Illustrations**, **Manga**, or **My Favorites**. Sort by newest, oldest, most viewed, or most favorited. Use the search bar to find specific works by title, tags, characters, or series.
+* **Upload Artwork:** Click **Upload Artwork** in the PHPShares submenu. You can upload multiple images at once (for manga pages), add a title, tags, description, and optionally assign it to a **Series**. Mark it as **NSFW** (18+) if necessary.
+* **Manga Reader:** When viewing a manga/comic, a dedicated reader mode allows you to flip through pages with keyboard arrows (←/→) or by clicking the left/right side of the screen. You can also jump to any page or episode using the episode selector modal.
+* **Series Management:** Group related artworks into series. Each series shows its own page with aggregated metadata (tags, characters, parodies, groups) and a list of all episodes. You can navigate directly from the series page to any episode.
+* **Favorites & Comments:** Like your favorite artworks and leave comments. Comments support markdown, @mentions, and threaded replies.
+* **Metadata Index:** Explore the gallery by tags, characters, parodies, groups, or series via the dedicated index pages accessible from the PHPShares submenu.
+
+### 7. Developer & Power-User Tools
 * **PHPEditor (IDE):** Access the fully integrated IDE from the Admin Panel to write, edit, and manage code files directly on your server. Built with Ace Editor, it features syntax highlighting, multi-tab support, file history restorations, a media viewer, and an interactive terminal console.
 * **Open API Endpoints:** Click "API Documentation" in the sidebar to reveal all internal backend URL hooks (e.g., `?action=get_songs`). You can copy these endpoints to write Python scripts, Discord bots, or external UI interfaces that tap directly into your PHP Music database.
 * **API Playground:** Use the visual API Playground to test JSON payloads, evaluate responses in an integrated code viewer, or execute queries directly via an injected iframe testing environment.
+* **PHPDBManager:** A web-based SQLite database manager available from the Admin Panel. Browse tables, run SQL queries, insert/update/delete rows, import/export CSV or SQL dumps, manage indexes and foreign keys, and perform maintenance (VACUUM, integrity check).
 
----
-
-## Admin Panel
+### 8. Admin Panel
 
 Access the administrative dashboard by appending `?access=admin` to your URL. Log in using the admin password (default: `admin_password/your own password`). Admin sessions are highly persistent and securely cached in the browser via a 1-year cookie.
 
@@ -249,6 +282,14 @@ Access the administrative dashboard by appending `?access=admin` to your URL. Lo
 | **System Library** | Files scanned directly from disk are assigned to the virtual "Music Library" administrator account. |
 | **Drive Manager** | An integrated file manager for server assets (`?access=admin&page=drive`). Features include native `.zip` extraction via context menus, dynamic URL deep linking for active files, an optimized 2-column mobile grid, and recursive folder property calculations (displaying total files, subdirectories, and byte size). |
 | **PHPEditor (IDE)** | Desktop-optimized code editor (`?access=admin&page=ide`) featuring a file explorer, multi-tab Ace Editor, version history, media viewer, and terminal console. |
+| **PHPDBManager** | Web-based SQLite database manager (`?access=admin&page=dbmanager`). Browse tables, run SQL queries, insert/edit/delete rows, export/import CSV/SQL, manage indexes and foreign keys, and perform maintenance (VACUUM, integrity check). |
+| **Song Management** | List, search, bulk edit, ban/unban, and soft/permanent delete songs. Transfer ownership between users. |
+| **Artwork Management** | Manage uploaded artwork (PHPShares) with metadata editing, bulk actions, and permanent deletion with file cleanup. |
+| **Activity Logs** | View a chronological list of all admin actions performed, including user and target details. |
+| **Profile Reports** | Manage user reports submitted by other users, with options to ban or dismiss. |
+| **Ban Appeals** | Review and approve/reject appeals from banned users, with ability to restore access. |
+| **API Keys** | Manage system-wide API keys for developer integrations. Generate, verify, ban/unban, and delete keys. |
+| **Storage Stats** | Visual breakdown of disk usage, audio files, non-audio assets, and per-user storage footprint with charts. |
 
 ---
 
@@ -270,6 +311,10 @@ Access the administrative dashboard by appending `?access=admin` to your URL. Lo
 * Play histories and view counts are continuously logged locally (after 30 seconds of playback) to generate personalized "For You" shelves and track statistics.
 * Secure transactional storage models like `personal_notes`, `tasks`, `blogs`, `blog_comments`, `song_comments`, `community_posts`, `listen_later`, and `messages` are safely indexed with Foreign Key constraints referencing the user session state.
 * The `follows` and `blocks` tables tightly control user-to-user social networking and privacy boundaries.
+* Rhythm Game beatmaps are generated deterministically using a Xorshift RNG seeded by song ID and difficulty, producing consistent charts across playthroughs.
+* The Image Editor uses Fabric.js for canvas manipulation, supporting layers, filters, and export.
+* Real-time collaboration sync for notes, tasks, blogs, and image editor projects uses Server-Sent Events (SSE) over the same PHP backend, eliminating the need for a separate WebSocket server.
+* PHPShares artwork and manga are stored with files and thumbnails; the reader uses lazy loading for performance.
 
 ---
 
@@ -301,6 +346,10 @@ Access the administrative dashboard by appending `?access=admin` to your URL. Lo
 | **Metadata or lyrics not saving** | Strict file permission constraints. | Grant write permissions to the audio files so PHP can use getID3's writetags function. |
 | **Lyrics not syncing** | Timestamp formatting issues in LRC file. | Ensure timestamps are followed by a space (e.g., `[00:15.30] Lyric text` instead of `[00:15.30]Lyric text`). |
 | **Invisible user playlists or songs** | SQL syntax crashes due to missing DB columns or failed tables. | Ensure the database structure is upgraded. (Fixed in latest code via independent column checks). |
+| **Rhythm Game notes not appearing** | Chart generation may not have completed for that song. | Run "Scan Charts" from the sidebar (admin only) or wait for automatic generation on first play. |
+| **Chat messages not sending** | Browser may be blocking notifications or WebSocket fallback (SSE) disabled. | Check browser console for errors; SSE requires `session_write_close()` during polling, which is handled automatically. |
+| **Image Editor layers not loading** | Browser may have insufficient memory for large images. | Try reducing image resolution or using the "Reset Canvas" option. |
+| **PHPShares upload fails** | PHP memory limits or incorrect file permissions. | Increase `memory_limit` and `post_max_size` in `php.ini`; ensure `phpshares/` directory is writable. |
 
 ---
 
