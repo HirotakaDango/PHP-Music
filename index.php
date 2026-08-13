@@ -423,7 +423,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '8.8');
+define('APP_VERSION', '8.9');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -21005,6 +21005,11 @@ HTML;
 
     case 'get_imageditor_projects':
       if (!$user_id) { send_json([]); }
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS imageditor_projects (id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT UNIQUE NOT NULL, user_id INTEGER NOT NULL, title TEXT, width INTEGER, height INTEGER, state TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);");
+        $db->exec("CREATE TABLE IF NOT EXISTS project_members (project_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT DEFAULT 'editor', joined_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (project_id, user_id));");
+        $db->exec("CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT, owner_id INTEGER NOT NULL, is_public INTEGER DEFAULT 0, project_type TEXT DEFAULT 'note', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE);");
+      } catch(Exception $e) {}
       try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
       try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN category TEXT DEFAULT 'all';"); } catch(Exception $e) {}
       try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN starred INTEGER DEFAULT 0;"); } catch(Exception $e) {}
@@ -21018,6 +21023,7 @@ HTML;
           );
         ");
       } catch(Exception $e) {}
+      
       $filter = $_GET['filter'] ?? 'all';
       $where = "WHERE user_id = ?";
       $params = [$user_id];
@@ -21033,26 +21039,60 @@ HTML;
         $params[] = $filter;
       }
 
-      $stmt = $db->prepare("SELECT public_id, title, width, height, updated_at, category, starred, project_id, view_count, last_viewed, (SELECT name FROM imageditor_categories WHERE id = imageditor_projects.category AND user_id = imageditor_projects.user_id) as category_name FROM imageditor_projects $where ORDER BY updated_at DESC");
-      $stmt->execute($params);
-      send_json($stmt->fetchAll());
+      try {
+        $stmt = $db->prepare("SELECT public_id, title, width, height, updated_at, category, starred, project_id, view_count, last_viewed, (SELECT name FROM imageditor_categories WHERE id = imageditor_projects.category AND user_id = imageditor_projects.user_id) as category_name FROM imageditor_projects $where ORDER BY updated_at DESC");
+        $stmt->execute($params);
+        send_json($stmt->fetchAll());
+      } catch(Exception $e) {
+        // Safe Fallback if the database was locked and missed creating the new columns
+        try {
+          $stmt = $db->prepare("SELECT public_id, title, width, height, updated_at FROM imageditor_projects WHERE user_id = ? ORDER BY updated_at DESC");
+          $stmt->execute([$user_id]);
+          send_json($stmt->fetchAll());
+        } catch(Exception $ex) {
+          send_json([]);
+        }
+      }
       break;
 
     case 'get_imageditor_project':
       if (!$user_id) { http_response_code(403); exit; }
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS imageditor_projects (id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT UNIQUE NOT NULL, user_id INTEGER NOT NULL, title TEXT, width INTEGER, height INTEGER, state TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);");
+        $db->exec("CREATE TABLE IF NOT EXISTS project_members (project_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT DEFAULT 'editor', joined_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (project_id, user_id));");
+      } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
+      
       $public_id = $_GET['public_id'] ?? '';
-      $stmt = $db->prepare("SELECT * FROM imageditor_projects WHERE public_id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))");
-      $stmt->execute([$public_id, $user_id, $user_id]);
-      $project = $stmt->fetch();
-      if ($project) send_json(['status' => 'success', 'project' => $project]);
-      else send_json(['status' => 'error', 'message' => 'Project not found']);
+      try {
+        $stmt = $db->prepare("SELECT * FROM imageditor_projects WHERE public_id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))");
+        $stmt->execute([$public_id, $user_id, $user_id]);
+        $project = $stmt->fetch();
+        if ($project) send_json(['status' => 'success', 'project' => $project]);
+        else send_json(['status' => 'error', 'message' => 'Project not found']);
+      } catch(Exception $e) {
+        try {
+          $stmt = $db->prepare("SELECT * FROM imageditor_projects WHERE public_id = ? AND user_id = ?");
+          $stmt->execute([$public_id, $user_id]);
+          $project = $stmt->fetch();
+          if ($project) send_json(['status' => 'success', 'project' => $project]);
+          else send_json(['status' => 'error', 'message' => 'Project not found']);
+        } catch(Exception $ex) {
+          send_json(['status' => 'error', 'message' => 'Database exception']);
+        }
+      }
       break;
 
     case 'save_imageditor_project':
       if (!$user_id) { http_response_code(403); exit; }
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS imageditor_projects (id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT UNIQUE NOT NULL, user_id INTEGER NOT NULL, title TEXT, width INTEGER, height INTEGER, state TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);");
+        $db->exec("CREATE TABLE IF NOT EXISTS project_members (project_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT DEFAULT 'editor', joined_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (project_id, user_id));");
+      } catch(Exception $e) {}
       try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN project_id INTEGER DEFAULT NULL;"); } catch(Exception $e) {}
       try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN category TEXT DEFAULT 'all';"); } catch(Exception $e) {}
       try { $db->exec("ALTER TABLE imageditor_projects ADD COLUMN starred INTEGER DEFAULT 0;"); } catch(Exception $e) {}
+      
       $data = json_decode(file_get_contents('php://input'), true);
       if (!is_array($data)) { send_json(['status' => 'error', 'message' => 'Payload too large or invalid.']); }
       $public_id = $data['public_id'] ?? '';
@@ -21066,18 +21106,27 @@ HTML;
 
       try {
         if ($public_id) {
-          $stmt = $db->prepare("SELECT user_id, category FROM imageditor_projects WHERE public_id = ?");
-          $stmt->execute([$public_id]);
-          $existing = $stmt->fetch();
-          if ($existing) {
-            if ($existing['user_id'] != $user_id) { $category = $existing['category']; }
-            $db->prepare("UPDATE imageditor_projects SET title = ?, width = ?, height = ?, state = ?, category = ?, starred = ?, updated_at = CURRENT_TIMESTAMP WHERE public_id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$title, $width, $height, $state, $category, $starred, $public_id, $user_id, $user_id]);
+          try {
+            $stmt = $db->prepare("SELECT user_id, category FROM imageditor_projects WHERE public_id = ?");
+            $stmt->execute([$public_id]);
+            $existing = $stmt->fetch();
+            if ($existing) {
+              if ($existing['user_id'] != $user_id) { $category = $existing['category'] ?? 'all'; }
+              $db->prepare("UPDATE imageditor_projects SET title = ?, width = ?, height = ?, state = ?, category = ?, starred = ?, updated_at = CURRENT_TIMESTAMP WHERE public_id = ? AND (user_id = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))")->execute([$title, $width, $height, $state, $category, $starred, $public_id, $user_id, $user_id]);
+              send_json(['status' => 'success', 'public_id' => $public_id]);
+            }
+          } catch (Exception $fallbackEx) {
+            $db->prepare("UPDATE imageditor_projects SET title = ?, width = ?, height = ?, state = ?, updated_at = CURRENT_TIMESTAMP WHERE public_id = ? AND user_id = ?")->execute([$title, $width, $height, $state, $public_id, $user_id]);
             send_json(['status' => 'success', 'public_id' => $public_id]);
           }
         }
         
         $public_id = bin2hex(random_bytes(8));
-        $db->prepare("INSERT INTO imageditor_projects (public_id, user_id, title, width, height, state, category, starred, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")->execute([$public_id, $user_id, $title, $width, $height, $state, $category, $starred, $proj_id]);
+        try {
+          $db->prepare("INSERT INTO imageditor_projects (public_id, user_id, title, width, height, state, category, starred, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")->execute([$public_id, $user_id, $title, $width, $height, $state, $category, $starred, $proj_id]);
+        } catch (Exception $fallbackEx) {
+          $db->prepare("INSERT INTO imageditor_projects (public_id, user_id, title, width, height, state) VALUES (?, ?, ?, ?, ?, ?)")->execute([$public_id, $user_id, $title, $width, $height, $state]);
+        }
         send_json(['status' => 'success', 'public_id' => $public_id]);
       } catch (Exception $e) {
         http_response_code(500);
@@ -26980,6 +27029,8 @@ function perform_cover_scan($db) {
     <script src="https://cdn.jsdelivr.net/npm/transliteration@2.3.5/dist/browser/bundle.umd.min.js"></script>
     <!-- Confetti Library -->
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.6.1/dist/mermaid.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
     <?php echo $initialViewJS; ?>
     <style>
       :root {
@@ -27786,6 +27837,13 @@ function perform_cover_scan($db) {
         justify-content: center;
         width: 32px;
         height: 32px;
+      }
+
+      .custom-opt-toggle.rounded-pill {
+        width: auto !important;
+        height: 36px !important;
+        border-radius: 50rem !important;
+        padding: 0 16px !important;
       }
 
       .custom-opt-toggle:hover {
@@ -29425,7 +29483,8 @@ function perform_cover_scan($db) {
         left: 0;
         width: 100%;
         height: 100%;
-        background-color: var(--ytm-bg);
+        background-color: #030303;
+        color: #ffffff;
         z-index: 3000;
         display: flex;
         flex-direction: column;
@@ -29433,6 +29492,105 @@ function perform_cover_scan($db) {
         transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s;
         opacity: 0;
         pointer-events: none;
+      }
+
+      .editor-overlay .editor-header {
+        background-color: #121212 !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+        padding: 0.5rem 1rem !important;
+      }
+
+      .editor-overlay select.form-select {
+        appearance: none;
+        -webkit-appearance: none;
+        background-color: rgba(255, 255, 255, 0.05) !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+        border-radius: 20px !important;
+        color: #ffffff !important;
+        font-weight: 600;
+        font-size: 0.85rem;
+        height: 38px !important;
+        padding: 0 2rem 0 1rem !important;
+        cursor: pointer;
+        transition: all 0.2s ease-in-out;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23aaaaaa'%3E%3Cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E") !important;
+        background-repeat: no-repeat !important;
+        background-position: right 0.75rem center !important;
+        background-size: 12px 12px !important;
+        backdrop-filter: blur(10px);
+      }
+
+      .editor-overlay select.form-select:hover {
+        background-color: rgba(255, 255, 255, 0.1) !important;
+        border-color: rgba(255, 255, 255, 0.25) !important;
+      }
+
+      .editor-overlay select.form-select option {
+        background-color: #121212 !important;
+        color: #ffffff !important;
+      }
+
+      .editor-overlay .editor-toolbar {
+        background-color: #121212 !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+        padding: 0.35rem 0.75rem !important;
+        gap: 0.25rem !important;
+      }
+
+      .editor-overlay .toolbar-btn {
+        border: none;
+        background: transparent;
+        color: #aaaaaa;
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        border-radius: 8px;
+        transition: all 0.15s ease;
+        font-size: 1rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .editor-overlay .toolbar-btn:hover,
+      .editor-overlay .toolbar-btn.active {
+        background-color: rgba(255, 255, 255, 0.1);
+        color: var(--ytm-accent, #ff0000) !important;
+      }
+
+      .editor-overlay .editor-footer {
+        background-color: #121212 !important;
+        border-top: 1px solid rgba(255, 255, 255, 0.1) !important;
+        color: #aaaaaa !important;
+        font-size: 0.8rem !important;
+        padding: 0.4rem 1rem !important;
+      }
+
+      .editor-resizer {
+        width: 6px;
+        background: rgba(255, 255, 255, 0.1);
+        cursor: col-resize;
+        flex-shrink: 0;
+        transition: background-color 0.2s;
+        z-index: 10;
+        display: none;
+      }
+
+      .editor-split-container.split-active .editor-resizer {
+        display: block;
+      }
+
+      .editor-resizer:hover,
+      .editor-resizer.resizing {
+        background-color: var(--ytm-accent, #ff0000) !important;
+      }
+
+      .editor-overlay .form-control:focus,
+      .editor-overlay .form-select:focus {
+        background-color: var(--ytm-surface-2) !important;
+        border-color: var(--ytm-accent) !important;
+        color: var(--ytm-primary-text) !important;
+        box-shadow: 0 0 0 1px var(--ytm-accent) !important;
       }
 
       /* Elevate Editor Sub-Modals Above Editor Overlay Layer */
@@ -29452,7 +29610,7 @@ function perform_cover_scan($db) {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 12px 24px;
+        padding: 8px 16px;
         border-bottom: 1px solid var(--ytm-surface-2);
         background-color: var(--ytm-bg);
       }
@@ -29462,69 +29620,163 @@ function perform_cover_scan($db) {
         display: flex;
         flex-direction: column;
         width: 100%;
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 24px 32px;
+        max-width: 100%;
+        margin: 0;
+        padding: 8px 16px;
         overflow: hidden;
       }
 
       .editor-title {
-        font-size: 2rem;
+        font-size: 1.5rem;
         font-weight: 700;
         border: none;
         outline: none;
         background: transparent;
         color: var(--ytm-primary-text);
         width: 100%;
-        margin-bottom: 16px;
+        margin-bottom: 4px;
       }
 
       .editor-split-container {
         display: flex;
-        flex-direction: column;
+        flex-direction: row;
         flex: 1;
         width: 100%;
         overflow: hidden;
-        gap: 0;
-      }
-
-      .editor-split-container.split-active {
-        flex-direction: row;
-        gap: 16px;
+        background-color: #000000;
       }
 
       .editor-content {
-        flex: 1;
-        width: 100%;
+        height: 100%;
         border: none;
         outline: none;
         background: transparent;
         color: var(--ytm-primary-text);
-        font-size: 1.15rem;
-        line-height: 1.7;
+        font-size: 1.05rem;
+        line-height: 1.6;
         resize: none;
         overflow-y: auto;
-        padding-bottom: 40px;
+        overflow-x: hidden;
+        padding-bottom: 20px;
+        word-break: break-word;
+        overflow-wrap: break-word;
       }
 
-      .editor-split-container.split-active .editor-content {
-        width: 50%;
+      textarea.editor-content {
+        font-family: 'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Consolas, monospace;
+        font-size: 0.95rem;
       }
 
-      .editor-split-container.split-active #editorContent,
-      .editor-split-container.split-active #blogEditorContent {
-        border-right: 1px solid var(--ytm-surface-2);
-        padding-right: 16px;
+      /* Native View Modes */
+      .view-mode-edit > textarea.editor-content,
+      .view-mode-edit > #taskEditorContentArea {
+        width: 100% !important;
+        flex: 1 !important;
+        display: flex !important;
+      }
+      .view-mode-edit > .editor-resizer,
+      .view-mode-edit > div.editor-content:not(#taskEditorContentArea),
+      .view-mode-edit > #taskMarkdownPreview {
+        display: none !important;
+      }
+
+      .view-mode-split > textarea.editor-content,
+      .view-mode-split > #taskEditorContentArea {
+        width: 50% !important;
+        flex: none !important;
+        display: flex !important;
+      }
+      .view-mode-split > .editor-resizer {
+        display: block !important;
+      }
+      .view-mode-split > div.editor-content:not(#taskEditorContentArea),
+      .view-mode-split > #taskMarkdownPreview {
+        flex: 1 !important;
+        min-width: 0 !important;
+        display: block !important;
+        border-left: 1px solid rgba(255, 255, 255, 0.05) !important;
+      }
+
+      .view-mode-preview > textarea.editor-content,
+      .view-mode-preview > #taskEditorContentArea,
+      .view-mode-preview > .editor-resizer {
+        display: none !important;
+      }
+      .view-mode-preview > div.editor-content:not(#taskEditorContentArea),
+      .view-mode-preview > #taskMarkdownPreview {
+        width: 100% !important;
+        flex: 1 !important;
+        display: block !important;
+      }
+
+      #editorMarkdownPreview, #blogEditorMarkdownPreview, #taskMarkdownPreview {
+        word-wrap: break-word !important;
+        overflow-wrap: anywhere !important;
+        white-space: normal !important;
+        overflow-x: hidden !important;
+      }
+      
+      #editorMarkdownPreview pre, #blogEditorMarkdownPreview pre, #taskMarkdownPreview pre {
+        white-space: pre-wrap !important;
+        word-wrap: break-word !important;
+        overflow-x: auto !important;
+        max-width: 100%;
+      }
+      
+      #editorMarkdownPreview img, #blogEditorMarkdownPreview img, #taskMarkdownPreview img {
+        max-width: 100%;
+        height: auto;
+      }
+
+      .editor-resizer {
+        width: 6px;
+        background: rgba(255, 255, 255, 0.08);
+        cursor: col-resize;
+        flex-shrink: 0;
+        transition: background-color 0.2s;
+        z-index: 10;
+        display: none;
+      }
+
+      .editor-resizer:hover,
+      .editor-resizer.resizing {
+        background-color: var(--ytm-accent, #ff0000) !important;
+      }
+
+      .toc-link {
+        color: #aaaaaa;
+        text-decoration: none;
+        display: block;
+        padding: 6px 12px;
+        border-radius: 6px;
+        transition: background 0.2s, color 0.2s;
+      }
+
+      .toc-link:hover {
+        background: rgba(255,255,255,0.1);
+        color: #ffffff;
+      }
+
+      .editor-toolbar {
+        overflow-x: auto;
+        white-space: nowrap;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+      
+      .editor-toolbar::-webkit-scrollbar {
+        display: none;
       }
 
       .editor-footer {
-        padding: 12px 32px;
-        border-top: 1px solid var(--ytm-surface-2);
+        padding: 10px 24px;
+        border-top: 1px solid rgba(255,255,255,0.1);
         display: flex;
         justify-content: space-between;
+        align-items: center;
         font-size: 0.85rem;
-        color: var(--ytm-secondary-text);
-        background-color: var(--ytm-bg);
+        color: #aaaaaa;
+        background-color: #121212;
       }
 
       .floating-presence-container {
@@ -29741,17 +29993,88 @@ function perform_cover_scan($db) {
       }
 
       .editor-toolbar {
-        background-color: var(--ytm-surface-2);
-        padding: 8px;
-        border-radius: 8px;
-        border: 1px solid #404040;
-        margin-bottom: 12px;
+        background-color: var(--ytm-surface);
+        border-bottom: 1px solid var(--ytm-surface-2);
+        padding: 6px 16px !important;
+        overflow-x: auto;
+        overflow-y: hidden;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
+        display: flex;
+        align-items: center;
+        flex-wrap: nowrap !important;
+        gap: 4px !important;
+        width: 100%;
+        flex-shrink: 0;
+      }
+
+      .editor-toolbar::-webkit-scrollbar {
+        height: 0px;
+        display: none;
       }
 
       .editor-toolbar .btn {
         color: var(--ytm-secondary-text);
         transition: all 0.2s;
+        flex-shrink: 0;
+        padding: 6px 10px;
+        font-size: 1.1rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 6px;
       }
+
+      .editor-toolbar .btn:hover {
+        color: var(--ytm-primary-text);
+        background-color: var(--ytm-surface-2);
+      }
+      
+      .editor-toolbar .vr {
+        background-color: #555;
+        width: 1px;
+        min-height: 24px;
+        margin: 0 4px;
+      }
+
+      .mermaid-container {
+        position: relative;
+        overflow: hidden;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        margin: 1.5rem 0;
+        background: #1e1e1e;
+        padding: 1rem;
+        border-radius: 8px;
+        border: 1px solid #404040;
+        min-height: 250px;
+        resize: vertical;
+      }
+
+      .mermaid-container svg {
+        max-width: none !important;
+        width: 100%;
+        height: 100%;
+        cursor: grab;
+      }
+
+      .mermaid-container svg:active { cursor: grabbing; }
+      .mermaid-controls { opacity: 0.15; transition: opacity 0.2s ease; z-index: 10; }
+      .mermaid-container:hover .mermaid-controls, .mermaid-controls:focus-within { opacity: 1; }
+
+      #presentation-mode {
+        position: fixed; inset: 0; background: #0a0a0a; z-index: 999999 !important;
+        display: flex; flex-direction: column; opacity: 0; pointer-events: none; transition: opacity 0.3s ease;
+      }
+
+      #presentation-mode.active { opacity: 1; pointer-events: auto; }
+      #presentation-content { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow-y: auto; padding: 2rem; }
+      .slide-inner { width: 100%; max-width: 900px; font-size: 1.4rem; line-height: 1.7; color: #fff; }
+      .slide-inner h1 { font-size: 3.5rem; text-align: center; margin-bottom: 2rem; border-bottom: none; }
+      .slide-inner h2 { font-size: 2.5rem; color: var(--ytm-accent); border-bottom: none; }
+      .slide-inner h3 { font-size: 2rem; }
+      .slide-inner img { max-height: 60vh; display: block; margin: 0 auto; }
 
       .editor-toolbar .btn:hover {
         color: var(--ytm-primary-text);
@@ -29774,6 +30097,24 @@ function perform_cover_scan($db) {
         border-radius: 8px;
         border: 1px solid #404040;
         transition: border-color 0.2s;
+        min-height: 44px;
+      }
+
+      .task-item-input {
+        flex-grow: 1;
+        border: none;
+        background: transparent;
+        color: var(--ytm-primary-text);
+        outline: none;
+        font-size: 0.95rem;
+        line-height: 1.4;
+        padding: 2px 0;
+        margin: 0;
+        resize: none;
+        overflow: hidden;
+        height: 24px;
+        min-height: 24px;
+        display: block;
       }
 
       .task-item-row:focus-within {
@@ -29786,15 +30127,6 @@ function perform_cover_scan($db) {
         cursor: pointer;
         flex-shrink: 0;
         margin-left: 4px;
-      }
-
-      .task-item-input {
-        flex-grow: 1;
-        border: none;
-        background: transparent;
-        color: var(--ytm-primary-text);
-        outline: none;
-        font-size: 1.05rem;
       }
 
       .task-item-input.completed {
@@ -29942,7 +30274,7 @@ function perform_cover_scan($db) {
 
       @media (max-width: 768px) {
         .editor-body {
-          padding: 20px 24px;
+          padding: 8px 12px;
         }
 
         .find-replace-panel {
@@ -34317,32 +34649,110 @@ function perform_cover_scan($db) {
       </div>
     </div>
 
+
     <div class="editor-overlay" id="editorOverlay">
-      <header class="editor-header">
-        <div class="d-flex align-items-center gap-2">
-          <button class="note-icon-btn" id="closeEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
+      <!-- Single Header Bar -->
+      <header class="editor-header px-2 px-sm-3 py-2 d-flex align-items-center justify-content-between gap-2 flex-nowrap overflow-x-auto" style="scrollbar-width: none;">
+        <!-- Left: Back Button, Icon, Path Slash & Inline Title Rename -->
+        <div class="d-flex align-items-center gap-1 gap-sm-2 text-truncate me-auto" style="min-width: 0;">
+          <button class="btn btn-sm btn-outline-secondary p-1 border-0 me-1 text-light flex-shrink-0" id="closeEditorBtn" title="Back">
+            <i class="bi bi-arrow-left fs-5"></i>
+          </button>
+          <i class="bi bi-journal-album text-warning fs-5 flex-shrink-0"></i>
+          <span class="text-muted opacity-50 flex-shrink-0">/</span>
+          <input type="text" id="editorTitle" class="form-control form-control-sm border-0 bg-transparent text-white fw-bold px-1 px-sm-2" placeholder="Untitled Note" style="max-width: 250px; font-size: 1.05rem; box-shadow: none;">
+          <input type="hidden" id="editorNoteId">
+          <input type="hidden" id="editorNoteType" value="note">
+          <span id="noteSaveStatus" class="fw-bold text-info small flex-shrink-0 ms-2"></span>
         </div>
-        <div class="d-flex align-items-center gap-2 position-relative">
-          <button class="note-icon-btn d-none d-md-inline-block" id="editorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
-          <button class="note-icon-btn" id="editorSplitBtn" title="Toggle Split View"><i class="bi bi-layout-split"></i></button>
-          <button class="note-icon-btn" id="editorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
-          <button class="note-icon-btn" id="editorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
-          <button class="note-icon-btn" id="editorStarBtn" title="Toggle Star"><i class="bi bi-star" id="editorStarIcon"></i></button>
-          <div style="position: relative;" id="editorDropdown">
-            <button class="note-icon-btn" id="editorMoreBtn" title="More Options"><i class="bi bi-three-dots-vertical"></i></button>
-            <div class="editor-dropdown-menu" id="editorMoreMenu">
-              <div class="editor-dropdown-item" id="editorForceSaveBtn"><i class="bi bi-floppy"></i> Save</div>
-              <div class="editor-dropdown-item" id="editorCopyBtn"><i class="bi bi-copy"></i> Copy Content</div>
-              <div class="editor-dropdown-item" id="editorUndoBtn"><i class="bi bi-arrow-counterclockwise"></i> Undo</div>
-              <div class="editor-dropdown-item" id="editorRedoBtn"><i class="bi bi-arrow-clockwise"></i> Redo</div>
-              <div class="editor-dropdown-item text-info fw-bold" id="editorMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</div>
-              <div class="editor-dropdown-item" id="editorMarkdownHelpBtn" data-bs-toggle="modal" data-bs-target="#markdown-info-modal"><i class="bi bi-info-circle"></i> Guide</div>
-              <div class="editor-dropdown-item" id="editorDownloadModalBtn" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Note...</div>
-              <div class="editor-dropdown-item text-danger" id="editorDeleteBtn"><i class="bi bi-trash2"></i> Delete</div>
-            </div>
+
+        <!-- Right: View Modes, Star & Data Dropdown -->
+        <div class="d-flex align-items-center gap-2 flex-shrink-0 ms-auto">
+          <div class="d-flex align-items-center gap-1 bg-dark rounded-pill p-1 border border-secondary shadow-sm flex-shrink-0">
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill border-0 px-3 fw-bold active" id="editorModeEditBtn" title="Editor"><i class="bi bi-pencil-fill me-1"></i> Edit</button>
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill border-0 px-3 fw-bold d-none d-sm-inline-flex" id="editorSplitBtn" title="Split View"><i class="bi bi-columns me-1"></i> Split</button>
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill border-0 px-3 fw-bold" id="editorMarkdownBtn" title="Preview"><i class="bi bi-eye-fill me-1"></i> View</button>
+          </div>
+
+          <button class="note-icon-btn flex-shrink-0" id="editorStarBtn" title="Toggle Star"><i class="bi bi-star" id="editorStarIcon"></i></button>
+
+          <div class="position-relative flex-shrink-0 custom-opt-dropdown" id="editorDropdown">
+            <button class="btn btn-sm btn-outline-light rounded-pill px-3 fw-bold shadow-sm d-flex align-items-center gap-2 custom-opt-toggle" type="button" id="editorMoreBtn" style="border-color: rgba(255,255,255,0.2); white-space: nowrap; width: auto !important; height: 36px !important; border-radius: 50rem !important;">
+              <i class="bi bi-list"></i> Menu
+            </button>
+            <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu dropdown-menu-end" id="editorMoreMenu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 220px;">
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="editorForceSaveBtn"><i class="bi bi-floppy"></i> Save Note</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="editorCopyBtn"><i class="bi bi-copy"></i> Copy Content</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="editorUndoBtn"><i class="bi bi-arrow-counterclockwise"></i> Undo</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="editorRedoBtn"><i class="bi bi-arrow-clockwise"></i> Redo</a></li>
+              <li><hr class="dropdown-divider border-secondary"></li>
+              <li><a class="dropdown-item text-info fw-bold d-flex align-items-center gap-2" href="#" id="editorMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="editorMarkdownHelpBtn" data-bs-toggle="modal" data-bs-target="#markdown-info-modal"><i class="bi bi-info-circle"></i> Formatting Guide</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="editorDownloadModalBtn" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Note...</a></li>
+              <li><hr class="dropdown-divider border-secondary"></li>
+              <li><a class="dropdown-item text-danger d-flex align-items-center gap-2" href="#" id="editorDeleteBtn"><i class="bi bi-trash2"></i> Delete Note</a></li>
+            </ul>
           </div>
         </div>
       </header>
+
+      <!-- Rich Text Formatting Toolbar -->
+      <div class="px-2 px-sm-3 py-2" style="background-color: #030303;">
+        <div class="editor-toolbar d-flex flex-nowrap align-items-center gap-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #121212; border: 1px solid rgba(255,255,255,0.08); overflow-x: auto; scrollbar-width: none;">
+          <!-- Category & Controls Moved to Second Header -->
+          <select id="editorCategorySelect" class="form-select form-select-sm flex-shrink-0" style="width: auto; max-width: 140px; height: 36px;"></select>
+          
+          <button class="btn btn-sm btn-outline-success text-white rounded-pill border-0 fw-bold px-3 d-inline-flex align-items-center gap-2 shadow-sm flex-shrink-0" id="editorPresentBtn" title="Start Presentation" style="background-color: rgba(25, 135, 84, 0.2); height: 36px;">
+            <i class="bi bi-play-fill fs-5"></i> Present
+          </button>
+          
+          <button class="toolbar-btn flex-shrink-0" id="editorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
+          
+          <button class="toolbar-btn flex-shrink-0" id="editorTocBtn" data-bs-toggle="offcanvas" data-bs-target="#tocOffcanvasNote" title="Table of Contents"><i class="bi bi-list-nested"></i></button>
+
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+
+          <button class="toolbar-btn flex-shrink-0" id="editorUndoToolbarBtn" title="Undo (Ctrl+Z)"><i class="bi bi-arrow-counterclockwise"></i></button>
+          <button class="toolbar-btn flex-shrink-0" id="editorRedoToolbarBtn" title="Redo (Ctrl+Y)"><i class="bi bi-arrow-clockwise"></i></button>
+          
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+          
+          <button class="toolbar-btn flex-shrink-0" id="editorFindBtn" title="Find & Replace (Ctrl+F)"><i class="bi bi-search"></i></button>
+          
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+          
+          <button class="toolbar-btn flex-shrink-0" data-md="bold" title="Bold"><i class="bi bi-type-bold"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="italic" title="Italic"><i class="bi bi-type-italic"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="spoiler" title="Spoiler"><i class="bi bi-eye-slash"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="heading" title="Heading"><i class="bi bi-type-h1"></i></button>
+          
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+          
+          <button class="toolbar-btn flex-shrink-0" data-md="ul" title="Bullet List"><i class="bi bi-list-ul"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="ol" title="Numbered List"><i class="bi bi-list-ol"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="task" title="Task List"><i class="bi bi-ui-checks"></i></button>
+          
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+          
+          <button class="toolbar-btn flex-shrink-0" data-md="quote" title="Blockquote"><i class="bi bi-quote"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="code" title="Code Block"><i class="bi bi-code-slash"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="table" title="Table"><i class="bi bi-table"></i></button>
+          
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+          
+          <button class="toolbar-btn flex-shrink-0" data-md="align-left" title="Align Left"><i class="bi bi-text-left"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="align-center" title="Align Center"><i class="bi bi-text-center"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="align-right" title="Align Right"><i class="bi bi-text-right"></i></button>
+          
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+          
+          <button class="toolbar-btn flex-shrink-0" data-md="link" title="Link"><i class="bi bi-link-45deg"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="image" title="Image"><i class="bi bi-image"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="video" title="Video"><i class="bi bi-camera-video"></i></button>
+          <button class="toolbar-btn text-warning flex-shrink-0" data-md="mermaid" title="Mermaid Diagram"><i class="bi bi-diagram-3"></i></button>
+        </div>
+      </div>
 
       <div class="find-replace-panel" id="findReplacePanel">
         <div class="d-flex justify-content-between align-items-center mb-2 fw-bold text-white">
@@ -34368,86 +34778,144 @@ function perform_cover_scan($db) {
         </div>
       </div>
 
-      <div class="editor-body position-relative">
+      <div class="editor-body position-relative p-0 d-flex flex-column h-100 bg-black">
         <div id="editorFloatingPresence" class="floating-presence-container"></div>
-        <div class="flex-shrink-0 mb-4">
-          <input type="hidden" id="editorNoteId">
-          <input type="hidden" id="editorNoteType" value="note">
-          <input type="text" class="editor-title" id="editorTitle" placeholder="Note Title" />
-          <div class="editor-meta-container">
-            <div class="d-flex align-items-center gap-2">
-              <span id="editorDate" class="fw-medium"></span>
-              <span id="noteSaveStatus" class="fw-bold text-info"></span>
-            </div>
-            <div class="editor-meta-divider"></div>
-            <div class="editor-meta-item">
-              <i class="bi bi-folder2 text-secondary"></i>
-              <select id="editorCategorySelect" class="editor-meta-select">
-                <option value="all">Uncategorized</option>
-              </select>
-            </div>
-          </div>
-        </div>
-        <div class="editor-toolbar d-flex flex-wrap gap-1">
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="bold" title="Bold"><i class="bi bi-type-bold"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="italic" title="Italic"><i class="bi bi-type-italic"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="heading" title="Heading"><i class="bi bi-type-h1"></i></button>
-          <div class="vr bg-secondary mx-1 opacity-50"></div>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="ul" title="Bullet List"><i class="bi bi-list-ul"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="ol" title="Numbered List"><i class="bi bi-list-ol"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="task" title="Task List"><i class="bi bi-ui-checks"></i></button>
-          <div class="vr bg-secondary mx-1 opacity-50"></div>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="quote" title="Blockquote"><i class="bi bi-quote"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="code" title="Code Block"><i class="bi bi-code-slash"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="table" title="Table"><i class="bi bi-table"></i></button>
-          <div class="vr bg-secondary mx-1 opacity-50"></div>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-left" title="Align Left"><i class="bi bi-text-left"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-center" title="Align Center"><i class="bi bi-text-center"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-right" title="Align Right"><i class="bi bi-text-right"></i></button>
-          <div class="vr bg-secondary mx-1 opacity-50"></div>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="link" title="Link"><i class="bi bi-link-45deg"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="image" title="Image URL & Resize"><i class="bi bi-image"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="video" title="Video / YouTube URL"><i class="bi bi-camera-video"></i></button>
-        </div>
-        <div id="noteSplitContainer" class="editor-split-container">
-          <textarea class="editor-content" id="editorContent" placeholder="Start typing here... (Markdown & Task-lists supported)"></textarea>
-          <div class="editor-content d-none" id="editorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
+        <div id="noteSplitContainer" class="editor-split-container flex-grow-1 w-100">
+          <textarea class="editor-content p-3 border-0 rounded-0" id="editorContent" placeholder="Start typing here... (Markdown & Task-lists supported)" style="font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; background: transparent;"></textarea>
+          <div class="editor-resizer" id="noteResizer"></div>
+          <div class="editor-content p-3 d-none rounded-0" id="editorMarkdownPreview" style="user-select: text; overflow-y: auto; background: var(--ytm-bg);"></div>
         </div>
       </div>
 
       <footer class="editor-footer">
-        <span id="editorWordCount">0 words</span>
-        <span id="editorCharCount">0 characters</span>
+        <div class="d-flex align-items-center gap-3 w-100">
+          <span id="editorWordCount">0 words</span>
+          <span id="editorCharCount">0 characters</span>
+          <span id="editorDate" class="fw-bold d-none d-sm-inline ms-4 text-white"></span>
+          <span id="editorReadTime" class="text-info fw-bold ms-auto"><i class="bi bi-book"></i> 0 min read</span>
+        </div>
       </footer>
+
+      <!-- TOC Offcanvas -->
+      <div class="offcanvas offcanvas-end bg-dark text-light shadow" tabindex="-1" id="tocOffcanvasNote" style="width: 300px; z-index: 100000;">
+        <div class="offcanvas-header border-bottom border-secondary">
+          <h6 class="offcanvas-title text-uppercase text-muted fw-bold"><i class="bi bi-list-nested me-2"></i>Table of Contents</h6>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button>
+        </div>
+        <div class="offcanvas-body">
+          <div id="toc-list-note" class="d-flex flex-column small"></div>
+        </div>
+      </div>
     </div>
 
     <div class="editor-overlay" id="blogEditorOverlay">
-      <header class="editor-header">
-        <div class="d-flex align-items-center gap-2">
-          <button class="note-icon-btn" id="closeBlogEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
+      <!-- Single Header Bar -->
+      <header class="editor-header px-2 px-sm-3 py-2 d-flex align-items-center justify-content-between gap-2 flex-nowrap overflow-x-auto" style="scrollbar-width: none;">
+        <!-- Left: Back Button, Icon, Path Slash & Inline Title Rename -->
+        <div class="d-flex align-items-center gap-1 gap-sm-2 text-truncate me-auto" style="min-width: 0;">
+          <button class="btn btn-sm btn-outline-secondary p-1 border-0 me-1 text-light flex-shrink-0" id="closeBlogEditorBtn" title="Back">
+            <i class="bi bi-arrow-left fs-5"></i>
+          </button>
+          <i class="bi bi-journal-richtext text-danger fs-5 flex-shrink-0"></i>
+          <span class="text-muted opacity-50 flex-shrink-0">/</span>
+          <input type="text" id="blogEditorTitle" class="form-control form-control-sm border-0 bg-transparent text-white fw-bold px-1 px-sm-2" placeholder="Blog Title" style="max-width: 250px; font-size: 1.05rem; box-shadow: none;">
+          <input type="hidden" id="blogEditorId">
+          <input type="hidden" id="blogEditorPublicId">
+          <span id="blogSaveStatus" class="fw-bold text-info small flex-shrink-0 ms-2"></span>
         </div>
-        <div class="d-flex align-items-center gap-2 position-relative">
-          <button class="note-icon-btn d-none d-md-inline-block" id="blogEditorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
-          <button class="note-icon-btn" id="blogEditorSplitBtn" title="Toggle Split View"><i class="bi bi-layout-split"></i></button>
-          <button class="note-icon-btn" id="blogEditorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
-          <button class="note-icon-btn" id="blogEditorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
-          <div style="position: relative;">
-            <button class="note-icon-btn" id="blogEditorMoreBtn" title="More Options" data-bs-toggle="dropdown" aria-expanded="false"><i class="bi bi-three-dots-vertical"></i></button>
-            <div class="dropdown-menu dropdown-menu-dark shadow-lg editor-dropdown-menu" style="right:0; left:auto; top:100%; border: 1px solid #404040;">
-              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorForceSaveBtn" style="cursor: pointer;"><i class="bi bi-floppy"></i> Save</div>
-              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorCopyBtn" style="cursor: pointer;"><i class="bi bi-copy"></i> Copy Content</div>
-              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorUndoBtn" style="cursor: pointer;"><i class="bi bi-arrow-counterclockwise"></i> Undo</div>
-              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorRedoBtn" style="cursor: pointer;"><i class="bi bi-arrow-clockwise"></i> Redo</div>
-              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-info fw-bold" id="blogEditorMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal" style="cursor: pointer;"><i class="bi bi-arrow-left-right"></i> Move to Project...</div>
-              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" data-bs-toggle="modal" data-bs-target="#markdown-info-modal" style="cursor: pointer;"><i class="bi bi-info-circle"></i> Guide</div>
-              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" data-bs-toggle="modal" data-bs-target="#download-note-modal" style="cursor: pointer;"><i class="bi bi-download"></i> Download Blog...</div>
-              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-white" id="blogEditorViewBtn" style="cursor: pointer;"><i class="bi bi-box-arrow-up-right text-info"></i> View Blog</div>
-              <div class="dropdown-item d-flex align-items-center gap-3 py-2 text-danger" id="blogEditorDeleteBtn" style="cursor: pointer;"><i class="bi bi-trash2"></i> Delete</div>
-            </div>
+
+        <!-- Right: View Modes & Data Dropdown -->
+        <div class="d-flex align-items-center gap-2 flex-shrink-0 ms-auto">
+          <div class="d-flex align-items-center gap-1 bg-dark rounded-pill p-1 border border-secondary shadow-sm flex-shrink-0">
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill border-0 px-3 fw-bold active" id="blogEditorModeEditBtn" title="Editor"><i class="bi bi-pencil-fill me-1"></i> Edit</button>
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill border-0 px-3 fw-bold d-none d-sm-inline-flex" id="blogEditorSplitBtn" title="Split View"><i class="bi bi-columns me-1"></i> Split</button>
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill border-0 px-3 fw-bold" id="blogEditorMarkdownBtn" title="Preview"><i class="bi bi-eye-fill me-1"></i> View</button>
+          </div>
+
+          <div class="position-relative flex-shrink-0 custom-opt-dropdown" id="blogEditorDropdown">
+            <button class="btn btn-sm btn-outline-light rounded-pill px-3 fw-bold shadow-sm d-flex align-items-center gap-2 custom-opt-toggle" type="button" id="blogEditorMoreBtn" style="border-color: rgba(255,255,255,0.2); white-space: nowrap; width: auto !important; height: 36px !important; border-radius: 50rem !important;">
+              <i class="bi bi-list"></i> Menu
+            </button>
+            <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu dropdown-menu-end" id="blogEditorMoreMenu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 220px;">
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="blogEditorForceSaveBtn"><i class="bi bi-floppy"></i> Save Blog</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="blogEditorCopyBtn"><i class="bi bi-copy"></i> Copy Content</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="blogEditorUndoBtn"><i class="bi bi-arrow-counterclockwise"></i> Undo</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="blogEditorRedoBtn"><i class="bi bi-arrow-clockwise"></i> Redo</a></li>
+              <li><hr class="dropdown-divider border-secondary"></li>
+              <li><a class="dropdown-item text-info fw-bold d-flex align-items-center gap-2" href="#" id="blogEditorMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" data-bs-toggle="modal" data-bs-target="#markdown-info-modal"><i class="bi bi-info-circle"></i> Formatting Guide</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Blog...</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="blogEditorViewBtn"><i class="bi bi-box-arrow-up-right text-info"></i> View Published Blog</a></li>
+              <li><hr class="dropdown-divider border-secondary"></li>
+              <li><a class="dropdown-item text-danger d-flex align-items-center gap-2" href="#" id="blogEditorDeleteBtn"><i class="bi bi-trash2"></i> Delete Blog</a></li>
+            </ul>
           </div>
         </div>
       </header>
+
+      <!-- Rich Text Formatting Toolbar -->
+      <div class="px-2 px-sm-3 py-2" style="background-color: #030303;" id="blogEditorToolbar">
+        <div class="editor-toolbar d-flex flex-nowrap align-items-center gap-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #121212; border: 1px solid rgba(255,255,255,0.08); overflow-x: auto; scrollbar-width: none;">
+          <!-- Status, Category & Controls Moved to Second Header -->
+          <select id="blogEditorStatusSelect" class="form-select form-select-sm flex-shrink-0" style="width: auto; max-width: 120px; height: 36px;">
+            <option value="private">Draft</option>
+            <option value="public">Published</option>
+          </select>
+
+          <select id="blogEditorCategorySelect" class="form-select form-select-sm flex-shrink-0" style="width: auto; max-width: 130px; height: 36px;"></select>
+
+          <button class="btn btn-sm btn-outline-success text-white rounded-pill border-0 fw-bold px-3 d-inline-flex align-items-center gap-2 shadow-sm flex-shrink-0" id="blogEditorPresentBtn" title="Start Presentation" style="background-color: rgba(25, 135, 84, 0.2); height: 36px;">
+            <i class="bi bi-play-fill fs-5"></i> Present
+          </button>
+
+          <button class="toolbar-btn flex-shrink-0" id="blogEditorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
+
+          <button class="toolbar-btn flex-shrink-0" id="blogEditorTocBtn" data-bs-toggle="offcanvas" data-bs-target="#tocOffcanvasBlog" title="Table of Contents"><i class="bi bi-list-nested"></i></button>
+
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+
+          <button class="toolbar-btn flex-shrink-0" id="blogEditorUndoToolbarBtn" title="Undo (Ctrl+Z)"><i class="bi bi-arrow-counterclockwise"></i></button>
+          <button class="toolbar-btn flex-shrink-0" id="blogEditorRedoToolbarBtn" title="Redo (Ctrl+Y)"><i class="bi bi-arrow-clockwise"></i></button>
+
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+
+          <button class="toolbar-btn flex-shrink-0" id="blogEditorFindBtn" title="Find & Replace (Ctrl+F)"><i class="bi bi-search"></i></button>
+
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+
+          <button class="toolbar-btn flex-shrink-0" data-md="bold" title="Bold"><i class="bi bi-type-bold"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="italic" title="Italic"><i class="bi bi-type-italic"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="spoiler" title="Spoiler"><i class="bi bi-eye-slash"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="heading" title="Heading"><i class="bi bi-type-h1"></i></button>
+
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+
+          <button class="toolbar-btn flex-shrink-0" data-md="ul" title="Bullet List"><i class="bi bi-list-ul"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="ol" title="Numbered List"><i class="bi bi-list-ol"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="task" title="Task List"><i class="bi bi-ui-checks"></i></button>
+
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+
+          <button class="toolbar-btn flex-shrink-0" data-md="quote" title="Blockquote"><i class="bi bi-quote"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="code" title="Code Block"><i class="bi bi-code-slash"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="table" title="Table"><i class="bi bi-table"></i></button>
+
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+
+          <button class="toolbar-btn flex-shrink-0" data-md="align-left" title="Align Left"><i class="bi bi-text-left"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="align-center" title="Align Center"><i class="bi bi-text-center"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="align-right" title="Align Right"><i class="bi bi-text-right"></i></button>
+
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+
+          <button class="toolbar-btn flex-shrink-0" data-md="link" title="Link"><i class="bi bi-link-45deg"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="image" title="Image"><i class="bi bi-image"></i></button>
+          <button class="toolbar-btn flex-shrink-0" data-md="video" title="Video"><i class="bi bi-camera-video"></i></button>
+          <button class="toolbar-btn text-warning flex-shrink-0" data-md="mermaid" title="Mermaid Diagram"><i class="bi bi-diagram-3"></i></button>
+        </div>
+      </div>
+
       <div class="find-replace-panel" id="blogFindReplacePanel">
         <div class="d-flex justify-content-between align-items-center mb-2 fw-bold text-white">
           <span>Find and Replace</span>
@@ -34472,90 +34940,98 @@ function perform_cover_scan($db) {
         </div>
       </div>
 
-      <div class="editor-body position-relative">
+      <div class="editor-body position-relative p-0 d-flex flex-column h-100 bg-black">
         <div id="blogFloatingPresence" class="floating-presence-container"></div>
-        <div class="flex-shrink-0 mb-4">
-          <input type="hidden" id="blogEditorId">
-          <input type="hidden" id="blogEditorPublicId">
-          <input type="text" class="editor-title" id="blogEditorTitle" placeholder="Blog Title" />
-          <div class="editor-meta-container">
-            <div class="d-flex align-items-center gap-2">
-              <span id="blogEditorDate" class="fw-medium"></span>
-              <span id="blogSaveStatus" class="fw-bold text-info"></span>
-            </div>
-            <div class="editor-meta-divider"></div>
-            <div class="editor-meta-item">
-              <i class="bi bi-eye text-secondary"></i>
-              <select id="blogEditorStatusSelect" class="editor-meta-select">
-                <option value="private">Private / Unpublished</option>
-                <option value="public">Public / Published</option>
-              </select>
-            </div>
-            <div class="editor-meta-divider"></div>
-            <div class="editor-meta-item">
-              <i class="bi bi-folder2 text-secondary"></i>
-              <select id="blogEditorCategorySelect" class="editor-meta-select">
-                <option value="all">Uncategorized</option>
-              </select>
-            </div>
-          </div>
-        </div>
-        <div class="editor-toolbar d-flex flex-wrap gap-1" id="blogEditorToolbar">
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="bold" title="Bold"><i class="bi bi-type-bold"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="italic" title="Italic"><i class="bi bi-type-italic"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="heading" title="Heading"><i class="bi bi-type-h1"></i></button>
-          <div class="vr bg-secondary mx-1 opacity-50"></div>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="ul" title="Bullet List"><i class="bi bi-list-ul"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="ol" title="Numbered List"><i class="bi bi-list-ol"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="task" title="Task List"><i class="bi bi-ui-checks"></i></button>
-          <div class="vr bg-secondary mx-1 opacity-50"></div>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="quote" title="Blockquote"><i class="bi bi-quote"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="code" title="Code Block"><i class="bi bi-code-slash"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="table" title="Table"><i class="bi bi-table"></i></button>
-          <div class="vr bg-secondary mx-1 opacity-50"></div>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-left" title="Align Left"><i class="bi bi-text-left"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-center" title="Align Center"><i class="bi bi-text-center"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="align-right" title="Align Right"><i class="bi bi-text-right"></i></button>
-          <div class="vr bg-secondary mx-1 opacity-50"></div>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="link" title="Link"><i class="bi bi-link-45deg"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="image" title="Image URL & Resize"><i class="bi bi-image"></i></button>
-          <button class="btn btn-sm btn-outline-secondary border-0" data-md="video" title="Video / YouTube URL"><i class="bi bi-camera-video"></i></button>
-        </div>
-        <div id="blogSplitContainer" class="editor-split-container">
-          <textarea class="editor-content" id="blogEditorContent" placeholder="Write your amazing blog here... (Markdown supported)"></textarea>
-          <div class="editor-content d-none" id="blogEditorMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
+        <div id="blogSplitContainer" class="editor-split-container flex-grow-1 w-100">
+          <textarea class="editor-content p-3 border-0 rounded-0" id="blogEditorContent" placeholder="Write your amazing blog here... (Markdown supported)" style="font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; background: transparent;"></textarea>
+          <div class="editor-resizer" id="blogResizer"></div>
+          <div class="editor-content p-3 d-none rounded-0" id="blogEditorMarkdownPreview" style="user-select: text; overflow-y: auto; background: var(--ytm-bg);"></div>
         </div>
       </div>
+
       <footer class="editor-footer">
-        <span id="blogEditorWordCount">0 words</span>
-        <span id="blogEditorCharCount">0 characters</span>
+        <div class="d-flex align-items-center gap-3 w-100">
+          <span id="blogEditorWordCount">0 words</span>
+          <span id="blogEditorCharCount">0 characters</span>
+          <span id="blogEditorDate" class="fw-bold d-none d-sm-inline ms-4 text-white"></span>
+          <span id="blogEditorReadTime" class="text-info fw-bold ms-auto"><i class="bi bi-book"></i> 0 min read</span>
+        </div>
       </footer>
+
+      <!-- TOC Offcanvas for Blogs -->
+      <div class="offcanvas offcanvas-end bg-dark text-light shadow" tabindex="-1" id="tocOffcanvasBlog" style="width: 300px; z-index: 100000;">
+        <div class="offcanvas-header border-bottom border-secondary">
+          <h6 class="offcanvas-title text-uppercase text-muted fw-bold"><i class="bi bi-list-nested me-2"></i>Table of Contents</h6>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button>
+        </div>
+        <div class="offcanvas-body">
+          <div id="toc-list-blog" class="d-flex flex-column small"></div>
+        </div>
+      </div>
     </div>
 
     <div class="editor-overlay" id="taskEditorOverlay">
-      <header class="editor-header">
-        <div class="d-flex align-items-center gap-2">
-          <button class="note-icon-btn" id="closeTaskEditorBtn" title="Back"><i class="bi bi-arrow-left fs-4"></i></button>
+      <!-- Single Header Bar -->
+      <header class="editor-header px-2 px-sm-3 py-2 d-flex align-items-center justify-content-between gap-2 flex-nowrap overflow-x-auto" style="scrollbar-width: none;">
+        <!-- Left: Back Button, Icon, Path Slash & Inline Title Rename -->
+        <div class="d-flex align-items-center gap-1 gap-sm-2 text-truncate me-auto" style="min-width: 0;">
+          <button class="btn btn-sm btn-outline-secondary p-1 border-0 me-1 text-light flex-shrink-0" id="closeTaskEditorBtn" title="Back">
+            <i class="bi bi-arrow-left fs-5"></i>
+          </button>
+          <i class="bi bi-check2-square text-success fs-5 flex-shrink-0"></i>
+          <span class="text-muted opacity-50 flex-shrink-0">/</span>
+          <input type="text" id="taskEditorTitle" class="form-control form-control-sm border-0 bg-transparent text-white fw-bold px-1 px-sm-2" placeholder="Task List Title" style="max-width: 250px; font-size: 1.05rem; box-shadow: none;">
+          <input type="hidden" id="taskEditorId">
+          <span id="taskSaveStatus" class="fw-bold text-info small flex-shrink-0 ms-2"></span>
         </div>
-        <div class="d-flex align-items-center gap-2 position-relative">
-          <button class="note-icon-btn d-none d-md-inline-block" id="taskEditorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
-          <button class="note-icon-btn" id="taskEditorSplitBtn" title="Toggle Split View"><i class="bi bi-layout-split"></i></button>
-          <button class="note-icon-btn" id="taskEditorMarkdownBtn" title="Toggle Markdown View"><i class="bi bi-markdown"></i></button>
-          <button class="note-icon-btn" id="taskEditorFindBtn" title="Find & Replace"><i class="bi bi-search"></i></button>
-          <button class="note-icon-btn" id="taskEditorStarBtn" title="Toggle Star"><i class="bi bi-star" id="taskEditorStarIcon"></i></button>
-          <div style="position: relative;">
-            <button class="note-icon-btn" id="taskEditorMoreBtn" title="More Options"><i class="bi bi-three-dots-vertical"></i></button>
-            <div class="editor-dropdown-menu" id="taskEditorMoreMenu">
-              <div class="editor-dropdown-item" id="taskEditorForceSaveBtn"><i class="bi bi-floppy"></i> Save</div>
-              <div class="editor-dropdown-item" id="taskEditorCopyBtn"><i class="bi bi-copy"></i> Copy Content</div>
-              <div class="editor-dropdown-item text-info fw-bold" id="taskMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</div>
-              <div class="editor-dropdown-item" id="taskEditorDownloadModalBtn" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Task List...</div>
-              <div class="editor-dropdown-item text-danger" id="taskEditorDeleteBtn"><i class="bi bi-trash2"></i> Delete List</div>
-            </div>
+
+        <!-- Right: View Modes, Star & Data Dropdown -->
+        <div class="d-flex align-items-center gap-2 flex-shrink-0 ms-auto">
+          <div class="d-flex align-items-center gap-1 bg-dark rounded-pill p-1 border border-secondary shadow-sm flex-shrink-0">
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill border-0 px-3 fw-bold active" id="taskEditorModeEditBtn" title="Editor"><i class="bi bi-pencil-fill me-1"></i> Edit</button>
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill border-0 px-3 fw-bold d-none d-sm-inline-flex" id="taskEditorSplitBtn" title="Split View"><i class="bi bi-columns me-1"></i> Split</button>
+            <button type="button" class="btn btn-sm btn-outline-light rounded-pill border-0 px-3 fw-bold" id="taskEditorMarkdownBtn" title="Preview"><i class="bi bi-eye-fill me-1"></i> View</button>
+          </div>
+
+          <button class="note-icon-btn flex-shrink-0" id="taskEditorStarBtn" title="Toggle Star"><i class="bi bi-star" id="taskEditorStarIcon"></i></button>
+
+          <div class="position-relative flex-shrink-0 custom-opt-dropdown" id="taskEditorDropdown">
+            <button class="btn btn-sm btn-outline-light rounded-pill px-3 fw-bold shadow-sm d-flex align-items-center gap-2 custom-opt-toggle" type="button" id="taskEditorMoreBtn" style="border-color: rgba(255,255,255,0.2); white-space: nowrap; width: auto !important; height: 36px !important; border-radius: 50rem !important;">
+              <i class="bi bi-list"></i> Menu
+            </button>
+            <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu dropdown-menu-end" id="taskEditorMoreMenu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 220px;">
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="taskEditorForceSaveBtn"><i class="bi bi-floppy"></i> Save List</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="taskEditorCopyBtn"><i class="bi bi-copy"></i> Copy Tasks</a></li>
+              <li><hr class="dropdown-divider border-secondary"></li>
+              <li><a class="dropdown-item text-info fw-bold d-flex align-items-center gap-2" href="#" id="taskMoveProjectBtn" data-bs-toggle="modal" data-bs-target="#project-move-modal"><i class="bi bi-arrow-left-right"></i> Move to Project...</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" data-bs-toggle="modal" data-bs-target="#markdown-info-modal"><i class="bi bi-info-circle"></i> Formatting Guide</a></li>
+              <li><a class="dropdown-item text-light d-flex align-items-center gap-2" href="#" id="taskEditorDownloadModalBtn" data-bs-toggle="modal" data-bs-target="#download-note-modal"><i class="bi bi-download"></i> Download Task List...</a></li>
+              <li><hr class="dropdown-divider border-secondary"></li>
+              <li><a class="dropdown-item text-danger d-flex align-items-center gap-2" href="#" id="taskEditorDeleteBtn"><i class="bi bi-trash2"></i> Delete List</a></li>
+            </ul>
           </div>
         </div>
       </header>
+
+      <!-- Rich Text / Task Toolbar -->
+      <div class="px-2 px-sm-3 py-2" style="background-color: #030303;" id="taskEditorToolbar">
+        <div class="editor-toolbar d-flex flex-nowrap align-items-center gap-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #121212; border: 1px solid rgba(255,255,255,0.08); overflow-x: auto; scrollbar-width: none;">
+          <select id="taskEditorCategorySelect" class="form-select form-select-sm flex-shrink-0" style="width: auto; max-width: 140px; height: 36px;"></select>
+
+          <button class="toolbar-btn flex-shrink-0" id="taskEditorPipBtn" title="Pop Out PiP"><i class="bi bi-pip"></i></button>
+          <button class="toolbar-btn flex-shrink-0" id="taskEditorTocBtn" data-bs-toggle="offcanvas" data-bs-target="#tocOffcanvasTask" title="Table of Contents"><i class="bi bi-list-nested"></i></button>
+
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+
+          <button class="toolbar-btn flex-shrink-0" id="taskEditorFindBtn" title="Find in Tasks (Ctrl+F)"><i class="bi bi-search"></i></button>
+
+          <div class="vr mx-1 bg-secondary opacity-25 flex-shrink-0" style="width: 2px; min-height: 24px;"></div>
+
+          <button class="btn btn-sm btn-danger rounded-pill px-3 py-1 fw-bold text-white d-inline-flex align-items-center gap-1 shadow-sm flex-shrink-0" id="addTaskItemBtnToolbar" title="Add New Item">
+            <i class="bi bi-plus-lg"></i> Add Item
+          </button>
+        </div>
+      </div>
 
       <div class="find-replace-panel" id="taskFindReplacePanel">
         <div class="d-flex justify-content-between align-items-center mb-2 fw-bold text-white">
@@ -34581,31 +35057,35 @@ function perform_cover_scan($db) {
         </div>
       </div>
 
-      <div class="editor-body position-relative">
+      <div class="editor-body position-relative p-0 d-flex flex-column h-100 bg-black">
         <div id="taskFloatingPresence" class="floating-presence-container"></div>
-        <div class="flex-shrink-0 mb-4">
-          <input type="hidden" id="taskEditorId">
-          <input type="text" class="editor-title" id="taskEditorTitle" placeholder="Task List Title" />
-          <div class="editor-meta-container">
-            <div class="d-flex align-items-center gap-2">
-              <span id="taskEditorDate" class="fw-medium"></span>
-              <span id="taskSaveStatus" class="fw-bold text-info"></span>
-            </div>
-            <div class="editor-meta-divider"></div>
-            <div class="editor-meta-item">
-              <i class="bi bi-folder2 text-secondary"></i>
-              <select id="taskEditorCategorySelect" class="editor-meta-select">
-                <option value="all">Uncategorized</option>
-              </select>
-            </div>
-          </div>
-        </div>
-        <div id="taskSplitContainer" class="editor-split-container">
-          <div class="editor-content p-0" id="taskEditorContentArea" style="display: flex; flex-direction: column;">
+        <div id="taskSplitContainer" class="editor-split-container flex-grow-1 w-100">
+          <div class="editor-content p-3 border-0 rounded-0 d-flex flex-column h-100" id="taskEditorContentArea" style="background: transparent;">
             <div class="task-list-container flex-grow-1 overflow-auto pe-2" id="taskItemsContainer"></div>
-            <button class="btn btn-outline-danger w-100 mt-3 fw-bold flex-shrink-0" id="addTaskItemBtn" style="border-style: dashed; padding: 12px;"><i class="bi bi-plus-lg"></i> Add New Task</button>
+            <button class="btn btn-outline-danger w-100 mt-3 fw-bold flex-shrink-0" id="addTaskItemBtn" style="border-style: dashed; padding: 12px; border-radius: 12px;"><i class="bi bi-plus-lg"></i> Add New Task</button>
           </div>
-          <div class="editor-content d-none" id="taskMarkdownPreview" style="user-select: text; padding: 1rem 0;"></div>
+          <div class="editor-resizer" id="taskResizer"></div>
+          <div class="editor-content p-3 d-none rounded-0" id="taskMarkdownPreview" style="user-select: text; overflow-y: auto; background: var(--ytm-bg);"></div>
+        </div>
+      </div>
+
+      <footer class="editor-footer">
+        <div class="d-flex align-items-center gap-3 w-100">
+          <span id="taskEditorTotalCount">0 items</span>
+          <span id="taskEditorCompletedCount" class="text-success fw-bold">0 completed</span>
+          <span id="taskEditorDate" class="fw-bold d-none d-sm-inline ms-4 text-white"></span>
+          <span id="taskEditorProgressBadge" class="text-info fw-bold ms-auto"><i class="bi bi-check2-circle"></i> 0% Done</span>
+        </div>
+      </footer>
+
+      <!-- TOC Offcanvas for Tasks -->
+      <div class="offcanvas offcanvas-end bg-dark text-light shadow" tabindex="-1" id="tocOffcanvasTask" style="width: 300px; z-index: 100000;">
+        <div class="offcanvas-header border-bottom border-secondary">
+          <h6 class="offcanvas-title text-uppercase text-muted fw-bold"><i class="bi bi-list-nested me-2"></i>Task Sections</h6>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button>
+        </div>
+        <div class="offcanvas-body">
+          <div id="toc-list-task" class="d-flex flex-column small"></div>
         </div>
       </div>
     </div>
@@ -39719,6 +40199,36 @@ SOFTWARE.</div>
       <button class="action-btn text-secondary" id="sleep-timer-cancel-btn" title="Cancel Timer"><i class="bi bi-x-circle-fill"></i></button>
     </div>
 
+    <!-- Fullscreen Presentation Mode -->
+    <div id="presentation-mode">
+      <div class="position-absolute top-0 start-0 w-100 d-flex justify-content-between align-items-center p-3 px-4 z-3" style="background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);">
+        <div class="d-flex align-items-center gap-2 text-white-50 small fw-bold text-uppercase" style="letter-spacing: 1px;">
+          <i class="bi bi-easel-fill text-danger fs-5"></i> Presentation Mode
+        </div>
+        <button class="btn btn-outline-secondary border-0 text-light p-1" onclick="window.closePresentation()" title="Exit Presentation (Esc)">
+          <i class="bi bi-x-lg fs-4"></i>
+        </button>
+      </div>
+      
+      <div id="presentation-content">
+        <div class="slide-inner" id="presentation-slide-container"></div>
+      </div>
+      
+      <div class="position-absolute bottom-0 w-100 p-3 pb-4 d-flex justify-content-between align-items-center text-muted z-3" style="background: linear-gradient(transparent, #0a0a0a);">
+        <div>
+          <button class="btn btn-sm btn-outline-secondary border-0" onclick="window.prevSlide()" title="Previous Slide (Left Arrow)"><i class="bi bi-chevron-left fs-5"></i></button>
+          <span class="mx-3 fw-medium font-monospace" id="presentation-indicator">1 / 1</span>
+          <button class="btn btn-sm btn-outline-secondary border-0" onclick="window.nextSlide()" title="Next Slide (Right Arrow)"><i class="bi bi-chevron-right fs-5"></i></button>
+        </div>
+        <span class="small opacity-50 d-none d-sm-inline">Use ← / → / Space to navigate. Esc to exit.</span>
+      </div>
+      
+      <!-- Progress Bar -->
+      <div class="position-absolute bottom-0 start-0 w-100" style="height: 4px; background: #1e1e1e;">
+        <div id="presentation-progress" class="h-100" style="width: 0%; background: var(--ytm-accent); transition: width 0.3s ease;"></div>
+      </div>
+    </div>
+
     <!-- Main Client Floating Mini Player -->
     <div id="main-mini-player" class="d-none shadow-lg" style="position: fixed; bottom: 80px; right: 20px; width: 210px; height: 210px; background: #000; border-radius: 12px; z-index: 9999; overflow: hidden; color: #fff; aspect-ratio: 1 / 1; box-shadow: 0 16px 40px rgba(0,0,0,0.8);" onmouseenter="document.getElementById('mmp-overlay').style.opacity='1'" onmouseleave="document.getElementById('mmp-overlay').style.opacity='0'">
 
@@ -43951,6 +44461,193 @@ SOFTWARE.</div>
         };
     
         // Safely decodes HTML entities back into symbols (like I&#039;m -> I'm) before pasting them into Input fields.
+        // Configure Mermaid & Marked with SVG Pan Zoom logic
+        if (typeof mermaid !== "undefined") {
+          mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+          window.mermaid = mermaid;
+        }
+
+        const initMermaidPanZoom = (container) => {
+          const svg = container.querySelector('svg');
+          if (!svg) return;
+
+          const controls = document.createElement('div');
+          controls.className = 'mermaid-controls position-absolute top-0 end-0 m-2 bg-dark rounded shadow-lg border border-secondary p-1 d-flex flex-column gap-1';
+          controls.innerHTML = `
+            <div class="btn-group btn-group-sm">
+              <button class="btn btn-outline-light pan-left" title="Move Left"><i class="bi bi-arrow-left"></i></button>
+              <button class="btn btn-outline-light pan-up" title="Move Up"><i class="bi bi-arrow-up"></i></button>
+              <button class="btn btn-outline-light pan-down" title="Move Down"><i class="bi bi-arrow-down"></i></button>
+              <button class="btn btn-outline-light pan-right" title="Move Right"><i class="bi bi-arrow-right"></i></button>
+            </div>
+            <div class="btn-group btn-group-sm">
+              <button class="btn btn-outline-light zoom-in" title="Zoom In (Scroll Up)"><i class="bi bi-zoom-in"></i></button>
+              <button class="btn btn-outline-light zoom-out" title="Zoom Out (Scroll Down)"><i class="bi bi-zoom-out"></i></button>
+              <button class="btn btn-outline-light reset" title="Reset View"><i class="bi bi-arrow-counterclockwise"></i></button>
+            </div>
+          `;
+          container.appendChild(controls);
+
+          let vb = svg.getAttribute('viewBox');
+          let x = 0, y = 0, w = 1000, h = 1000;
+          
+          if (vb) {
+            const parts = vb.split(' ').map(Number);
+            if (parts.length === 4 && !parts.some(isNaN)) {
+              [x, y, w, h] = parts;
+            }
+          } else {
+            w = parseFloat(svg.getAttribute('width') || container.clientWidth || 1000);
+            h = parseFloat(svg.getAttribute('height') || container.clientHeight || 1000);
+            svg.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
+          }
+          
+          const origX = x, origY = y, origW = w, origH = h;
+          svg.style.maxWidth = 'none';
+          svg.removeAttribute('width');
+          svg.removeAttribute('height');
+
+          const updateViewBox = () => svg.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
+          const pan = (dx, dy) => { x += dx * (w / container.clientWidth); y += dy * (h / container.clientHeight); updateViewBox(); };
+          const zoom = (factor, cx = container.clientWidth / 2, cy = container.clientHeight / 2) => {
+            const svgX = x + (cx / container.clientWidth) * w;
+            const svgY = y + (cy / container.clientHeight) * h;
+            w *= factor; h *= factor;
+            x = svgX - (cx / container.clientWidth) * w;
+            y = svgY - (cy / container.clientHeight) * h;
+            updateViewBox();
+          };
+
+          controls.querySelector('.pan-up').addEventListener('click', () => pan(0, -50));
+          controls.querySelector('.pan-down').addEventListener('click', () => pan(0, 50));
+          controls.querySelector('.pan-left').addEventListener('click', () => pan(-50, 0));
+          controls.querySelector('.pan-right').addEventListener('click', () => pan(50, 0));
+          controls.querySelector('.zoom-in').addEventListener('click', () => zoom(0.8));
+          controls.querySelector('.zoom-out').addEventListener('click', () => zoom(1.2));
+          controls.querySelector('.reset').addEventListener('click', () => { x = origX; y = origY; w = origW; h = origH; updateViewBox(); });
+
+          let isDragging = false;
+          let lastMouseX, lastMouseY;
+
+          svg.addEventListener('pointerdown', (e) => {
+            isDragging = true; lastMouseX = e.clientX; lastMouseY = e.clientY; svg.setPointerCapture(e.pointerId);
+          });
+          svg.addEventListener('pointermove', (e) => {
+            if (!isDragging) return;
+            pan(lastMouseX - e.clientX, lastMouseY - e.clientY);
+            lastMouseX = e.clientX; lastMouseY = e.clientY;
+          });
+          svg.addEventListener('pointerup', (e) => { isDragging = false; svg.releasePointerCapture(e.pointerId); });
+
+          container.addEventListener('wheel', (e) => {
+            e.preventDefault(); 
+            const rect = container.getBoundingClientRect();
+            zoom(e.deltaY > 0 ? 1.1 : 0.9, e.clientX - rect.left, e.clientY - rect.top);
+          }, { passive: false });
+        };
+
+        const parseMermaidBlocks = async (previewArea) => {
+          if (window.mermaid) {
+            const mermaidBlocks = previewArea.querySelectorAll('code.language-mermaid');
+            for (let i = 0; i < mermaidBlocks.length; i++) {
+              const block = mermaidBlocks[i];
+              const code = block.textContent;
+              const id = `mermaid-preview-${Date.now()}-${i}`;
+              try {
+                const { svg } = await window.mermaid.render(id, code);
+                const pre = block.parentElement;
+                const div = document.createElement('div');
+                div.className = 'mermaid-container shadow-sm';
+                div.innerHTML = svg;
+                pre.replaceWith(div);
+                initMermaidPanZoom(div);
+              } catch (e) {
+                const pre = block.parentElement;
+                pre.innerHTML = `<div class="text-danger p-2 mb-2 bg-dark border border-danger rounded" style="font-size: 0.8rem">Mermaid Syntax Error</div><pre><code>${escapeHTML(code)}</code></pre>`;
+              }
+            }
+          }
+        };
+
+        // Presentation Mode Engine
+        let presentationSlides = [];
+        let currentSlideIdx = 0;
+        
+        window.openPresentation = (content) => {
+          const overlay = document.getElementById("presentation-mode");
+          if (!overlay || !content) return;
+          
+          const rawSlides = content
+            .split(/^_{3,}\s*$|^\*{3,}\s*$|^-{3,}\s*$/gm)
+            .map(slide => slide.trim())
+            .filter(slide => slide.length > 0);
+          
+          presentationSlides = rawSlides.map(slide => {
+            if (typeof marked !== "undefined") return marked.parse(slide);
+            return `<div style="white-space: pre-wrap;">${escapeHTML(slide)}</div>`;
+          });
+          
+          if (presentationSlides.length === 0) {
+            presentationSlides = ["<h2 class='text-secondary text-center'>Empty Document</h2>"];
+          }
+          
+          currentSlideIdx = 0;
+          overlay.classList.add("active");
+          window.renderCurrentSlide();
+          document.body.style.overflow = "hidden";
+          
+          window.removeEventListener('keydown', presentationKeyListener);
+          window.addEventListener('keydown', presentationKeyListener);
+        };
+        
+        window.closePresentation = () => {
+          const overlay = document.getElementById("presentation-mode");
+          if (overlay) overlay.classList.remove("active");
+          document.body.style.overflow = "";
+          window.removeEventListener('keydown', presentationKeyListener);
+        };
+        
+        window.renderCurrentSlide = async () => {
+          const container = document.getElementById("presentation-slide-container");
+          const progress = document.getElementById("presentation-progress");
+          const indicator = document.getElementById("presentation-indicator");
+          if (!container || !progress) return;
+          
+          container.style.opacity = "0";
+          setTimeout(async () => {
+            container.innerHTML = `<div style="max-width: 1400px; width: 100%; text-align: center;">${presentationSlides[currentSlideIdx] || "End of presentation."}</div>`;
+            container.style.opacity = "1";
+            
+            await parseMermaidBlocks(container);
+            
+            progress.style.width = `${((currentSlideIdx + 1) / presentationSlides.length) * 100}%`;
+            if (indicator) indicator.textContent = `${currentSlideIdx + 1} / ${presentationSlides.length}`;
+          }, 150);
+        };
+        
+        window.prevSlide = () => {
+          if (currentSlideIdx > 0) {
+            currentSlideIdx--;
+            window.renderCurrentSlide();
+          }
+        };
+        
+        window.nextSlide = () => {
+          if (currentSlideIdx < presentationSlides.length - 1) {
+            currentSlideIdx++;
+            window.renderCurrentSlide();
+          }
+        };
+        
+        const presentationKeyListener = (e) => {
+          const overlay = document.getElementById("presentation-mode");
+          if (overlay && overlay.classList.contains("active")) {
+            if (e.key === "Escape") { e.preventDefault(); window.closePresentation(); }
+            if (e.key === "ArrowRight" || e.key === " ") { e.preventDefault(); window.nextSlide(); }
+            if (e.key === "ArrowLeft") { e.preventDefault(); window.prevSlide(); }
+          }
+        };
+
         const decodeHTML = (html) => {
           if (!html) return "";
           const txt = document.createElement("textarea");
@@ -43962,87 +44659,52 @@ SOFTWARE.</div>
         const parseUserText = (text) => {
           if (!text) return "";
           let parsed = text;
-    
-          // Safely transform explicit [img] tags
-          parsed = parsed.replace(
-            /\[img\]\s*([^\s<>\[\]]+)\s*\[\/img\]/gi,
-            function (match, url) {
-              return window.buildLazyMediaHtml(url, "image/jpeg", "", true);
-            },
-          );
-    
-          // Safely transform explicit [video] tags into responsive YouTube or Native Video players
-          parsed = parsed.replace(
-            /\[video\]\s*([^\s<>\[\]]+)\s*\[\/video\]/gi,
-            function (match, url) {
-              const ytMatch = url.match(
-                /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i,
-              );
+
+          if (parsed.includes("[img]")) {
+            parsed = parsed.replace(/\[img\]\s*([^\s<>\[\]]+)\s*\[\/img\]/gi, (match, url) => window.buildLazyMediaHtml(url, "image/jpeg", "", true));
+          }
+          if (parsed.includes("[video]")) {
+            parsed = parsed.replace(/\[video\]\s*([^\s<>\[\]]+)\s*\[\/video\]/gi, (match, url) => {
+              const ytMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
               if (ytMatch && ytMatch[1]) {
                 const mediaId = "yt_" + Math.random().toString(36).substr(2, 9);
                 return `<div class="mt-2 mb-2 w-100"><button type="button" class="btn btn-sm btn-outline-secondary fw-bold mb-2" onclick="const wrapper = document.getElementById('${mediaId}'); wrapper.classList.toggle('d-none'); this.innerHTML = wrapper.classList.contains('d-none') ? '<i class=\\'bi bi-play-btn\\'></i> View YouTube' : '<i class=\\'bi bi-chevron-up\\'></i> Hide YouTube'; event.stopPropagation();"><i class="bi bi-play-btn"></i> View YouTube</button><div id="${mediaId}" class="position-relative w-100 rounded overflow-hidden shadow-sm d-none" style="padding-top: 56.25%; max-width: 500px;"><iframe src="https://www.youtube.com/embed/${ytMatch[1]}" class="position-absolute top-0 start-0 w-100 h-100" frameborder="0" allowfullscreen></iframe></div></div>`;
               }
               return window.buildLazyMediaHtml(url, "video/mp4", "", true);
-            },
-          );
-    
-          // Safely transform explicit [url] tags into active clickable links, auto-appending https:// if missing!
-          parsed = parsed.replace(
-            /\[url\]\s*([^\s<>\[\]]+)\s*\[\/url\]/gi,
-            function (match, url) {
+            });
+          }
+          if (parsed.includes("[url]")) {
+            parsed = parsed.replace(/\[url\]\s*([^\s<>\[\]]+)\s*\[\/url\]/gi, (match, url) => {
               let href = url.match(/^https?:\/\//i) ? url : "https://" + url;
               return `<a href="${href}" target="_blank" class="text-info text-decoration-none hover-underline">${url}</a>`;
-            },
-          );
-          // Defensive fallback: Parse any unformatted raw URLs directly into active links
-          parsed = parsed.replace(
-            /(^|[^"'])(https?:\/\/[^\s<]+)/gi,
-            '$1<a href="$2" target="_blank" class="text-info text-decoration-none hover-underline">$2</a>',
-          );
-    
-          // Convert mentions
-          parsed = parsed.replace(
-            /@([\w\.\-_]+)/g,
-            '<strong class="text-info mention-link" data-artist="$1" style="cursor:pointer;" title="Go to Profile">@$1</strong>',
-          );
-    
-          // Markdown Headings
-          parsed = parsed.replace(
-            /(^|\n)###\s+([^\n]+)/g,
-            '$1<strong class="fs-5 d-block my-1">$2</strong>',
-          );
-          parsed = parsed.replace(
-            /(^|\n)##\s+([^\n]+)/g,
-            '$1<strong class="fs-4 d-block my-1">$2</strong>',
-          );
-          parsed = parsed.replace(
-            /(^|\n)#\s+([^\n]+)/g,
-            '$1<strong class="fs-3 d-block my-1">$2</strong>',
-          );
-    
-          // Markdown Formatting
-          parsed = parsed.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-          parsed = parsed.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-          parsed = parsed.replace(/~~([^~]+)~~/g, "<del>$1</del>");
-    
-          // PHPBoard Spoiler
-          parsed = parsed.replace(
-            /\[spoiler\]([\s\S]*?)\[\/spoiler\]/gi,
-            '<span class="spoiler" onclick="this.classList.toggle(\'revealed\')">$1</span>',
-          );
-    
-          // PHPBoard Greentext (lines starting with >)
-          parsed = parsed.replace(
-            /(^|\n)(>[^\n]+)/g,
-            '$1<span class="greentext">$2</span>',
-          );
-    
-          // PHPBoard Post Quotes (>>ID)
-          parsed = parsed.replace(
-            /(?:&gt;&gt;|>>)(\d+)/g,
-            "<a onclick=\"const el=document.querySelector('.reply-anchor-$1'); if(el) el.scrollIntoView({behavior:'smooth'', block:'center'});\" class=\"post-quote-link\" title=\"Click to jump to post\">&gt;&gt;$1</a>",
-          );
-    
+            });
+          }
+          if (parsed.includes("http://") || parsed.includes("https://")) {
+            parsed = parsed.replace(/(^|[^"'])(https?:\/\/[^\s<]+)/gi, '$1<a href="$2" target="_blank" class="text-info text-decoration-none hover-underline">$2</a>');
+          }
+          if (parsed.includes("@")) {
+            parsed = parsed.replace(/@([\w\.\-_]+)/g, '<strong class="text-info mention-link" data-artist="$1" style="cursor:pointer;" title="Go to Profile">@$1</strong>');
+          }
+          if (parsed.includes("#")) {
+            parsed = parsed.replace(/(^|\n)###\s+([^\n]+)/g, '$1<strong class="fs-5 d-block my-1">$2</strong>');
+            parsed = parsed.replace(/(^|\n)##\s+([^\n]+)/g, '$1<strong class="fs-4 d-block my-1">$2</strong>');
+            parsed = parsed.replace(/(^|\n)#\s+([^\n]+)/g, '$1<strong class="fs-3 d-block my-1">$2</strong>');
+          }
+          if (parsed.includes("*")) {
+            parsed = parsed.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+            parsed = parsed.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+          }
+          if (parsed.includes("~~")) {
+            parsed = parsed.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+          }
+          if (parsed.includes("[spoiler]")) {
+            parsed = parsed.replace(/\[spoiler\]([\s\S]*?)\[\/spoiler\]/gi, '<span class="spoiler" onclick="this.classList.toggle(\'revealed\')">$1</span>');
+          }
+          if (parsed.includes(">")) {
+            parsed = parsed.replace(/(^|\n)(>[^\n]+)/g, '$1<span class="greentext">$2</span>');
+            parsed = parsed.replace(/(?:&gt;&gt;|>>)(\d+)/g, "<a onclick=\"const el=document.querySelector('.reply-anchor-$1'); if(el) el.scrollIntoView({behavior:'smooth'', block:'center'});\" class=\"post-quote-link\" title=\"Click to jump to post\">&gt;&gt;$1</a>");
+          }
+
           return parsed;
         };
     
@@ -50193,6 +50855,19 @@ SOFTWARE.</div>
                     }
                   });
                   window.addEventListener("resize", drawWaveform);
+                  window.addEventListener("resize", () => {
+                    if (window.innerWidth < 768) {
+                      if (document.getElementById("editorOverlay")?.classList.contains("active") && isNoteSplitView) {
+                        setNoteViewMode('edit');
+                      }
+                      if (document.getElementById("blogEditorOverlay")?.classList.contains("active") && isBlogSplitView) {
+                        setBlogViewMode('edit');
+                      }
+                      if (document.getElementById("taskEditorOverlay")?.classList.contains("active") && isTaskSplitView) {
+                        setTaskViewMode('edit');
+                      }
+                    }
+                  });
                 }, 50);
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to use the PHPAudio editor.</div>`;
@@ -58945,13 +59620,17 @@ SOFTWARE.</div>
     
         const coverScanModalEl = document.getElementById("cover-scan-modal");
         const coverScanIframe = document.getElementById("cover-scan-iframe");
-        if (coverScanModalEl && coverScanIframe) {
-          coverScanModalEl.addEventListener("show.bs.modal", () => {
-            // Only assign if it's completely empty to avoid restarting a hidden scan!
-            if (coverScanIframe.src.includes("about:blank")) {
-               coverScanIframe.src = "?action=rescan_covers";
-            }
+        const coverScanBtn = document.getElementById("nav-cover-scan");
+
+        if (coverScanBtn && coverScanModalEl && coverScanIframe) {
+          coverScanBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            coverScanIframe.src = "?action=rescan_covers";
+            bootstrap.Modal.getOrCreateInstance(coverScanModalEl).show();
           });
+        }
+
+        if (coverScanModalEl && coverScanIframe) {
           coverScanModalEl.addEventListener("hidden.bs.modal", () => {
             if (!window.isHidingScan) {
               coverScanIframe.src = "about:blank";
@@ -68464,8 +69143,13 @@ SOFTWARE.</div>
               words = matches ? matches.length : 0;
               document.getElementById("blogEditorWordCount").innerText =
                 `${new Intl.NumberFormat().format(words)} words`;
+              const readTime = Math.max(1, Math.ceil(words / 200));
+              const readTimeEl = document.getElementById("blogEditorReadTime");
+              if (readTimeEl) readTimeEl.innerHTML = `<i class="bi bi-book"></i> ${readTime} min read`;
             } else {
               document.getElementById("blogEditorWordCount").innerText = `0 words`;
+              const readTimeEl = document.getElementById("blogEditorReadTime");
+              if (readTimeEl) readTimeEl.innerHTML = `<i class="bi bi-book"></i> 0 min read`;
             }
           }, 600);
         };
@@ -69869,38 +70553,8 @@ SOFTWARE.</div>
             );
           }
     
-          isMarkdownPreview = false;
-          isNoteSplitView = localStorage.getItem('note_split_view') === 'true';
-          const splitBtn = document.getElementById("editorSplitBtn");
-          const splitContainer = document.getElementById("noteSplitContainer");
-          
-          if (isNoteSplitView) {
-            if (splitBtn) splitBtn.querySelector("i").className = "bi bi-layout-split text-info";
-            if (splitContainer) splitContainer.classList.add("split-active");
-            if (contentEl) contentEl.classList.remove("d-none");
-            const previewEl = document.getElementById("editorMarkdownPreview");
-            if (previewEl) {
-              previewEl.classList.remove("d-none");
-              renderNoteMarkdown();
-            }
-          } else {
-            if (splitBtn) splitBtn.querySelector("i").className = "bi bi-layout-split";
-            if (splitContainer) splitContainer.classList.remove("split-active");
-          }
-
-          const mdBtn = document.getElementById("editorMarkdownBtn");
-          if (mdBtn) {
-            const mdIcon = mdBtn.querySelector("i");
-            // Persist Markdown state if the user previously toggled it for this note
-            if (window.noteViewerStates[note.id] === "markdown" && !isNoteSplitView) {
-              mdBtn.click();
-            } else if (!isNoteSplitView) {
-              if (mdIcon) mdIcon.className = "bi bi-markdown";
-              if (contentEl) contentEl.classList.remove("d-none");
-              const previewEl = document.getElementById("editorMarkdownPreview");
-              if (previewEl) previewEl.classList.add("d-none");
-            }
-          }
+          const savedNoteMode = localStorage.getItem('note_view_mode') || 'edit';
+          setNoteViewMode(savedNoteMode);
     
           if (contentEl) noteTextHistory = [contentEl.value];
           noteHistoryIdx = 0;
@@ -69990,14 +70644,59 @@ SOFTWARE.</div>
           window.lastLocalEditTime = Date.now();
         };
     
+        document.getElementById("editorPresentBtn")?.addEventListener("click", () => {
+          const text = document.getElementById("editorContent").value;
+          window.openPresentation(text);
+        });
+
         let isNoteSplitView = false;
 
-        const renderNoteMarkdown = () => {
+        const generateTOC = (previewElement, tocContainerId) => {
+          const tocList = document.getElementById(tocContainerId);
+          if (!tocList) return;
+          const headings = previewElement.querySelectorAll('h1, h2, h3, h4, h5, h6');
+          tocList.innerHTML = '';
+          if (headings.length === 0) {
+            tocList.innerHTML = '<div class="text-muted p-2 small">No headings found in the document.</div>';
+            return;
+          }
+          headings.forEach((h, index) => {
+            if (!h.id) h.id = 'heading-' + index;
+            const link = document.createElement('a');
+            link.href = '#' + h.id;
+            link.textContent = h.textContent;
+            const level = parseInt(h.tagName[1]);
+            link.className = `toc-link text-truncate py-1 px-2 mb-1`;
+            link.style.paddingLeft = `${(level - 1) * 15 + 10}px`;
+            if (level === 1) link.classList.add('fw-bold', 'text-white');
+            else link.classList.add('text-secondary');
+
+            link.addEventListener('click', (e) => {
+              e.preventDefault();
+              h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+            tocList.appendChild(link);
+          });
+        };
+
+        const renderNoteMarkdown = async () => {
           const contentArea = document.getElementById("editorContent");
           const previewArea = document.getElementById("editorMarkdownPreview");
           if (typeof marked !== "undefined") {
-            marked.use({ gfm: true });
-            previewArea.innerHTML = marked.parse(contentArea.value);
+            const rawHTML = marked.parse(contentArea.value);
+            
+            // SECURITY FIX: Sanitize HTML output to prevent "Re-scan Covers" Modal header injections!
+            let cleanHTML = rawHTML;
+            if (typeof DOMPurify !== 'undefined') {
+               cleanHTML = DOMPurify.sanitize(rawHTML, { ADD_TAGS: ['iframe', 'video', 'source'], ADD_ATTR: ['allow', 'allowfullscreen', 'frameborder', 'src', 'controls', 'type', 'width', 'height'] });
+            } else {
+               cleanHTML = cleanHTML.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/class="[^"]*fixed[^"]*"/gi, '');
+            }
+
+            previewArea.innerHTML = cleanHTML;
+            await parseMermaidBlocks(previewArea);
+            generateTOC(previewArea, "toc-list-note");
+
             previewArea.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
               cb.addEventListener("change", (e) => {
                 const isChecked = e.target.checked;
@@ -70076,61 +70775,34 @@ SOFTWARE.</div>
           }
         });
 
-        document.getElementById("editorMarkdownBtn").addEventListener("click", () => {
-          isMarkdownPreview = !isMarkdownPreview;
-          const idInput = document.getElementById("editorNoteId").value;
-          if (idInput) window.noteViewerStates[idInput] = isMarkdownPreview ? "markdown" : "editor";
-    
-          const container = document.getElementById("noteSplitContainer");
-          const contentArea = document.getElementById("editorContent");
-          const previewArea = document.getElementById("editorMarkdownPreview");
-          const icon = document.getElementById("editorMarkdownBtn").querySelector("i");
-    
-          isNoteSplitView = false;
-          const splitIcon = document.getElementById("editorSplitBtn")?.querySelector("i");
-          if (splitIcon) splitIcon.className = "bi bi-layout-split";
-          if (container) container.classList.remove("split-active");
-
-          if (isMarkdownPreview) {
-            icon.className = "bi bi-pencil-square";
-            contentArea.classList.add("d-none");
-            previewArea.classList.remove("d-none");
-            document.getElementById("findReplacePanel").classList.remove("active");
-            document.getElementById("editorFindBtn").disabled = true;
-            document.getElementById("editorFindBtn").style.opacity = "0.5";
-            renderNoteMarkdown();
-          } else {
-            icon.className = "bi bi-markdown";
-            previewArea.classList.add("d-none");
-            contentArea.classList.remove("d-none");
-            contentArea.focus();
-            document.getElementById("editorFindBtn").disabled = false;
-            document.getElementById("editorFindBtn").style.opacity = "1";
-          }
-        });
-    
         let wordCountTimeout = null;
         const updateEditorWordCount = () => {
           const text = document.getElementById("editorContent").value;
           document.getElementById("editorCharCount").innerText =
             `${new Intl.NumberFormat().format(text.length)} chars`;
-    
+
           clearTimeout(wordCountTimeout);
           wordCountTimeout = setTimeout(() => {
             let words = 0;
-            // ADVANCED RENDERING: Prevent browser freeze by bypassing regex on documents over 500k chars
-            if (text.length > 500000) {
-              document.getElementById("editorWordCount").innerText =
-                `Massive Document`;
+            if (text.length > 100000) {
+              const approxWords = (text.match(/ /g) || []).length + 1;
+              document.getElementById("editorWordCount").innerText = `~${new Intl.NumberFormat().format(approxWords)} words`;
+              const readTime = Math.max(1, Math.ceil(approxWords / 200));
+              const readTimeEl = document.getElementById("editorReadTime");
+              if (readTimeEl) readTimeEl.innerHTML = `<i class="bi bi-book"></i> ~${readTime} min read`;
             } else if (text.trim()) {
               const matches = text.match(/\S+/g);
               words = matches ? matches.length : 0;
-              document.getElementById("editorWordCount").innerText =
-                `${new Intl.NumberFormat().format(words)} words`;
+              document.getElementById("editorWordCount").innerText = `${new Intl.NumberFormat().format(words)} words`;
+              const readTime = Math.max(1, Math.ceil(words / 200));
+              const readTimeEl = document.getElementById("editorReadTime");
+              if (readTimeEl) readTimeEl.innerHTML = `<i class="bi bi-book"></i> ${readTime} min read`;
             } else {
               document.getElementById("editorWordCount").innerText = `0 words`;
+              const readTimeEl = document.getElementById("editorReadTime");
+              if (readTimeEl) readTimeEl.innerHTML = `<i class="bi bi-book"></i> 0 min read`;
             }
-          }, 600);
+          }, 400);
         };
     
         document.getElementById("editorCopyBtn")?.addEventListener("click", () => {
@@ -70216,6 +70888,10 @@ SOFTWARE.</div>
             case "table":
               pre = "| Header | Header |\n| --- | --- |\n| Cell | Cell |";
               break;
+            case "mermaid":
+              pre = "```mermaid\ngraph TD;\n    A-->B;\n    A-->C;\n    B-->D;\n    C-->D;\n```\n";
+              def = "";
+              break;
             case "align-left":
               pre = '<div style="text-align: left;">\n';
               suf = "\n</div>";
@@ -70297,7 +70973,110 @@ SOFTWARE.</div>
         });
     
         let taskSaveTimeout = null;
-    
+        let isTaskSplitView = false;
+        let isTaskMarkdownPreview = false;
+        window.taskSortable = null;
+
+        const updateTaskEditorWordCount = () => {
+          const total = window.currentTaskItems ? window.currentTaskItems.length : 0;
+          const completed = window.currentTaskItems ? window.currentTaskItems.filter(i => i.completed).length : 0;
+          const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+          const totalEl = document.getElementById("taskEditorTotalCount");
+          const compEl = document.getElementById("taskEditorCompletedCount");
+          const badgeEl = document.getElementById("taskEditorProgressBadge");
+
+          if (totalEl) totalEl.innerText = `${total} ${total === 1 ? 'item' : 'items'}`;
+          if (compEl) compEl.innerText = `${completed} completed`;
+          if (badgeEl) badgeEl.innerHTML = `<i class="bi bi-check2-circle"></i> ${pct}% Done`;
+        };
+
+        const setTaskViewMode = (mode) => {
+          const container = document.getElementById("taskSplitContainer");
+          if (!container) return;
+          
+          if (mode === 'split' && window.innerWidth < 768) {
+            mode = 'edit';
+          }
+
+          localStorage.setItem('task_view_mode', mode);
+
+          const idInput = document.getElementById("taskEditorId")?.value;
+          if (idInput) window.noteViewerStates[idInput] = (mode === 'preview') ? "markdown" : "editor";
+
+          container.classList.remove('view-mode-edit', 'view-mode-split', 'view-mode-preview');
+          container.classList.add(`view-mode-${mode}`);
+          
+          ['taskEditorModeEditBtn', 'taskEditorSplitBtn', 'taskEditorMarkdownBtn'].forEach(id => {
+            const btn = document.getElementById(id);
+            if (btn) btn.classList.remove('active');
+          });
+          
+          let activeBtnId = 'taskEditorModeEditBtn';
+          if (mode === 'split') activeBtnId = 'taskEditorSplitBtn';
+          if (mode === 'preview') activeBtnId = 'taskEditorMarkdownBtn';
+          
+          const activeBtn = document.getElementById(activeBtnId);
+          if (activeBtn) activeBtn.classList.add('active');
+          
+          const findBtn = document.getElementById("taskEditorFindBtn");
+          const addToolbarBtn = document.getElementById("addTaskItemBtnToolbar");
+
+          const contentArea = document.getElementById("taskEditorContentArea");
+          const previewArea = document.getElementById("taskMarkdownPreview");
+          const resizer = document.getElementById("taskResizer");
+
+          if (mode === 'edit') {
+            isTaskSplitView = false;
+            isTaskMarkdownPreview = false;
+            if (contentArea) {
+              contentArea.style.width = "100%";
+              contentArea.style.flex = "1 1 100%";
+            }
+            if (resizer) resizer.style.display = "none";
+            if (previewArea) previewArea.style.display = "none";
+            if (findBtn) { findBtn.disabled = false; findBtn.style.opacity = "1"; }
+            if (addToolbarBtn) { addToolbarBtn.style.display = "inline-flex"; }
+            if (window.taskSortable) window.taskSortable.option("disabled", false);
+          } else if (mode === 'split') {
+            isTaskSplitView = true;
+            isTaskMarkdownPreview = false;
+            if (contentArea) {
+              contentArea.style.width = "50%";
+              contentArea.style.flex = "none";
+            }
+            if (resizer) resizer.style.display = "block";
+            if (previewArea) {
+              previewArea.style.display = "block";
+              previewArea.style.width = "";
+              previewArea.style.flex = "1 1 0%";
+            }
+            window.renderTaskMarkdown(false);
+            if (findBtn) { findBtn.disabled = false; findBtn.style.opacity = "1"; }
+            if (addToolbarBtn) { addToolbarBtn.style.display = "inline-flex"; }
+            if (window.taskSortable) window.taskSortable.option("disabled", false);
+          } else if (mode === 'preview') {
+            isTaskSplitView = false;
+            isTaskMarkdownPreview = true;
+            document.getElementById("taskFindReplacePanel")?.classList.remove("active");
+            if (contentArea) contentArea.style.display = "none";
+            if (resizer) resizer.style.display = "none";
+            if (previewArea) {
+              previewArea.style.display = "block";
+              previewArea.style.width = "100%";
+              previewArea.style.flex = "1 1 100%";
+            }
+            if (findBtn) { findBtn.disabled = true; findBtn.style.opacity = "0.5"; }
+            if (addToolbarBtn) { addToolbarBtn.style.display = "none"; }
+            if (window.taskSortable) window.taskSortable.option("disabled", true);
+            window.renderTaskMarkdown(true); // Pure read-only non-interactive view
+          }
+        };
+
+        document.getElementById("taskEditorModeEditBtn")?.addEventListener("click", () => setTaskViewMode('edit'));
+        document.getElementById("taskEditorSplitBtn")?.addEventListener("click", () => setTaskViewMode('split'));
+        document.getElementById("taskEditorMarkdownBtn")?.addEventListener("click", () => setTaskViewMode('preview'));
+
         window.openTaskEditor = (task) => {
           if (task.id) fetchData("?action=log_item_view", { method: "POST", body: JSON.stringify({ item_id: task.id, item_type: "task" }) }, true);
           const isOwner =
@@ -70356,37 +71135,8 @@ SOFTWARE.</div>
     
           window.renderTaskItems();
 
-          window.isTaskMarkdownPreview = false;
-          window.isTaskSplitView = localStorage.getItem('task_split_view') === 'true';
-          const splitBtn = document.getElementById("taskEditorSplitBtn");
-          const splitContainer = document.getElementById("taskSplitContainer");
-          const contentArea = document.getElementById("taskEditorContentArea");
-          const previewArea = document.getElementById("taskMarkdownPreview");
-
-          if (window.isTaskSplitView) {
-            if (splitBtn) splitBtn.querySelector("i").className = "bi bi-layout-split text-info";
-            if (splitContainer) splitContainer.classList.add("split-active");
-            if (contentArea) contentArea.classList.remove("d-none");
-            if (previewArea) {
-              previewArea.classList.remove("d-none");
-              if (typeof window.renderTaskMarkdown === "function") window.renderTaskMarkdown();
-            }
-          } else {
-            if (splitBtn) splitBtn.querySelector("i").className = "bi bi-layout-split";
-            if (splitContainer) splitContainer.classList.remove("split-active");
-          }
-
-          const mdBtn = document.getElementById("taskEditorMarkdownBtn");
-          if (mdBtn) {
-            const mdIcon = mdBtn.querySelector("i");
-            if (window.noteViewerStates[task.id] === "markdown" && !window.isTaskSplitView) {
-              mdBtn.click();
-            } else if (!window.isTaskSplitView) {
-              if (mdIcon) mdIcon.className = "bi bi-markdown";
-              if (contentArea) contentArea.classList.remove("d-none");
-              if (previewArea) previewArea.classList.add("d-none");
-            }
-          }
+          const savedTaskMode = localStorage.getItem('task_view_mode') || 'edit';
+          setTaskViewMode(savedTaskMode);
     
           const findPanel = document.getElementById("taskFindReplacePanel");
           if (findPanel) findPanel.classList.remove("active");
@@ -70398,6 +71148,14 @@ SOFTWARE.</div>
           if (overlay) overlay.classList.add("active");
           if (typeof currentSong !== 'undefined' && currentSong) toggleMainMiniPlayer(true);
     
+          // Re-calculate accurate heights once overlay is rendered and visible in DOM
+          requestAnimationFrame(() => {
+            document.querySelectorAll("#taskItemsContainer .task-item-input").forEach((input) => {
+              input.style.height = "0px";
+              input.style.height = Math.max(24, input.scrollHeight) + "px";
+            });
+          });
+
           const isCollab = currentView.filter && currentView.filter.startsWith("proj_");
           if (task.id && isCollab) {
             lastSyncContentTime = task.updated_at;
@@ -70405,23 +71163,46 @@ SOFTWARE.</div>
           }
         };
     
-        window.renderTaskMarkdown = () => {
+        window.renderTaskMarkdown = async (readOnly = false) => {
           const previewArea = document.getElementById("taskMarkdownPreview");
           if (!previewArea) return;
-          let markdownText = window.currentTaskItems.map(t => (t.completed ? "- [x] " : "- [ ] ") + t.text).join('\n');
+          const itemsList = window.currentTaskItems || [];
+          let markdownText = itemsList.map(t => (t.completed ? "- [x] " : "- [ ] ") + t.text).join('\n');
+          
           if (typeof marked !== "undefined") {
             marked.use({ gfm: true });
-            previewArea.innerHTML = marked.parse(markdownText);
+            const rawHTML = marked.parse(markdownText || "*(No tasks added yet)*");
+
+            let cleanHTML = rawHTML;
+            if (typeof DOMPurify !== 'undefined') {
+              cleanHTML = DOMPurify.sanitize(rawHTML, { ADD_TAGS: ['iframe', 'video', 'source'], ADD_ATTR: ['allow', 'allowfullscreen', 'frameborder', 'src', 'controls', 'type', 'width', 'height'] });
+            } else {
+              cleanHTML = cleanHTML.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/class="[^"]*fixed[^"]*"/gi, '');
+            }
+
+            previewArea.innerHTML = cleanHTML;
+            await parseMermaidBlocks(previewArea);
+            generateTOC(previewArea, "toc-list-task");
+
             previewArea.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
-              cb.addEventListener("change", (e) => {
-                const isChecked = e.target.checked;
-                let cbIndex = Array.from(previewArea.querySelectorAll('input[type="checkbox"]')).indexOf(e.target);
-                if (window.currentTaskItems[cbIndex]) {
-                   window.currentTaskItems[cbIndex].completed = isChecked;
-                   window.renderTaskItems();
-                   window.saveCurrentTask(false);
-                }
-              });
+              if (readOnly) {
+                cb.setAttribute("disabled", "true");
+                cb.style.pointerEvents = "none";
+                cb.style.cursor = "default";
+              } else {
+                cb.removeAttribute("disabled");
+                cb.style.pointerEvents = "auto";
+                cb.style.cursor = "pointer";
+                cb.addEventListener("change", (e) => {
+                  const isChecked = e.target.checked;
+                  let cbIndex = Array.from(previewArea.querySelectorAll('input[type="checkbox"]')).indexOf(e.target);
+                  if (window.currentTaskItems[cbIndex]) {
+                    window.currentTaskItems[cbIndex].completed = isChecked;
+                    window.renderTaskItems();
+                    window.saveCurrentTask(false);
+                  }
+                });
+              }
             });
           } else {
             previewArea.innerHTML = '<p class="text-secondary text-center p-5">Markdown renderer is loading or unavailable.</p>';
@@ -70432,7 +71213,7 @@ SOFTWARE.</div>
         let isSyncingRightTask = false;
 
         document.getElementById("taskItemsContainer")?.addEventListener("scroll", (e) => {
-          if (!window.isTaskSplitView) return;
+          if (!isTaskSplitView) return;
           if (isSyncingRightTask) { isSyncingRightTask = false; return; }
           isSyncingLeftTask = true;
           const previewArea = document.getElementById("taskMarkdownPreview");
@@ -70442,7 +71223,7 @@ SOFTWARE.</div>
         });
 
         document.getElementById("taskMarkdownPreview")?.addEventListener("scroll", (e) => {
-          if (!window.isTaskSplitView) return;
+          if (!isTaskSplitView) return;
           if (isSyncingLeftTask) { isSyncingLeftTask = false; return; }
           isSyncingRightTask = true;
           const contentArea = document.getElementById("taskItemsContainer");
@@ -70451,82 +71232,58 @@ SOFTWARE.</div>
           contentArea.scrollTop = percentage * (contentArea.scrollHeight - contentArea.clientHeight);
         });
 
-        document.getElementById("taskEditorSplitBtn")?.addEventListener("click", () => {
-          window.isTaskSplitView = !window.isTaskSplitView;
-          localStorage.setItem('task_split_view', window.isTaskSplitView);
-          const container = document.getElementById("taskSplitContainer");
-          const contentArea = document.getElementById("taskEditorContentArea");
-          const previewArea = document.getElementById("taskMarkdownPreview");
-          const splitIcon = document.getElementById("taskEditorSplitBtn").querySelector("i");
-          
-          window.isTaskMarkdownPreview = false;
-          const mdIcon = document.getElementById("taskEditorMarkdownBtn").querySelector("i");
-          if (mdIcon) mdIcon.className = "bi bi-markdown";
-
-          if (window.isTaskSplitView) {
-            splitIcon.className = "bi bi-layout-split text-info";
-            if (container) container.classList.add("split-active");
-            if (contentArea) contentArea.classList.remove("d-none");
-            if (previewArea) {
-              previewArea.classList.remove("d-none");
-              if (typeof window.renderTaskMarkdown === "function") window.renderTaskMarkdown();
-            }
-          } else {
-            splitIcon.className = "bi bi-layout-split";
-            if (container) container.classList.remove("split-active");
-            if (previewArea) previewArea.classList.add("d-none");
-            if (contentArea) contentArea.classList.remove("d-none");
-          }
-        });
-
-        document.getElementById("taskEditorMarkdownBtn")?.addEventListener("click", () => {
-          window.isTaskMarkdownPreview = !window.isTaskMarkdownPreview;
-          const idInput = document.getElementById("taskEditorId").value;
-          if (idInput) window.noteViewerStates[idInput] = window.isTaskMarkdownPreview ? "markdown" : "editor";
-    
-          const container = document.getElementById("taskSplitContainer");
-          const contentArea = document.getElementById("taskEditorContentArea");
-          const previewArea = document.getElementById("taskMarkdownPreview");
-          const icon = document.getElementById("taskEditorMarkdownBtn").querySelector("i");
-    
-          window.isTaskSplitView = false;
-          const splitIcon = document.getElementById("taskEditorSplitBtn")?.querySelector("i");
-          if (splitIcon) splitIcon.className = "bi bi-layout-split";
-          if (container) container.classList.remove("split-active");
-
-          if (window.isTaskMarkdownPreview) {
-            if (icon) icon.className = "bi bi-pencil-square";
-            if (contentArea) contentArea.classList.add("d-none");
-            if (previewArea) {
-              previewArea.classList.remove("d-none");
-              if (typeof window.renderTaskMarkdown === "function") window.renderTaskMarkdown();
-            }
-          } else {
-            if (icon) icon.className = "bi bi-markdown";
-            if (previewArea) previewArea.classList.add("d-none");
-            if (contentArea) contentArea.classList.remove("d-none");
-          }
-        });
-
         window.renderTaskItems = () => {
           const container = document.getElementById("taskItemsContainer");
           if (!container) return;
           const autoResizeTaskInput = (el) => {
-            el.style.height = "auto";
-            el.style.height = el.scrollHeight + "px";
+            if (!el) return;
+            el.style.height = "0px";
+            el.style.height = Math.max(24, el.scrollHeight) + "px";
           };
     
-          container.innerHTML = window.currentTaskItems
+          container.innerHTML = (window.currentTaskItems || [])
             .map(
               (item, idx) => `
-                  <div class="task-item-row">
+                  <div class="task-item-row" data-idx="${idx}">
+                    <i class="bi bi-grip-vertical text-secondary task-item-drag-handle" title="Drag to reorder" style="cursor: grab; font-size: 1.1rem; user-select: none;"></i>
                     <input type="checkbox" class="task-item-checkbox" data-idx="${idx}" ${item.completed ? "checked" : ""}>
-                    <textarea class="task-item-input ${item.completed ? "completed" : ""}" data-idx="${idx}" placeholder="Task description..." rows="1" style="resize: none; overflow: hidden; padding-top: 4px;">${escapeHTML(item.text)}</textarea>
+                    <textarea class="task-item-input ${item.completed ? "completed" : ""}" data-idx="${idx}" placeholder="Task description..." rows="1" style="resize: none; overflow: hidden; height: 24px; padding: 2px 0; line-height: 1.4;">${escapeHTML(item.text)}</textarea>
                     <button class="task-item-del" data-idx="${idx}"><i class="bi bi-x-lg"></i></button>
                   </div>
                 `,
             )
             .join("");
+
+          updateTaskEditorWordCount();
+
+          // Initialize / reattach SortableJS for drag-and-drop task sorting
+          if (typeof Sortable !== "undefined") {
+            if (window.taskSortable) {
+              window.taskSortable.destroy();
+              window.taskSortable = null;
+            }
+            window.taskSortable = Sortable.create(container, {
+              animation: 150,
+              handle: ".task-item-drag-handle",
+              ghostClass: "ghost",
+              onEnd: () => {
+                window.lastLocalEditTime = Date.now();
+                const reorderedItems = [];
+                container.querySelectorAll(".task-item-row").forEach((row) => {
+                  const idx = parseInt(row.dataset.idx);
+                  if (window.currentTaskItems[idx]) {
+                    reorderedItems.push(window.currentTaskItems[idx]);
+                  }
+                });
+                window.currentTaskItems = reorderedItems;
+                window.renderTaskItems();
+                if (isTaskSplitView) {
+                  window.renderTaskMarkdown(false);
+                }
+                window.saveCurrentTask(false);
+              },
+            });
+          }
     
           container.querySelectorAll(".task-item-input").forEach((input) => {
             autoResizeTaskInput(input);
@@ -70534,8 +71291,9 @@ SOFTWARE.</div>
               window.lastLocalEditTime = Date.now();
               autoResizeTaskInput(e.target);
               window.currentTaskItems[e.target.dataset.idx].text = e.target.value;
-              if (window.isTaskSplitView && typeof window.renderTaskMarkdown === "function") {
-                window.renderTaskMarkdown();
+              updateTaskEditorWordCount();
+              if (isTaskSplitView) {
+                window.renderTaskMarkdown(false);
               }
               if (
                 document
@@ -70568,7 +71326,6 @@ SOFTWARE.</div>
                   const inputs = document.querySelectorAll(".task-item-input");
                   if (inputs.length > idx - 1) {
                     inputs[idx - 1].focus();
-                    // Instantly move the cursor to the end of the previous line
                     const val = inputs[idx - 1].value;
                     inputs[idx - 1].value = "";
                     inputs[idx - 1].value = val;
@@ -70586,7 +71343,6 @@ SOFTWARE.</div>
               const isChecked = e.target.checked;
               window.currentTaskItems[idx].completed = isChecked;
     
-              // Bypass full array re-rendering to prevent UI lag on massive lists
               const row = e.target.closest(".task-item-row");
               if (row) {
                 const inputField = row.querySelector(".task-item-input");
@@ -70595,8 +71351,9 @@ SOFTWARE.</div>
                   else inputField.classList.remove("completed");
                 }
               }
-              if (window.isTaskSplitView && typeof window.renderTaskMarkdown === "function") {
-                window.renderTaskMarkdown();
+              updateTaskEditorWordCount();
+              if (isTaskSplitView) {
+                window.renderTaskMarkdown(false);
               }
               window.saveCurrentTask(false);
             });
@@ -70607,7 +71364,7 @@ SOFTWARE.</div>
               window.lastLocalEditTime = Date.now();
               window.currentTaskItems.splice(e.currentTarget.dataset.idx, 1);
               window.renderTaskItems();
-              if (window.isTaskSplitView && typeof window.renderTaskMarkdown === "function") window.renderTaskMarkdown();
+              if (isTaskSplitView) window.renderTaskMarkdown(false);
               window.saveCurrentTask(false);
             });
           });
@@ -70669,17 +71426,23 @@ SOFTWARE.</div>
           window.lastLocalEditTime = Date.now();
         };
     
-        document.getElementById("addTaskItemBtn")?.addEventListener("click", () => {
+        const handleAddTaskItem = () => {
           window.lastLocalEditTime = Date.now();
+          if (isTaskMarkdownPreview) {
+            setTaskViewMode('edit');
+          }
           window.currentTaskItems.push({
             text: "",
             completed: false,
           });
           window.renderTaskItems();
-          if (window.isTaskSplitView && typeof window.renderTaskMarkdown === "function") window.renderTaskMarkdown();
+          if (isTaskSplitView) window.renderTaskMarkdown(false);
           const inputs = document.querySelectorAll(".task-item-input");
           if (inputs.length > 0) inputs[inputs.length - 1].focus();
-        });
+        };
+
+        document.getElementById("addTaskItemBtn")?.addEventListener("click", handleAddTaskItem);
+        document.getElementById("addTaskItemBtnToolbar")?.addEventListener("click", handleAddTaskItem);
     
         document.getElementById("taskEditorTitle")?.addEventListener("input", () => {
           window.lastLocalEditTime = Date.now();
@@ -70773,10 +71536,12 @@ SOFTWARE.</div>
             }
           });
     
+        let noteMarkdownTimer = null;
         document.getElementById("editorContent").addEventListener("input", (e) => {
           window.lastLocalEditTime = Date.now();
           clearTimeout(noteSaveTimeout);
-          if (isNoteSplitView) renderNoteMarkdown();
+          clearTimeout(noteMarkdownTimer);
+          if (isNoteSplitView) noteMarkdownTimer = setTimeout(renderNoteMarkdown, 300);
           clearTimeout(noteHistoryTimeout);
           updateEditorWordCount();
           if (
@@ -70864,35 +71629,8 @@ SOFTWARE.</div>
             ? new Date(blog.updated_at.replace(" ", "T") + "Z").toLocaleDateString()
             : new Date().toLocaleDateString();
     
-          isBlogMarkdownPreview = false;
-          isBlogSplitView = localStorage.getItem('blog_split_view') === 'true';
-          const blogSplitIcon = document.getElementById("blogEditorSplitBtn")?.querySelector("i");
-          const blogSplitCont = document.getElementById("blogSplitContainer");
-          const previewArea = document.getElementById("blogEditorMarkdownPreview");
-          
-          if (isBlogSplitView) {
-            if (blogSplitIcon) blogSplitIcon.className = "bi bi-layout-split text-info";
-            if (blogSplitCont) blogSplitCont.classList.add("split-active");
-            if (contentEl) contentEl.classList.remove("d-none");
-            if (previewArea) {
-              previewArea.classList.remove("d-none");
-              renderBlogMarkdown();
-            }
-          } else {
-            if (blogSplitIcon) blogSplitIcon.className = "bi bi-layout-split";
-            if (blogSplitCont) blogSplitCont.classList.remove("split-active");
-          }
-
-          const mdIcon = document
-            .getElementById("blogEditorMarkdownBtn")
-            .querySelector("i");
-          if (mdIcon) mdIcon.className = "bi bi-markdown";
-          contentEl.classList.remove("d-none");
-          if (!isBlogSplitView) {
-            document
-              .getElementById("blogEditorMarkdownPreview")
-              .classList.add("d-none");
-          }
+          const savedBlogMode = localStorage.getItem('blog_view_mode') || 'edit';
+          setBlogViewMode(savedBlogMode);
     
           if (contentEl) blogTextHistory = [contentEl.value];
           blogHistoryIdx = 0;
@@ -71011,12 +71749,14 @@ SOFTWARE.</div>
             showToast("Blog saved!", "success");
           });
     
+       let blogMarkdownTimer = null;
         document
           .getElementById("blogEditorContent")
           ?.addEventListener("input", (e) => {
             window.lastLocalEditTime = Date.now();
             clearTimeout(blogSaveTimeout);
-            if (isBlogSplitView) renderBlogMarkdown();
+            clearTimeout(blogMarkdownTimer);
+            if (isBlogSplitView) blogMarkdownTimer = setTimeout(renderBlogMarkdown, 300);
             clearTimeout(blogHistoryTimeout);
             updateBlogEditorWordCount();
             blogSaveTimeout = setTimeout(() => saveCurrentBlog(false), 300);
@@ -71041,27 +71781,38 @@ SOFTWARE.</div>
             }
           });
     
-        document
-          .getElementById("blogEditorUndoBtn")
-          ?.addEventListener("click", () => {
-            if (blogHistoryIdx > 0) {
-              blogHistoryIdx--;
-              document.getElementById("blogEditorContent").value =
-                blogTextHistory[blogHistoryIdx];
-              saveCurrentBlog(false);
-            }
-          });
-    
-        document
-          .getElementById("blogEditorRedoBtn")
-          ?.addEventListener("click", () => {
-            if (blogHistoryIdx < blogTextHistory.length - 1) {
-              blogHistoryIdx++;
-              document.getElementById("blogEditorContent").value =
-                blogTextHistory[blogHistoryIdx];
-              saveCurrentBlog(false);
-            }
-          });
+        const performBlogUndo = () => {
+          const ta = document.getElementById("blogEditorContent");
+          if (!ta) return;
+          if (blogHistoryIdx > 0) {
+            blogHistoryIdx--;
+            ta.value = blogTextHistory[blogHistoryIdx];
+            updateBlogEditorWordCount();
+            saveCurrentBlog(false);
+          } else {
+            ta.focus();
+            try { document.execCommand("undo"); } catch (e) {}
+          }
+        };
+
+        const performBlogRedo = () => {
+          const ta = document.getElementById("blogEditorContent");
+          if (!ta) return;
+          if (blogHistoryIdx < blogTextHistory.length - 1) {
+            blogHistoryIdx++;
+            ta.value = blogTextHistory[blogHistoryIdx];
+            updateBlogEditorWordCount();
+            saveCurrentBlog(false);
+          } else {
+            ta.focus();
+            try { document.execCommand("redo"); } catch (e) {}
+          }
+        };
+
+        document.getElementById("blogEditorUndoBtn")?.addEventListener("click", performBlogUndo);
+        document.getElementById("blogEditorUndoToolbarBtn")?.addEventListener("click", performBlogUndo);
+        document.getElementById("blogEditorRedoBtn")?.addEventListener("click", performBlogRedo);
+        document.getElementById("blogEditorRedoToolbarBtn")?.addEventListener("click", performBlogRedo);
     
         document.getElementById("blogEditorTitle")?.addEventListener("input", () => {
           window.lastLocalEditTime = Date.now();
@@ -71110,14 +71861,30 @@ SOFTWARE.</div>
             }
           });
     
+        document.getElementById("blogEditorPresentBtn")?.addEventListener("click", () => {
+          const text = document.getElementById("blogEditorContent").value;
+          window.openPresentation(text);
+        });
+
         let isBlogSplitView = false;
 
-        const renderBlogMarkdown = () => {
+        const renderBlogMarkdown = async () => {
           const contentArea = document.getElementById("blogEditorContent");
           const previewArea = document.getElementById("blogEditorMarkdownPreview");
           if (typeof marked !== "undefined") {
-            marked.use({ gfm: true });
-            previewArea.innerHTML = marked.parse(contentArea.value);
+            const rawHTML = marked.parse(contentArea.value);
+            
+            // SECURITY FIX: Sanitize HTML output to prevent "Re-scan Covers" Modal header injections!
+            let cleanHTML = rawHTML;
+            if (typeof DOMPurify !== 'undefined') {
+               cleanHTML = DOMPurify.sanitize(rawHTML, { ADD_TAGS: ['iframe', 'video', 'source'], ADD_ATTR: ['allow', 'allowfullscreen', 'frameborder', 'src', 'controls', 'type', 'width', 'height'] });
+            } else {
+               cleanHTML = cleanHTML.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/class="[^"]*fixed[^"]*"/gi, '');
+            }
+
+            previewArea.innerHTML = cleanHTML;
+            await parseMermaidBlocks(previewArea);
+            generateTOC(previewArea, "toc-list-blog");
           } else {
             previewArea.innerHTML = '<p class="text-secondary text-center p-5">Markdown renderer is loading or unavailable.</p>';
           }
@@ -71173,35 +71940,6 @@ SOFTWARE.</div>
         });
 
         document
-          .getElementById("blogEditorMarkdownBtn")
-          ?.addEventListener("click", () => {
-            isBlogMarkdownPreview = !isBlogMarkdownPreview;
-            const container = document.getElementById("blogSplitContainer");
-            const contentArea = document.getElementById("blogEditorContent");
-            const previewArea = document.getElementById("blogEditorMarkdownPreview");
-            const icon = document
-              .getElementById("blogEditorMarkdownBtn")
-              .querySelector("i");
-    
-            isBlogSplitView = false;
-            const splitIcon = document.getElementById("blogEditorSplitBtn")?.querySelector("i");
-            if (splitIcon) splitIcon.className = "bi bi-layout-split";
-            if (container) container.classList.remove("split-active");
-
-            if (isBlogMarkdownPreview) {
-              if (icon) icon.className = "bi bi-pencil-square";
-              contentArea.classList.add("d-none");
-              previewArea.classList.remove("d-none");
-              renderBlogMarkdown();
-            } else {
-              if (icon) icon.className = "bi bi-markdown";
-              previewArea.classList.add("d-none");
-              contentArea.classList.remove("d-none");
-              contentArea.focus();
-            }
-          });
-    
-        document
           .getElementById("editorForceSaveBtn")
           .addEventListener("click", async () => {
             await saveCurrentEditorNote(true);
@@ -71217,33 +71955,229 @@ SOFTWARE.</div>
             : "bi bi-star-fill text-warning";
           saveCurrentEditorNote(true);
         });
-    
-        document.getElementById("editorMoreBtn").addEventListener("click", (e) => {
-          e.stopPropagation();
-          document.getElementById("editorMoreMenu").classList.toggle("active");
+
+        // Data Dropdown explicit handlers (Fixed positioning avoids header overflow clipping)
+        const setupDataDropdown = (btnId, menuId) => {
+          const btn = document.getElementById(btnId);
+          const menu = document.getElementById(menuId);
+          if (!btn || !menu) return;
+
+          btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const isVisible = menu.style.display === "block";
+
+            document.querySelectorAll(".custom-opt-menu, .dropdown-menu").forEach((m) => {
+              m.style.display = "none";
+            });
+
+            if (!isVisible) {
+              const rect = btn.getBoundingClientRect();
+              menu.style.position = "fixed";
+              menu.style.top = (rect.bottom + 4) + "px";
+              menu.style.left = "auto";
+              menu.style.right = Math.max(8, window.innerWidth - rect.right) + "px";
+              menu.style.display = "block";
+              menu.style.zIndex = "99999";
+            }
+          });
+        };
+
+        setupDataDropdown("editorMoreBtn", "editorMoreMenu");
+        setupDataDropdown("blogEditorMoreBtn", "blogEditorMoreMenu");
+        setupDataDropdown("taskEditorMoreBtn", "taskEditorMoreMenu");
+
+        document.querySelectorAll('[data-bs-toggle="offcanvas"]').forEach(btn => {
+           btn.addEventListener("click", (e) => {
+             const target = document.querySelector(btn.getAttribute("data-bs-target"));
+             if (target) {
+               bootstrap.Offcanvas.getOrCreateInstance(target).show();
+             }
+           });
         });
     
-        document.getElementById("editorUndoBtn").addEventListener("click", () => {
-          document.getElementById("editorMoreMenu").classList.remove("active");
+        // Draggable Resizer Handler for Split Views
+        const setupEditorResizer = (resizerId, containerId, leftId) => {
+          const resizer = document.getElementById(resizerId);
+          const container = document.getElementById(containerId);
+          const leftPane = document.getElementById(leftId);
+          if (!resizer || !container || !leftPane) return;
+
+          let isResizing = false;
+
+          resizer.addEventListener("mousedown", (e) => {
+            isResizing = true;
+            resizer.classList.add("resizing");
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+          });
+
+          document.addEventListener("mousemove", (e) => {
+            if (!isResizing) return;
+            const rect = container.getBoundingClientRect();
+            let percentage = ((e.clientX - rect.left) / rect.width) * 100;
+            if (percentage < 15) percentage = 15;
+            if (percentage > 85) percentage = 85;
+            leftPane.style.width = `${percentage}%`;
+            leftPane.style.flex = "none";
+          });
+
+          document.addEventListener("mouseup", () => {
+            if (isResizing) {
+              isResizing = false;
+              resizer.classList.remove("resizing");
+              document.body.style.cursor = "";
+              document.body.style.userSelect = "";
+            }
+          });
+        };
+
+        setupEditorResizer("noteResizer", "noteSplitContainer", "editorContent");
+        setupEditorResizer("blogResizer", "blogSplitContainer", "blogEditorContent");
+        setupEditorResizer("taskResizer", "taskSplitContainer", "taskEditorContentArea");
+
+        const performUndo = () => {
+          const ta = document.getElementById("editorContent");
+          if (!ta) return;
           if (noteHistoryIdx > 0) {
             noteHistoryIdx--;
-            document.getElementById("editorContent").value =
-              noteTextHistory[noteHistoryIdx];
+            ta.value = noteTextHistory[noteHistoryIdx];
             updateEditorWordCount();
             saveCurrentEditorNote(false);
+          } else {
+            ta.focus();
+            try { document.execCommand("undo"); } catch (e) {}
           }
-        });
-    
-        document.getElementById("editorRedoBtn").addEventListener("click", () => {
-          document.getElementById("editorMoreMenu").classList.remove("active");
+        };
+
+        const performRedo = () => {
+          const ta = document.getElementById("editorContent");
+          if (!ta) return;
           if (noteHistoryIdx < noteTextHistory.length - 1) {
             noteHistoryIdx++;
-            document.getElementById("editorContent").value =
-              noteTextHistory[noteHistoryIdx];
+            ta.value = noteTextHistory[noteHistoryIdx];
             updateEditorWordCount();
             saveCurrentEditorNote(false);
+          } else {
+            ta.focus();
+            try { document.execCommand("redo"); } catch (e) {}
           }
+        };
+
+        document.getElementById("editorUndoBtn")?.addEventListener("click", () => {
+          document.getElementById("editorMoreMenu")?.classList.remove("active");
+          performUndo();
         });
+
+        document.getElementById("editorUndoToolbarBtn")?.addEventListener("click", performUndo);
+
+        document.getElementById("editorRedoBtn")?.addEventListener("click", () => {
+          document.getElementById("editorMoreMenu")?.classList.remove("active");
+          performRedo();
+        });
+
+        document.getElementById("editorRedoToolbarBtn")?.addEventListener("click", performRedo);
+
+        const setNoteViewMode = (mode) => {
+          const container = document.getElementById("noteSplitContainer");
+          if (!container) return;
+          
+          if (mode === 'split' && window.innerWidth < 768) {
+            mode = 'edit';
+          }
+
+          localStorage.setItem('note_view_mode', mode);
+
+          const idInput = document.getElementById("editorNoteId")?.value;
+          if (idInput) window.noteViewerStates[idInput] = (mode === 'preview') ? "markdown" : "editor";
+
+          container.classList.remove('view-mode-edit', 'view-mode-split', 'view-mode-preview');
+          container.classList.add(`view-mode-${mode}`);
+          
+          ['editorModeEditBtn', 'editorSplitBtn', 'editorMarkdownBtn'].forEach(id => {
+            const btn = document.getElementById(id);
+            if (btn) btn.classList.remove('active');
+          });
+          
+          let activeBtnId = 'editorModeEditBtn';
+          if (mode === 'split') activeBtnId = 'editorSplitBtn';
+          if (mode === 'preview') activeBtnId = 'editorMarkdownBtn';
+          
+          const activeBtn = document.getElementById(activeBtnId);
+          if (activeBtn) activeBtn.classList.add('active');
+          
+          const findBtn = document.getElementById("editorFindBtn");
+          if (mode === 'edit') {
+            isNoteSplitView = false;
+            isMarkdownPreview = false;
+            document.getElementById("editorContent")?.focus();
+            if (findBtn) { findBtn.disabled = false; findBtn.style.opacity = "1"; }
+          } else if (mode === 'split') {
+            isNoteSplitView = true;
+            isMarkdownPreview = false;
+            renderNoteMarkdown();
+            if (findBtn) { findBtn.disabled = false; findBtn.style.opacity = "1"; }
+          } else if (mode === 'preview') {
+            isNoteSplitView = false;
+            isMarkdownPreview = true;
+            document.getElementById("findReplacePanel")?.classList.remove("active");
+            if (findBtn) { findBtn.disabled = true; findBtn.style.opacity = "0.5"; }
+            renderNoteMarkdown();
+          }
+        };
+
+        document.getElementById("editorModeEditBtn")?.addEventListener("click", () => setNoteViewMode('edit'));
+        document.getElementById("editorSplitBtn")?.addEventListener("click", () => setNoteViewMode('split'));
+        document.getElementById("editorMarkdownBtn")?.addEventListener("click", () => setNoteViewMode('preview'));
+
+        const setBlogViewMode = (mode) => {
+          const container = document.getElementById("blogSplitContainer");
+          if (!container) return;
+          
+          if (mode === 'split' && window.innerWidth < 768) {
+            mode = 'edit';
+          }
+
+          localStorage.setItem('blog_view_mode', mode);
+
+          container.classList.remove('view-mode-edit', 'view-mode-split', 'view-mode-preview');
+          container.classList.add(`view-mode-${mode}`);
+          
+          ['blogEditorModeEditBtn', 'blogEditorSplitBtn', 'blogEditorMarkdownBtn'].forEach(id => {
+            const btn = document.getElementById(id);
+            if (btn) btn.classList.remove('active');
+          });
+          
+          let activeBtnId = 'blogEditorModeEditBtn';
+          if (mode === 'split') activeBtnId = 'blogEditorSplitBtn';
+          if (mode === 'preview') activeBtnId = 'blogEditorMarkdownBtn';
+          
+          const activeBtn = document.getElementById(activeBtnId);
+          if (activeBtn) activeBtn.classList.add('active');
+          
+          const findBtn = document.getElementById("blogEditorFindBtn");
+          if (mode === 'edit') {
+            isBlogSplitView = false;
+            isBlogMarkdownPreview = false;
+            document.getElementById("blogEditorContent")?.focus();
+            if (findBtn) { findBtn.disabled = false; findBtn.style.opacity = "1"; }
+          } else if (mode === 'split') {
+            isBlogSplitView = true;
+            isBlogMarkdownPreview = false;
+            renderBlogMarkdown();
+            if (findBtn) { findBtn.disabled = false; findBtn.style.opacity = "1"; }
+          } else if (mode === 'preview') {
+            isBlogSplitView = false;
+            isBlogMarkdownPreview = true;
+            document.getElementById("blogFindReplacePanel")?.classList.remove("active");
+            if (findBtn) { findBtn.disabled = true; findBtn.style.opacity = "0.5"; }
+            renderBlogMarkdown();
+          }
+        };
+
+        document.getElementById("blogEditorModeEditBtn")?.addEventListener("click", () => setBlogViewMode('edit'));
+        document.getElementById("blogEditorSplitBtn")?.addEventListener("click", () => setBlogViewMode('split'));
+        document.getElementById("blogEditorMarkdownBtn")?.addEventListener("click", () => setBlogViewMode('preview'));
     
         document
           .getElementById("editorMarkdownHelpBtn")
@@ -79009,6 +79943,16 @@ SOFTWARE.</div>
           }
   
           function setupEvents() {
+            const ws = document.getElementById('workspace');
+            if (ws) {
+              ws.addEventListener('dragover', e => e.preventDefault());
+              ws.addEventListener('drop', e => {
+                e.preventDefault();
+                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                  uploadImageToOPFS({ target: { files: e.dataTransfer.files } });
+                }
+              });
+            }
             canvas.on('selection:created', handleSelection);
             canvas.on('selection:updated', handleSelection);
             canvas.on('selection:cleared', () => {
