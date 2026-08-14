@@ -423,7 +423,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '8.9');
+define('APP_VERSION', '9.0');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -28094,24 +28094,25 @@ function perform_cover_scan($db) {
       .progress-bar-fg::after {
         content: '';
         position: absolute;
-        right: -7px;
-        top: -5px;
-        width: 14px;
-        height: 14px;
-        border: 2px solid var(--ytm-primary-text);
+        right: -6px;
+        top: -4px;
+        width: 12px;
+        height: 12px;
+        border: none;
         border-radius: 50%;
-        background: var(--ytm-primary-text);
-        box-shadow: none;
-        transition: background-color 0.2s, border-color 0.2s;
+        background: #ffffff;
+        box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.22), 0 2px 4px rgba(0, 0, 0, 0.3);
+        transition: background-color 0.2s, transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s ease;
       }
 
       .progress-bar-container:hover .progress-bar-fg {
-        background-color: var(--ytm-accent);
+        background-color: var(--ytm-accent, #ff0000) !important;
       }
 
       .progress-bar-container:hover .progress-bar-fg::after {
-        border-color: var(--ytm-accent);
-        background: var(--ytm-accent);
+        background: var(--ytm-accent, #ff0000) !important;
+        box-shadow: 0 0 0 4px rgba(255, 0, 0, 0.3), 0 0 12px rgba(255, 0, 0, 0.5) !important;
+        transform: scale(1.15);
       }
 
       .player-bar .extra-controls {
@@ -28818,15 +28819,25 @@ function perform_cover_scan($db) {
         background-color: var(--ytm-accent) !important;
       }
 
+      .player-modal-content .progress-bar-fg::after {
+        border: none !important;
+        box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.22), 0 2px 4px rgba(0, 0, 0, 0.3) !important;
+      }
+
+      .player-modal-content .progress-bar-container:hover .progress-bar-fg::after {
+        background: var(--ytm-accent, #ff0000) !important;
+        box-shadow: 0 0 0 4px rgba(255, 0, 0, 0.3), 0 0 12px rgba(255, 0, 0, 0.5) !important;
+      }
+
       .player-modal-content.theme-light-bg .progress-bar-fg::after {
-        border-color: #000000 !important;
+        border: none !important;
         background: #000000 !important;
-        box-shadow: none !important;
+        box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.15) !important;
       }
 
       .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg::after {
-        border-color: var(--ytm-accent) !important;
-        background: var(--ytm-accent) !important;
+        background: var(--ytm-accent, #ff0000) !important;
+        box-shadow: 0 0 0 4px rgba(255, 0, 0, 0.3), 0 0 12px rgba(255, 0, 0, 0.5) !important;
       }
 
       .player-modal-content.theme-light-bg .nav-tabs {
@@ -38805,24 +38816,26 @@ curl_close($ch);
             .timeline-filled::after {
               content: '';
               position: absolute;
-              right: -7px;
-              top: -5px;
-              width: 14px;
-              height: 14px;
-              border: 2px solid var(--ytm-primary-text);
+              right: -6px;
+              top: -4px;
+              width: 12px;
+              height: 12px;
+              border: none;
               border-radius: 50%;
-              background: var(--ytm-primary-text);
-              box-shadow: none;
-              transition: background-color 0.2s, border-color 0.2s;
+              background: #ffffff;
+              box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+              transition: background-color 0.2s, transform 0.1s, box-shadow 0.2s;
             }
         
             .timeline-container:hover .timeline-filled {
-              background-color: var(--ytm-accent);
+              background-color: var(--ytm-accent, #ff0000) !important;
             }
 
             .timeline-container:hover .timeline-filled::after {
-              border-color: var(--ytm-accent);
-              background: var(--ytm-accent);
+              border-color: var(--ytm-accent, #ff0000) !important;
+              background: var(--ytm-accent, #ff0000) !important;
+              box-shadow: 0 0 8px rgba(255, 0, 0, 0.5) !important;
+              transform: scale(1.15);
             }
         
             .pb-right {
@@ -39748,7 +39761,7 @@ curl_close($ch);
               let pos = (e.clientX - rect.left) / rect.width;
               pos = Math.max(0, Math.min(1, pos));
               audioPlayer.volume = pos;
-              lastVolume = pos;
+              if (pos > 0) lastVolume = pos;
               volumeFilled.style.width = `${pos * 100}%`;
               updateVolumeIcon(pos);
             }
@@ -39764,15 +39777,18 @@ curl_close($ch);
               }
             }
             btnMute.addEventListener('click', () => {
-              if (audioPlayer.volume > 0) {
+              if (audioPlayer.volume === 0 || audioPlayer.muted) {
+                audioPlayer.muted = false;
+                let restoreVol = lastVolume > 0 ? lastVolume : 1;
+                audioPlayer.volume = restoreVol;
+                volumeFilled.style.width = `${restoreVol * 100}%`;
+              } else {
+                lastVolume = audioPlayer.volume;
+                audioPlayer.muted = true;
                 audioPlayer.volume = 0;
                 volumeFilled.style.width = '0%';
-                volumeIcon.className = 'bi bi-volume-mute';
-              } else {
-                audioPlayer.volume = lastVolume;
-                volumeFilled.style.width = `${lastVolume * 100}%`;
-                updateVolumeIcon(lastVolume);
               }
+              updateVolumeIcon(audioPlayer.volume);
             });
 
             function toggleShuffle() {
@@ -43989,7 +44005,7 @@ SOFTWARE.</div>
         let contextMenuItemEl = null;
         let previousVolume = 1;
         let cachedExploreData = null;
-        let offlineViewSongsData = [];
+        window.offlineViewSongsData = [];
         let currentLrcData = null;
         let currentLrcSongId = null;
         let currentLyricIndex = -1;
@@ -45219,15 +45235,21 @@ SOFTWARE.</div>
             }
     
             const v = globalSongCache[id] ? globalSongCache[id].last_modified || 0 : 0;
-            await cache.add(`?action=get_image&id=${id}&v=${v}`);
-            await cache.add(`?action=get_song_data&id=${id}`);
-    
-            await cache.add(`?action=get_all_rhythm_levels`).catch(() => {});
-            await cache.add(`?action=get_rhythm_levels&song_id=${id}`).catch(() => {});
+            
+            // OPTIMIZATION: Run all metadata and chart fetches concurrently
+            const cachePromises = [
+              cache.add(`?action=get_image&id=${id}&v=${v}`),
+              cache.add(`?action=get_song_data&id=${id}`),
+              cache.add(`?action=get_all_rhythm_levels`).catch(() => {}),
+              cache.add(`?action=get_rhythm_levels&song_id=${id}`).catch(() => {})
+            ];
+            
             const rgDiffs = ["easy", "medium", "hard", "expert", "master", "demon"];
             for (let d of rgDiffs) {
-              await cache.add(`?action=get_rhythm_chart&song_id=${id}&difficulty=${d}`).catch(() => {});
+              cachePromises.push(cache.add(`?action=get_rhythm_chart&song_id=${id}&difficulty=${d}`).catch(() => {}));
             }
+            
+            await Promise.all(cachePromises);
     
             const response = await fetch(`?action=get_stream&id=${id}`);
             if (!response.ok) throw new Error("Stream fetch failed");
@@ -45252,9 +45274,12 @@ SOFTWARE.</div>
                       const { done, value } = await reader.read();
                       if (done) break;
                       loaded += value.length;
-                      const pct = Math.round((loaded / total) * 100);
-                      const pctText = document.getElementById(`re-offline-progress-${id}`);
-                      if (pctText) pctText.innerText = `${actionText} song (${pct}%)...`;
+                      // Throttle DOM updates to prevent layout thrashing on massive files
+                      if (loaded % (1024 * 512) < 65536 || loaded === total) { 
+                        const pct = Math.round((loaded / total) * 100);
+                        const pctText = document.getElementById(`re-offline-progress-${id}`);
+                        if (pctText) pctText.innerText = `${actionText} song (${pct}%)...`;
+                      }
                       await writable.write(value);
                     }
                   }
@@ -45266,36 +45291,11 @@ SOFTWARE.</div>
               console.warn("OPFS write failed, falling back to standard Cache API", opfsErr);
             }
 
-            // Fallback to standard Cache API to ensure it works EVERYWHERE if OPFS isn't fully supported
+            // OPTIMIZATION: Bypass JS memory bridging. Put directly into native Cache API.
             if (!opfsUsed) {
-              const contentLength = response.headers.get("content-length");
-              if (!contentLength) {
-                await cache.put(`?action=get_stream&id=${id}`, response.clone());
-              } else {
-                const total = parseInt(contentLength, 10);
-                let loaded = 0;
-                const reader = response.clone().body.getReader();
-                const stream = new ReadableStream({
-                  async start(controller) {
-                    while (true) {
-                      const { done, value } = await reader.read();
-                      if (done) break;
-                      loaded += value.length;
-                      const pct = Math.round((loaded / total) * 100);
-                      const pctText = document.getElementById(`re-offline-progress-${id}`);
-                      if (pctText) pctText.innerText = `${actionText} song (${pct}%)...`;
-                      controller.enqueue(value);
-                    }
-                    controller.close();
-                  }
-                });
-                const newResponse = new Response(stream, {
-                  headers: response.headers,
-                  status: response.status,
-                  statusText: response.statusText,
-                });
-                await cache.put(`?action=get_stream&id=${id}`, newResponse);
-              }
+              const pctText = document.getElementById(`re-offline-progress-${id}`);
+              if (pctText) pctText.innerText = `${actionText} song (Finalizing cache)...`;
+              await cache.put(`?action=get_stream&id=${id}`, response.clone());
             }
     
             pToast.classList.replace("bg-warning", "bg-success");
@@ -45303,13 +45303,13 @@ SOFTWARE.</div>
             document.getElementById(`re-offline-progress-${id}`).innerText = successText;
             setTimeout(() => pToast.remove(), 3000);
     
-            const itemRow = document.querySelector(`.song-item[data-song-id="${id}"]`);
-            if (itemRow) {
+            const itemRows = document.querySelectorAll(`.song-item[data-song-id="${id}"]`);
+            itemRows.forEach(itemRow => {
               itemRow.classList.remove("offline-missing");
               itemRow.style.opacity = "1";
               const warningIcon = itemRow.querySelector(".offline-missing-icon");
               if (warningIcon) warningIcon.remove();
-            }
+            });
             offlineSongsSet.add(parseInt(id));
           } catch (e) {
             console.error(e);
@@ -45354,6 +45354,7 @@ SOFTWARE.</div>
     
             offlineBtn.disabled = false;
             offlineBtn.innerHTML = originalBtnHtml;
+            window.offlineViewSongsData = null; // Invalidate offline cache list dynamically
             showToast(
               `Processed ${processed} songs for offline playback!`,
               "success",
@@ -45450,6 +45451,7 @@ SOFTWARE.</div>
               }
             }
     
+            window.offlineViewSongsData = null; // Invalidate offline cache list dynamically
             showToast(`Removed ${removed} songs.`, "success");
             selectedSongs.clear();
             updateMultiSelectUI();
@@ -47323,15 +47325,15 @@ SOFTWARE.</div>
               }
               break;
             case "get_offline_songs":
-              if (offlineViewSongsData && offlineViewSongsData.length > 0) {
+              if (window.offlineViewSongsData && window.offlineViewSongsData.length > 0) {
                 const startIndex = (currentPage - 1) * PAGE_SIZE;
                 const endIndex = startIndex + PAGE_SIZE;
-                data = offlineViewSongsData.slice(startIndex, endIndex);
+                data = window.offlineViewSongsData.slice(startIndex, endIndex);
                 if (capturedLoadId !== viewLoadCounter) return;
                 if (data.length > 0) {
                   renderSongs(data, true);
                 }
-                if (endIndex >= offlineViewSongsData.length) {
+                if (endIndex >= window.offlineViewSongsData.length) {
                   allContentloaded = true;
                 }
               } else {
@@ -52954,13 +52956,13 @@ SOFTWARE.</div>
                 }
     
                 if (allData && allData.length > 0) {
-                  offlineViewSongsData = allData;
-                  data = offlineViewSongsData.slice(0, PAGE_SIZE);
+                  window.offlineViewSongsData = allData;
+                  data = window.offlineViewSongsData.slice(0, PAGE_SIZE);
                   renderSongs(data, true);
-                  if (offlineViewSongsData.length <= PAGE_SIZE)
+                  if (window.offlineViewSongsData.length <= PAGE_SIZE)
                     allContentloaded = true;
                 } else {
-                  offlineViewSongsData = [];
+                  window.offlineViewSongsData = [];
                   renderSongs([], true);
                   allContentloaded = true;
                 }
@@ -59678,23 +59680,25 @@ SOFTWARE.</div>
         }
         if (playerElements.volumeBtn) {
           playerElements.volumeBtn.addEventListener("click", () => {
-            audio.muted = !audio.muted;
-            if (audio.muted) {
-              playerElements.volumeSlider.value = 0;
+            if (audio.volume === 0 || audio.muted) {
+              audio.muted = false;
+              audio.volume = previousVolume > 0 ? previousVolume : 1;
+              playerElements.volumeSlider.value = audio.volume;
             } else {
-              playerElements.volumeSlider.value =
-                audio.volume > 0 ? audio.volume : previousVolume;
-              audio.volume = playerElements.volumeSlider.value;
+              previousVolume = audio.volume;
+              audio.muted = true;
+              audio.volume = 0;
+              playerElements.volumeSlider.value = 0;
             }
             updateVolumeSliderFill();
             updateVolumeIcon();
           });
         }
         audio.addEventListener("volumechange", () => {
-          if (!audio.muted) {
+          if (!audio.muted && audio.volume > 0) {
             previousVolume = audio.volume;
-            playerElements.volumeSlider.value = audio.volume;
           }
+          playerElements.volumeSlider.value = audio.muted ? 0 : audio.volume;
           updateVolumeSliderFill();
           updateVolumeIcon();
         });
@@ -62863,12 +62867,14 @@ SOFTWARE.</div>
               if (offRes) {
                 if (offRes.status === "added") {
                   offlineSongsSet.add(parseInt(id));
+                  window.offlineViewSongsData = null; // Invalidate offline cache list dynamically
                   await recacheOfflineSong(parseInt(id), true);
                   if (currentView.type === "get_offline_songs") {
                     loadView(currentView);
                   }
                 } else {
                   offlineSongsSet.delete(parseInt(id));
+                  window.offlineViewSongsData = null; // Invalidate offline cache list dynamically
                   try {
                     const cache = await caches.open("php-music-offline");
                     const keys = await cache.keys();
@@ -64289,16 +64295,28 @@ SOFTWARE.</div>
                         body.theme-light-bg .progress-bar-bg, .player-bar.theme-light-bg .timeline-bg, .player-bar.theme-light-bg .volume-bg { background-color: rgba(0, 0, 0, 0.2) !important; }
                         body.theme-light-bg .progress-bar-fg, .player-bar.theme-light-bg .timeline-filled, .player-bar.theme-light-bg .volume-filled { background-color: #000000 !important; }
                         .player-bar.theme-light-bg .timeline-container:hover .timeline-filled, .player-bar.theme-light-bg .volume-bar:hover .volume-filled { background-color: var(--ytm-accent) !important; }
+                        .ytm-modal .timeline-filled::after {
+                          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3) !important;
+                          border: none !important;
+                        }
+
+                        .ytm-modal .timeline-container:hover .timeline-filled::after {
+                          background: var(--ytm-accent, #ff0000) !important;
+                          border-color: var(--ytm-accent, #ff0000) !important;
+                          box-shadow: 0 0 8px rgba(255, 0, 0, 0.5) !important;
+                        }
+
                         .player-modal-content.theme-light-bg .progress-bar-fg::after,
                         .player-bar.theme-light-bg .timeline-filled::after { 
-                          border-color: #000000 !important; 
+                          border: none !important;
                           background: #000000 !important; 
-                          box-shadow: none !important; 
+                          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2) !important; 
                         }
                         .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg::after,
                         .player-bar.theme-light-bg .timeline-container:hover .timeline-filled::after { 
-                          border-color: var(--ytm-accent) !important; 
-                          background: var(--ytm-accent) !important; 
+                          border-color: var(--ytm-accent, #ff0000) !important; 
+                          background: var(--ytm-accent, #ff0000) !important; 
+                          box-shadow: 0 0 8px rgba(255, 0, 0, 0.5) !important; 
                         }
                         .player-bar .pb-title, .player-bar .pb-time { text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
                         .player-bar .pb-artist, .player-bar .pb-btn, .player-bar .text-secondary { text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
@@ -73777,9 +73795,11 @@ SOFTWARE.</div>
                 if (offRes) {
                   if (offRes.status === "added") {
                     offlineSongsSet.add(parseInt(currentSong.id));
-                    recacheOfflineSong(parseInt(currentSong.id));
+                    window.offlineViewSongsData = null; // Invalidate offline cache list dynamically
+                    recacheOfflineSong(parseInt(currentSong.id), true);
                   } else {
                     offlineSongsSet.delete(parseInt(currentSong.id));
+                    window.offlineViewSongsData = null; // Invalidate offline cache list dynamically
                     try {
                       const cache = await caches.open("php-music-offline");
                       const keys = await cache.keys();
@@ -73790,6 +73810,11 @@ SOFTWARE.</div>
                           u.searchParams.get("song_id") == currentSong.id
                         )
                           await cache.delete(req);
+                      }
+                      if (navigator.storage && navigator.storage.getDirectory) {
+                        const root = await navigator.storage.getDirectory();
+                        const dir = await root.getDirectoryHandle("offline_music_cache");
+                        await dir.removeEntry(`song_${currentSong.id}`).catch(() => {});
                       }
                     } catch (err) {}
                     showToast("Removed from offline list.", "success");
