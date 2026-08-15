@@ -407,6 +407,35 @@ session_start([
 ]);
 set_time_limit(0);
 
+// FORBIDDEN PAGE HANDLER: Displays 403 Forbidden page on unauthorized inspection
+if (isset($_GET['page']) && $_GET['page'] === 'forbidden') {
+  http_response_code(403);
+  ?>
+  <!DOCTYPE html>
+  <html lang="en" data-bs-theme="dark">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>403 Forbidden - PHP Music</title>
+      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+      <style>
+        body { background-color: #030303; color: #fff; height: 100vh; display: flex; align-items: center; justify-content: center; font-family: sans-serif; margin: 0; }
+        .forbidden-card { background: #121212; border: 1px solid #333; border-radius: 16px; padding: 36px; max-width: 460px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }
+      </style>
+    </head>
+    <body>
+      <div class="forbidden-card">
+        <div class="text-danger mb-3" style="font-size: 3.5rem;">&#x26D4;</div>
+        <h3 class="fw-bold text-white mb-2">403 - Access Forbidden</h3>
+        <p class="text-secondary small mb-4">Unauthorized inspection and developer tools are strictly prohibited on this platform.</p>
+        <a href="./" class="btn btn-danger w-100 fw-bold py-2 rounded-pill">Return to Home</a>
+      </div>
+    </body>
+  </html>
+  <?php
+  exit;
+}
+
 // GLOBAL ADMIN VARIABLES: Initialize early to prevent undefined variable warnings in views
 $is_super_admin = 0;
 $is_admin = 0;
@@ -423,7 +452,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '9.0');
+define('APP_VERSION', '9.1');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1501,6 +1530,410 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               exec('git log -n 50 --oneline 2>&1', $output);
               echo json_encode(['success' => true, 'history' => htmlspecialchars(implode("\n", $output))]);
               break;
+
+            case 'ai_get_chats':
+              $db = get_db();
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS ide_ai_chats (
+                  id TEXT PRIMARY KEY,
+                  user_id INTEGER,
+                  title TEXT,
+                  pinned INTEGER DEFAULT 0,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS ide_ai_messages (
+                  id TEXT PRIMARY KEY,
+                  chat_id TEXT,
+                  parent_id TEXT,
+                  role TEXT,
+                  content TEXT,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_ide_ai_messages_chat_id ON ide_ai_messages(chat_id);
+              ");
+              $cols = $db->query("PRAGMA table_info(ide_ai_chats)")->fetchAll(PDO::FETCH_COLUMN, 1);
+              if (!in_array('pinned', $cols)) {
+                $db->exec("ALTER TABLE ide_ai_chats ADD COLUMN pinned INTEGER DEFAULT 0");
+              }
+
+              $adminId = $_SESSION['admin_id'] ?? 0;
+              $page = max(1, (int)($input['page'] ?? ($_GET['page'] ?? 1)));
+              $limit = 25;
+              $offset = ($page - 1) * $limit;
+              $q = trim($input['q'] ?? ($_GET['q'] ?? ''));
+
+              $where = "WHERE user_id = ?";
+              $params = [$adminId];
+
+              if ($q !== '') {
+                $where .= " AND title LIKE ?";
+                $params[] = '%' . $q . '%';
+              }
+
+              $stmt = $db->prepare("SELECT * FROM ide_ai_chats $where ORDER BY pinned DESC, created_at DESC LIMIT $limit OFFSET $offset");
+              $stmt->execute($params);
+              $chats = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+              $countStmt = $db->prepare("SELECT COUNT(*) FROM ide_ai_chats $where");
+              $countStmt->execute($params);
+              $total = (int)$countStmt->fetchColumn();
+
+              echo json_encode([
+                'success' => true,
+                'chats' => $chats,
+                'total' => $total,
+                'page' => $page,
+                'has_more' => ($offset + count($chats)) < $total
+              ]);
+              break;
+
+            case 'ai_create_chat':
+              $db = get_db();
+              $chatId = 'aic_' . bin2hex(random_bytes(8));
+              $adminId = $_SESSION['admin_id'] ?? 0;
+              $title = trim($input['title'] ?? 'New Coding Session');
+              $stmt = $db->prepare("INSERT INTO ide_ai_chats (id, user_id, title) VALUES (?, ?, ?)");
+              $stmt->execute([$chatId, $adminId, $title]);
+              echo json_encode(['success' => true, 'chat_id' => $chatId]);
+              break;
+
+            case 'ai_delete_chat':
+              $db = get_db();
+              $chatId = $input['chat_id'] ?? '';
+              $adminId = $_SESSION['admin_id'] ?? 0;
+              $db->prepare("DELETE FROM ide_ai_chats WHERE id = ? AND user_id = ?")->execute([$chatId, $adminId]);
+              $db->prepare("DELETE FROM ide_ai_messages WHERE chat_id = ?")->execute([$chatId]);
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'ai_rename_chat':
+              $db = get_db();
+              $chatId = $input['chat_id'] ?? '';
+              $title = trim(strip_tags($input['title'] ?? 'Coding Session'));
+              $adminId = $_SESSION['admin_id'] ?? 0;
+              $db->prepare("UPDATE ide_ai_chats SET title = ? WHERE id = ? AND user_id = ?")->execute([$title, $chatId, $adminId]);
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'ai_pin_chat':
+              $db = get_db();
+              $chatId = $input['chat_id'] ?? '';
+              $pinned = !empty($input['pinned']) ? 1 : 0;
+              $adminId = $_SESSION['admin_id'] ?? 0;
+              $db->prepare("UPDATE ide_ai_chats SET pinned = ? WHERE id = ? AND user_id = ?")->execute([$pinned, $chatId, $adminId]);
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'ai_get_messages':
+              $db = get_db();
+              $chatId = $input['chat_id'] ?? ($_GET['chat_id'] ?? '');
+              $stmt = $db->prepare("SELECT * FROM ide_ai_messages WHERE chat_id = ? ORDER BY created_at ASC");
+              $stmt->execute([$chatId]);
+              echo json_encode(['success' => true, 'messages' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
+              break;
+
+            case 'ai_save_message':
+              $db = get_db();
+              $msgId = $input['id'] ?? ('aim_' . bin2hex(random_bytes(8)));
+              $chatId = $input['chat_id'] ?? '';
+              $parentId = $input['parent_id'] ?? null;
+              $role = $input['role'] ?? 'user';
+              $content = $input['content'] ?? '';
+              $stmt = $db->prepare("INSERT INTO ide_ai_messages (id, chat_id, parent_id, role, content) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content");
+              $stmt->execute([$msgId, $chatId, $parentId, $role, $content]);
+              echo json_encode(['success' => true, 'id' => $msgId]);
+              break;
+
+            case 'ai_get_settings':
+              $db = get_db();
+              $admin_id = $_SESSION['admin_id'] ?? 0;
+              $stmt = $db->prepare("SELECT status, settings FROM users WHERE id = ?");
+              $stmt->execute([$admin_id]);
+              $adm_user = $stmt->fetch();
+              $is_super = ($adm_user && $adm_user['status'] === 'super_admin');
+
+              // Load master settings from Super Admin
+              $master_stmt = $db->query("SELECT settings FROM users WHERE status = 'super_admin' LIMIT 1");
+              $masterSettings = json_decode($master_stmt->fetchColumn() ?: '{}', true) ?? [];
+
+              echo json_encode([
+                'success' => true,
+                'is_super_admin' => $is_super,
+                'gemini_token' => $is_super ? ($masterSettings['ai_gemini_token'] ?? '') : '',
+                'hf_token' => $is_super ? ($masterSettings['ai_hf_token'] ?? '') : '',
+                'has_gemini_token' => !empty($masterSettings['ai_gemini_token']),
+                'has_hf_token' => !empty($masterSettings['ai_hf_token']),
+                'provider' => $masterSettings['ai_provider'] ?? 'gemini',
+                'gemini_model' => $masterSettings['ai_gemini_model'] ?? 'gemini-3.1-flash-lite',
+                'hf_model' => $masterSettings['ai_hf_model'] ?? 'Qwen/Qwen2.5-Coder-32B-Instruct'
+              ]);
+              break;
+
+            case 'ai_save_settings':
+              $db = get_db();
+              $admin_id = $_SESSION['admin_id'] ?? 0;
+              $stmt = $db->prepare("SELECT status, settings FROM users WHERE id = ?");
+              $stmt->execute([$admin_id]);
+              $adm_user = $stmt->fetch();
+
+              if (!$adm_user || $adm_user['status'] !== 'super_admin') {
+                throw new Exception("Security Restriction: Only Super Administrators are authorized to configure AI API keys.");
+              }
+
+              $userSettings = json_decode($adm_user['settings'] ?: '{}', true) ?? [];
+              $userSettings['ai_gemini_token'] = trim($input['gemini_token'] ?? ($userSettings['ai_gemini_token'] ?? ''));
+              $userSettings['ai_hf_token'] = trim($input['hf_token'] ?? ($userSettings['ai_hf_token'] ?? ''));
+              $userSettings['ai_provider'] = $input['provider'] ?? 'gemini';
+              $userSettings['ai_gemini_model'] = $input['gemini_model'] ?? 'gemini-3.1-flash-lite';
+              $userSettings['ai_hf_model'] = $input['hf_model'] ?? 'Qwen/Qwen2.5-Coder-32B-Instruct';
+
+              $db->prepare("UPDATE users SET settings = ? WHERE id = ?")->execute([json_encode($userSettings), $admin_id]);
+              echo json_encode(['success' => true]);
+              break;
+
+            case 'ai_search':
+              $query = trim($input['q'] ?? '');
+              if (empty($query)) {
+                echo json_encode(['context' => '', 'urls' => []]);
+                break;
+              }
+
+              $urls = [];
+              $snippets = [];
+
+              // 1. DuckDuckGo Search Fallback
+              $ip = mt_rand(11, 197) . '.' . mt_rand(0, 255) . '.' . mt_rand(0, 255) . '.' . mt_rand(1, 254);
+              $ddgOpts = [
+                'http' => [
+                  'method' => 'POST',
+                  'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\nContent-type: application/x-www-form-urlencoded\r\nReferer: https://lite.duckduckgo.com/\r\nX-Forwarded-For: $ip\r\n",
+                  'content' => 'q=' . urlencode($query . ' -site:youtube.com'),
+                  'timeout' => 3.0,
+                  'ignore_errors' => true
+                ],
+                'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
+              ];
+              $html = @file_get_contents('https://lite.duckduckgo.com/lite/', false, stream_context_create($ddgOpts));
+              if ($html) {
+                preg_match_all('/<a rel="nofollow" href="([^"]+)".*?>(.*?)<\/a>/is', $html, $linkMatches);
+                preg_match_all('/<td class=\'result-snippet\'>(.*?)<\/td>/is', $html, $descMatches);
+                $limit = min(8, count($linkMatches[1] ?? []));
+                for ($i = 0; $i < $limit; $i++) {
+                  $url = $linkMatches[1][$i];
+                  if (filter_var($url, FILTER_VALIDATE_URL) && strpos($url, 'duckduckgo.com') === false && !in_array($url, $urls)) {
+                    $title = trim(strip_tags($linkMatches[2][$i]));
+                    $text = isset($descMatches[1][$i]) ? trim(strip_tags($descMatches[1][$i])) : '';
+                    $snippets[] = "- [Source: $url]\n  Title: $title\n  Snippet: $text";
+                    $urls[] = $url;
+                  }
+                }
+              }
+
+              // 2. Wikipedia Search Fallback
+              if (count($urls) < 3) {
+                $wikiUrl = "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=" . urlencode($query) . "&utf8=&format=json";
+                $wikiOpts = ['http' => ['method' => 'GET', 'header' => "User-Agent: PHPMusicAI/1.0\r\n", 'timeout' => 2.0, 'ignore_errors' => true], 'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]];
+                $wikiJson = @file_get_contents($wikiUrl, false, stream_context_create($wikiOpts));
+                if ($wikiJson) {
+                  $wikiData = json_decode($wikiJson, true);
+                  if (!empty($wikiData['query']['search'])) {
+                    foreach ($wikiData['query']['search'] as $result) {
+                      if (count($urls) >= 8) break;
+                      $wUrl = 'https://en.wikipedia.org/wiki/' . urlencode(str_replace(' ', '_', $result['title']));
+                      if (!in_array($wUrl, $urls)) {
+                        $snippets[] = "- [Source: $wUrl]\n  Title: {$result['title']}\n  Snippet: " . strip_tags($result['snippet']);
+                        $urls[] = $wUrl;
+                      }
+                    }
+                  }
+                }
+              }
+
+              $searchContext = "";
+              if (!empty($snippets)) {
+                $searchContext = "[REAL-TIME WEB SEARCH RESULTS (" . count($urls) . " sources)]:\n" . implode("\n\n", $snippets) . "\n[END OF WEB SEARCH RESULTS]\n\n";
+              }
+              echo json_encode(['success' => true, 'context' => $searchContext, 'urls' => $urls]);
+              break;
+
+            case 'ai_chat':
+              $db = get_db();
+              $master_stmt = $db->query("SELECT settings FROM users WHERE status = 'super_admin' LIMIT 1");
+              $userSettings = json_decode($master_stmt->fetchColumn() ?: '{}', true) ?? [];
+
+              $provider = $input['provider'] ?? ($userSettings['ai_provider'] ?? 'gemini');
+              $geminiToken = trim($userSettings['ai_gemini_token'] ?? '');
+              $hfToken = trim($userSettings['ai_hf_token'] ?? '');
+              $model = $input['model'] ?? ($provider === 'gemini' ? ($userSettings['ai_gemini_model'] ?? 'gemini-3.1-flash-lite') : ($userSettings['ai_hf_model'] ?? 'Qwen/Qwen2.5-Coder-32B-Instruct'));
+
+              // Clear all output buffers to prepare SSE streaming
+              while (ob_get_level() > 0) {
+                ob_end_clean();
+              }
+
+              header('Content-Type: text/event-stream; charset=utf-8');
+              header('Cache-Control: no-cache, no-transform');
+              header('Connection: keep-alive');
+              header('X-Accel-Buffering: no');
+              if (function_exists('apache_setenv')) {
+                @apache_setenv('no-gzip', '1');
+              }
+              @ini_set('zlib.output_compression', '0');
+              @ini_set('implicit_flush', '1');
+              ob_implicit_flush(true);
+
+              $isGemini = ($provider === 'gemini');
+              if ($isGemini && empty($geminiToken)) {
+                echo "data: " . json_encode(['error' => 'Google Gemini API Key has not been configured in Settings by the Super Administrator.']) . "\n\n";
+                exit;
+              }
+              if (!$isGemini && empty($hfToken)) {
+                echo "data: " . json_encode(['error' => 'HuggingFace API Token has not been configured in Settings by the Super Administrator.']) . "\n\n";
+                exit;
+              }
+
+              $rawMessages = $input['messages'] ?? [];
+              $fileContext = $input['file_context'] ?? '';
+              $searchContext = $input['search_context'] ?? '';
+              $thinkMode = !empty($input['think']);
+
+              // Filter out empty messages
+              $validMessages = [];
+              foreach ($rawMessages as $m) {
+                $txt = trim($m['content'] ?? '');
+                if ($txt !== '') {
+                  $validMessages[] = ['role' => $m['role'], 'content' => $txt];
+                }
+              }
+
+              if (empty($validMessages)) {
+                $validMessages[] = ['role' => 'user', 'content' => 'Hello'];
+              }
+
+              $instructionBlock = "You are an expert software engineer integrated directly into PHPEditor IDE. Provide clean, secure, production-ready code wrapped in Markdown blocks (e.g. ```php, ```js).";
+              if (!empty($fileContext)) {
+                $instructionBlock .= "\n\n[ACTIVE CODE CONTEXT]:\n" . $fileContext;
+              }
+              if (!empty($searchContext)) {
+                $instructionBlock .= "\n\n" . $searchContext;
+              }
+              if ($thinkMode) {
+                $instructionBlock .= "\n\n[INSTRUCTION: Think step-by-step inside `<think>...</think>` tags before your final code output.]";
+              } else {
+                $instructionBlock .= "\n\n[INSTRUCTION: Provide the direct solution immediately without `<think>` tags or internal reasoning.]";
+              }
+
+              if ($isGemini) {
+                $geminiContents = [];
+                $lastRole = null;
+
+                foreach ($validMessages as $m) {
+                  $role = ($m['role'] === 'assistant' || $m['role'] === 'model') ? 'model' : 'user';
+                  if ($role === $lastRole && !empty($geminiContents)) {
+                    $geminiContents[count($geminiContents) - 1]['parts'][0]['text'] .= "\n\n" . $m['content'];
+                  } else {
+                    $geminiContents[] = [
+                      'role' => $role,
+                      'parts' => [['text' => $m['content']]]
+                    ];
+                    $lastRole = $role;
+                  }
+                }
+
+                if (!empty($geminiContents) && $geminiContents[0]['role'] !== 'user') {
+                  array_unshift($geminiContents, ['role' => 'user', 'parts' => [['text' => 'Hello']]]);
+                }
+
+                $lastIdx = count($geminiContents) - 1;
+                $geminiContents[$lastIdx]['parts'][0]['text'] .= "\n\n[SYSTEM INSTRUCTIONS]:\n" . $instructionBlock;
+
+                $payload = [
+                  'contents' => $geminiContents,
+                  'generationConfig' => [
+                    'temperature' => 0.4,
+                    'maxOutputTokens' => 8192
+                  ]
+                ];
+
+                $url = "https://generativelanguage.googleapis.com/v1beta/models/" . urlencode($model) . ":streamGenerateContent?alt=sse&key=" . urlencode($geminiToken);
+                $headers = ["Content-Type: application/json"];
+              } else {
+                $hfMessages = [['role' => 'system', 'content' => $instructionBlock]];
+                foreach ($validMessages as $m) {
+                  $hfMessages[] = ['role' => $m['role'], 'content' => $m['content']];
+                }
+                $payload = [
+                  'model' => $model,
+                  'messages' => $hfMessages,
+                  'max_tokens' => 8192,
+                  'temperature' => 0.4,
+                  'stream' => true
+                ];
+                $url = "https://router.huggingface.co/v1/chat/completions";
+                $headers = [
+                  "Content-Type: application/json",
+                  "Authorization: Bearer " . $hfToken
+                ];
+              }
+
+              $payloadJson = json_encode($payload);
+
+              // Dual-Engine Streamer: cURL (Primary) with fallback to stream_context fopen
+              if (function_exists('curl_init')) {
+                $ch = curl_init($url);
+                curl_setopt_array($ch, [
+                  CURLOPT_POST => true,
+                  CURLOPT_POSTFIELDS => $payloadJson,
+                  CURLOPT_HTTPHEADER => $headers,
+                  CURLOPT_RETURNTRANSFER => false,
+                  CURLOPT_FOLLOWLOCATION => true,
+                  CURLOPT_SSL_VERIFYPEER => false,
+                  CURLOPT_SSL_VERIFYHOST => 0,
+                  CURLOPT_TIMEOUT => 120,
+                  CURLOPT_WRITEFUNCTION => function($ch, $data) {
+                    echo $data;
+                    if (ob_get_level() > 0) @ob_flush();
+                    flush();
+                    return strlen($data);
+                  }
+                ]);
+                $curlSuccess = curl_exec($ch);
+                if (!$curlSuccess || curl_errno($ch)) {
+                  $cErr = curl_error($ch);
+                  echo "data: " . json_encode(['error' => 'cURL Error: ' . $cErr]) . "\n\n";
+                }
+                curl_close($ch);
+                exit;
+              }
+
+              $options = [
+                'http' => [
+                  'header' => implode("\r\n", $headers) . "\r\n",
+                  'method' => 'POST',
+                  'content' => $payloadJson,
+                  'ignore_errors' => true,
+                  'timeout' => 120
+                ],
+                'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
+              ];
+
+              $context = stream_context_create($options);
+              $fp = @fopen($url, 'r', false, $context);
+              if (!$fp) {
+                echo "data: " . json_encode(['error' => 'Failed to establish connection to AI provider API (allow_url_fopen disabled).']) . "\n\n";
+                exit;
+              }
+
+              while (!feof($fp)) {
+                $chunk = fgets($fp);
+                if ($chunk !== false) {
+                  echo $chunk;
+                  if (ob_get_level() > 0) @ob_flush();
+                  flush();
+                }
+              }
+              fclose($fp);
+              exit;
 
             default:
               throw new Exception('Unknown POST action');
@@ -7673,6 +8106,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <span id="ide-current-file">No file selected</span>
               </div>
               <div class="ide-actions">
+                <button class="ide-btn text-info" id="ide-ai-btn" title="AI Coding Assistant"><i class="bi bi-robot"></i> AI Help</button>
                 <button class="ide-btn" id="ide-mini-player-btn" title="Toggle Mini Player"><i class="bi bi-music-note-beamed"></i> Mini Player</button>
                 <button class="ide-btn" id="ide-fullscreen-btn" title="Toggle Fullscreen IDE"><i class="bi bi-arrows-fullscreen"></i> Fullscreen</button>
                 <button class="ide-btn" id="ide-find-btn" title="Ctrl+F"><i class="bi bi-search"></i> Find</button>
@@ -7688,6 +8122,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <!-- Custom Editor Right-Click Context Menu -->
             <div class="ide-ctx-modal" id="ide-editor-ctx-modal">
               <div class="ide-ctx-title">Editor Actions</div>
+              <button class="ide-ctx-btn text-info fw-bold" id="ide-editor-ai-analyze"><i class="bi bi-robot text-danger"></i> Ask AI to Fix / Explain</button>
+              <hr class="border-secondary my-2 opacity-25">
               <button class="ide-ctx-btn" id="ide-editor-cmd-palette"><i class="bi bi-command"></i> Command Palette (F1)</button>
               <hr class="border-secondary my-2 opacity-25">
               <button class="ide-ctx-btn" id="ide-editor-cut"><i class="bi bi-scissors"></i> Cut</button>
@@ -7706,6 +8142,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <div class="ide-ctx-title" id="ide-ctx-title">file.php</div>
               <input type="hidden" id="ide-ctx-path">
               <input type="hidden" id="ide-ctx-is-folder">
+              <button class="ide-ctx-btn text-info fw-bold" id="ide-btn-ai-analyze"><i class="bi bi-robot text-danger"></i> Send to AI (Analyze / Fix)</button>
+              <hr class="border-secondary my-2 opacity-25">
               <button class="ide-ctx-btn" id="ide-btn-new-file"><i class="bi bi-file-earmark-plus"></i> New file here</button>
               <button class="ide-ctx-btn" id="ide-btn-new-folder"><i class="bi bi-folder-plus"></i> New folder here</button>
               <button class="ide-ctx-btn" id="ide-btn-rename"><i class="bi bi-pencil-square"></i> Rename</button>
@@ -7823,6 +8261,47 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <div class="mb-3">
                       <label class="form-label fw-bold text-danger mb-1">XDEBUG SESSION KEY</label>
                       <input type="text" id="ide-setting-xdebug" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="e.g. IDE or PHPSTORM" value="IDE">
+                    </div>
+                    <hr class="border-secondary opacity-50">
+                    <h6 class="text-info fw-bold mb-2"><i class="bi bi-robot me-1"></i> AI CODING AGENT SETTINGS</h6>
+                    <div class="mb-2">
+                      <label class="form-label text-secondary small fw-bold mb-1">AI PROVIDER</label>
+                      <select id="ide-ai-setting-provider" class="form-select form-select-sm bg-dark text-white border-secondary">
+                        <option value="gemini">Google Gemini (AI Studio)</option>
+                        <option value="huggingface">HuggingFace Router</option>
+                      </select>
+                    </div>
+                    <div class="mb-2" id="ide-ai-gemini-fields">
+                      <label class="form-label text-secondary small fw-bold mb-1">GEMINI API KEY</label>
+                      <input type="password" id="ide-ai-setting-gemini-token" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="AIzaSy...">
+                      <label class="form-label text-secondary small fw-bold mt-2 mb-1">GEMINI MODEL</label>
+                      <select id="ide-ai-setting-gemini-model" class="form-select form-select-sm bg-dark text-white border-secondary">
+                        <optgroup label="Google Gemini Models">
+                          <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
+                          <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+                          <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                          <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite</option>
+                          <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Preview)</option>
+                          <option value="gemini-3.1-flash-lite" selected>Gemini 3.1 Flash-Lite</option>
+                        </optgroup>
+                        <optgroup label="Google Gemma Models (AI Studio)">
+                          <option value="gemma-4-31b-it">Gemma 4 31B Instruct</option>
+                          <option value="gemma-4-12b-it">Gemma 4 12B Instruct</option>
+                          <option value="gemma-3-27b-it">Gemma 3 27B Instruct</option>
+                          <option value="gemma-3-4b-it">Gemma 3 4B Instruct</option>
+                          <option value="gemma-2-27b-it">Gemma 2 27B Instruct</option>
+                        </optgroup>
+                      </select>
+                    </div>
+                    <div class="mb-2 d-none" id="ide-ai-hf-fields">
+                      <label class="form-label text-secondary small fw-bold mb-1">HUGGINGFACE TOKEN</label>
+                      <input type="password" id="ide-ai-setting-hf-token" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="hf_...">
+                      <label class="form-label text-secondary small fw-bold mt-2 mb-1">HF CODE MODEL</label>
+                      <select id="ide-ai-setting-hf-model" class="form-select form-select-sm bg-dark text-white border-secondary">
+                        <option value="Qwen/Qwen2.5-Coder-32B-Instruct">Qwen 2.5 Coder 32B Instruct</option>
+                        <option value="deepseek-ai/DeepSeek-R1">DeepSeek R1 (Reasoning)</option>
+                        <option value="meta-llama/Llama-3.3-70B-Instruct">Llama 3.3 70B Instruct</option>
+                      </select>
                     </div>
                     <?php if (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true): ?>
                     <hr class="border-danger opacity-50">
@@ -7947,11 +8426,34 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </div>
               </div>
             </div>
+
+            <!-- IDE AI Attached File Inspection Modal -->
+            <div class="modal fade" id="ide-ai-file-modal" tabindex="-1">
+              <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
+                <div class="modal-content border-secondary shadow-lg" style="background-color: #0a0a0a;">
+                  <div class="modal-header border-bottom border-secondary py-2">
+                    <h6 class="modal-title text-white fw-bold d-flex align-items-center gap-2">
+                      <i class="bi bi-file-earmark-code text-danger"></i>
+                      <span id="ide-ai-file-modal-title" class="text-truncate" style="max-width: 500px;">File View</span>
+                    </h6>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body p-3">
+                    <pre id="ide-ai-file-modal-content" class="bg-dark text-light p-3 rounded border border-secondary font-monospace" style="font-size: 0.8rem; max-height: 60vh; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin: 0;"></pre>
+                  </div>
+                  <div class="modal-footer border-top border-secondary py-2 justify-content-between">
+                    <button type="button" id="ide-ai-file-modal-copy" class="btn btn-sm btn-outline-info fw-bold"><i class="bi bi-copy me-1"></i> Copy Code</button>
+                    <button type="button" class="btn btn-sm btn-secondary fw-bold" data-bs-dismiss="modal">Close</button>
+                  </div>
+                </div>
+              </div>
+            </div>
   
             <div class="ide-body">
               <!-- Thin Sidebar (Activity Bar) -->
               <div class="ide-activity-bar">
                 <div class="ide-activity-action active" id="act-explorer" title="Explorer" onclick="window.switchIdeSidebar('explorer')"><i class="bi bi-files"></i></div>
+                <div class="ide-activity-action text-info" id="act-ai" title="AI Coding Assistant" onclick="window.switchIdeSidebar('ai')"><i class="bi bi-robot"></i></div>
                 <div class="ide-activity-action" id="act-git" title="Drive Activity" onclick="window.switchIdeSidebar('git')"><i class="bi bi-activity"></i></div>
                 <div class="ide-activity-action" id="act-history" title="File History" onclick="window.switchIdeSidebar('history')"><i class="bi bi-clock-history"></i></div>
                 <div class="ide-activity-action" id="act-trash" title="Trash" onclick="window.switchIdeSidebar('trash')"><i class="bi bi-trash2"></i></div>
@@ -8009,6 +8511,95 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
                 <div class="ide-file-tree d-none" id="ide-trash-tree" style="padding: 12px; font-family: monospace; font-size: 0.8rem; color: #ccc;">
                   <div class="text-center mt-4 text-secondary"><i class="spinner-border spinner-border-sm"></i> Loading Trash...</div>
+                </div>
+
+                <!-- Floating Draggable AI Assistant Popup Window Widget with Permanent History & Branching -->
+                <div id="ideAiHelperWidget" style="position: fixed; bottom: 30px; right: 30px; width: 480px; height: 620px; background: rgba(14, 14, 14, 0.98); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 16px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.9); z-index: 3500; display: none; flex-direction: column; overflow: hidden; resize: both; min-width: 340px; min-height: 420px; max-width: 95vw; max-height: 95vh; color: #fff;">
+                  
+                  <!-- Draggable Header -->
+                  <div id="ideAiHeader" style="padding: 10px 14px; background: rgba(255, 255, 255, 0.04); cursor: move; display: flex; align-items: center; justify-content: space-between; user-select: none; border-bottom: 1px solid rgba(255, 255, 255, 0.08); flex-shrink: 0;">
+                    <div class="d-flex align-items-center gap-2" style="min-width: 0;">
+                      <i class="bi bi-robot text-danger fs-5"></i>
+                      <div class="d-flex flex-column min-width-0">
+                        <span id="ide-ai-chat-title" class="fw-bold text-white text-truncate" style="font-size: 0.86rem; max-width: 170px;">Coding Session</span>
+                        <span class="badge bg-dark text-secondary border border-secondary p-0 px-1 mt-1 text-truncate" id="ide-ai-model-tag" style="font-size: 0.65rem; width: fit-content;">Gemini</span>
+                      </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-1">
+                      <button class="btn btn-sm btn-outline-secondary border-0 p-1 text-white" id="ide-ai-new-chat-btn" title="New Chat Session" style="width: 28px; height: 28px; border-radius: 6px;"><i class="bi bi-plus-lg"></i></button>
+                      <button class="btn btn-sm btn-outline-secondary border-0 p-1 text-white" id="ide-ai-history-toggle-btn" title="Chat History" style="width: 28px; height: 28px; border-radius: 6px;"><i class="bi bi-clock-history"></i></button>
+                      <button class="btn btn-sm btn-outline-secondary border-0 p-1 text-secondary" id="ide-ai-close-btn" title="Close AI Agent" style="width: 28px; height: 28px; border-radius: 6px;"><i class="bi bi-x-lg"></i></button>
+                    </div>
+                  </div>
+
+                  <!-- History Drawer (Overlay Panel) -->
+                  <div id="ide-ai-history-drawer" class="d-none position-absolute w-100 h-100 flex-column" style="top: 0; left: 0; background: rgba(10, 10, 10, 0.98); z-index: 50; padding: 14px; box-sizing: border-box;">
+                    <!-- Drawer Header -->
+                    <div class="d-flex align-items-center justify-content-between pb-2 border-bottom border-secondary border-opacity-25 mb-2">
+                      <div class="d-flex align-items-center gap-2">
+                        <i class="bi bi-clock-history text-danger fs-6"></i>
+                        <span class="fw-bold text-white small">Saved Sessions</span>
+                        <span class="badge bg-dark text-secondary border border-secondary border-opacity-50" id="ide-ai-history-total" style="font-size: 0.65rem;">0</span>
+                      </div>
+                      <div class="d-flex align-items-center gap-1">
+                        <button class="btn btn-sm btn-outline-secondary border-0 p-1 text-white" id="ide-ai-history-new-btn" title="New Session" style="width: 26px; height: 26px; border-radius: 6px;"><i class="bi bi-plus-lg"></i></button>
+                        <button class="btn btn-sm btn-link text-secondary p-0 text-decoration-none d-flex align-items-center justify-content-center" id="ide-ai-close-history-btn" style="width: 26px; height: 26px;"><i class="bi bi-x-lg"></i></button>
+                      </div>
+                    </div>
+                    <!-- Real-Time Search Bar -->
+                    <div class="mb-2 position-relative">
+                      <input type="text" id="ide-ai-history-search-input" class="form-control form-control-sm bg-dark text-white border-secondary border-opacity-50 ps-4" placeholder="Search sessions..." style="font-size: 0.78rem; border-radius: 8px;">
+                      <i class="bi bi-search position-absolute text-secondary" style="left: 10px; top: 50%; transform: translateY(-50%); font-size: 0.72rem; pointer-events: none;"></i>
+                    </div>
+                    <!-- Vertical List of Conversations -->
+                    <div id="ide-ai-history-list" class="flex-grow-1 overflow-y-auto d-flex flex-column gap-1 pe-1" style="min-height: 0; scrollbar-width: thin;">
+                      <div class="text-secondary small text-center my-auto">Loading history...</div>
+                    </div>
+                  </div>
+
+                  <!-- Options Bar -->
+                  <div class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom border-secondary border-opacity-25" style="background: rgba(0, 0, 0, 0.4); font-size: 0.78rem;">
+                    <div class="form-check form-switch m-0 text-secondary d-flex align-items-center gap-1">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" id="ide-ai-include-file" checked style="cursor: pointer;">
+                      <label class="form-check-label text-white-50" for="ide-ai-include-file" style="cursor: pointer;">Active Code</label>
+                    </div>
+                    <div class="d-flex gap-2">
+                      <button id="ide-ai-btn-search" class="btn btn-sm btn-outline-secondary border-0 p-1 px-2 d-flex align-items-center gap-1 rounded-pill" style="font-size: 0.75rem;" title="Toggle Real-Time Web Search">
+                        <i class="bi bi-globe"></i> <span>Search</span>
+                      </button>
+                      <button id="ide-ai-btn-think" class="btn btn-sm btn-outline-secondary border-0 p-1 px-2 d-flex align-items-center gap-1 rounded-pill" style="font-size: 0.75rem;" title="Toggle Deep Reasoning">
+                        <i class="bi bi-lightbulb"></i> <span>Think</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- Chat Messages Container -->
+                  <div id="ide-ai-messages" class="flex-grow-1 overflow-y-auto p-3" style="background: #0a0a0a; display: flex; flex-direction: column; gap: 14px; min-height: 120px; scroll-behavior: smooth;">
+                    <div class="text-secondary small text-center my-auto">
+                      <i class="bi bi-stars text-danger fs-2 d-block mb-2"></i>
+                      Ask AI to explain code, fix bugs, write features, or refactor.
+                    </div>
+                  </div>
+
+                  <!-- Input & Actions Area with File Attachment Support & Auto-Height Textarea -->
+                  <div class="p-2 border-top border-secondary border-opacity-25" style="background: rgba(255, 255, 255, 0.02);">
+                    <div id="ide-ai-attachments" class="d-flex flex-wrap gap-1 mb-1 px-1"></div>
+                    <div class="d-flex gap-2 align-items-end">
+                      <button class="btn btn-sm btn-outline-secondary border-0 p-2 text-white-50 d-flex align-items-center justify-content-center rounded-circle" id="ide-ai-attach-btn" title="Attach Code/Text File" style="height: 36px; width: 36px; flex-shrink: 0;">
+                        <i class="bi bi-paperclip fs-5"></i>
+                      </button>
+                      <input type="file" id="ide-ai-file-input" multiple style="display: none;" accept=".php,.js,.ts,.py,.java,.c,.cpp,.h,.cs,.go,.rs,.rb,.swift,.kt,.html,.css,.scss,.json,.xml,.yaml,.yml,.sql,.sh,.bash,.md,.txt,text/*">
+                      <textarea id="ide-ai-input" class="form-control form-control-sm bg-dark text-white border-secondary" rows="1" style="height: 36px; min-height: 36px; max-height: 180px; resize: none; border-radius: 18px; font-size: 0.85rem; padding: 7px 14px; line-height: 1.4; overflow-y: hidden; box-sizing: border-box;" placeholder="Ask AI or attach code... (Enter to send)"></textarea>
+                      <div class="d-flex flex-column gap-1 flex-shrink-0">
+                        <button class="btn btn-sm btn-danger fw-bold d-flex align-items-center justify-content-center p-2 rounded-circle" id="ide-ai-send-btn" title="Send Prompt" style="height: 36px; width: 36px;">
+                          <i class="bi bi-arrow-up"></i>
+                        </button>
+                        <button class="btn btn-sm btn-secondary fw-bold d-none align-items-center justify-content-center p-2 rounded-circle" id="ide-ai-stop-btn" title="Stop Generation" style="height: 36px; width: 36px;">
+                          <i class="bi bi-stop-fill text-danger"></i>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
   
@@ -9078,7 +9669,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       if (um) um.markClean();
                     } catch(e) {}
                     window.isIdeLoadingFile = false;
-  
+
+                    const modelist = ace.require("ace/ext/modelist");
+                    const targetMode = modelist ? modelist.getModeForPath(path).mode : "ace/mode/text";
                     aceEditor.session.setMode(targetMode);
                     setTimeout(() => {
                       aceEditor.resize(true);
@@ -10154,20 +10747,26 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               };
   
               window.switchIdeSidebar = (view) => {
+                if (view === 'ai') {
+                  if (typeof window.toggleAiWidget === 'function') window.toggleAiWidget();
+                  return;
+                }
+
                 const sidebar = document.getElementById('ide-main-sidebar');
                 const actionEl = document.getElementById('act-' + view);
-  
+                if (!sidebar || !actionEl) return;
+
                 if (actionEl.classList.contains('active')) {
                   sidebar.classList.toggle('d-none');
                   actionEl.classList.toggle('active');
                   setTimeout(() => aceEditor.resize(true), 50);
                   return;
                 }
-  
+
                 sidebar.classList.remove('d-none');
                 document.querySelectorAll('.ide-activity-action').forEach(el => el.classList.remove('active'));
                 actionEl.classList.add('active');
-  
+
                 document.getElementById('ide-file-tree').classList.add('d-none');
                 document.getElementById('ide-git-tree').classList.add('d-none');
                 document.getElementById('ide-history-tree').classList.add('d-none');
@@ -11024,8 +11623,913 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
               }
   
+              // ==========================================
+              // AGENTIC AI CODING ASSISTANT (BRANCHING & PERMANENT HISTORY)
+              // ==========================================
+              let aiCurrentChatId = localStorage.getItem('ide_ai_current_chat_id') || null;
+              let aiAllMessages = [];
+              let aiActiveLeafId = null;
+              let aiAttachedFiles = [];
+              let isAiGenerating = false;
+              let aiAbortController = null;
+              let isAiSearchActive = localStorage.getItem('ide_ai_search') === 'true';
+              let isAiThinkActive = localStorage.getItem('ide_ai_think') === 'true';
+
+              // Render Uploaded File Pills
+              window.renderAiAttachments = () => {
+                const container = document.getElementById('ide-ai-attachments');
+                if (!container) return;
+                if (aiAttachedFiles.length === 0) {
+                  container.innerHTML = '';
+                  return;
+                }
+                container.innerHTML = aiAttachedFiles.map((f, idx) => `
+                  <div class="badge bg-dark border border-secondary border-opacity-75 text-white d-flex align-items-center gap-1 py-1 px-2 shadow-sm" style="font-size: 0.72rem; border-radius: 6px;">
+                    <i class="bi bi-file-earmark-code text-danger"></i>
+                    <span class="text-truncate" style="max-width: 130px;" title="${f.name}">${f.name}</span>
+                    <i class="bi bi-x ms-1 text-secondary" style="cursor: pointer;" onclick="removeAiAttachment(${idx})" title="Remove"></i>
+                  </div>
+                `).join('');
+              };
+
+              window.removeAiAttachment = (idx) => {
+                aiAttachedFiles.splice(idx, 1);
+                renderAiAttachments();
+              };
+
+              // Open Attached File Preview Modal
+              window.openAiFileModal = (b64Name, b64Content) => {
+                const name = decodeURIComponent(escape(window.atob(b64Name)));
+                const content = decodeURIComponent(escape(window.atob(b64Content)));
+
+                const titleEl = document.getElementById('ide-ai-file-modal-title');
+                const contentEl = document.getElementById('ide-ai-file-modal-content');
+                const copyBtn = document.getElementById('ide-ai-file-modal-copy');
+
+                if (titleEl) titleEl.textContent = name;
+                if (contentEl) contentEl.textContent = content;
+
+                if (copyBtn) {
+                  copyBtn.onclick = () => {
+                    navigator.clipboard.writeText(content);
+                    copyBtn.innerHTML = '<i class="bi bi-check-lg text-success me-1"></i> Copied!';
+                    setTimeout(() => {
+                      copyBtn.innerHTML = '<i class="bi bi-copy me-1"></i> Copy Code';
+                    }, 2000);
+                  };
+                }
+
+                const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('ide-ai-file-modal'));
+                modal.show();
+              };
+
+              // File Attachment Listener (Supports Any Programming Language)
+              document.getElementById('ide-ai-attach-btn')?.addEventListener('click', () => {
+                document.getElementById('ide-ai-file-input')?.click();
+              });
+
+              document.getElementById('ide-ai-file-input')?.addEventListener('change', (e) => {
+                const files = Array.from(e.target.files || []);
+                if (files.length === 0) return;
+
+                files.forEach(file => {
+                  const reader = new FileReader();
+                  reader.onload = (evt) => {
+                    aiAttachedFiles.push({
+                      name: file.name,
+                      content: evt.target.result || ''
+                    });
+                    renderAiAttachments();
+                  };
+                  reader.readAsText(file);
+                });
+                e.target.value = '';
+              });
+
+              // Context Menu "Send to AI (Analyze / Fix)" for File Explorer
+              document.getElementById('ide-btn-ai-analyze')?.addEventListener('click', async () => {
+                const path = document.getElementById('ide-ctx-path').value;
+                document.getElementById('ide-ctx-modal').style.display = 'none';
+                if (!path) return;
+
+                const fileName = path.split('/').pop();
+                const res = await driveFetch('read', { action: 'read', file: path }, path);
+                const content = res?.content || '';
+
+                window.toggleAiWidget(true);
+                aiAttachedFiles.push({ name: fileName, content: content });
+                renderAiAttachments();
+
+                const inputEl = document.getElementById('ide-ai-input');
+                if (inputEl) {
+                  inputEl.value = `Analyze and review ${fileName} for potential bugs, security issues, and performance optimizations. Provide detailed fixes.`;
+                  inputEl.focus();
+                }
+              });
+
+              // Context Menu "Ask AI to Fix / Explain" for Ace Editor Selection
+              document.getElementById('ide-editor-ai-analyze')?.addEventListener('click', () => {
+                document.getElementById('ide-editor-ctx-modal').style.display = 'none';
+                if (!aceEditor) return;
+
+                const selectedText = aceEditor.getSelectedText();
+                const fileName = currentPath ? currentPath.split('/').pop() : 'Snippet';
+                const codeToAnalyze = selectedText || aceEditor.getValue();
+
+                window.toggleAiWidget(true);
+                aiAttachedFiles.push({ name: fileName, content: codeToAnalyze });
+                renderAiAttachments();
+
+                const inputEl = document.getElementById('ide-ai-input');
+                if (inputEl) {
+                  inputEl.value = selectedText 
+                    ? `Review, debug, and optimize this selected code snippet from ${fileName}:` 
+                    : `Analyze and fix any bugs in ${fileName}:`;
+                  inputEl.focus();
+                }
+              });
+
+              const aiWidget = document.getElementById('ideAiHelperWidget');
+              const aiHeader = document.getElementById('ideAiHeader');
+              const aiBtn = document.getElementById('ide-ai-btn');
+              const actAiBtn = document.getElementById('act-ai');
+
+              window.toggleAiWidget = () => {
+                if (!aiWidget) return;
+                const isHidden = aiWidget.style.display === 'none' || !aiWidget.style.display;
+                aiWidget.style.display = isHidden ? 'flex' : 'none';
+                if (isHidden) {
+                  document.getElementById('ide-ai-input')?.focus();
+                  if (!aiCurrentChatId) initAiChatSession();
+                }
+              };
+
+              // Tree Walking: Reconstruct active conversation thread from root to current leaf
+              const getAiThreadPath = (leafId) => {
+                let path = [];
+                let currId = leafId;
+                const msgMap = new Map();
+                for (let m of aiAllMessages) msgMap.set(m.id, m);
+
+                while (currId) {
+                  let msg = msgMap.get(currId);
+                  if (!msg) break;
+                  path.unshift(msg);
+                  currId = msg.parent_id;
+                }
+                return path;
+              };
+
+              // Tree Traversal: Find deepest leaf node along a branch
+              const findAiDeepestLeaf = (startId) => {
+                const childrenMap = new Map();
+                for (let m of aiAllMessages) {
+                  const pid = m.parent_id || '__root__';
+                  if (!childrenMap.has(pid)) childrenMap.set(pid, []);
+                  childrenMap.get(pid).push(m);
+                }
+
+                function traverse(id) {
+                  const children = childrenMap.get(id) || [];
+                  if (children.length === 0) return id;
+                  return traverse(children[children.length - 1].id);
+                }
+                return traverse(startId);
+              };
+
+              // Branch Switching: Navigate between siblings (< 1/2 >)
+              window.switchAiBranch = (msgId, direction) => {
+                const msg = aiAllMessages.find(m => m.id === msgId);
+                if (!msg) return;
+
+                const siblings = aiAllMessages.filter(m => m.parent_id === msg.parent_id);
+                const idx = siblings.findIndex(m => m.id === msgId);
+                const targetIdx = idx + direction;
+
+                if (targetIdx >= 0 && targetIdx < siblings.length) {
+                  aiActiveLeafId = findAiDeepestLeaf(siblings[targetIdx].id);
+                  renderAiMessages();
+                }
+              };
+
+              const saveAiMessageToDB = async (msg) => {
+                await driveFetch('ai_save_message', {
+                  action: 'ai_save_message',
+                  id: msg.id,
+                  chat_id: msg.chat_id,
+                  parent_id: msg.parent_id,
+                  role: msg.role,
+                  content: msg.content
+                });
+              };
+
+              let aiHistoryPage = 1;
+              let aiHistorySearchQuery = '';
+              let aiHistoryChats = [];
+
+              const loadAiChatsList = async (page = 1, append = false) => {
+                aiHistoryPage = page;
+                const listEl = document.getElementById('ide-ai-history-list');
+                const totalEl = document.getElementById('ide-ai-history-total');
+                if (!listEl) return;
+
+                if (!append) {
+                  listEl.innerHTML = '<div class="text-secondary small text-center my-4"><span class="spinner-border spinner-border-sm me-1"></span> Loading sessions...</div>';
+                }
+
+                const res = await driveFetch('ai_get_chats', {
+                  action: 'ai_get_chats',
+                  page: aiHistoryPage,
+                  q: aiHistorySearchQuery
+                });
+
+                if (res && res.success) {
+                  if (totalEl) totalEl.textContent = res.total || 0;
+                  const fetched = res.chats || [];
+
+                  if (append) {
+                    aiHistoryChats = aiHistoryChats.concat(fetched);
+                  } else {
+                    aiHistoryChats = fetched;
+                  }
+
+                  if (aiHistoryChats.length === 0) {
+                    listEl.innerHTML = '<div class="text-secondary small text-center my-4">' + (aiHistorySearchQuery ? 'No matching sessions found.' : 'No saved conversations yet.') + '</div>';
+                    return;
+                  }
+
+                  listEl.innerHTML = aiHistoryChats.map(c => {
+                    const isActive = c.id === aiCurrentChatId;
+                    const isPinned = parseInt(c.pinned) === 1;
+                    const dateStr = c.created_at ? new Date(c.created_at.replace(' ', 'T') + 'Z').toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+                    const safeTitle = (c.title || 'Untitled Session').replace(/"/g, '&quot;');
+                    const escapedTitle = (c.title || 'Untitled Session').replace(/'/g, "\\'");
+
+                    return `
+                      <div class="d-flex align-items-center justify-content-between p-2 rounded-3 mb-1 ${isActive ? 'bg-danger bg-opacity-25 border border-danger' : 'bg-dark border border-secondary border-opacity-50'}" style="cursor: pointer; transition: all 0.2s;" onclick="selectAiChatSession('${c.id}', '${escapedTitle}')">
+                        <div class="d-flex align-items-center gap-2 min-width-0 flex-grow-1 me-2">
+                          <i class="bi ${isPinned ? 'bi-pin-angle-fill text-warning' : 'bi-chat-left-text text-danger'} fs-6 flex-shrink-0"></i>
+                          <div class="d-flex flex-column min-width-0 flex-grow-1">
+                            <span class="text-white text-truncate fw-medium" style="font-size: 0.8rem;" title="${safeTitle}">${safeTitle}</span>
+                            <span class="text-secondary text-truncate" style="font-size: 0.68rem;">${dateStr}</span>
+                          </div>
+                        </div>
+                        <div class="d-flex align-items-center gap-1 flex-shrink-0" onclick="event.stopPropagation()">
+                          <button class="btn btn-sm btn-link text-secondary p-0 text-decoration-none" onclick="toggleAiPinChat('${c.id}', ${isPinned ? 1 : 0})" title="${isPinned ? 'Unpin' : 'Pin to top'}">
+                            <i class="bi ${isPinned ? 'bi-pin-angle-fill text-warning' : 'bi-pin-angle'}" style="font-size: 0.78rem;"></i>
+                          </button>
+                          <button class="btn btn-sm btn-link text-secondary p-0 text-decoration-none" onclick="renameAiChatSession('${c.id}', '${escapedTitle}')" title="Rename">
+                            <i class="bi bi-pencil" style="font-size: 0.78rem;"></i>
+                          </button>
+                          <button class="btn btn-sm btn-link text-secondary p-0 text-decoration-none" onclick="deleteAiChatSession('${c.id}')" title="Delete">
+                            <i class="bi bi-trash" style="font-size: 0.78rem;"></i>
+                          </button>
+                        </div>
+                      </div>
+                    `;
+                  }).join('');
+
+                  // Load More Pagination Trigger
+                  if (res.has_more) {
+                    const moreBtn = document.createElement('button');
+                    moreBtn.className = 'btn btn-sm btn-outline-secondary w-100 py-1 mt-1 small text-white-50 border-dashed';
+                    moreBtn.style.fontSize = '0.74rem';
+                    moreBtn.innerHTML = '<i class="bi bi-chevron-down me-1"></i> Load Older Sessions (25)';
+                    moreBtn.onclick = () => loadAiChatsList(aiHistoryPage + 1, true);
+                    listEl.appendChild(moreBtn);
+                  }
+                } else {
+                  listEl.innerHTML = '<div class="text-danger small text-center my-4">Failed to load chat history.</div>';
+                }
+              };
+
+              window.toggleAiPinChat = async (chatId, currentPinned) => {
+                await driveFetch('ai_pin_chat', {
+                  action: 'ai_pin_chat',
+                  chat_id: chatId,
+                  pinned: currentPinned ? 0 : 1
+                });
+                loadAiChatsList(1, false);
+              };
+
+              window.renameAiChatSession = async (chatId, currentTitle) => {
+                const newTitle = prompt('Enter session name:', currentTitle);
+                if (newTitle && newTitle.trim() && newTitle.trim() !== currentTitle) {
+                  await driveFetch('ai_rename_chat', {
+                    action: 'ai_rename_chat',
+                    chat_id: chatId,
+                    title: newTitle.trim()
+                  });
+                  if (aiCurrentChatId === chatId) {
+                    document.getElementById('ide-ai-chat-title').textContent = newTitle.trim();
+                  }
+                  loadAiChatsList(1, false);
+                }
+              };
+
+              window.selectAiChatSession = async (chatId, title) => {
+                aiCurrentChatId = chatId;
+                localStorage.setItem('ide_ai_current_chat_id', chatId);
+                document.getElementById('ide-ai-chat-title').textContent = title || 'Coding Session';
+                document.getElementById('ide-ai-history-drawer')?.classList.add('d-none');
+
+                const res = await driveFetch('ai_get_messages', { action: 'ai_get_messages', chat_id: chatId });
+                if (res && res.success) {
+                  aiAllMessages = res.messages || [];
+                  aiActiveLeafId = aiAllMessages.length > 0 ? aiAllMessages[aiAllMessages.length - 1].id : null;
+                }
+                renderAiMessages();
+              };
+
+              window.deleteAiChatSession = async (chatId) => {
+                if (!confirm('Delete this AI chat session?')) return;
+                await driveFetch('ai_delete_chat', { action: 'ai_delete_chat', chat_id: chatId });
+                if (aiCurrentChatId === chatId) {
+                  initAiChatSession();
+                } else {
+                  loadAiChatsList(1, false);
+                }
+              };
+
+              const initAiChatSession = async () => {
+                const res = await driveFetch('ai_create_chat', { action: 'ai_create_chat', title: 'Session ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) });
+                if (res && res.success) {
+                  aiCurrentChatId = res.chat_id;
+                  localStorage.setItem('ide_ai_current_chat_id', aiCurrentChatId);
+                  aiAllMessages = [];
+                  aiActiveLeafId = null;
+                  document.getElementById('ide-ai-chat-title').textContent = 'New Session';
+                  document.getElementById('ide-ai-history-drawer')?.classList.add('d-none');
+                  renderAiMessages();
+                }
+              };
+
+              // Real-Time Search Debounce
+              let aiHistorySearchTimeout = null;
+              document.getElementById('ide-ai-history-search-input')?.addEventListener('input', (e) => {
+                clearTimeout(aiHistorySearchTimeout);
+                aiHistorySearchQuery = e.target.value.trim();
+                aiHistorySearchTimeout = setTimeout(() => {
+                  loadAiChatsList(1, false);
+                }, 250);
+              });
+
+              document.getElementById('ide-ai-new-chat-btn')?.addEventListener('click', initAiChatSession);
+              document.getElementById('ide-ai-history-new-btn')?.addEventListener('click', initAiChatSession);
+              document.getElementById('ide-ai-history-toggle-btn')?.addEventListener('click', () => {
+                const drawer = document.getElementById('ide-ai-history-drawer');
+                drawer?.classList.toggle('d-none');
+                if (!drawer?.classList.contains('d-none')) {
+                  const searchInp = document.getElementById('ide-ai-history-search-input');
+                  if (searchInp) searchInp.value = '';
+                  aiHistorySearchQuery = '';
+                  loadAiChatsList(1, false);
+                }
+              });
+              document.getElementById('ide-ai-close-history-btn')?.addEventListener('click', () => {
+                document.getElementById('ide-ai-history-drawer')?.classList.add('d-none');
+              });
+
+              if (aiBtn) aiBtn.onclick = window.toggleAiWidget;
+              if (actAiBtn) actAiBtn.onclick = window.toggleAiWidget;
+              document.getElementById('ide-ai-close-btn')?.addEventListener('click', () => {
+                if (aiWidget) aiWidget.style.display = 'none';
+              });
+
+              // Draggable Popup Window Logic
+              let isAiDragging = false, aiStartX = 0, aiStartY = 0, aiInitLeft = 0, aiInitTop = 0;
+              if (aiHeader) {
+                aiHeader.onmousedown = (e) => {
+                  if (e.target.closest('button')) return;
+                  isAiDragging = true;
+                  aiStartX = e.clientX;
+                  aiStartY = e.clientY;
+                  const rect = aiWidget.getBoundingClientRect();
+                  aiInitLeft = rect.left;
+                  aiInitTop = rect.top;
+                  aiWidget.style.bottom = 'auto';
+                  aiWidget.style.right = 'auto';
+                  aiWidget.style.left = aiInitLeft + 'px';
+                  aiWidget.style.top = aiInitTop + 'px';
+                  e.preventDefault();
+                };
+              }
+
+              document.addEventListener('mousemove', (e) => {
+                if (!isAiDragging || !aiWidget) return;
+                const dx = e.clientX - aiStartX;
+                const dy = e.clientY - aiStartY;
+                aiWidget.style.left = Math.max(10, Math.min(window.innerWidth - aiWidget.offsetWidth - 10, aiInitLeft + dx)) + 'px';
+                aiWidget.style.top = Math.max(10, Math.min(window.innerHeight - aiWidget.offsetHeight - 10, aiInitTop + dy)) + 'px';
+              });
+
+              document.addEventListener('mouseup', () => { isAiDragging = false; });
+
+              // Toggles for Search and Think
+              const btnSearch = document.getElementById('ide-ai-btn-search');
+              const btnThink = document.getElementById('ide-ai-btn-think');
+
+              const updateToggleButtons = () => {
+                if (btnSearch) {
+                  btnSearch.className = isAiSearchActive 
+                    ? 'btn btn-sm btn-info text-dark fw-bold p-1 px-2 d-flex align-items-center gap-1 rounded-pill' 
+                    : 'btn btn-sm btn-outline-secondary border-0 p-1 px-2 d-flex align-items-center gap-1 rounded-pill';
+                }
+                if (btnThink) {
+                  btnThink.className = isAiThinkActive 
+                    ? 'btn btn-sm btn-warning text-dark fw-bold p-1 px-2 d-flex align-items-center gap-1 rounded-pill' 
+                    : 'btn btn-sm btn-outline-secondary border-0 p-1 px-2 d-flex align-items-center gap-1 rounded-pill';
+                }
+              };
+
+              btnSearch?.addEventListener('click', () => {
+                isAiSearchActive = !isAiSearchActive;
+                localStorage.setItem('ide_ai_search', isAiSearchActive.toString());
+                updateToggleButtons();
+              });
+
+              btnThink?.addEventListener('click', () => {
+                isAiThinkActive = !isAiThinkActive;
+                localStorage.setItem('ide_ai_think', isAiThinkActive.toString());
+                updateToggleButtons();
+              });
+
+              updateToggleButtons();
+
+              // Load AI Settings and enforce Super Admin permission UI
+              const loadAiSettings = async () => {
+                const res = await driveFetch('ai_get_settings', { action: 'ai_get_settings' });
+                if (res && res.success) {
+                  const provSelect = document.getElementById('ide-ai-setting-provider');
+                  if (provSelect) {
+                    provSelect.value = res.provider;
+                    document.getElementById('ide-ai-gemini-fields')?.classList.toggle('d-none', res.provider !== 'gemini');
+                    document.getElementById('ide-ai-hf-fields')?.classList.toggle('d-none', res.provider === 'gemini');
+                  }
+
+                  const geminiInp = document.getElementById('ide-ai-setting-gemini-token');
+                  if (geminiInp) {
+                    geminiInp.value = res.gemini_token;
+                    geminiInp.disabled = !res.is_super_admin;
+                    if (!res.is_super_admin) geminiInp.placeholder = res.has_gemini_token ? 'Configured by Super Admin' : 'Not configured';
+                  }
+
+                  const hfInp = document.getElementById('ide-ai-setting-hf-token');
+                  if (hfInp) {
+                    hfInp.value = res.hf_token;
+                    hfInp.disabled = !res.is_super_admin;
+                    if (!res.is_super_admin) hfInp.placeholder = res.has_hf_token ? 'Configured by Super Admin' : 'Not configured';
+                  }
+
+                  const gModel = document.getElementById('ide-ai-setting-gemini-model');
+                  if (gModel) gModel.value = res.gemini_model;
+                  const hfModel = document.getElementById('ide-ai-setting-hf-model');
+                  if (hfModel) hfModel.value = res.hf_model;
+
+                  const tag = document.getElementById('ide-ai-model-tag');
+                  if (tag) tag.textContent = res.provider === 'gemini' ? res.gemini_model : res.hf_model.split('/').pop();
+                }
+              };
+
+              const saveAiSettings = async () => {
+                const payload = {
+                  action: 'ai_save_settings',
+                  provider: document.getElementById('ide-ai-setting-provider')?.value || 'gemini',
+                  gemini_token: document.getElementById('ide-ai-setting-gemini-token')?.value || '',
+                  hf_token: document.getElementById('ide-ai-setting-hf-token')?.value || '',
+                  gemini_model: document.getElementById('ide-ai-setting-gemini-model')?.value || 'gemini-3.1-flash-lite',
+                  hf_model: document.getElementById('ide-ai-setting-hf-model')?.value || 'Qwen/Qwen2.5-Coder-32B-Instruct'
+                };
+                await driveFetch('ai_save_settings', payload);
+              };
+
+              const ideSettingsModal = document.getElementById('ide-settings-modal');
+              if (ideSettingsModal) {
+                ideSettingsModal.addEventListener('hide.bs.modal', saveAiSettings);
+                ideSettingsModal.addEventListener('show.bs.modal', loadAiSettings);
+              }
+
+              window.applyAiCodeSnippet = (b64Code, actionType) => {
+                const code = decodeURIComponent(escape(window.atob(b64Code)));
+                if (!aceEditor) return;
+
+                if (actionType === 'replace_file') {
+                  if (confirm('Replace the ENTIRE current file with this AI solution?')) {
+                    aceEditor.setValue(code, -1);
+                    termLog('AI code replaced entire file buffer.');
+                  }
+                } else if (actionType === 'replace_selection') {
+                  const range = aceEditor.getSelectionRange();
+                  aceEditor.session.replace(range, code);
+                  termLog('AI code replaced editor selection.');
+                } else {
+                  aceEditor.insert(code);
+                  termLog('AI code inserted at cursor position.');
+                }
+              };
+
+              // Parser for Live Thinking and Output Rendering
+              const parseAiContent = (rawText) => {
+                let text = rawText || '';
+                let searchHtml = '';
+                let thinkHtml = '';
+
+                text = text.replace(/<search>([\s\S]*?)<\/search>/gi, (_, p1) => {
+                  searchHtml += `<div class="p-1 px-2 mb-2 rounded bg-info bg-opacity-10 border border-info border-opacity-25 text-info small"><i class="bi bi-globe me-1"></i> ${p1.trim()}</div>`;
+                  return '';
+                });
+
+                // When Thinking mode is OFF: completely strip out any <think> blocks
+                if (!isAiThinkActive) {
+                  text = text
+                    .replace(/<\s*(?:think|thinking|thought)\s*[^>]*>[\s\S]*?<\s*\/\s*(?:think|thinking|thought)\s*[^>]*>/gi, '')
+                    .replace(/<\s*(?:think|thinking|thought)\s*[^>]*>[\s\S]*$/gi, '')
+                    .trim();
+                } else {
+                  // When Thinking mode is ON: extract and render collapsible reasoning
+                  let cleanText = text
+                    .replace(/<\s*(?:think|thinking|thought)\s*[^>]*>/gi, '<think>')
+                    .replace(/<\s*\/\s*(?:think|thinking|thought)\s*[^>]*>/gi, '</think>');
+
+                  let firstClose = cleanText.indexOf('</think>');
+                  let firstOpen = cleanText.indexOf('<think>');
+                  if (firstClose !== -1 && (firstOpen === -1 || firstOpen > firstClose)) {
+                    cleanText = '<think>' + cleanText;
+                  }
+
+                  let parts = cleanText.split('<think>');
+                  let mainContent = parts[0];
+
+                  for (let i = 1; i < parts.length; i++) {
+                    let splitClose = parts[i].split('</think>');
+                    let thoughtBlock = splitClose[0].trim();
+                    if (thoughtBlock) {
+                      thinkHtml += `<details class="p-2 mb-2 rounded bg-black bg-opacity-50 border border-secondary border-opacity-25 small text-secondary" open><summary class="fw-bold text-warning" style="cursor:pointer;"><i class="bi bi-lightbulb me-1"></i> Reasoning Process</summary><div class="mt-1 font-monospace" style="font-size:0.75rem; white-space:pre-wrap; color:#aaa;">${thoughtBlock}</div></details>`;
+                    }
+                    if (splitClose.length > 1) {
+                      mainContent += splitClose.slice(1).join('</think>');
+                    }
+                  }
+                  text = mainContent;
+                }
+
+                let parsedMarkdown = typeof marked !== 'undefined' ? marked.parse(text.trim()) : text;
+
+                // Agentic Quick Action Buttons for codeblocks
+                parsedMarkdown = parsedMarkdown.replace(/<pre><code class="language-([a-zA-Z0-9_\-]+)">([\s\S]*?)<\/code><\/pre>/gi, (match, lang, codeRaw) => {
+                  const decodedCode = codeRaw.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#039;/g, "'");
+                  const b64Code = window.btoa(unescape(encodeURIComponent(decodedCode)));
+                  return `
+                    <div class="position-relative my-2 rounded border border-secondary border-opacity-50 overflow-hidden">
+                      <div class="d-flex align-items-center justify-content-between px-2 py-1 bg-dark border-bottom border-secondary border-opacity-25 small text-secondary">
+                        <span class="fw-bold font-monospace text-uppercase" style="font-size: 0.7rem;">${lang}</span>
+                        <div class="d-flex gap-1">
+                          <button class="btn btn-sm btn-outline-light border-0 py-0 px-1" style="font-size: 0.72rem;" onclick="navigator.clipboard.writeText(decodeURIComponent(escape(window.atob('${b64Code}')))); this.innerText='Copied!';" title="Copy Code"><i class="bi bi-copy"></i></button>
+                          <button class="btn btn-sm btn-outline-info border-0 py-0 px-1" style="font-size: 0.72rem;" onclick="window.applyAiCodeSnippet('${b64Code}', 'insert')" title="Insert at Cursor"><i class="bi bi-cursor-text"></i> Insert</button>
+                          <button class="btn btn-sm btn-outline-warning border-0 py-0 px-1" style="font-size: 0.72rem;" onclick="window.applyAiCodeSnippet('${b64Code}', 'replace_file')" title="Replace Active File"><i class="bi bi-file-earmark-code"></i> Replace All</button>
+                        </div>
+                      </div>
+                      ${match}
+                    </div>`;
+                });
+
+                return searchHtml + thinkHtml + parsedMarkdown;
+              };
+
+              const renderAiMessages = () => {
+                const container = document.getElementById('ide-ai-messages');
+                if (!container) return;
+
+                const thread = getAiThreadPath(aiActiveLeafId);
+
+                if (thread.length === 0) {
+                  container.innerHTML = `
+                    <div class="text-secondary small text-center my-auto">
+                      <i class="bi bi-stars text-danger fs-2 d-block mb-2"></i>
+                      Ask AI to explain code, fix bugs, write features, or refactor.
+                    </div>`;
+                  return;
+                }
+
+                container.innerHTML = thread.map((m) => {
+                  const isUser = m.role === 'user';
+                  const siblings = aiAllMessages.filter(s => s.parent_id === m.parent_id);
+                  const bIndex = siblings.findIndex(s => s.id === m.id);
+
+                  let branchNavHtml = '';
+                  if (siblings.length > 1) {
+                    branchNavHtml = `
+                      <div class="d-inline-flex align-items-center gap-1 bg-black bg-opacity-50 px-2 py-0 rounded border border-secondary border-opacity-50" style="font-size: 0.68rem;">
+                        <button class="btn btn-sm btn-link text-white-50 p-0 text-decoration-none" ${bIndex === 0 ? 'disabled' : ''} onclick="switchAiBranch('${m.id}', -1)">‹</button>
+                        <span class="text-white-50">${bIndex + 1}/${siblings.length}</span>
+                        <button class="btn btn-sm btn-link text-white-50 p-0 text-decoration-none" ${bIndex === siblings.length - 1 ? 'disabled' : ''} onclick="switchAiBranch('${m.id}', 1)">›</button>
+                      </div>`;
+                  }
+
+                  let parsedContent = '';
+                  if (isUser) {
+                    let safeText = m.content
+                      .replace(/&/g, '&amp;')
+                      .replace(/</g, '&lt;')
+                      .replace(/>/g, '&gt;')
+                      .replace(/"/g, '&quot;')
+                      .replace(/'/g, '&#039;');
+
+                    // Render interactive file badges exactly like phpchatai.txt
+                    safeText = safeText.replace(/\[File:\s*(.*?)\]\n([\s\S]*?)\n\[End of File\]/g, (match, fName, fContent) => {
+                      const rawContent = fContent.replace(/&#039;/g, "'").replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+                      const rawFName = fName.replace(/&#039;/g, "'").replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+
+                      const base64Content = window.btoa(unescape(encodeURIComponent(rawContent)));
+                      const base64Name = window.btoa(unescape(encodeURIComponent(rawFName)));
+
+                      return `
+                        <div class="d-inline-flex align-items-center gap-2 bg-dark border border-secondary border-opacity-75 rounded-3 px-2 py-1 my-1 shadow-sm" style="cursor: pointer;" onclick="openAiFileModal('${base64Name}', '${base64Content}')" title="Click to view file">
+                          <i class="bi bi-file-earmark-code text-danger"></i>
+                          <span class="fw-medium text-white text-truncate" style="font-size: 0.76rem; max-width: 160px;">${rawFName}</span>
+                        </div>
+                      `;
+                    });
+
+                    parsedContent = safeText.replace(/\n/g, '<br>');
+                  } else {
+                    parsedContent = parseAiContent(m.content);
+                    if (!parsedContent && isAiGenerating && m.id === aiActiveLeafId) {
+                      parsedContent = '<span class="text-secondary fst-italic"><span class="spinner-border spinner-border-sm me-1" style="width: 12px; height: 12px;"></span> Generating solution...</span>';
+                    }
+                  }
+
+                  return `
+                    <div class="p-3 rounded-3 ${isUser ? 'bg-danger bg-opacity-10 border border-danger border-opacity-50 text-white ms-3' : 'bg-dark border border-secondary border-opacity-50 text-light me-3'}" style="font-size: 0.82rem; word-break: break-word;" id="aimsg-${m.id}">
+                      <div class="d-flex align-items-center justify-content-between mb-2">
+                        <div class="fw-bold small ${isUser ? 'text-danger' : 'text-info'}">
+                          ${isUser ? '<i class="bi bi-person me-1"></i> You' : '<i class="bi bi-robot me-1"></i> AI Assistant'}
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                          ${branchNavHtml}
+                          ${isUser ? `<button class="btn btn-sm btn-link text-secondary p-0 text-decoration-none" onclick="editAiPrompt('${m.id}')" title="Edit Prompt"><i class="bi bi-pencil" style="font-size:0.75rem;"></i></button>` : ''}
+                        </div>
+                      </div>
+                      <div class="ai-msg-body">${parsedContent}</div>
+                    </div>`;
+                }).join('');
+
+                container.scrollTop = container.scrollHeight;
+              };
+
+              const aiInputTextarea = document.getElementById('ide-ai-input');
+              const adjustAiInputHeight = () => {
+                if (!aiInputTextarea) return;
+                aiInputTextarea.style.height = '36px';
+                const scrollH = aiInputTextarea.scrollHeight;
+                const newHeight = Math.max(36, Math.min(180, scrollH));
+                aiInputTextarea.style.height = newHeight + 'px';
+                aiInputTextarea.style.overflowY = scrollH > 180 ? 'auto' : 'hidden';
+              };
+
+              aiInputTextarea?.addEventListener('input', adjustAiInputHeight);
+
+              window.editAiPrompt = (msgId) => {
+                const msg = aiAllMessages.find(m => m.id === msgId);
+                if (!msg) return;
+                const inputEl = document.getElementById('ide-ai-input');
+                if (inputEl) {
+                  inputEl.value = msg.content;
+                  adjustAiInputHeight();
+                  inputEl.focus();
+                  window.aiEditParentId = msg.parent_id;
+                }
+              };
+
+              const stopAiGeneration = () => {
+                if (aiAbortController) {
+                  aiAbortController.abort();
+                  aiAbortController = null;
+                }
+                isAiGenerating = false;
+                document.getElementById('ide-ai-send-btn')?.classList.remove('d-none');
+                document.getElementById('ide-ai-stop-btn')?.classList.add('d-none');
+              };
+
+              document.getElementById('ide-ai-stop-btn')?.addEventListener('click', stopAiGeneration);
+
+              const sendAiMessage = async () => {
+                if (isAiGenerating) return;
+
+                const inputEl = document.getElementById('ide-ai-input');
+                let prompt = inputEl.value.trim();
+                if (!prompt && aiAttachedFiles.length === 0) return;
+                if (!prompt && aiAttachedFiles.length > 0) {
+                  prompt = 'Please inspect and analyze the attached code files.';
+                }
+
+                if (!aiCurrentChatId) {
+                  await initAiChatSession();
+                }
+
+                // Standardized File Format Serialization according to phpchatai.txt reference
+                let fullContent = prompt;
+                if (aiAttachedFiles.length > 0) {
+                  const filesBlock = aiAttachedFiles.map(f => `[File: ${f.name}]\n${f.content}\n[End of File]`).join('\n\n');
+                  fullContent = fullContent ? (fullContent + '\n\n' + filesBlock) : filesBlock;
+                  aiAttachedFiles = [];
+                  renderAiAttachments();
+                }
+
+                // Automatic Chat Title Generation with Truncation on First User Turn
+                const isFirstTurn = aiAllMessages.filter(m => m.role === 'user').length === 0;
+                const currentTitle = document.getElementById('ide-ai-chat-title')?.textContent || '';
+                if (isFirstTurn || currentTitle === 'New Session' || currentTitle.startsWith('Session ')) {
+                  let cleanTitle = prompt
+                    .replace(/\[File:\s*.*?\]\n[\s\S]*?\n\[End of File\]/g, '')
+                    .replace(/```[\s\S]*?```/g, '')
+                    .replace(/[#*`_~>\-\[\]\(\)\{\}\\\/]/g, '')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                  if (!cleanTitle && fullContent.includes('[File:')) {
+                    const match = fullContent.match(/\[File:\s*(.*?)\]/);
+                    if (match) cleanTitle = match[1];
+                  }
+                  if (cleanTitle.length > 28) {
+                    cleanTitle = cleanTitle.substring(0, 28).trim() + '...';
+                  }
+                  if (!cleanTitle) cleanTitle = 'Code Session';
+
+                  driveFetch('ai_rename_chat', { action: 'ai_rename_chat', chat_id: aiCurrentChatId, title: cleanTitle });
+                  const titleEl = document.getElementById('ide-ai-chat-title');
+                  if (titleEl) titleEl.textContent = cleanTitle;
+                }
+
+                const attachActiveCode = document.getElementById('ide-ai-include-file')?.checked;
+                let fileContext = '';
+                if (attachActiveCode && currentPath && aceEditor) {
+                  const code = aceEditor.getValue();
+                  fileContext = `[File: ${currentPath}]\n${code}\n[End of File]`;
+                }
+
+                const parentId = window.aiEditParentId !== undefined ? window.aiEditParentId : aiActiveLeafId;
+                window.aiEditParentId = undefined;
+
+                const userMsgId = 'aim_' + Math.random().toString(36).substring(2, 9);
+                const userMsg = {
+                  id: userMsgId,
+                  chat_id: aiCurrentChatId,
+                  parent_id: parentId,
+                  role: 'user',
+                  content: fullContent
+                };
+
+                aiAllMessages.push(userMsg);
+                aiActiveLeafId = userMsgId;
+                await saveAiMessageToDB(userMsg);
+
+                inputEl.value = '';
+                adjustAiInputHeight();
+
+                const aiMsgId = 'aim_' + Math.random().toString(36).substring(2, 9);
+                const aiAssistantMsg = {
+                  id: aiMsgId,
+                  chat_id: aiCurrentChatId,
+                  parent_id: userMsgId,
+                  role: 'assistant',
+                  content: isAiSearchActive ? '<search>Searching web sources...</search>' : ''
+                };
+
+                aiAllMessages.push(aiAssistantMsg);
+                aiActiveLeafId = aiMsgId;
+                renderAiMessages();
+
+                isAiGenerating = true;
+                document.getElementById('ide-ai-send-btn')?.classList.add('d-none');
+                document.getElementById('ide-ai-stop-btn')?.classList.remove('d-none');
+
+                aiAbortController = new AbortController();
+
+                let searchContext = '';
+                if (isAiSearchActive) {
+                  try {
+                    const cleanSearchPrompt = prompt.replace(/\[File:\s*.*?\]\n[\s\S]*?\n\[End of File\]/g, '').trim() || 'programming solution';
+                    const searchRes = await driveFetch('ai_search', { action: 'ai_search', q: cleanSearchPrompt });
+                    if (searchRes && searchRes.success && searchRes.context) {
+                      searchContext = searchRes.context;
+                      aiAssistantMsg.content = `<search>Analyzed ${searchRes.urls.length} web reference(s).</search>\n\n`;
+                    }
+                  } catch (e) {}
+                  renderAiMessages();
+                }
+
+                try {
+                  const csrfToken = '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>';
+                  const activeThread = getAiThreadPath(userMsgId);
+                  const sanitizedMessages = activeThread.map(m => ({ role: m.role, content: m.content }));
+
+                  const res = await fetch('?access=admin&page=drive&api=true', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrfToken },
+                    body: JSON.stringify({
+                      action: 'ai_chat',
+                      csrf_token: csrfToken,
+                      messages: sanitizedMessages,
+                      file_context: fileContext,
+                      search_context: searchContext,
+                      think: isAiThinkActive
+                    }),
+                    signal: aiAbortController.signal
+                  });
+
+                  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+                  const reader = res.body.getReader();
+                  const decoder = new TextDecoder('utf-8');
+                  let sseBuffer = '';
+                  let textBuffer = '';
+                  let reasoningBuffer = '';
+
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    sseBuffer += decoder.decode(value, { stream: true });
+                    const lines = sseBuffer.split('\n');
+                    sseBuffer = lines.pop();
+
+                    for (let line of lines) {
+                      line = line.trim();
+                      if (!line) continue;
+
+                      let dataStr = line;
+                      if (line.startsWith('data: ')) dataStr = line.substring(6).trim();
+                      else if (line.startsWith('{') && line.endsWith('}')) dataStr = line;
+                      else continue;
+
+                      if (dataStr === '[DONE]') continue;
+
+                      try {
+                        const parsed = JSON.parse(dataStr);
+
+                        if (parsed.error || parsed.success === false) {
+                          const errText = parsed.error ? (typeof parsed.error === 'object' ? (parsed.error.message || JSON.stringify(parsed.error)) : parsed.error) : (parsed.message || 'Unknown error');
+                          aiAssistantMsg.content = `⚠️ **API Error**: ${errText}`;
+                          renderAiMessages();
+                          stopAiGeneration();
+                          await saveAiMessageToDB(aiAssistantMsg);
+                          return;
+                        }
+
+                        if (parsed.choices && parsed.choices[0].delta) {
+                          const delta = parsed.choices[0].delta;
+                          if (isAiThinkActive && (delta.reasoning_content || delta.reasoning || delta.thinking)) {
+                            reasoningBuffer += delta.reasoning_content || delta.reasoning || delta.thinking;
+                          }
+                          if (delta.content) textBuffer += delta.content;
+                        } else if (parsed.candidates && parsed.candidates[0].content && parsed.candidates[0].content.parts) {
+                          const parts = parsed.candidates[0].content.parts;
+                          for (let part of parts) {
+                            if (part.thought) {
+                              if (isAiThinkActive) reasoningBuffer += part.text;
+                            } else if (part.text) {
+                              textBuffer += part.text;
+                            }
+                          }
+                        }
+
+                        let combined = '';
+                        if (searchContext) combined += `<search>Used web references.</search>\n\n`;
+                        if (isAiThinkActive && reasoningBuffer) combined += '<think>\n' + reasoningBuffer + '\n</think>\n';
+                        combined += textBuffer;
+                        aiAssistantMsg.content = combined;
+                        renderAiMessages();
+                      } catch (e) {}
+                    }
+                  }
+                } catch (err) {
+                  if (err.name !== 'AbortError') {
+                    aiAssistantMsg.content += `\n\n⚠️ **AI Error**: ${err.message}`;
+                    renderAiMessages();
+                  }
+                } finally {
+                  stopAiGeneration();
+                  await saveAiMessageToDB(aiAssistantMsg);
+                  loadAiChatsList();
+                }
+              };
+
+              document.getElementById('ide-ai-send-btn')?.addEventListener('click', sendAiMessage);
+              document.getElementById('ide-ai-input')?.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  sendAiMessage();
+                } else {
+                  setTimeout(adjustAiInputHeight, 0);
+                }
+              });
+
               // Boot invocations
               loadTree();
+              loadAiSettings();
+              if (aiCurrentChatId) {
+                selectAiChatSession(aiCurrentChatId);
+              }
               if (openFiles.length > 0) {
                 renderTabs();
                 if (activeTabPath) {
@@ -16542,7 +18046,7 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
   // 3. Global API Firewall: Require API Key for ALL external requests
   $api_extracted_action = $_GET['action'] ?? '';
   
-  $public_media_actions = ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon', 'get_art_image'];
+  $public_media_actions = ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon', 'get_art_image', 'verify_admin_dev'];
   if (!in_array($api_extracted_action, $public_media_actions)) {
     $api_key = $_GET['api_key'] ?? '';
     
@@ -16551,22 +18055,28 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
     
     $is_valid_api = false;
 
-    // Check Master Admin Password (Unlimited uses)
-    $stmt_fw = $db_fw->query("SELECT password_hash FROM users WHERE status = 'super_admin' LIMIT 1");
-    $master_hash = $stmt_fw->fetchColumn();
-          
-    if (!empty($master_hash) && password_verify($api_key, $master_hash)) {
-      $is_valid_api = true;
-    } elseif ($api_key === 'ADMIN_SESSION_BYPASS' && isset($_SESSION['user_id'])) {
-      // Securely bypass API check if current active session matches Super Admin
-      $stmt_sess = $db_fw->prepare("SELECT status FROM users WHERE id = ?");
+    // Check Super Admin & Admin User Passwords for identification (Unlimited uses)
+    $stmt_fw = $db_fw->query("SELECT id, password_hash, status, is_admin FROM users WHERE status = 'super_admin' OR status = 'admin' OR is_admin = 1");
+    $admin_rows = $stmt_fw->fetchAll();
+    foreach ($admin_rows as $admin_row_item) {
+      if (!empty($admin_row_item['password_hash']) && password_verify($api_key, $admin_row_item['password_hash'])) {
+        $is_valid_api = true;
+        break;
+      }
+    }
+
+    if (!$is_valid_api && $api_key === 'ADMIN_SESSION_BYPASS' && isset($_SESSION['user_id'])) {
+      // Securely bypass API check if current active session matches Super Admin or Admin
+      $stmt_sess = $db_fw->prepare("SELECT status, is_admin FROM users WHERE id = ?");
       $stmt_sess->execute([$_SESSION['user_id']]);
-      if ($stmt_sess->fetchColumn() === 'super_admin') {
+      $sess_row = $stmt_sess->fetch();
+      if ($sess_row && ($sess_row['status'] === 'super_admin' || $sess_row['status'] === 'admin' || $sess_row['is_admin'] == 1)) {
         $is_valid_api = true;
       }
-    } else {
+    }
+
+    if (!$is_valid_api) {
       // Check Custom API Keys (1,000 uses per month)
-      $stmt_key = $db_fw->prepare("SELECT id, uses, reset_month FROM api_keys WHERE token = ?");
       $stmt_key->execute([$api_key]);
       $key_row = $stmt_key->fetch();
       
@@ -16614,7 +18124,7 @@ if (isset($_GET['action'])) {
       $is_valid_internal = true;
     } elseif ($referer && parse_url($referer, PHP_URL_HOST) === $host) {
       $is_valid_internal = true;
-    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes', 'full_scan', 'force_rescan', 'rescan_covers', 'vacuum_database', 'reset_rhythm_charts', 'rescan_charts'])) {
+    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes', 'full_scan', 'force_rescan', 'rescan_covers', 'vacuum_database', 'reset_rhythm_charts', 'rescan_charts', 'verify_admin_dev'])) {
       // Media and Admin Scanner routes are allowed internally without headers, but data JSON routes are strictly blocked!
       $is_valid_internal = true;
     }
@@ -17521,6 +19031,27 @@ HTML;
       $size = intval($_GET['size'] ?? 192);
       echo '<?xml version="1.0" encoding="utf-8"?><svg width="'.$size.'px" height="'.$size.'px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="24" height="24" rx="6" fill="#0a0a0a"/><path d="M0 24L24 0V24H0Z" fill="#141414" clip-path="inset(0px round 6px)"/><path d="M4 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M16 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M7 7L7 16" stroke="#ff0044" stroke-width="1.7" stroke-linecap="round"/><path d="M13 7L13 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M19 7L19 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M10 4L10 19" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/></svg>';
       exit;
+
+    case 'verify_admin_dev':
+      $data = json_decode(file_get_contents('php://input'), true);
+      $pwd = $data['password'] ?? '';
+      $is_valid = false;
+      if (!empty($pwd)) {
+        $stmt_v = $db->query("SELECT password_hash FROM users WHERE status = 'super_admin' OR status = 'admin' OR is_admin = 1");
+        while ($row_v = $stmt_v->fetch()) {
+          if (!empty($row_v['password_hash']) && password_verify($pwd, $row_v['password_hash'])) {
+            $is_valid = true;
+            break;
+          }
+        }
+      }
+      if ($is_valid) {
+        send_json(['status' => 'success', 'valid' => true]);
+      } else {
+        http_response_code(401);
+        send_json(['status' => 'error', 'valid' => false]);
+      }
+      break;
 
     case 'get_session':
       if ($user_id) {
@@ -26845,39 +28376,120 @@ function perform_cover_scan($db) {
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
-      window.adminAutoToken = '<?php echo $is_super_admin ? "super_admin_bypass" : ""; ?>';
+      window.adminAutoToken = '<?php echo ($is_super_admin || $is_admin) ? "super_admin_bypass" : ""; ?>';
       window.autoScanEnabled = <?php echo isset($auto_scan) && $auto_scan ? 'true' : 'false'; ?>;
-      // ANTI-INSPECT: Block Eruda/vConsole/Bookmarklets, with Super Admin Bypass
+      // ANTI-INSPECT: Prompt on DevTools inspection attempt and redirect to ?page=forbidden if incorrect
       (function() {
-        const blockInspect = (el = null) => {
-          console.warn('Security Notice: Unauthorized debugging tools blocked.');
-          if (el && el.parentNode) {
-            try { el.parentNode.removeChild(el); } catch(e) {}
+        window.__devGranted = false;
+        try {
+          if (sessionStorage.getItem('dev_mode_token') === 'verified') {
+            window.__devGranted = true;
           }
+        } catch (e) {}
+
+        const isBypassed = () => {
+          return window.adminAutoToken === 'super_admin_bypass' || window.__devGranted === true;
         };
 
-        window.isValidDevToken = (token) => {
+        window.isValidDevToken = async (token) => {
           if (!token) return false;
-          if (token === 'super_admin_bypass') return true;
+          if (token === 'super_admin_bypass' || window.adminAutoToken === 'super_admin_bypass') return true;
           if (token.startsWith('pk_')) return true;
-          const currentApi = sessionStorage.getItem('ytm_apiKey') || window.apiKey;
-          return currentApi && token === currentApi;
+          let currentApi = '';
+          try { currentApi = sessionStorage.getItem('ytm_apiKey') || window.apiKey || ''; } catch (e) {}
+          if (currentApi && token === currentApi) return true;
+          try {
+            const res = await fetch('?action=verify_admin_dev', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: token })
+            });
+            const data = await res.json();
+            return Boolean(data && data.valid === true);
+          } catch (e) {
+            return false;
+          }
         };
-        const isValidDevToken = window.isValidDevToken;
 
-        const checkBypass = () => {
-          if (window.adminAutoToken === 'super_admin_bypass') return true;
-          if (isValidDevToken(sessionStorage.getItem('dev_mode_token'))) return true;
-          const pwd = prompt("Developer tools detected. Enter API Key or Admin password to proceed:");
-          if (isValidDevToken(pwd)) {
-            sessionStorage.setItem('dev_mode_token', pwd);
-            return true;
+        let isPrompting = false;
+        window.verifyAndGrantDevAccess = async () => {
+          if (isBypassed() || isPrompting) return true;
+          if (window.location.search.indexOf('page=forbidden') !== -1) return false;
+
+          isPrompting = true;
+          const pwd = prompt("Developer tools access detected.\nEnter Super Admin or Admin password to proceed:");
+          isPrompting = false;
+
+          if (pwd) {
+            const isValid = await window.isValidDevToken(pwd);
+            if (isValid) {
+              window.__devGranted = true;
+              try { sessionStorage.setItem('dev_mode_token', 'verified'); } catch (e) {}
+              alert("Access granted. You may now inspect.");
+              return true;
+            }
           }
-          if (pwd !== null) {
-            console.warn("Password incorrect. Tool blocked.");
-          }
+
+          // Incorrect password, empty, or cancelled
+          window.location.href = '?page=forbidden';
           return false;
         };
+
+        const blockInspect = (el = null) => {
+          if (isBypassed()) return;
+          if (el && el.parentNode) {
+            try { el.parentNode.removeChild(el); } catch (e) {}
+          }
+          window.verifyAndGrantDevAccess();
+        };
+
+        const checkBypass = () => {
+          return isBypassed();
+        };
+
+        // 1. Detect Docked DevTools (Menu -> More tools -> Developer tools)
+        const checkDimensions = () => {
+          if (isBypassed() || isPrompting) return;
+          const isDesktop = window.innerWidth >= 768 && !/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+          if (!isDesktop) return;
+          const widthThreshold = window.outerWidth - window.innerWidth > 160;
+          const heightThreshold = window.outerHeight - window.innerHeight > 160;
+          if (widthThreshold || heightThreshold) {
+            window.verifyAndGrantDevAccess();
+          }
+        };
+
+        // 2. Detect Undocked / Console Inspector evaluation
+        const checkConsole = () => {
+          if (isBypassed() || isPrompting) return;
+          const detector = new Image();
+          Object.defineProperty(detector, 'id', {
+            get: function() {
+              window.verifyAndGrantDevAccess();
+            }
+          });
+          console.log('%c', detector);
+          console.clear();
+        };
+
+        // 3. Detect Active Debugger Hooking
+        const checkDebugger = () => {
+          if (isBypassed() || isPrompting) return;
+          const start = performance.now();
+          debugger;
+          if (performance.now() - start > 100) {
+            window.verifyAndGrantDevAccess();
+          }
+        };
+
+        setInterval(() => {
+          if (isBypassed() || isPrompting) return;
+          checkDimensions();
+          checkConsole();
+          checkDebugger();
+        }, 1000);
+
+        window.addEventListener('resize', checkDimensions);
 
         // 1. STRICT PROTOTYPE CHAIN LOCKDOWN
         const originalAppend = Node.prototype.appendChild;
@@ -32730,6 +34342,412 @@ function perform_cover_scan($db) {
       #artists-modal {
         z-index: 99998 !important;
       }
+
+      .auth-modal-fullscreen {
+        padding: 0 !important;
+        margin: 0 !important;
+      }
+
+      .auth-modal-content {
+        background: #080308 linear-gradient(180deg, #12040b 0%, #290815 35%, #541122 65%, #a82435 85%, #d94d4d 100%) no-repeat center center !important;
+        background-size: cover !important;
+        position: relative;
+        overflow-x: hidden !important;
+        overflow-y: auto !important;
+        min-height: 100vh;
+        min-height: 100dvh;
+        border: none !important;
+        color: #ffffff;
+      }
+
+      .auth-ambient-glow {
+        position: absolute;
+        top: 20%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 600px;
+        height: 600px;
+        background: radial-gradient(circle, rgba(255, 0, 51, 0.25) 0%, rgba(255, 0, 51, 0) 70%);
+        filter: blur(60px);
+        pointer-events: none;
+        z-index: 1;
+      }
+
+      .auth-mountain-backdrop {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        width: 100%;
+        height: 60%;
+        pointer-events: none;
+        z-index: 1;
+        background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 600" preserveAspectRatio="none"><path fill="%232b0713" opacity="0.65" d="M0,600 L0,380 L180,260 L360,420 L580,210 L760,360 L980,140 L1180,310 L1340,240 L1440,320 L1440,600 Z"/><path fill="%231a030a" opacity="0.88" d="M0,600 L0,440 L220,330 L440,490 L680,290 L880,450 L1120,240 L1300,410 L1440,360 L1440,600 Z"/><path fill="%230a0104" d="M0,600 L0,510 L140,460 L320,530 L540,430 L740,510 L940,400 L1160,490 L1360,440 L1440,480 L1440,600 Z"/></svg>') no-repeat bottom center;
+        background-size: cover;
+      }
+
+      .auth-container-shell {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        min-height: 100dvh;
+        padding: 1.5rem;
+      }
+
+      .auth-glass-card {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        max-width: 440px;
+        border-radius: 20px;
+        overflow: hidden;
+        background: rgba(15, 6, 10, 0.78);
+        border: 1px solid rgba(255, 0, 51, 0.28);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.85), 0 0 30px rgba(255, 0, 51, 0.2);
+        backdrop-filter: blur(25px);
+        -webkit-backdrop-filter: blur(25px);
+        margin: auto;
+        transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.3s ease;
+      }
+
+      @media (min-width: 768px) {
+        .auth-glass-card {
+          flex-direction: row;
+          max-width: 860px;
+          min-height: 520px;
+          border-radius: 24px;
+        }
+      }
+
+      .auth-left-banner {
+        background: linear-gradient(145deg, rgba(35, 10, 18, 0.85) 0%, rgba(15, 4, 8, 0.95) 100%);
+        border-right: 1px solid rgba(255, 0, 51, 0.15);
+        padding: 3rem 2.5rem;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        text-align: center;
+        position: relative;
+        width: 42%;
+      }
+
+      .auth-left-banner::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 4px;
+        height: 100%;
+        background: linear-gradient(180deg, #ff0033 0%, #7a0018 100%);
+      }
+
+      .auth-brand-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        background: rgba(255, 0, 51, 0.12);
+        border: 1px solid rgba(255, 0, 51, 0.3);
+        border-radius: 50px;
+        padding: 6px 14px;
+        font-size: 0.85rem;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        color: #ff4d66;
+        box-shadow: 0 4px 15px rgba(255, 0, 51, 0.2);
+      }
+
+      .auth-banner-title {
+        font-size: clamp(1.6rem, 3vw, 2.1rem);
+        font-weight: 900;
+        letter-spacing: -0.5px;
+        line-height: 1.2;
+        color: #ffffff;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+      }
+
+      .auth-banner-sub {
+        color: rgba(255, 255, 255, 0.65);
+        font-size: 0.95rem;
+        margin-top: 0.5rem;
+        margin-bottom: 2rem;
+        line-height: 1.5;
+      }
+
+      .auth-switch-box {
+        background: rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        padding: 1rem 1.25rem;
+        width: 100%;
+      }
+
+      .auth-switch-label {
+        font-size: 0.85rem;
+        color: rgba(255, 255, 255, 0.7);
+        font-weight: 500;
+        margin-bottom: 0.75rem;
+      }
+
+      .auth-pill-btn {
+        background: rgba(255, 255, 255, 0.06) !important;
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
+        color: #ffffff !important;
+        font-size: 0.85rem !important;
+        font-weight: 700 !important;
+        border-radius: 50rem !important;
+        padding: 0.45rem 1.2rem !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        text-decoration: none !important;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .auth-pill-btn:hover {
+        background: rgba(255, 0, 51, 0.25) !important;
+        border-color: #ff0033 !important;
+        color: #ffffff !important;
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(255, 0, 51, 0.3);
+      }
+
+      .auth-right-form {
+        background: rgba(18, 7, 12, 0.6);
+        padding: 2rem 1.5rem;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        flex-grow: 1;
+        width: 100%;
+      }
+
+      @media (min-width: 768px) {
+        .auth-right-form {
+          width: 58%;
+          padding: 3rem 2.8rem;
+        }
+      }
+
+      .auth-form-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1.75rem;
+      }
+
+      .auth-form-title {
+        font-size: 1.85rem;
+        font-weight: 800;
+        color: #ffffff;
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        letter-spacing: -0.5px;
+      }
+
+      .auth-form-title::after {
+        content: '';
+        display: inline-block;
+        width: 32px;
+        height: 4px;
+        border-radius: 2px;
+        background: linear-gradient(90deg, #ff0033 0%, transparent 100%);
+      }
+
+      .auth-floating-group {
+        position: relative;
+        margin-bottom: 1.25rem;
+      }
+
+      .auth-floating-group .form-control {
+        background: rgba(0, 0, 0, 0.45) !important;
+        border: 1px solid rgba(255, 255, 255, 0.12) !important;
+        color: #ffffff !important;
+        border-radius: 14px !important;
+        height: 58px !important;
+        font-size: 0.95rem !important;
+        padding: 1.45rem 3rem 0.45rem 1.15rem !important;
+        transition: all 0.25s ease;
+        box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.4);
+      }
+
+      /* Hides placeholder when unfocused so it never overlaps the label */
+      .auth-floating-group .form-control::placeholder {
+        color: transparent !important;
+        opacity: 0 !important;
+      }
+
+      .auth-floating-group .form-control:focus::placeholder {
+        color: rgba(255, 255, 255, 0.35) !important;
+        opacity: 1 !important;
+      }
+
+      .auth-floating-group .form-control:focus {
+        background: rgba(0, 0, 0, 0.7) !important;
+        border-color: #ff0033 !important;
+        box-shadow: 0 0 0 3px rgba(255, 0, 51, 0.25), inset 0 2px 6px rgba(0, 0, 0, 0.6) !important;
+      }
+
+      .auth-floating-group label {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        padding: 1.05rem 1.15rem !important;
+        color: rgba(255, 255, 255, 0.6) !important;
+        font-size: 0.9rem !important;
+        pointer-events: none;
+        transform-origin: 0 0;
+        transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1), color 0.2s ease;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .auth-floating-group .form-control:focus ~ label,
+      .auth-floating-group .form-control:not(:placeholder-shown) ~ label {
+        transform: translateY(-0.55rem) scale(0.78);
+        color: #ff4d66 !important;
+        font-weight: 700;
+      }
+
+      .auth-input-action {
+        position: absolute;
+        right: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        background: none;
+        border: none;
+        color: rgba(255, 255, 255, 0.4);
+        padding: 6px;
+        cursor: pointer;
+        z-index: 5;
+        transition: color 0.2s ease;
+      }
+
+      .auth-input-action:hover {
+        color: #ffffff;
+      }
+
+      .auth-btn-submit {
+        background: linear-gradient(135deg, #ff0033 0%, #c40026 100%) !important;
+        border: none !important;
+        color: #ffffff !important;
+        font-weight: 800 !important;
+        border-radius: 14px !important;
+        padding: 0.95rem 1.5rem !important;
+        font-size: 1.05rem !important;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        box-shadow: 0 8px 24px rgba(255, 0, 51, 0.45);
+        transition: all 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+        width: 100%;
+        margin-top: 0.5rem;
+      }
+
+      .auth-btn-submit:hover {
+        background: linear-gradient(135deg, #ff1a47 0%, #e0002b 100%) !important;
+        transform: translateY(-2px);
+        box-shadow: 0 12px 30px rgba(255, 0, 51, 0.6);
+      }
+
+      .auth-btn-submit:active {
+        transform: translateY(1px);
+        box-shadow: 0 4px 15px rgba(255, 0, 51, 0.4);
+      }
+
+      .auth-terms-box {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        margin-top: 0.5rem;
+        margin-bottom: 1.25rem;
+        padding: 0 4px;
+      }
+
+      .auth-terms-checkbox {
+        accent-color: #ff0033 !important;
+        width: 18px;
+        height: 18px;
+        margin-top: 2px;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+
+      .auth-terms-text {
+        font-size: 0.82rem;
+        color: rgba(255, 255, 255, 0.65);
+        line-height: 1.4;
+        margin: 0;
+      }
+
+      .auth-terms-text a {
+        color: #ffffff;
+        font-weight: 700;
+        text-decoration: underline;
+        transition: color 0.2s;
+      }
+
+      .auth-terms-text a:hover {
+        color: #ff4d66;
+      }
+
+      .auth-footer-help {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: 1.5rem;
+        padding-top: 1.25rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .auth-help-link {
+        font-size: 0.85rem;
+        color: rgba(255, 255, 255, 0.6);
+        text-decoration: none;
+        transition: all 0.2s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .auth-help-link:hover {
+        color: #ff4d66;
+      }
+
+      /* Card Internal Close Button */
+      .auth-card-close-btn {
+        position: absolute;
+        top: 18px;
+        right: 18px;
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+        color: rgba(255, 255, 255, 0.75) !important;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.95rem;
+        z-index: 10;
+        cursor: pointer;
+        backdrop-filter: blur(8px);
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      .auth-card-close-btn:hover {
+        background: rgba(255, 0, 51, 0.35) !important;
+        border-color: #ff0033 !important;
+        color: #ffffff !important;
+        transform: rotate(90deg) scale(1.1);
+      }
     </style>
   </head>
   <body class="logged-out">
@@ -35367,61 +37385,219 @@ function perform_cover_scan($db) {
       </div>
     </div>
 
-    <div class="modal fade" id="login-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
-        <div class="modal-content">
-          <div class="modal-header border-0">
-            <h5 class="modal-title">Login</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body">
-            <form id="login-form">
-              <div class="mb-3">
-                <label for="login-email" class="form-label">Email address</label>
-                <input type="email" class="form-control" id="login-email" required>
+    <div class="modal fade" id="login-modal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-fullscreen auth-modal-fullscreen">
+        <div class="modal-content auth-modal-content">
+          <div class="auth-ambient-glow"></div>
+          <div class="auth-mountain-backdrop"></div>
+
+          <div class="auth-container-shell">
+            <div class="auth-glass-card position-relative">
+              <!-- Close Button Inside Card -->
+              <button type="button" class="auth-card-close-btn" data-bs-dismiss="modal" aria-label="Close" title="Close">
+                <i class="bi bi-x-lg"></i>
+              </button>
+
+              <!-- Left Welcome Banner (Desktop Only) -->
+              <div class="auth-left-banner d-none d-md-flex">
+                <div class="auth-brand-badge">
+                  <i class="bi bi-music-note-beamed"></i> PHP Music
+                </div>
+                <h2 class="auth-banner-title">Welcome<br>to signin</h2>
+                <p class="auth-banner-sub">Sign in to continue your streaming experience</p>
+
+                <div class="auth-switch-box">
+                  <div class="auth-switch-label">Don't have an account?</div>
+                  <div class="d-flex align-items-center justify-content-center gap-2">
+                    <button type="button" class="auth-pill-btn" data-bs-dismiss="modal">
+                      <i class="bi bi-chevron-left me-1"></i> back
+                    </button>
+                    <button type="button" class="auth-pill-btn" data-bs-toggle="modal" data-bs-target="#register-modal" data-bs-dismiss="modal">
+                      Sign up
+                    </button>
+                  </div>
+                </div>
+
+                <div class="mt-auto pt-4">
+                  <p class="auth-terms-text">
+                    Having trouble with your <a href="#" data-bs-toggle="modal" data-bs-target="#forgot-password-modal" data-bs-dismiss="modal">account</a>?
+                  </p>
+                </div>
               </div>
-              <div class="mb-3">
-                <label for="login-password" class="form-label">Password</label>
-                <input type="password" class="form-control" id="login-password" required>
+
+              <!-- Right Form Section (Mobile & Desktop) -->
+              <div class="auth-right-form">
+                <!-- Mobile Header (Mobile Only) -->
+                <div class="d-md-none text-center mb-3">
+                  <div class="auth-brand-badge mb-2">
+                    <i class="bi bi-music-note-beamed"></i> PHP Music
+                  </div>
+                  <h3 class="fw-bold text-white mb-1" style="font-size: 1.45rem;">Welcome to signin</h3>
+                  <p class="text-white-50 small mb-0">Sign in to continue</p>
+                </div>
+
+                <!-- Desktop Header (Desktop Only) -->
+                <div class="auth-form-header pe-4 d-none d-md-flex">
+                  <h3 class="auth-form-title">Sign In</h3>
+                </div>
+
+                <form id="login-form">
+                  <div class="auth-floating-group">
+                    <input type="email" class="form-control" id="login-email" placeholder=" " required maxlength="50">
+                    <label for="login-email">Email address</label>
+                    <span class="auth-input-action"><i class="bi bi-envelope"></i></span>
+                  </div>
+
+                  <div class="auth-floating-group">
+                    <input type="password" class="form-control" id="login-password" placeholder=" " required>
+                    <label for="login-password">Password</label>
+                    <button type="button" class="auth-input-action" onclick="const p = document.getElementById('login-password'); p.type = p.type === 'password' ? 'text' : 'password'; this.querySelector('i').classList.toggle('bi-eye'); this.querySelector('i').classList.toggle('bi-eye-slash');" title="Show / Hide Password">
+                      <i class="bi bi-eye"></i>
+                    </button>
+                  </div>
+
+                  <button type="submit" class="auth-btn-submit">
+                    <i class="bi bi-box-arrow-in-right me-2"></i> Login
+                  </button>
+
+                  <!-- Mobile Switch Box (Mobile Only) -->
+                  <div class="d-md-none text-center mt-3 pt-3 border-top border-secondary border-opacity-25">
+                    <p class="text-white-50 small mb-2">Don't have an account?</p>
+                    <div class="d-flex align-items-center justify-content-center gap-2">
+                      <button type="button" class="auth-pill-btn" data-bs-dismiss="modal">
+                        <i class="bi bi-chevron-left me-1"></i> back
+                      </button>
+                      <button type="button" class="auth-pill-btn" data-bs-toggle="modal" data-bs-target="#register-modal" data-bs-dismiss="modal">
+                        Sign up
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="auth-footer-help">
+                    <a href="#" class="auth-help-link" data-bs-toggle="modal" data-bs-target="#forgot-password-modal" data-bs-dismiss="modal">
+                      <i class="bi bi-key-fill text-warning"></i> Forgot password?
+                    </a>
+                    <a href="#" class="auth-help-link" data-bs-toggle="modal" data-bs-target="#appeal-ban-modal" data-bs-dismiss="modal">
+                      <i class="bi bi-shield-exclamation text-danger"></i> Appeal ban
+                    </a>
+                  </div>
+                </form>
               </div>
-              <button type="submit" class="btn btn-danger w-100 mb-3">Login</button>
-              <div class="text-center">
-                <a href="#" class="text-info text-decoration-none small d-block mb-2" data-bs-toggle="modal" data-bs-target="#forgot-password-modal" data-bs-dismiss="modal">I forgot my password</a>
-                <a href="#" class="text-warning text-decoration-none small d-block mb-2" data-bs-toggle="modal" data-bs-target="#appeal-ban-modal" data-bs-dismiss="modal">Appeal an account ban</a>
-                <a href="#" class="text-secondary text-decoration-none small d-block" data-bs-toggle="modal" data-bs-target="#register-modal" data-bs-dismiss="modal">I don't have an account</a>
-              </div>
-            </form>
+            </div>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="modal fade" id="register-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
-        <div class="modal-content">
-          <div class="modal-header border-0">
-            <h5 class="modal-title">Register</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body">
-            <form id="register-form">
-              <div class="mb-3">
-                <label for="register-artist" class="form-label">Artist/Display Name</label>
-                <input type="text" class="form-control" id="register-artist" required>
+    <div class="modal fade" id="register-modal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-fullscreen auth-modal-fullscreen">
+        <div class="modal-content auth-modal-content">
+          <div class="auth-ambient-glow"></div>
+          <div class="auth-mountain-backdrop"></div>
+
+          <div class="auth-container-shell">
+            <div class="auth-glass-card position-relative">
+              <!-- Close Button Inside Card -->
+              <button type="button" class="auth-card-close-btn" data-bs-dismiss="modal" aria-label="Close" title="Close">
+                <i class="bi bi-x-lg"></i>
+              </button>
+
+              <!-- Left Welcome Banner (Desktop Only) -->
+              <div class="auth-left-banner d-none d-md-flex">
+                <div class="auth-brand-badge">
+                  <i class="bi bi-stars"></i> PHP Music
+                </div>
+                <h2 class="auth-banner-title">Welcome<br>to signup</h2>
+                <p class="auth-banner-sub">Sign up to create playlists and explore music</p>
+
+                <div class="auth-switch-box">
+                  <div class="auth-switch-label">Already have an account?</div>
+                  <div class="d-flex align-items-center justify-content-center gap-2">
+                    <button type="button" class="auth-pill-btn" data-bs-dismiss="modal">
+                      <i class="bi bi-chevron-left me-1"></i> back
+                    </button>
+                    <button type="button" class="auth-pill-btn" data-bs-toggle="modal" data-bs-target="#login-modal" data-bs-dismiss="modal">
+                      Sign in
+                    </button>
+                  </div>
+                </div>
+
+                <div class="mt-auto pt-4">
+                  <p class="auth-terms-text">
+                    Need help getting started? <a href="#" data-bs-toggle="modal" data-bs-target="#how-to-use-modal" data-bs-dismiss="modal">User Guide</a>
+                  </p>
+                </div>
               </div>
-              <div class="mb-3">
-                <label for="register-email" class="form-label">Email address</label>
-                <input type="email" class="form-control" id="register-email" required>
+
+              <!-- Right Form Section (Mobile & Desktop) -->
+              <div class="auth-right-form">
+                <!-- Mobile Header (Mobile Only) -->
+                <div class="d-md-none text-center mb-3">
+                  <div class="auth-brand-badge mb-2">
+                    <i class="bi bi-stars"></i> PHP Music
+                  </div>
+                  <h3 class="fw-bold text-white mb-1" style="font-size: 1.45rem;">Welcome to signup</h3>
+                  <p class="text-white-50 small mb-0">Sign up to explore & create playlists</p>
+                </div>
+
+                <!-- Desktop Header (Desktop Only) -->
+                <div class="auth-form-header pe-4 d-none d-md-flex">
+                  <h3 class="auth-form-title">Sign Up</h3>
+                </div>
+
+                <form id="register-form">
+                  <div class="auth-floating-group">
+                    <input type="text" class="form-control" id="register-artist" placeholder=" " required maxlength="40">
+                    <label for="register-artist">Your name / Artist handle</label>
+                    <span class="auth-input-action"><i class="bi bi-person"></i></span>
+                  </div>
+
+                  <div class="auth-floating-group">
+                    <input type="email" class="form-control" id="register-email" placeholder=" " required maxlength="50">
+                    <label for="register-email">Email address</label>
+                    <span class="auth-input-action"><i class="bi bi-envelope"></i></span>
+                  </div>
+
+                  <div class="auth-floating-group">
+                    <input type="password" class="form-control" id="register-password" placeholder=" " required minlength="6">
+                    <label for="register-password">Password (min. 6 characters)</label>
+                    <button type="button" class="auth-input-action" onclick="const p = document.getElementById('register-password'); p.type = p.type === 'password' ? 'text' : 'password'; this.querySelector('i').classList.toggle('bi-eye'); this.querySelector('i').classList.toggle('bi-eye-slash');" title="Show / Hide Password">
+                      <i class="bi bi-eye"></i>
+                    </button>
+                  </div>
+
+                  <div class="auth-terms-box">
+                    <input class="auth-terms-checkbox" type="checkbox" id="register-terms-check" required>
+                    <label class="auth-terms-text" for="register-terms-check">
+                      By clicking this, you agree with the <a href="#" data-bs-toggle="modal" data-bs-target="#license-modal" data-bs-dismiss="modal">terms of service</a>.
+                    </label>
+                  </div>
+
+                  <button type="submit" class="auth-btn-submit">
+                    <i class="bi bi-person-check-fill me-2"></i> Register
+                  </button>
+
+                  <!-- Mobile Switch Box (Mobile Only) -->
+                  <div class="d-md-none text-center mt-3 pt-3 border-top border-secondary border-opacity-25">
+                    <p class="text-white-50 small mb-2">Already have an account?</p>
+                    <div class="d-flex align-items-center justify-content-center gap-2">
+                      <button type="button" class="auth-pill-btn" data-bs-dismiss="modal">
+                        <i class="bi bi-chevron-left me-1"></i> back
+                      </button>
+                      <button type="button" class="auth-pill-btn" data-bs-toggle="modal" data-bs-target="#login-modal" data-bs-dismiss="modal">
+                        Sign in
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="auth-footer-help justify-content-center d-none d-md-flex">
+                    <span class="text-secondary small">
+                      Already registered? <a href="#" class="text-white fw-bold ms-1" data-bs-toggle="modal" data-bs-target="#login-modal" data-bs-dismiss="modal">Log in here</a>
+                    </span>
+                  </div>
+                </form>
               </div>
-              <div class="mb-3">
-                <label for="register-password" class="form-label">Password</label>
-                <input type="password" class="form-control" id="register-password" required minlength="6">
-              </div>
-              <button type="submit" class="btn btn-danger w-100 mb-3">Register</button>
-              <div class="text-center">
-                <a href="#" class="text-secondary text-decoration-none small" data-bs-toggle="modal" data-bs-target="#login-modal" data-bs-dismiss="modal">I already have an account</a>
-              </div>
-            </form>
+            </div>
           </div>
         </div>
       </div>
@@ -73399,14 +75575,11 @@ SOFTWARE.</div>
           }
         });
     
-        // Forbid inspecting the page, bypassable by super admin
+        // Contextmenu protection for Private & Normal windows
         document.addEventListener("contextmenu", (e) => {
-          if (
-            typeof window.isValidDevToken === "function" &&
-            window.isValidDevToken(localStorage.getItem("dev_mode_token"))
-          )
+          if (window.adminAutoToken === "super_admin_bypass" || window.__devGranted === true) {
             return;
-          if (window.adminAutoToken === "super_admin_bypass") return;
+          }
           if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA") {
             e.preventDefault();
           }
@@ -73420,46 +75593,21 @@ SOFTWARE.</div>
           ) {
             return;
           }
-          // Anti-inspect
+          // Anti-inspect shortcut interceptor
           if (
             e.key === "F12" ||
-            (e.ctrlKey &&
-              e.shiftKey &&
-              (e.key === "I" || e.key === "C" || e.key === "J")) ||
-            (e.ctrlKey && e.key === "U")
+            (e.ctrlKey && e.shiftKey && (e.key === "I" || e.key === "C" || e.key === "J" || e.key === "i" || e.key === "c" || e.key === "j")) ||
+            (e.metaKey && e.altKey && (e.key === "I" || e.key === "C" || e.key === "J" || e.key === "i" || e.key === "c" || e.key === "j" || e.key === "U" || e.key === "u")) ||
+            (e.ctrlKey && (e.key === "U" || e.key === "u"))
           ) {
-            const isValidDevToken = (token) => {
-              if (!token) return false;
-              if (token === "super_admin_bypass")
-                return true;
-              if (token.startsWith("pk_")) return true;
-              const currentApi =
-                sessionStorage.getItem("ytm_apiKey") ||
-                sessionStorage.getItem("admin_api_key") ||
-                window.apiKey;
-              return currentApi && token === currentApi;
-            };
-    
-            if (
-              !isValidDevToken(sessionStorage.getItem("dev_mode_token")) &&
-              window.adminAutoToken !== "super_admin_bypass"
-            ) {
-              e.preventDefault(); // Block the browser's default inspect window opening
-              const pwd = prompt(
-                "Developer tools locked. Enter API Key or Admin password:",
-              );
-              if (isValidDevToken(pwd)) {
-                sessionStorage.setItem("dev_mode_token", pwd);
-                alert(
-                  "Access granted. You can now press the shortcut again to open DevTools.",
-                );
-              } else if (pwd !== null) {
-                alert("Password incorrect. You want to try exploit the site?");
-              }
-              return false;
+            if (window.adminAutoToken === "super_admin_bypass" || window.__devGranted === true) {
+              return true;
             }
+            e.preventDefault();
+            e.stopPropagation();
+            await window.verifyAndGrantDevAccess();
+            return false;
           }
-          // Stop if user is typing in an input field
           if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") {
             if (e.code === "Escape") {
               e.target.blur();
