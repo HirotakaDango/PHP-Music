@@ -452,7 +452,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '9.1');
+define('APP_VERSION', '9.2');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -677,1702 +677,2185 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   }
 
   // ==========================================
-  // PHP DRIVE BACKEND CONTROLLER
+  // PHP DRIVE (PHPFILES) BACKEND CONTROLLER
   // ==========================================
-  if (isset($_GET['page']) && $_GET['page'] === 'drive') {
-    if (!$is_admin_logged_in && (isset($_GET['api']) || isset($_GET['download']) || isset($_GET['batch']))) {
-      header('Content-Type: application/json');
-      http_response_code(401);
-      echo json_encode(['success' => false, 'error' => 'auth_required']);
-      exit;
-    }
-
-    $baseDir = __DIR__;
-
-    function isAllowedExtension($filename) {
-      return true; // All file extensions allowed
-    }
-
-    function save_file_version($filepath) {
-      global $baseDir;
-      if (!file_exists($filepath) || is_dir($filepath)) return;
-      $filename = basename($filepath);
-      $verDir = $baseDir . '/.file_version/' . $filename;
-      if (!is_dir($verDir)) @mkdir($verDir, 0755, true);
-      $date = date('Y-m-d_H-i-s');
-      @copy($filepath, $verDir . '/' . $filename . '_' . $date);
-    }
-
-    function generateUniqueFileName($dir, $filename) {
-      $baseName = pathinfo($filename, PATHINFO_FILENAME);
-      $extension = pathinfo($filename, PATHINFO_EXTENSION);
-      $extPart = $extension ? '.' . $extension : '';
-      $counter = 1;
-      while (file_exists($dir . '/' . $baseName . '_(' . $counter . ')' . $extPart)) {
-        $counter++;
+  if (isset($_GET['page']) && $_GET['page'] === 'drive' || isset($_GET['share'])) {
+    if (!$is_admin_logged_in && !isset($_GET['share'])) {
+      if (isset($_GET['action']) || isset($_GET['api'])) {
+        header('Content-Type: application/json; charset=utf-8');
+        http_response_code(401);
+        echo json_encode(['error' => 'Authentication required'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        exit;
       }
-      return $baseName . '_(' . $counter . ')' . $extPart;
     }
 
-    function generateUniqueFolderName($dir, $foldername) {
-      $counter = 1;
-      while (is_dir($dir . '/' . $foldername . '_(' . $counter . ')')) {
-        $counter++;
+    $driveConfig = [
+      'root_dir'           => MUSIC_DIR,
+      'cache_dir'          => MUSIC_DIR . '/.gallery_cache',
+      'trash_dir'          => MUSIC_DIR . '/.drive_trash_bin',
+      'version_dir'        => MUSIC_DIR . '/.file_version',
+      'meta_file'          => MUSIC_DIR . '/.gallery_cache/.drive_meta.json',
+      'thumb_size'         => 480,
+      'thumb_quality'      => 85,
+      'memory_limit'       => '512M',
+      'encryption_key'     => 'PHP_Music_Secret_2026',
+      'image_extensions'   => ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'],
+      'video_extensions'   => ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv', 'avi', 'ts', '3gp', 'wmv', 'flv'],
+      'audio_extensions'   => ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'm4r', 'mid', 'midi'],
+      'text_extensions'    => ['txt', 'md', 'markdown', 'json', 'js', 'css', 'html', 'htm', 'php', 'py', 'c', 'cpp', 'sh', 'log', 'xml', 'yaml', 'yml', 'ini', 'env', 'sql', 'csv', 'enc'],
+      'archive_extensions' => ['zip', 'tar', 'gz', '7z', 'rar', 'tgz'],
+    ];
+
+    @ini_set('memory_limit', $driveConfig['memory_limit']);
+
+    foreach ([$driveConfig['cache_dir'], $driveConfig['trash_dir'], $driveConfig['version_dir']] as $sysDir) {
+      if (!is_dir($sysDir)) {
+        @mkdir($sysDir, 0777, true);
+        @file_put_contents($sysDir . '/.htaccess', "Order Deny,Allow\nDeny from all");
       }
-      return $foldername . '_(' . $counter . ')';
     }
 
-    function recursiveCopy($src, $dst) {
-      if (is_dir($src)) {
-        @mkdir($dst);
-        $items = scandir($src);
-        foreach ($items as $item) {
-          if ($item === '.' || $item === '..') continue;
-          recursiveCopy($src . '/' . $item, $dst . '/' . $item);
+    if (!function_exists('driveFormatBytes')) {
+      function driveFormatBytes($bytes, $precision = 2) {
+        if ($bytes >= 1073741824) return number_format($bytes / 1073741824, $precision) . ' GB';
+        if ($bytes >= 1048576) return number_format($bytes / 1048576, $precision) . ' MB';
+        if ($bytes >= 1024) return number_format($bytes / 1024, $precision) . ' KB';
+        return ($bytes ?: 0) . ' B';
+      }
+    }
+
+    if (!function_exists('driveNormalizePath')) {
+      function driveNormalizePath($path) {
+        $parts = explode(DIRECTORY_SEPARATOR, str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path));
+        $safe = [];
+        foreach ($parts as $p) {
+          if ($p === '' || $p === '.') continue;
+          if ($p === '..') array_pop($safe);
+          else $safe[] = $p;
         }
-      } else if (file_exists($src)) {
-        copy($src, $dst);
+        return (DIRECTORY_SEPARATOR === '\\' ? '' : DIRECTORY_SEPARATOR) . implode(DIRECTORY_SEPARATOR, $safe);
       }
     }
 
-    function isValidPath($base, $path) {
-      $realBase = realpath($base);
-      $realPath = realpath($path);
-      if ($realPath === false) return false;
-      return strpos($realPath, $realBase) === 0;
-    }
-
-    function recursiveDelete($dir) {
-      global $baseDir;
-      if (!isValidPath($baseDir, $dir)) return false;
-      if (is_file($dir)) return unlink($dir);
-      if (!is_dir($dir)) return false;
-      $items = array_diff(scandir($dir), ['.', '..']);
-      foreach ($items as $item) {
-        $path = $dir . '/' . $item;
-        is_dir($path) ? recursiveDelete($path) : unlink($path);
-      }
-      return rmdir($dir);
-    }
-
-    function formatBytes($bytes, $precision = 2) {
-      $units = ['B', 'KB', 'MB', 'GB', 'TB'];
-      $bytes = max($bytes, 0);
-      $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
-      $pow = min($pow, count($units) - 1);
-      $bytes /= (1 << (10 * $pow));
-      return round($bytes, $precision) . ' ' . $units[$pow];
-    }
-
-    function logDriveActivity($fileName, $filePath, $action) {
-      try {
-        $db = get_db();
-        $stmt = $db->prepare("INSERT INTO drive_activity (file_name, file_path, action, timestamp) VALUES (?, ?, ?, ?)");
-        $stmt->execute([$fileName, $filePath, $action, time()]);
-        if (function_exists('log_admin_activity') && isset($_SESSION['admin_email'])) {
-          log_admin_activity($db, $_SESSION['admin_email'], "Drive: {$action} {$fileName}", 0);
+    if (!function_exists('driveSafePath')) {
+      function driveSafePath($base, $requestPath) {
+        $realBase = realpath($base);
+        if (!$realBase) return false;
+        $cleanRel = ltrim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $requestPath ?? ''), DIRECTORY_SEPARATOR);
+        $targetPath = $cleanRel === '' ? $realBase : ($realBase . DIRECTORY_SEPARATOR . $cleanRel);
+        $realTarget = realpath($targetPath);
+        if ($realTarget === false) {
+          $check = driveNormalizePath($targetPath);
+          if (strpos($check, $realBase) === 0) return $check;
+          return false;
         }
-      } catch (Exception $e) {}
-    }
-
-    $db = get_db();
-    $db->exec("
-      CREATE TABLE IF NOT EXISTS drive_starred (
-        path TEXT PRIMARY KEY
-      );
-      CREATE TABLE IF NOT EXISTS drive_trash (
-        uniq TEXT PRIMARY KEY,
-        original_name TEXT,
-        original_parent TEXT,
-        deleted_at INTEGER
-      );
-      CREATE TABLE IF NOT EXISTS drive_shares (
-        token TEXT PRIMARY KEY,
-        path TEXT
-      );
-      CREATE TABLE IF NOT EXISTS drive_activity (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        file_name TEXT,
-        file_path TEXT,
-        action TEXT,
-        timestamp INTEGER
-      );
-    ");
-
-    function cleanupExpiredTrash() {
-      global $baseDir;
-      $db = get_db();
-      $thirtyDays = 30 * 24 * 60 * 60;
-      $now = time();
-      $trashBin = $baseDir . '/.drive_trash_bin';
-
-      $stmt = $db->prepare("SELECT uniq FROM drive_trash WHERE (? - deleted_at) > ?");
-      $stmt->execute([$now, $thirtyDays]);
-      $expired = $stmt->fetchAll(PDO::FETCH_COLUMN);
-
-      $delStmt = $db->prepare("DELETE FROM drive_trash WHERE uniq = ?");
-      foreach ($expired as $uniq) {
-        $full = $trashBin . '/' . $uniq;
-        if (file_exists($full)) {
-          recursiveDelete($full);
-        }
-        $delStmt->execute([$uniq]);
+        if (strpos($realTarget, $realBase) !== 0) return $realBase;
+        return $realTarget;
       }
     }
 
-    function streamFileRange($filePath) {
-      $size = filesize($filePath);
-      $length = $size;
-      $start = 0;
-      $end = $size - 1;
-      $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
-      $mimeTypes = [
-        'mp3' => 'audio/mpeg', 'wav' => 'audio/wav', 'ogg' => 'audio/ogg',
-        'mp4' => 'video/mp4', 'webm' => 'video/webm', 'pdf' => 'application/pdf',
-        'png' => 'image/png', 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'gif' => 'image/gif',
-        'txt' => 'text/plain', 'html' => 'text/plain', 'css' => 'text/plain',
-        'js' => 'text/plain', 'json' => 'text/plain', 'xml' => 'text/plain',
-        'php' => 'text/plain', 'md' => 'text/markdown', 'markdown' => 'text/markdown'
-      ];
-      $mime = $mimeTypes[$ext] ?? 'application/octet-stream';
-      
-      header("Content-Disposition: inline; filename=\"" . basename($filePath) . "\"");
-      header("Accept-Ranges: bytes");
-      if (isset($_SERVER['HTTP_RANGE'])) {
-        $c_start = $start;
-        $c_end = $end;
-        list(, $range) = explode('=', $_SERVER['HTTP_RANGE'], 2);
-        if (strpos($range, ',') !== false) {
-          header('HTTP/1.1 416 Requested Range Not Satisfiable');
-          header("Content-Range: bytes $start-$end/$size");
+    if (!function_exists('driveFindRealFile')) {
+      function driveFindRealFile($rootDir, $relPath) {
+        $path = driveSafePath($rootDir, $relPath);
+        if ($path && file_exists($path)) return $path;
+
+        $baseName = basename($relPath);
+        $cleanName = preg_replace('/[^\w\s\d\.\-_~()[\]]/u', '', $baseName);
+        $dir = dirname($relPath);
+        $altRel = ($dir && $dir !== '.') ? ($dir . '/' . $cleanName) : $cleanName;
+        $altPath = driveSafePath($rootDir, $altRel);
+        if ($altPath && file_exists($altPath)) return $altPath;
+
+        $rootPath = driveSafePath($rootDir, $baseName);
+        if ($rootPath && file_exists($rootPath)) return $rootPath;
+
+        $rootCleanPath = driveSafePath($rootDir, $cleanName);
+        if ($rootCleanPath && file_exists($rootCleanPath)) return $rootCleanPath;
+
+        return false;
+      }
+    }
+
+    if (!function_exists('driveJsonResponse')) {
+      function driveJsonResponse($data, $status = 200) {
+        while (ob_get_level() > 0) @ob_end_clean();
+        http_response_code($status);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        exit;
+      }
+    }
+
+    if (!function_exists('driveGetFileType')) {
+      function driveGetFileType($ext, $config) {
+        $ext = strtolower($ext);
+        if (in_array($ext, $config['image_extensions'])) return 'image';
+        if (in_array($ext, $config['video_extensions'])) return 'video';
+        if (in_array($ext, $config['audio_extensions'])) return 'audio';
+        if (in_array($ext, $config['text_extensions'])) return 'text';
+        if (in_array($ext, $config['archive_extensions'])) return 'archive';
+        if ($ext === 'pdf') return 'pdf';
+        return 'file';
+      }
+    }
+
+    if (!function_exists('driveGetFolderStats')) {
+      function driveGetFolderStats($dirPath, $cacheDir) {
+        if (!is_dir($dirPath)) return ['size' => 0, 'files' => 0, 'folders' => 0];
+        if (function_exists('set_time_limit')) @set_time_limit(120);
+
+        $cacheReal = realpath($cacheDir);
+        $cacheFile = $cacheDir . DIRECTORY_SEPARATOR . 'fstat_' . md5($dirPath) . '.dat';
+        $currentMtime = @filemtime($dirPath) ?: 0;
+
+        if (file_exists($cacheFile)) {
+          $fp = @fopen($cacheFile, 'rb');
+          if ($fp) {
+            $header = fread($fp, 128);
+            fclose($fp);
+            if ($header) {
+              $lines = explode("\n", trim($header));
+              if (count($lines) >= 4 && intval($lines[0]) >= $currentMtime) {
+                return [
+                  'size'    => floatval($lines[1]),
+                  'files'   => intval($lines[2]),
+                  'folders' => intval($lines[3])
+                ];
+              }
+            }
+          }
+        }
+
+        $size = 0.0;
+        $files = 0;
+        $folders = 0;
+        $ignoreDirs = ['.gallery_cache', '.drive_trash_bin', '.file_version', '.git'];
+
+        $queue = [$dirPath];
+        while (!empty($queue)) {
+          $currentDir = array_shift($queue);
+          $dh = @opendir($currentDir);
+          if (!$dh) continue;
+
+          while (($entry = @readdir($dh)) !== false) {
+            if ($entry === '.' || $entry === '..' || in_array($entry, $ignoreDirs) || $entry[0] === '.') {
+              continue;
+            }
+            $full = $currentDir . DIRECTORY_SEPARATOR . $entry;
+            if ($cacheReal && strpos($full, $cacheReal) === 0) continue;
+
+            if (is_dir($full)) {
+              $folders++;
+              $queue[] = $full;
+            } else {
+              $files++;
+              $sz = @filesize($full);
+              if ($sz !== false) $size += (float)$sz;
+            }
+          }
+          @closedir($dh);
+        }
+
+        $outFp = @fopen($cacheFile, 'wb');
+        if ($outFp) {
+          fprintf($outFp, "%d\n%.0f\n%d\n%d\n", $currentMtime, $size, $files, $folders);
+          fclose($outFp);
+        }
+
+        return ['size' => $size, 'files' => $files, 'folders' => $folders];
+      }
+    }
+
+    if (!function_exists('driveParseGPSCoordinate')) {
+      function driveParseGPSCoordinate($coord, $ref) {
+        if (!is_array($coord) || count($coord) < 3) return null;
+        $parts = [];
+        for ($i = 0; $i < 3; $i++) {
+          $p = explode('/', $coord[$i]);
+          $parts[$i] = (count($p) === 2 && $p[1] > 0) ? ($p[0] / $p[1]) : floatval($coord[$i]);
+        }
+        $degrees = $parts[0] + ($parts[1] / 60) + ($parts[2] / 3600);
+        return ($ref === 'S' || $ref === 'W') ? -$degrees : $degrees;
+      }
+    }
+
+    if (!function_exists('driveGetExifMetadata')) {
+      function driveGetExifMetadata($filePath) {
+        $meta = ['exif' => [], 'iptc' => []];
+        $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+
+        if (in_array($ext, ['jpg', 'jpeg', 'tiff']) && function_exists('exif_read_data')) {
+          $exif = @exif_read_data($filePath, 'ANY_TAG', true);
+          if ($exif) {
+            if (isset($exif['IFD0']['Make'])) $meta['exif']['Camera Make'] = trim($exif['IFD0']['Make']);
+            if (isset($exif['IFD0']['Model'])) $meta['exif']['Camera Model'] = trim($exif['IFD0']['Model']);
+            if (isset($exif['EXIF']['ExposureTime'])) $meta['exif']['Shutter Speed'] = $exif['EXIF']['ExposureTime'] . 's';
+            if (isset($exif['EXIF']['FNumber'])) {
+              $f = explode('/', $exif['EXIF']['FNumber']);
+              $meta['exif']['Aperture'] = 'f/' . (count($f) === 2 && $f[1] > 0 ? round($f[0] / $f[1], 1) : $exif['EXIF']['FNumber']);
+            }
+            if (isset($exif['EXIF']['ISOSpeedRatings'])) $meta['exif']['ISO'] = is_array($exif['EXIF']['ISOSpeedRatings']) ? $exif['EXIF']['ISOSpeedRatings'][0] : $exif['EXIF']['ISOSpeedRatings'];
+            if (isset($exif['EXIF']['FocalLength'])) {
+              $fl = explode('/', $exif['EXIF']['FocalLength']);
+              $meta['exif']['Focal Length'] = (count($fl) === 2 && $fl[1] > 0 ? round($fl[0] / $fl[1], 1) : $exif['EXIF']['FocalLength']) . 'mm';
+            }
+            if (isset($exif['EXIF']['DateTimeOriginal'])) $meta['exif']['Date Taken'] = $exif['EXIF']['DateTimeOriginal'];
+
+            if (isset($exif['GPS']['GPSLatitude'], $exif['GPS']['GPSLatitudeRef'], $exif['GPS']['GPSLongitude'], $exif['GPS']['GPSLongitudeRef'])) {
+              $lat = driveParseGPSCoordinate($exif['GPS']['GPSLatitude'], $exif['GPS']['GPSLatitudeRef']);
+              $lon = driveParseGPSCoordinate($exif['GPS']['GPSLongitude'], $exif['GPS']['GPSLongitudeRef']);
+              if ($lat !== null && $lon !== null) {
+                $meta['exif']['GPS Coordinates'] = sprintf('%.5f, %.5f', $lat, $lon);
+                $meta['exif']['Maps'] = "https://www.google.com/maps?q={$lat},{$lon}";
+              }
+            }
+          }
+        }
+
+        if (in_array($ext, ['jpg', 'jpeg']) && function_exists('iptcparse')) {
+          @getimagesize($filePath, $info);
+          if (!empty($info['APP13'])) {
+            $iptc = @iptcparse($info['APP13']);
+            if ($iptc) {
+              if (!empty($iptc['2#005'][0])) $meta['iptc']['Title'] = $iptc['2#005'][0];
+              if (!empty($iptc['2#120'][0])) $meta['iptc']['Caption'] = $iptc['2#120'][0];
+              if (!empty($iptc['2#080'][0])) $meta['iptc']['Author'] = $iptc['2#080'][0];
+              if (!empty($iptc['2#025'])) $meta['iptc']['Keywords'] = implode(', ', $iptc['2#025']);
+            }
+          }
+        }
+        return $meta;
+      }
+    }
+
+    if (!function_exists('driveFormatDuration')) {
+      function driveFormatDuration($seconds) {
+        if (!$seconds || $seconds <= 0) return '';
+        $s = (int)round($seconds);
+        $h = floor($s / 3600);
+        $m = floor(($s % 3600) / 60);
+        $sec = $s % 60;
+        return $h > 0 ? sprintf('%02d:%02d:%02d', $h, $m, $sec) : sprintf('%02d:%02d', $m, $sec);
+      }
+    }
+
+    if (!function_exists('driveGetMediaMetadata')) {
+      function driveGetMediaMetadata($filePath) {
+        $meta = ['tags' => [], 'cover_art' => null, 'raw_cover' => null];
+        $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+
+        if ($ext === 'mp3') {
+          $fp = @fopen($filePath, 'rb');
+          if ($fp) {
+            $header = fread($fp, 10);
+            if (strlen($header) === 10 && substr($header, 0, 3) === 'ID3') {
+              $version = ord($header[3]);
+              $tagSize = ((ord($header[6]) & 0x7f) << 21) | ((ord($header[7]) & 0x7f) << 14) | ((ord($header[8]) & 0x7f) << 7) | (ord($header[9]) & 0x7f);
+              if ($tagSize > 0 && $tagSize < 10485760) {
+                $data = fread($fp, $tagSize);
+                $len = strlen($data);
+                $pos = 0;
+                $tagMap = ['TIT2' => 'Track Title', 'TPE1' => 'Artist', 'TALB' => 'Album', 'TYER' => 'Year', 'TDRC' => 'Year', 'TCON' => 'Genre', 'TRCK' => 'Track #'];
+
+                while ($pos + 10 < $len) {
+                  $frameId = substr($data, $pos, 4);
+                  if (!preg_match('/^[A-Z0-9]{4}$/', $frameId)) break;
+                  $fSize = $version === 4
+                    ? ((ord($data[$pos+4]) & 0x7f) << 21) | ((ord($data[$pos+5]) & 0x7f) << 14) | ((ord($data[$pos+6]) & 0x7f) << 7) | (ord($data[$pos+7]) & 0x7f)
+                    : (ord($data[$pos+4]) << 24) | (ord($data[$pos+5]) << 16) | (ord($data[$pos+6]) << 8) | ord($data[$pos+7]);
+
+                  if ($fSize <= 0 || $pos + 10 + $fSize > $len) break;
+                  $content = substr($data, $pos + 10, $fSize);
+                  $pos += 10 + $fSize;
+
+                  if (isset($tagMap[$frameId]) && strlen($content) > 1) {
+                    $enc = ord($content[0]);
+                    $text = substr($content, 1);
+                    if ($enc === 1 || $enc === 2) $text = @mb_convert_encoding($text, 'UTF-8', 'UTF-16');
+                    $meta['tags'][$tagMap[$frameId]] = trim($text);
+                  } elseif ($frameId === 'APIC' && strlen($content) > 5 && empty($meta['cover_art'])) {
+                    $enc = ord($content[0]);
+                    $p = 1;
+                    $mime = '';
+                    while ($p < strlen($content) && $content[$p] !== "\x00") { $mime .= $content[$p]; $p++; }
+                    $p += 2;
+                    if ($enc === 1 || $enc === 2) {
+                      while ($p + 1 < strlen($content) && !($content[$p] === "\x00" && $content[$p+1] === "\x00")) $p += 2;
+                      $p += 2;
+                    } else {
+                      while ($p < strlen($content) && $content[$p] !== "\x00") $p++;
+                      $p++;
+                    }
+                    if ($p < strlen($content)) {
+                      $img = substr($content, $p);
+                      $mimeType = $mime ?: 'image/jpeg';
+                      $meta['cover_art'] = 'data:' . $mimeType . ';base64,' . base64_encode($img);
+                      $meta['raw_cover'] = $img;
+                    }
+                  }
+                }
+              }
+            }
+            fclose($fp);
+          }
+        } elseif (in_array($ext, ['mp4', 'm4a', 'mov'])) {
+          $fp = @fopen($filePath, 'rb');
+          if ($fp) {
+            $fsize = filesize($filePath);
+            while (ftell($fp) < $fsize) {
+              $buf = fread($fp, 8);
+              if (strlen($buf) < 8) break;
+              $atomSize = unpack('N', substr($buf, 0, 4))[1];
+              $atomType = substr($buf, 4, 4);
+              if ($atomSize === 1) {
+                $extBuf = fread($fp, 8);
+                if (strlen($extBuf) < 8) break;
+                $atomSize = unpack('N', substr($extBuf, 4, 4))[1];
+              } elseif ($atomSize === 0) {
+                $atomSize = $fsize - ftell($fp) + 8;
+              }
+              if ($atomSize < 8) break;
+
+              if ($atomType === 'moov') {
+                $moov = fread($fp, min($atomSize - 8, 12582912));
+                $mvhd = strpos($moov, 'mvhd');
+                if ($mvhd !== false) {
+                  $ver = ord($moov[$mvhd + 4]);
+                  $off = $mvhd + 8;
+                  $scale = unpack('N', substr($moov, $ver === 0 ? $off + 8 : $off + 16, 4))[1];
+                  $dur = unpack('N', substr($moov, $ver === 0 ? $off + 12 : $off + 24, 4))[1];
+                  if ($scale > 0 && $dur > 0) $meta['tags']['Duration'] = driveFormatDuration($dur / $scale);
+                }
+
+                $tkhd = strpos($moov, 'tkhd');
+                if ($tkhd !== false) {
+                  $ver = ord($moov[$tkhd + 4]);
+                  $wOff = $ver === 0 ? $tkhd + 8 + 76 : $tkhd + 8 + 88;
+                  if ($wOff + 8 <= strlen($moov)) {
+                    $w = unpack('N', substr($moov, $wOff, 4))[1] >> 16;
+                    $h = unpack('N', substr($moov, $wOff + 4, 4))[1] >> 16;
+                    if ($w > 0 && $h > 0) $meta['tags']['Resolution'] = "{$w} × {$h} px";
+                  }
+                }
+
+                $ilst = strpos($moov, 'ilst');
+                if ($ilst !== false) {
+                  $pos = $ilst + 4;
+                  $end = strlen($moov);
+                  $tagMap = ["\xa9nam" => 'Track Title', "\xa9ART" => 'Artist', "\xa9alb" => 'Album', "\xa9day" => 'Year', "\xa9gen" => 'Genre'];
+                  while ($pos + 8 < $end) {
+                    $sz = unpack('N', substr($moov, $pos, 4))[1];
+                    $type = substr($moov, $pos + 4, 4);
+                    if ($sz < 8 || $pos + $sz > $end) break;
+                    if (isset($tagMap[$type]) || $type === 'covr') {
+                      $dPos = strpos(substr($moov, $pos, $sz), 'data');
+                      if ($dPos !== false) {
+                        $real = $pos + $dPos;
+                        $dSz = unpack('N', substr($moov, $real - 4, 4))[1];
+                        $dType = unpack('N', substr($moov, $real + 4, 4))[1];
+                        $payload = substr($moov, $real + 8, $dSz - 16);
+                        if ($type === 'covr') {
+                          $mime = ($dType === 14) ? 'image/png' : 'image/jpeg';
+                          $meta['cover_art'] = 'data:' . $mime . ';base64,' . base64_encode($payload);
+                          $meta['raw_cover'] = $payload;
+                        } else {
+                          $meta['tags'][$tagMap[$type]] = trim($payload);
+                        }
+                      }
+                    }
+                    $pos += $sz;
+                  }
+                }
+                break;
+              } else {
+                fseek($fp, $atomSize - 8, SEEK_CUR);
+              }
+            }
+            fclose($fp);
+          }
+        } elseif ($ext === 'flac') {
+          $fp = @fopen($filePath, 'rb');
+          if ($fp && fread($fp, 4) === 'fLaC') {
+            while (!feof($fp)) {
+              $hdr = fread($fp, 4);
+              if (strlen($hdr) < 4) break;
+              $isLast = (ord($hdr[0]) & 0x80) !== 0;
+              $type = ord($hdr[0]) & 0x7f;
+              $sz = (ord($hdr[1]) << 16) | (ord($hdr[2]) << 8) | ord($hdr[3]);
+              if ($sz <= 0) break;
+              $block = fread($fp, $sz);
+
+              if ($type === 0 && strlen($block) >= 18) {
+                $sr = (ord($block[10]) << 12) | (ord($block[11]) << 4) | (ord($block[12]) >> 4);
+                $samples = ((ord($block[13]) & 0x0f) << 32) | (ord($block[14]) << 24) | (ord($block[15]) << 16) | (ord($block[16]) << 8) | ord($block[17]);
+                if ($sr > 0 && $samples > 0) {
+                  $meta['tags']['Duration'] = driveFormatDuration($samples / $sr);
+                  $meta['tags']['Sample Rate'] = number_format($sr) . ' Hz';
+                }
+              } elseif ($type === 4) {
+                $p = 4 + unpack('V', substr($block, 0, 4))[1];
+                if ($p + 4 <= strlen($block)) {
+                  $n = unpack('V', substr($block, $p, 4))[1];
+                  $p += 4;
+                  $fMap = ['TITLE' => 'Track Title', 'ARTIST' => 'Artist', 'ALBUM' => 'Album', 'DATE' => 'Year', 'GENRE' => 'Genre'];
+                  for ($i = 0; $i < $n && $p + 4 <= strlen($block); $i++) {
+                    $cl = unpack('V', substr($block, $p, 4))[1];
+                    $p += 4;
+                    if ($p + $cl <= strlen($block)) {
+                      $c = substr($block, $p, $cl);
+                      $parts = explode('=', $c, 2);
+                      if (count($parts) === 2 && isset($fMap[strtoupper(trim($parts[0]))])) {
+                        $meta['tags'][$fMap[strtoupper(trim($parts[0]))]] = trim($parts[1]);
+                      }
+                      $p += $cl;
+                    }
+                  }
+                }
+              } elseif ($type === 6 && strlen($block) > 32) {
+                $mLen = unpack('N', substr($block, 4, 4))[1];
+                $mime = substr($block, 8, $mLen);
+                $p = 8 + $mLen;
+                $dLen = unpack('N', substr($block, $p, 4))[1];
+                $p += 4 + $dLen + 16;
+                if ($p + 4 <= strlen($block)) {
+                  $imgLen = unpack('N', substr($block, $p, 4))[1];
+                  $p += 4;
+                  if ($p + $imgLen <= strlen($block)) {
+                    $img = substr($block, $p, $imgLen);
+                    $meta['cover_art'] = 'data:' . ($mime ?: 'image/jpeg') . ';base64,' . base64_encode($img);
+                    $meta['raw_cover'] = $img;
+                  }
+                }
+              }
+              if ($isLast) break;
+            }
+            fclose($fp);
+          }
+        }
+        return $meta;
+      }
+    }
+
+    if (!function_exists('driveCreateThumbnail')) {
+      function driveCreateThumbnail($src, $dest, $size, $quality) {
+        if (!file_exists($src)) return false;
+        $info = @getimagesize($src);
+        if (!$info) return false;
+
+        list($origW, $origH) = $info;
+        $mime = $info['mime'];
+
+        $ratio = min($size / $origW, $size / $origH);
+        $newW = max(1, round($origW * $ratio));
+        $newH = max(1, round($origH * $ratio));
+
+        $srcImg = false;
+        switch ($mime) {
+          case 'image/jpeg': $srcImg = @imagecreatefromjpeg($src); break;
+          case 'image/png':  $srcImg = @imagecreatefrompng($src); break;
+          case 'image/gif':  $srcImg = @imagecreatefromgif($src); break;
+          case 'image/webp': $srcImg = function_exists('imagecreatefromwebp') ? @imagecreatefromwebp($src) : false; break;
+          case 'image/avif': $srcImg = function_exists('imagecreatefromavif') ? @imagecreatefromavif($src) : false; break;
+          case 'image/bmp':  $srcImg = function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($src) : false; break;
+        }
+        if (!$srcImg) return false;
+
+        if ($mime === 'image/jpeg' && function_exists('exif_read_data')) {
+          $exif = @exif_read_data($src);
+          if (!empty($exif['Orientation'])) {
+            switch ($exif['Orientation']) {
+              case 3: $srcImg = imagerotate($srcImg, 180, 0); break;
+              case 6:
+                $srcImg = imagerotate($srcImg, -90, 0);
+                list($origW, $origH) = [$origH, $origW];
+                break;
+              case 8:
+                $srcImg = imagerotate($srcImg, 90, 0);
+                list($origW, $origH) = [$origH, $origW];
+                break;
+            }
+            $ratio = min($size / $origW, $size / $origH);
+            $newW = max(1, round($origW * $ratio));
+            $newH = max(1, round($origH * $ratio));
+          }
+        }
+
+        $destImg = imagecreatetruecolor($newW, $newH);
+        if ($mime === 'image/png' || $mime === 'image/webp') {
+          imagealphablending($destImg, false);
+          imagesavealpha($destImg, true);
+          $transparent = imagecolorallocatealpha($destImg, 255, 255, 255, 127);
+          imagefilledrectangle($destImg, 0, 0, $newW, $newH, $transparent);
+        }
+        imagecopyresampled($destImg, $srcImg, 0, 0, 0, 0, $newW, $newH, $origW, $origH);
+
+        $ok = imagejpeg($destImg, $dest, $quality);
+        imagedestroy($srcImg);
+        imagedestroy($destImg);
+        return $ok;
+      }
+    }
+
+    if (!function_exists('driveStreamRangeFile')) {
+      function driveStreamRangeFile($path, $mime) {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+          session_write_close();
+        }
+        while (ob_get_level() > 0) {
+          @ob_end_clean();
+        }
+        if (function_exists('set_time_limit')) {
+          @set_time_limit(0);
+        }
+
+        $filesize = @filesize($path);
+        if ($filesize === false || $filesize <= 0) {
+          header('HTTP/1.1 404 Not Found');
           exit;
         }
-        if ($range[0] == '-') {
-          $c_start = $size - substr($range, 1);
-        } else {
-          $range = explode('-', $range);
-          $c_start = $range[0];
-          $c_end = (isset($range[1]) && is_numeric($range[1])) ? $range[1] : $size - 1;
+
+        $start = 0;
+        $end = $filesize - 1;
+        $isRange = false;
+
+        if (isset($_SERVER['HTTP_RANGE'])) {
+          $range = $_SERVER['HTTP_RANGE'];
+          if (preg_match('/bytes=\s*(\d+)?\s*-\s*(\d+)?/i', $range, $matches)) {
+            if (!empty($matches[1])) {
+              $start = floatval($matches[1]);
+              if (!empty($matches[2])) {
+                $end = min($filesize - 1, floatval($matches[2]));
+              }
+            } elseif (!empty($matches[2])) {
+              $start = max(0, $filesize - floatval($matches[2]));
+            }
+
+            if ($start > $end || $start >= $filesize) {
+              header('HTTP/1.1 416 Requested Range Not Satisfiable');
+              header('Content-Range: bytes */' . sprintf('%.0f', $filesize));
+              exit;
+            }
+            $isRange = true;
+          }
         }
-        $c_end = ($c_end > $end) ? $end : $c_end;
-        if ($c_start > $c_end || $c_start > $size - 1 || $c_end >= $size) {
-          header('HTTP/1.1 416 Requested Range Not Satisfiable');
-          header("Content-Range: bytes $start-$end/$size");
-          exit;
-        }
-        $start = $c_start;
-        $end = $c_end;
+
         $length = $end - $start + 1;
-        header('HTTP/1.1 206 Partial Content');
-        header("Content-Range: bytes $start-$end/$size");
-      }
-      header("Content-Length: " . $length);
-      header("Content-Type: " . $mime);
-      
-      $fp = fopen($filePath, 'rb');
-      if ($fp) {
-        fseek($fp, $start, SEEK_SET);
-        $currentOffset = ftell($fp);
-        if ($currentOffset !== false && $currentOffset !== $start) {
-          fseek($fp, $start, SEEK_SET);
+
+        if ($isRange) {
+          header('HTTP/1.1 206 Partial Content', true, 206);
+          header('Content-Range: bytes ' . sprintf('%.0f-%.0f/%.0f', $start, $end, $filesize));
+        } else {
+          header('HTTP/1.1 200 OK', true, 200);
         }
-        $bytesLeft = $length;
-        $bufferSize = 1024 * 8;
-        while (!feof($fp) && $bytesLeft > 0) {
-          if (connection_aborted()) break;
-          $readSize = min($bufferSize, $bytesLeft);
-          $data = fread($fp, $readSize);
-          if ($data === false || strlen($data) === 0) break;
-          echo $data;
-          flush();
-          $bytesLeft -= strlen($data);
+
+        header('Content-Type: ' . $mime);
+        header('Accept-Ranges: bytes');
+        header('Content-Length: ' . sprintf('%.0f', $length));
+        header('Content-Disposition: inline; filename="' . basename($path) . '"');
+        header('Cache-Control: public, max-age=86400');
+        header('X-Content-Type-Options: nosniff');
+
+        $fp = @fopen($path, 'rb');
+        if (!$fp) exit;
+        if ($start > 0) {
+          fseek($fp, (int)$start, SEEK_SET);
+        }
+
+        while (!feof($fp) && $length > 0 && connection_status() === CONNECTION_NORMAL) {
+          $read = (int)min(65536, $length);
+          $buff = fread($fp, $read);
+          if ($buff === false || $buff === '') break;
+          echo $buff;
+          $length -= strlen($buff);
+          @flush();
         }
         fclose($fp);
+        exit;
+      }
+    }
+
+    if (!function_exists('driveDeleteRecursive')) {
+      function driveDeleteRecursive($path) {
+        if (is_dir($path) && !is_link($path)) {
+          $files = array_diff(scandir($path), ['.', '..']);
+          foreach ($files as $file) {
+            driveDeleteRecursive($path . DIRECTORY_SEPARATOR . $file);
+          }
+          return @rmdir($path);
+        }
+        return @unlink($path);
+      }
+    }
+
+    if (!function_exists('driveGetMeta')) {
+      function driveGetMeta($metaFile) {
+        if (!file_exists($metaFile)) return ['starred' => [], 'shares' => [], 'trash' => []];
+        $data = @json_decode(@file_get_contents($metaFile), true);
+        return is_array($data) ? $data : ['starred' => [], 'shares' => [], 'trash' => []];
+      }
+    }
+
+    if (!function_exists('driveSaveMeta')) {
+      function driveSaveMeta($metaFile, $data) {
+        @file_put_contents($metaFile, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+      }
+    }
+
+    if (!function_exists('driveLogActivity')) {
+      function driveLogActivity($metaFile, $action, $relPath, $details = '') {
+        $meta = driveGetMeta($metaFile);
+        if (!isset($meta['activity'])) $meta['activity'] = [];
+        array_unshift($meta['activity'], [
+          'id'        => uniqid('act_'),
+          'action'    => $action,
+          'path'      => ltrim(str_replace(['\\', '//'], '/', $relPath), '/'),
+          'name'      => basename($relPath),
+          'details'   => $details,
+          'timestamp' => time()
+        ]);
+        if (count($meta['activity']) > 300) {
+          $meta['activity'] = array_slice($meta['activity'], 0, 300);
+        }
+        driveSaveMeta($metaFile, $meta);
+        if (function_exists('log_admin_activity') && isset($_SESSION['admin_email'])) {
+          try {
+            log_admin_activity(get_db(), $_SESSION['admin_email'], "Drive: {$action} {$relPath}", 0);
+          } catch(Exception $e) {}
+        }
+      }
+    }
+
+    if (!function_exists('driveBackupVersion')) {
+      function driveBackupVersion($filePath, $config) {
+        if (!file_exists($filePath) || is_dir($filePath)) return;
+        $rel = ltrim(str_replace(['\\', '//'], '/', substr(realpath($filePath), strlen(realpath($config['root_dir'])))), '/');
+        $hashDir = $config['version_dir'] . DIRECTORY_SEPARATOR . md5($rel);
+        if (!is_dir($hashDir)) @mkdir($hashDir, 0777, true);
+        $ts = date('Ymd_His');
+        $dest = $hashDir . DIRECTORY_SEPARATOR . "{$ts}_" . basename($filePath);
+        @copy($filePath, $dest);
+      }
+    }
+
+    if (!function_exists('driveGetFolderPreviewImage')) {
+      function driveGetFolderPreviewImage($dirPath, $relPath, $config) {
+        $items = @scandir($dirPath) ?: [];
+        $imageFiles = [];
+        $otherFilesCount = 0;
+
+        foreach ($items as $item) {
+          if ($item === '.' || $item === '..' || substr($item, 0, 1) === '.') continue;
+          $p = $dirPath . DIRECTORY_SEPARATOR . $item;
+          if (is_file($p)) {
+            $ext = strtolower(pathinfo($p, PATHINFO_EXTENSION));
+            if (in_array($ext, $config['image_extensions'])) {
+              $imageFiles[] = ($relPath ? ($relPath . '/' . $item) : $item);
+            } else {
+              $otherFilesCount++;
+            }
+          }
+        }
+
+        if (empty($imageFiles)) return null;
+        if ($otherFilesCount === 0) {
+          usort($imageFiles, fn($a, $b) => strnatcasecmp(basename($a), basename($b)));
+          return $imageFiles[0];
+        }
+        return $imageFiles[array_rand($imageFiles)];
+      }
+    }
+
+    if (!function_exists('driveCleanOldTrash')) {
+      function driveCleanOldTrash($config) {
+        $meta = driveGetMeta($config['meta_file']);
+        $now = time();
+        $updated = false;
+        foreach ($meta['trash'] as $key => $item) {
+          if ($now - ($item['trashed_at'] ?? 0) > (30 * 86400)) {
+            $trashPath = $config['trash_dir'] . DIRECTORY_SEPARATOR . $item['trash_name'];
+            if (file_exists($trashPath)) driveDeleteRecursive($trashPath);
+            unset($meta['trash'][$key]);
+            $updated = true;
+          }
+        }
+        if ($updated) driveSaveMeta($config['meta_file'], $meta);
       }
     }
 
     if (isset($_GET['share'])) {
       $token = $_GET['share'];
-      $db = get_db();
-      $stmt = $db->prepare("SELECT path FROM drive_shares WHERE token = ?");
-      $stmt->execute([$token]);
-      $relFile = $stmt->fetchColumn();
-      if ($relFile) {
-        $fullFile = $baseDir . '/' . $relFile;
-        if (file_exists($fullFile) && isAllowedExtension($fullFile)) {
-          streamFileRange($fullFile);
+      $meta = driveGetMeta($driveConfig['meta_file']);
+      if (isset($meta['shares'][$token])) {
+        $rel = $meta['shares'][$token]['rel'] ?? '';
+        $fullPath = driveSafePath($driveConfig['root_dir'], $rel);
+        if ($fullPath && file_exists($fullPath) && is_file($fullPath)) {
+          $mime = mime_content_type($fullPath) ?: 'application/octet-stream';
+          driveStreamRangeFile($fullPath, $mime);
           exit;
         }
       }
       http_response_code(404);
-      echo "<h1>Link Expired or Invalid</h1>";
+      echo "<h1>404 - Public Link Expired or Invalid</h1>";
       exit;
     }
 
-    $api = $_GET['api'] ?? null;
-    $action = $_GET['action'] ?? null;
-    $reqPath = $_GET['path'] ?? '';
-    $absPath = $baseDir;
+    $driveAction = $_GET['action'] ?? ($_POST['action'] ?? '');
 
-    if ($reqPath) {
-      $propPath = $baseDir . '/' . $reqPath;
-      if (isValidPath($baseDir, $propPath)) {
-        $absPath = $propPath;
-      } else {
-        if ($api) {
-          header('Content-Type: application/json');
-          echo json_encode(['success' => false, 'error' => 'Invalid path access']);
-          exit;
+    if ($driveAction) {
+      $postWriteActions = [
+        'upload_chunk', 'create', 'rename', 'delete', 'save_text',
+        'trash', 'trash_restore', 'trash_delete', 'trash_empty', 'version_restore',
+        'star_toggle', 'clipboard_paste', 'fetch_url', 'encrypt_file',
+        'decrypt_file', 'zip', 'unzip'
+      ];
+
+      if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($driveAction, $postWriteActions)) {
+        $clientCsrf = $_POST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+        if (empty($clientCsrf) || !hash_equals($_SESSION['admin_csrf_token'], $clientCsrf)) {
+          driveJsonResponse(['error' => 'Security violation: CSRF token mismatch.'], 403);
         }
       }
-    }
 
-    if ($api) {
-      cleanupExpiredTrash();
+      if ($driveAction === 'list') {
+        $dir = $_GET['dir'] ?? ($_GET['path'] ?? '');
+        $fullPath = driveSafePath($driveConfig['root_dir'], $dir);
+        if (!$fullPath || !is_dir($fullPath)) driveJsonResponse(['error' => 'Directory not found'], 404);
 
-      if ($action === 'thumb') {
-        while (ob_get_level()) ob_end_clean();
-        $file = $_GET['file'] ?? '';
-        $full = $baseDir . '/' . $file;
-        if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) {
-          http_response_code(404);
-          exit;
-        }
-        
-        $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
-        $isImage = in_array($ext, ['png', 'jpg', 'jpeg', 'gif']);
-        $isAudio = in_array($ext, ['mp3', 'flac', 'm4a', 'ogg', 'wav']);
-        
-        if ($ext === 'svg') {
-          header('Content-Type: image/svg+xml');
-          readfile($full);
-          exit;
-        }
-        
-        if ($isAudio) {
-          require_once __DIR__ . '/getid3/getid3.php';
-          $getID3 = new getID3;
-          $info = @$getID3->analyze($full);
-          if (!empty($info['comments']['picture'][0]['data'])) {
-              header('Content-Type: ' . ($info['comments']['picture'][0]['image_mime'] ?? 'image/jpeg'));
-              echo $info['comments']['picture'][0]['data'];
-              exit;
-          }
-          // Fallback vinyl graphic if no ID3 cover exists
-          header('Content-Type: image/svg+xml');
-          echo '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="#111"><rect width="512" height="512"/><path d="M256 96a160 160 0 1 0 160 160A160 160 0 0 0 256 96zm0 256a96 96 0 1 1 96-96 96 96 0 0 1-96 96z" fill="#333"/></svg>';
-          exit;
-        }
-        
-        if ($isImage) {
-          $thumbDir = $baseDir . '/.drive_thumbnails';
-          if (!is_dir($thumbDir)) @mkdir($thumbDir, 0755, true);
-          $hash = md5($full . filemtime($full));
-          $thumbPath = $thumbDir . '/' . $hash . '.webp';
-          
-          if (!file_exists($thumbPath)) {
-            if (function_exists('imagecreatefromstring')) {
-              @ini_set('memory_limit', '256M');
-              $content = '';
-              $size = filesize($full);
-              if ($size > 0) {
-                $fp = @fopen($full, 'rb');
-                if ($fp) {
-                  $content = @fread($fp, $size);
-                  fclose($fp);
-                }
-              }
-              if ($content) {
-                $img = @imagecreatefromstring($content);
-                if ($img) {
-                  $width = imagesx($img);
-                  $height = imagesy($img);
-                  $newWidth = 320;
-                  $newHeight = floor($height * ($newWidth / $width));
-                  $tmp = imagecreatetruecolor($newWidth, $newHeight);
-                  if ($ext === 'png' || $ext === 'gif') {
-                    imagealphablending($tmp, false);
-                    imagesavealpha($tmp, true);
-                    $transparent = imagecolorallocatealpha($tmp, 255, 255, 255, 127);
-                    imagefilledrectangle($tmp, 0, 0, $newWidth, $newHeight, $transparent);
-                  }
-                  imagecopyresampled($tmp, $img, 0, 0, 0, 0, $newWidth, $newHeight, $width, $height);
-                  @imagewebp($tmp, $thumbPath, 50);
-                  imagedestroy($img);
-                  imagedestroy($tmp);
-                }
-              }
-            }
-          }
-          
-          if (file_exists($thumbPath)) {
-            header('Content-Type: image/webp');
-            header('Content-Length: ' . filesize($thumbPath));
-            readfile($thumbPath);
-            exit;
+        $relDir = ltrim(str_replace(['\\', '//'], '/', substr($fullPath, strlen(realpath($driveConfig['root_dir'])))), '/');
+        $scanned = @scandir($fullPath) ?: [];
+        $folders = [];
+        $files = [];
+        $totalSize = 0;
+
+        foreach ($scanned as $item) {
+          if ($item === '.' || $item === '..' || substr($item, 0, 1) === '.') continue;
+          if (preg_match('/\.(part|crdownload|tmp|swp)$/i', $item)) continue;
+          $itemPath = $fullPath . DIRECTORY_SEPARATOR . $item;
+          if ($itemPath === realpath($driveConfig['cache_dir'])) continue;
+
+          $itemRel = $relDir ? ($relDir . '/' . $item) : $item;
+          $mtime = @filemtime($itemPath);
+
+          if (is_dir($itemPath)) {
+            $subCount = count(array_diff(@scandir($itemPath) ?: [], ['.', '..', '.gallery_cache', '.drive_trash_bin', '.file_version']));
+            $folders[] = [
+              'name'        => $item,
+              'path'        => $itemRel,
+              'mtime'       => $mtime,
+              'items_count' => $subCount,
+              'thumb_image' => driveGetFolderPreviewImage($itemPath, $itemRel, $driveConfig),
+            ];
+          } else {
+            $size = @filesize($itemPath);
+            $totalSize += $size;
+            $ext = strtolower(pathinfo($itemPath, PATHINFO_EXTENSION));
+            $type = driveGetFileType($ext, $driveConfig);
+
+            $files[] = [
+              'name'     => $item,
+              'path'     => $itemRel,
+              'size'     => $size,
+              'size_fmt' => driveFormatBytes($size),
+              'mtime'    => $mtime,
+              'ext'      => $ext,
+              'type'     => $type,
+              'width'    => 0,
+              'height'   => 0,
+            ];
           }
         }
-        
-        streamFileRange($full);
-        exit;
+
+        usort($folders, fn($a, $b) => strnatcasecmp($a['name'], $b['name']));
+        usort($files, fn($a, $b) => strnatcasecmp($a['name'], $b['name']));
+
+        driveJsonResponse([
+          'path'       => $relDir,
+          'folders'    => $folders,
+          'files'      => $files,
+          'stats'      => [
+            'folders'    => count($folders),
+            'files'      => count($files),
+            'total_size' => driveFormatBytes($totalSize),
+          ]
+        ]);
       }
 
-      if ($action === 'stream') {
-        while (ob_get_level()) ob_end_clean();
-        $file = $_GET['file'] ?? '';
-        $full = $baseDir . '/' . $file;
-        if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) {
-          http_response_code(404);
-          exit;
+      if ($driveAction === 'search') {
+        $dir = $_GET['dir'] ?? ($_GET['path'] ?? '');
+        $query = trim($_GET['q'] ?? '');
+        $fullPath = driveSafePath($driveConfig['root_dir'], $dir);
+        if (!$fullPath || !is_dir($fullPath) || $query === '') {
+          driveJsonResponse(['folders' => [], 'files' => [], 'query' => $query, 'count' => 0]);
         }
-        streamFileRange($full);
-        exit;
-      }
 
-      header('Content-Type: application/json');
-      ob_start();
+        $maxResults = 200;
+        $foundFolders = [];
+        $foundFiles = [];
+        $rootLen = strlen(realpath($driveConfig['root_dir']));
+        $cacheReal = realpath($driveConfig['cache_dir']);
 
-      try {
-        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-          $input = json_decode(file_get_contents('php://input'), true) ?? $_POST;
-          $postAction = $input['action'] ?? $_POST['action'] ?? '';
-
-          // STRICT CSRF PROTECTION FOR DRIVE AND IDE API
-          $client_csrf = $input['csrf_token'] ?? $_POST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
-          if (empty($client_csrf) || !hash_equals($_SESSION['admin_csrf_token'], $client_csrf)) {
-            throw new Exception("Security Violation: CSRF token missing or invalid.");
+        $flags = FilesystemIterator::SKIP_DOTS | FilesystemIterator::FOLLOW_SYMLINKS;
+        $dirIterator = new RecursiveDirectoryIterator($fullPath, $flags);
+        $filterIterator = new RecursiveCallbackFilterIterator($dirIterator, function ($current) use ($cacheReal) {
+          $path = $current->getPathname();
+          $filename = $current->getFilename();
+          if ($filename[0] === '.' || ($cacheReal && strpos($path, $cacheReal) === 0)) {
+            return false;
           }
+          return true;
+        });
 
-          switch ($postAction) {
-            case 'add_file':
-              $name = $input['name'] ?? '';
-              $full = $absPath . '/' . $name;
-              if (file_exists($full)) throw new Exception('CONFLICT|' . basename($full));
-              file_put_contents($full, '');
-              logDriveActivity($name, ltrim(str_replace($baseDir, '', $full), '/'), 'created');
-              echo json_encode(['success' => true]);
-              break;
+        $iterator = new RecursiveIteratorIterator($filterIterator, RecursiveIteratorIterator::SELF_FIRST);
+        $iterator->setMaxDepth(10);
 
-            case 'add_folder':
-              $name = $input['name'] ?? '';
-              $full = $absPath . '/' . $name;
-              if (file_exists($full)) throw new Exception('CONFLICT|' . basename($full));
-              mkdir($full);
-              logDriveActivity($name, ltrim(str_replace($baseDir, '', $full), '/'), 'created');
-              echo json_encode(['success' => true]);
-              break;
+        $count = 0;
+        foreach ($iterator as $item) {
+          if ($count >= $maxResults) break;
+          $name = $item->getFilename();
+          if (stripos($name, $query) !== false) {
+            $itemPath = $item->getPathname();
+            $rel = ltrim(str_replace(['\\', '//'], '/', substr($itemPath, $rootLen)), '/');
+            $mtime = $item->getMTime();
 
-            case 'upload':
-              if (!isset($_FILES['files'])) throw new Exception('No files uploaded');
-              $uploaded = 0;
-              $paths = $_POST['paths'] ?? [];
-              $chunk = isset($_POST['chunk']) ? (int)$_POST['chunk'] : 0;
-              $chunks = isset($_POST['chunks']) ? (int)$_POST['chunks'] : 1;
-              $fileId = $_POST['file_id'] ?? 'unknown';
-              $override = !empty($_POST['override']);
-
-              foreach ($_FILES['files']['name'] as $i => $name) {
-                $relPathClean = !empty($paths[$i]) ? ltrim(str_replace(['..', '\\'], ['', '/'], $paths[$i]), '/') : $name;
-                $dest = $absPath . '/' . $relPathClean;
-                $targetDir = dirname($dest);
-                if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
-
-                if ($chunk === 0 && file_exists($dest) && $override) {
-                  save_file_version($dest);
-                }
-
-                if ($chunks > 1) {
-                  $tempDest = $targetDir . '/.temp_upload_' . md5($fileId . $name);
-                  $out = @fopen($tempDest, $chunk === 0 ? 'wb' : 'ab');
-                  if ($out) {
-                    $in = @fopen($_FILES['files']['tmp_name'][$i], 'rb');
-                    if ($in) { stream_copy_to_stream($in, $out); fclose($in); }
-                    fclose($out);
-                  }
-                  if ($chunk == $chunks - 1) {
-                    $finalDest = $dest;
-                    if (file_exists($finalDest) && !$override) {
-                      $finalDest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($finalDest));
-                    }
-                    rename($tempDest, $finalDest);
-                    $uploaded++;
-                    logDriveActivity(basename($finalDest), ltrim(str_replace($baseDir, '', $finalDest), '/'), 'uploaded');
-                  }
-                } else {
-                  $finalDest = $dest;
-                  if (file_exists($finalDest) && !$override) {
-                    $finalDest = $targetDir . '/' . generateUniqueFileName($targetDir, basename($finalDest));
-                  }
-                  if (move_uploaded_file($_FILES['files']['tmp_name'][$i], $finalDest)) {
-                    $uploaded++;
-                    logDriveActivity(basename($finalDest), ltrim(str_replace($baseDir, '', $finalDest), '/'), 'uploaded');
-                  }
-                }
-              }
-              echo json_encode(['success' => true, 'uploaded' => $uploaded]);
-              break;
-
-            case 'upload_url':
-              $url = $input['url'] ?? '';
-              $override = !empty($input['override']);
-              $name = basename(parse_url($url, PHP_URL_PATH));
-              if (!$name) $name = 'downloaded_file_' . time();
-              $target = $absPath . '/' . $name;
-              if (file_exists($target) && !$override) {
-                $name = generateUniqueFileName($absPath, $name);
-                $target = $absPath . '/' . $name;
-              }
-              if (file_exists($target) && $override) save_file_version($target);
-              file_put_contents($target, file_get_contents($url));
-              logDriveActivity($name, ltrim(str_replace($baseDir, '', $target), '/'), 'uploaded via url');
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'zip_items':
-              $items = $input['items'] ?? [];
-              if (empty($items)) throw new Exception('No items selected');
-              $zipName = (count($items) === 1) ? basename($items[0]) . '.zip' : 'Archive_' . date('Ymd_His') . '.zip';
-              $target = $absPath . '/' . $zipName;
-              if (file_exists($target) && empty($input['override'])) {
-                $zipName = generateUniqueFileName($absPath, $zipName);
-                $target = $absPath . '/' . $zipName;
-              }
-              if (file_exists($target) && !empty($input['override'])) save_file_version($target);
-              
-              $zip = new ZipArchive();
-              if ($zip->open($target, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {
-                foreach ($items as $item) {
-                  $src = $baseDir . '/' . $item;
-                  if (is_file($src)) $zip->addFile($src, basename($src));
-                  elseif (is_dir($src)) {
-                    $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS));
-                    foreach ($iter as $f) {
-                      if ($f->isFile()) $zip->addFile($f->getPathname(), basename($src) . '/' . str_replace($src . '/', '', $f->getPathname()));
-                    }
-                  }
-                }
-                $zip->close();
-              }
-              logDriveActivity($zipName, ltrim(str_replace($baseDir, '', $target), '/'), 'archived');
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'encrypt_file':
-            case 'decrypt_file':
-              $file = $input['file'] ?? '';
-              $src = $baseDir . '/' . $file;
-              if (!file_exists($src) || is_dir($src)) throw new Exception('Invalid file');
-              
-              $admin_stmt = get_db()->query("SELECT password_hash FROM users WHERE status = 'super_admin' LIMIT 1");
-              $admin_hash = $admin_stmt->fetchColumn() ?: 'fallback_secure_key_123!';
-              $secret_key = substr(hash('sha256', $admin_hash), 0, 32);
-              $content = '';
-              $size = filesize($src);
-              if ($size > 0) {
-                $fp = @fopen($src, 'rb');
-                if ($fp) {
-                  $content = @fread($fp, $size);
-                  fclose($fp);
-                }
-              }
-              
-              if ($postAction === 'encrypt_file') {
-                $target = $src . '.enc';
-                if (file_exists($target) && empty($input['override'])) throw new Exception('CONFLICT|' . basename($target));
-                $iv = random_bytes(16);
-                $encrypted = openssl_encrypt($content, 'aes-256-cbc', $secret_key, 0, $iv);
-                file_put_contents($target, base64_encode($iv) . ':' . $encrypted);
-                unlink($src);
-              } else {
-                if (substr($src, -4) !== '.enc') throw new Exception('Not an encrypted file');
-                $target = substr($src, 0, -4);
-                if (file_exists($target) && empty($input['override'])) throw new Exception('CONFLICT|' . basename($target));
-                $parts = explode(':', $content, 2);
-                $iv = base64_decode($parts[0]);
-                $decrypted = openssl_decrypt($parts[1], 'aes-256-cbc', $secret_key, 0, $iv);
-                if ($decrypted === false) throw new Exception('Decryption failed. Incorrect key or corrupted file.');
-                file_put_contents($target, $decrypted);
-                unlink($src);
-              }
-              logDriveActivity(basename($target), ltrim(str_replace($baseDir, '', $target), '/'), $postAction === 'encrypt_file' ? 'encrypted' : 'decrypted');
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'get_versions':
-              $file = $input['file'] ?? '';
-              $verDir = $baseDir . '/.file_version/' . basename($file);
-              $versions = [];
-              if (is_dir($verDir)) {
-                foreach (array_diff(scandir($verDir), ['.', '..']) as $v) {
-                  $versions[] = ['name' => $v, 'mtime' => filemtime($verDir . '/' . $v), 'size' => formatBytes(filesize($verDir . '/' . $v))];
-                }
-                usort($versions, function($a, $b) { return $b['mtime'] - $a['mtime']; });
-                $versions = array_slice($versions, 0, 25);
-              }
-              echo json_encode(['success' => true, 'versions' => $versions]);
-              break;
-
-            case 'restore_version':
-              $file = $input['file'] ?? '';
-              $version_name = $input['version_name'] ?? '';
-              $src = $baseDir . '/.file_version/' . basename($file) . '/' . $version_name;
-              $dest = $baseDir . '/' . $file;
-              if (!file_exists($src)) throw new Exception('Version not found');
-              save_file_version($dest); // Backup current state before restoring
-              copy($src, $dest);
-              logDriveActivity(basename($dest), $file, 'restored version');
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'trash':
-              $items = $input['items'] ?? [];
-              $db = get_db();
-              $trashBin = $baseDir . '/.drive_trash_bin';
-              if (!is_dir($trashBin)) mkdir($trashBin, 0755, true);
-              
-              $insStmt = $db->prepare("INSERT INTO drive_trash (uniq, original_name, original_parent, deleted_at) VALUES (?, ?, ?, ?)");
-              foreach ($items as $itemPath) {
-                $full = $baseDir . '/' . $itemPath;
-                if (isValidPath($baseDir, $full) && file_exists($full)) {
-                  $itemName = basename($itemPath);
-                  $uniq = uniqid() . '_' . $itemName;
-                  $trashPath = $trashBin . '/' . $uniq;
-                  if (rename($full, $trashPath)) {
-                    $insStmt->execute([$uniq, $itemName, ltrim(str_replace($baseDir, '', dirname($full)), '/'), time()]);
-                    logDriveActivity($itemName, $itemPath, 'deleted');
-                  }
-                }
-              }
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'restore_trash':
-              $items = $input['items'] ?? [];
-              $db = get_db();
-              $trashBin = $baseDir . '/.drive_trash_bin';
-              
-              $selectStmt = $db->prepare("SELECT original_name, original_parent FROM drive_trash WHERE uniq = ?");
-              $delStmt = $db->prepare("DELETE FROM drive_trash WHERE uniq = ?");
-              foreach ($items as $uniq) {
-                $selectStmt->execute([$uniq]);
-                $info = $selectStmt->fetch(PDO::FETCH_ASSOC);
-                if ($info) {
-                  $targetDir = $baseDir . '/' . $info['original_parent'];
-                  if (!is_dir($targetDir)) $targetDir = $baseDir;
-                  $dest = $targetDir . '/' . $info['original_name'];
-                  if (file_exists($dest) && empty($input['override'])) throw new Exception('CONFLICT|' . $info['original_name']);
-                  if (file_exists($dest) && !empty($input['override'])) save_file_version($dest);
-                  if (rename($trashBin . '/' . $uniq, $dest)) {
-                    $delStmt->execute([$uniq]);
-                    logDriveActivity(basename($dest), ltrim(str_replace($baseDir, '', $dest), '/'), 'restored');
-                  }
-                }
-              }
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'delete_perm':
-              $items = $input['items'] ?? [];
-              $db = get_db();
-              $trashBin = $baseDir . '/.drive_trash_bin';
-              $delStmt = $db->prepare("DELETE FROM drive_trash WHERE uniq = ?");
-              foreach ($items as $uniq) {
-                $full = $trashBin . '/' . $uniq;
-                if (file_exists($full)) {
-                  recursiveDelete($full);
-                  $delStmt->execute([$uniq]);
-                }
-              }
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'empty_trash':
-              $trashBin = $baseDir . '/.drive_trash_bin';
-              recursiveDelete($trashBin);
-              mkdir($trashBin, 0755, true);
-              get_db()->exec("DELETE FROM drive_trash");
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'rename':
-              $old = $input['old'] ?? '';
-              $new = $input['new'] ?? '';
-              $oldFull = $baseDir . '/' . $old;
-              $newFull = dirname($oldFull) . '/' . $new;
-              if (!isValidPath($baseDir, $oldFull) || !file_exists($oldFull)) throw new Exception('Invalid source');
-              if (file_exists($newFull) && empty($input['override'])) throw new Exception('CONFLICT|' . $new);
-              if (file_exists($newFull) && !empty($input['override'])) save_file_version($newFull);
-              rename($oldFull, $newFull);
-              logDriveActivity($new, ltrim(str_replace($baseDir, '', $newFull), '/'), 'renamed');
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'write':
-              $file = $input['file'] ?? '';
-              $content = $input['content'] ?? '';
-              $full = $baseDir . '/' . $file;
-              if (!isValidPath($baseDir, $full)) throw new Exception('Invalid file');
-              save_file_version($full); // Track file version before writing
-              file_put_contents($full, $content);
-              logDriveActivity(basename($file), $file, 'modified');
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'toggle_star':
-              $item = $input['item'] ?? '';
-              $db = get_db();
-              $stmt = $db->prepare("SELECT path FROM drive_starred WHERE path = ?");
-              $stmt->execute([$item]);
-              if ($stmt->fetch()) {
-                $db->prepare("DELETE FROM drive_starred WHERE path = ?")->execute([$item]);
-                $starred = false;
-              } else {
-                $db->prepare("INSERT OR IGNORE INTO drive_starred (path) VALUES (?)")->execute([$item]);
-                $starred = true;
-              }
-              echo json_encode(['success' => true, 'starred' => $starred]);
-              break;
-
-            case 'copy_items':
-            case 'move_items':
-              $items = $input['items'] ?? [];
-              $target = $input['target'] ?? '';
-              $targetDir = rtrim($baseDir . '/' . $target, '/');
-              if (!isValidPath($baseDir, $targetDir)) throw new Exception('Invalid target');
-              
-              clearstatcache();
-              foreach ($items as $item) {
-                $src = $baseDir . '/' . $item;
-                if (!isValidPath($baseDir, $src) || !file_exists($src)) continue;
-                
-                // Prevent infinite recursion (e.g. copying folder into itself)
-                if (is_dir($src) && strpos($targetDir . '/', $src . '/') === 0) {
-                  throw new Exception("Cannot copy or move a folder into its own subfolder.");
-                }
-
-                $destName = basename($item);
-                $dest = $targetDir . '/' . $destName;
-                
-                // Automatically rename if file/folder exists
-                if (file_exists($dest)) {
-                  if (is_dir($src)) {
-                    $destName = generateUniqueFolderName($targetDir, $destName);
-                  } else {
-                    $destName = generateUniqueFileName($targetDir, $destName);
-                  }
-                  $dest = $targetDir . '/' . $destName;
-                }
-                
-                if ($postAction === 'move_items') {
-                  if ($src !== $dest) rename($src, $dest);
-                } else {
-                  recursiveCopy($src, $dest);
-                }
-              }
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'create_share':
-              $item = $input['item'] ?? '';
-              $token = md5($item . time());
-              get_db()->prepare("INSERT INTO drive_shares (token, path) VALUES (?, ?)")->execute([$token, $item]);
-              echo json_encode(['success' => true, 'token' => $token]);
-              break;
-
-            case 'unzip':
-              $item = $input['item'] ?? '';
-              $src = $baseDir . '/' . $item;
-              if (!isValidPath($baseDir, $src) || !file_exists($src) || strtolower(pathinfo($src, PATHINFO_EXTENSION)) !== 'zip') {
-                throw new Exception('Invalid zip file');
-              }
-              $zip = new ZipArchive;
-              if ($zip->open($src) === TRUE) {
-                $folderName = pathinfo($src, PATHINFO_FILENAME);
-                $parentDir = dirname($src);
-                $extractTarget = $parentDir . '/' . $folderName;
-                if (file_exists($extractTarget) && empty($input['override'])) {
-                  $folderName = generateUniqueFolderName($parentDir, $folderName);
-                  $extractTarget = $parentDir . '/' . $folderName;
-                }
-                if (!file_exists($extractTarget)) mkdir($extractTarget, 0755, true);
-                $zip->extractTo($extractTarget);
-                $zip->close();
-                logDriveActivity(basename($extractTarget), ltrim(str_replace($baseDir, '', $extractTarget), '/'), 'extracted');
-                echo json_encode(['success' => true]);
-              } else {
-                throw new Exception('Failed to extract ZIP');
-              }
-              break;
-
-            case 'toggle_cli':
-              if ($is_super_admin) {
-                $disable = !empty($input['disable']);
-                $db = get_db();
-                $stmt = $db->prepare("SELECT settings FROM users WHERE id = ?");
-                $stmt->execute([$_SESSION['admin_id'] ?? 0]);
-                $settings = json_decode($stmt->fetchColumn() ?: '{}', true) ?? [];
-                $settings['disable_ide_cli'] = $disable;
-                $db->prepare("UPDATE users SET settings = ? WHERE id = ?")->execute([json_encode($settings), $_SESSION['admin_id'] ?? 0]);
-                echo json_encode(['success' => true]);
-              } else {
-                echo json_encode(['success' => false, 'error' => 'Permission denied']);
-              }
-              break;
-
-            case 'terminal_cmd':
-              // Check if CLI is disabled
-              $db = get_db();
-              $stmt = $db->prepare("SELECT settings FROM users WHERE id = ?");
-              $stmt->execute([$_SESSION['admin_id'] ?? 0]);
-              $admin_settings = json_decode($stmt->fetchColumn() ?: '{}', true) ?? [];
-              if (!empty($admin_settings['disable_ide_cli'])) {
-                echo json_encode(['success' => false, 'output' => "CLI access has been disabled by the Administrator."]);
-                break;
-              }
-
-              $cmd = trim($input['cmd'] ?? '');
-              $path = rtrim($absPath ?? MUSIC_DIR, '/');
-
-              // Strict validation & sanitization
-              if (preg_match('/[;&`\n$]/', $cmd) || strpos($cmd, '>') !== false || strpos($cmd, '<') !== false || preg_match('/(rm\s+-rf|curl|wget|nc|bash|sh|mkfifo|su|sudo)\b/i', $cmd)) {
-                echo json_encode(['success' => false, 'output' => "Command restricted. Destructive and chaining commands are forbidden for security."]);
-                break;
-              }
-
-              // Built-in proper CLI cd command support via scoping mechanism
-              if (strpos($cmd, 'cd ') === 0) {
-                echo json_encode(['success' => true, 'output' => "Directory changes are scoped to the UI explorer module."]);
-                break;
-              }
-
-              // Built-in PHP Emulators for common commands on restricted hosts (e.g. Free Hosting / rf.gd)
-              $lowerCmd = strtolower($cmd);
-              if ($lowerCmd === 'php -v' || $lowerCmd === 'php --version') {
-                echo json_encode(['success' => true, 'output' => "PHP " . PHP_VERSION . " (" . PHP_SAPI . ")\nCopyright (c) The PHP Group\nBuilt on " . PHP_OS]);
-                break;
-              }
-              if ($lowerCmd === 'pwd') {
-                echo json_encode(['success' => true, 'output' => $path]);
-                break;
-              }
-              if ($lowerCmd === 'whoami') {
-                echo json_encode(['success' => true, 'output' => $_SESSION['admin_email'] ?? 'musiclibrary']);
-                break;
-              }
-              if ($lowerCmd === 'date') {
-                echo json_encode(['success' => true, 'output' => date('D M j H:i:s T Y')]);
-                break;
-              }
-              if ($lowerCmd === 'ls' || $lowerCmd === 'dir' || strpos($lowerCmd, 'ls ') === 0) {
-                $dirTarget = $path;
-                if (strpos($lowerCmd, 'ls ') === 0) {
-                  $sub = trim(substr($cmd, 3));
-                  if ($sub && is_dir($path . '/' . $sub)) $dirTarget = $path . '/' . $sub;
-                }
-                $files = array_diff(scandir($dirTarget), ['.', '..']);
-                $out = [];
-                foreach ($files as $f) {
-                  $isD = is_dir($dirTarget . '/' . $f);
-                  $out[] = $isD ? $f . '/' : $f;
-                }
-                echo json_encode(['success' => true, 'output' => implode("\n", $out)]);
-                break;
-              }
-
-              $output = "";
-              $fullCmd = "cd " . escapeshellarg($path) . " && " . $cmd . " 2>&1";
-
-              // Try proc_open first
-              if (function_exists('proc_open')) {
-                $descriptorspec = [
-                  0 => ["pipe", "r"],
-                  1 => ["pipe", "w"],
-                  2 => ["pipe", "w"]
-                ];
-                $process = @proc_open($fullCmd, $descriptorspec, $pipes);
-                if (is_resource($process)) {
-                  @fclose($pipes[0]);
-                  $stdout = @stream_get_contents($pipes[1]);
-                  @fclose($pipes[1]);
-                  $stderr = @stream_get_contents($pipes[2]);
-                  @fclose($pipes[2]);
-                  @proc_close($process);
-                  $output = trim($stdout . "\n" . $stderr);
-                }
-              }
-
-              // Fallbacks if proc_open failed or is disabled
-              if ($output === "" && function_exists('shell_exec')) {
-                $output = @shell_exec($fullCmd);
-              }
-              if (empty($output) && function_exists('exec')) {
-                @exec($fullCmd, $outArr);
-                $output = implode("\n", $outArr);
-              }
-              if (empty($output) && function_exists('system')) {
-                @system($fullCmd, $retval);
-                if ($retval !== 0) $output = "Command failed with status " . $retval;
-              }
-
-              if ($output === null || $output === false || $output === "") {
-                $output = "Command execution failed or shell functions are disabled on this host.";
-              }
-              
-              if (function_exists('log_admin_activity') && isset($_SESSION['admin_email'])) {
-                log_admin_activity(get_db(), $_SESSION['admin_email'], "Terminal: " . substr($cmd, 0, 50), 0);
-              }
-
-              echo json_encode(['success' => true, 'output' => htmlspecialchars(trim($output))]);
-              break;
-
-            case 'git_history':
-              $output = [];
-              exec('git log -n 50 --oneline 2>&1', $output);
-              echo json_encode(['success' => true, 'history' => htmlspecialchars(implode("\n", $output))]);
-              break;
-
-            case 'ai_get_chats':
-              $db = get_db();
-              $db->exec("
-                CREATE TABLE IF NOT EXISTS ide_ai_chats (
-                  id TEXT PRIMARY KEY,
-                  user_id INTEGER,
-                  title TEXT,
-                  pinned INTEGER DEFAULT 0,
-                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS ide_ai_messages (
-                  id TEXT PRIMARY KEY,
-                  chat_id TEXT,
-                  parent_id TEXT,
-                  role TEXT,
-                  content TEXT,
-                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE INDEX IF NOT EXISTS idx_ide_ai_messages_chat_id ON ide_ai_messages(chat_id);
-              ");
-              $cols = $db->query("PRAGMA table_info(ide_ai_chats)")->fetchAll(PDO::FETCH_COLUMN, 1);
-              if (!in_array('pinned', $cols)) {
-                $db->exec("ALTER TABLE ide_ai_chats ADD COLUMN pinned INTEGER DEFAULT 0");
-              }
-
-              $adminId = $_SESSION['admin_id'] ?? 0;
-              $page = max(1, (int)($input['page'] ?? ($_GET['page'] ?? 1)));
-              $limit = 25;
-              $offset = ($page - 1) * $limit;
-              $q = trim($input['q'] ?? ($_GET['q'] ?? ''));
-
-              $where = "WHERE user_id = ?";
-              $params = [$adminId];
-
-              if ($q !== '') {
-                $where .= " AND title LIKE ?";
-                $params[] = '%' . $q . '%';
-              }
-
-              $stmt = $db->prepare("SELECT * FROM ide_ai_chats $where ORDER BY pinned DESC, created_at DESC LIMIT $limit OFFSET $offset");
-              $stmt->execute($params);
-              $chats = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-              $countStmt = $db->prepare("SELECT COUNT(*) FROM ide_ai_chats $where");
-              $countStmt->execute($params);
-              $total = (int)$countStmt->fetchColumn();
-
-              echo json_encode([
-                'success' => true,
-                'chats' => $chats,
-                'total' => $total,
-                'page' => $page,
-                'has_more' => ($offset + count($chats)) < $total
-              ]);
-              break;
-
-            case 'ai_create_chat':
-              $db = get_db();
-              $chatId = 'aic_' . bin2hex(random_bytes(8));
-              $adminId = $_SESSION['admin_id'] ?? 0;
-              $title = trim($input['title'] ?? 'New Coding Session');
-              $stmt = $db->prepare("INSERT INTO ide_ai_chats (id, user_id, title) VALUES (?, ?, ?)");
-              $stmt->execute([$chatId, $adminId, $title]);
-              echo json_encode(['success' => true, 'chat_id' => $chatId]);
-              break;
-
-            case 'ai_delete_chat':
-              $db = get_db();
-              $chatId = $input['chat_id'] ?? '';
-              $adminId = $_SESSION['admin_id'] ?? 0;
-              $db->prepare("DELETE FROM ide_ai_chats WHERE id = ? AND user_id = ?")->execute([$chatId, $adminId]);
-              $db->prepare("DELETE FROM ide_ai_messages WHERE chat_id = ?")->execute([$chatId]);
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'ai_rename_chat':
-              $db = get_db();
-              $chatId = $input['chat_id'] ?? '';
-              $title = trim(strip_tags($input['title'] ?? 'Coding Session'));
-              $adminId = $_SESSION['admin_id'] ?? 0;
-              $db->prepare("UPDATE ide_ai_chats SET title = ? WHERE id = ? AND user_id = ?")->execute([$title, $chatId, $adminId]);
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'ai_pin_chat':
-              $db = get_db();
-              $chatId = $input['chat_id'] ?? '';
-              $pinned = !empty($input['pinned']) ? 1 : 0;
-              $adminId = $_SESSION['admin_id'] ?? 0;
-              $db->prepare("UPDATE ide_ai_chats SET pinned = ? WHERE id = ? AND user_id = ?")->execute([$pinned, $chatId, $adminId]);
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'ai_get_messages':
-              $db = get_db();
-              $chatId = $input['chat_id'] ?? ($_GET['chat_id'] ?? '');
-              $stmt = $db->prepare("SELECT * FROM ide_ai_messages WHERE chat_id = ? ORDER BY created_at ASC");
-              $stmt->execute([$chatId]);
-              echo json_encode(['success' => true, 'messages' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
-              break;
-
-            case 'ai_save_message':
-              $db = get_db();
-              $msgId = $input['id'] ?? ('aim_' . bin2hex(random_bytes(8)));
-              $chatId = $input['chat_id'] ?? '';
-              $parentId = $input['parent_id'] ?? null;
-              $role = $input['role'] ?? 'user';
-              $content = $input['content'] ?? '';
-              $stmt = $db->prepare("INSERT INTO ide_ai_messages (id, chat_id, parent_id, role, content) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content");
-              $stmt->execute([$msgId, $chatId, $parentId, $role, $content]);
-              echo json_encode(['success' => true, 'id' => $msgId]);
-              break;
-
-            case 'ai_get_settings':
-              $db = get_db();
-              $admin_id = $_SESSION['admin_id'] ?? 0;
-              $stmt = $db->prepare("SELECT status, settings FROM users WHERE id = ?");
-              $stmt->execute([$admin_id]);
-              $adm_user = $stmt->fetch();
-              $is_super = ($adm_user && $adm_user['status'] === 'super_admin');
-
-              // Load master settings from Super Admin
-              $master_stmt = $db->query("SELECT settings FROM users WHERE status = 'super_admin' LIMIT 1");
-              $masterSettings = json_decode($master_stmt->fetchColumn() ?: '{}', true) ?? [];
-
-              echo json_encode([
-                'success' => true,
-                'is_super_admin' => $is_super,
-                'gemini_token' => $is_super ? ($masterSettings['ai_gemini_token'] ?? '') : '',
-                'hf_token' => $is_super ? ($masterSettings['ai_hf_token'] ?? '') : '',
-                'has_gemini_token' => !empty($masterSettings['ai_gemini_token']),
-                'has_hf_token' => !empty($masterSettings['ai_hf_token']),
-                'provider' => $masterSettings['ai_provider'] ?? 'gemini',
-                'gemini_model' => $masterSettings['ai_gemini_model'] ?? 'gemini-3.1-flash-lite',
-                'hf_model' => $masterSettings['ai_hf_model'] ?? 'Qwen/Qwen2.5-Coder-32B-Instruct'
-              ]);
-              break;
-
-            case 'ai_save_settings':
-              $db = get_db();
-              $admin_id = $_SESSION['admin_id'] ?? 0;
-              $stmt = $db->prepare("SELECT status, settings FROM users WHERE id = ?");
-              $stmt->execute([$admin_id]);
-              $adm_user = $stmt->fetch();
-
-              if (!$adm_user || $adm_user['status'] !== 'super_admin') {
-                throw new Exception("Security Restriction: Only Super Administrators are authorized to configure AI API keys.");
-              }
-
-              $userSettings = json_decode($adm_user['settings'] ?: '{}', true) ?? [];
-              $userSettings['ai_gemini_token'] = trim($input['gemini_token'] ?? ($userSettings['ai_gemini_token'] ?? ''));
-              $userSettings['ai_hf_token'] = trim($input['hf_token'] ?? ($userSettings['ai_hf_token'] ?? ''));
-              $userSettings['ai_provider'] = $input['provider'] ?? 'gemini';
-              $userSettings['ai_gemini_model'] = $input['gemini_model'] ?? 'gemini-3.1-flash-lite';
-              $userSettings['ai_hf_model'] = $input['hf_model'] ?? 'Qwen/Qwen2.5-Coder-32B-Instruct';
-
-              $db->prepare("UPDATE users SET settings = ? WHERE id = ?")->execute([json_encode($userSettings), $admin_id]);
-              echo json_encode(['success' => true]);
-              break;
-
-            case 'ai_search':
-              $query = trim($input['q'] ?? '');
-              if (empty($query)) {
-                echo json_encode(['context' => '', 'urls' => []]);
-                break;
-              }
-
-              $urls = [];
-              $snippets = [];
-
-              // 1. DuckDuckGo Search Fallback
-              $ip = mt_rand(11, 197) . '.' . mt_rand(0, 255) . '.' . mt_rand(0, 255) . '.' . mt_rand(1, 254);
-              $ddgOpts = [
-                'http' => [
-                  'method' => 'POST',
-                  'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\nContent-type: application/x-www-form-urlencoded\r\nReferer: https://lite.duckduckgo.com/\r\nX-Forwarded-For: $ip\r\n",
-                  'content' => 'q=' . urlencode($query . ' -site:youtube.com'),
-                  'timeout' => 3.0,
-                  'ignore_errors' => true
-                ],
-                'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
+            if ($item->isDir()) {
+              $foundFolders[] = [
+                'name'        => $name,
+                'path'        => $rel,
+                'mtime'       => $mtime,
+                'items_count' => 0
               ];
-              $html = @file_get_contents('https://lite.duckduckgo.com/lite/', false, stream_context_create($ddgOpts));
-              if ($html) {
-                preg_match_all('/<a rel="nofollow" href="([^"]+)".*?>(.*?)<\/a>/is', $html, $linkMatches);
-                preg_match_all('/<td class=\'result-snippet\'>(.*?)<\/td>/is', $html, $descMatches);
-                $limit = min(8, count($linkMatches[1] ?? []));
-                for ($i = 0; $i < $limit; $i++) {
-                  $url = $linkMatches[1][$i];
-                  if (filter_var($url, FILTER_VALIDATE_URL) && strpos($url, 'duckduckgo.com') === false && !in_array($url, $urls)) {
-                    $title = trim(strip_tags($linkMatches[2][$i]));
-                    $text = isset($descMatches[1][$i]) ? trim(strip_tags($descMatches[1][$i])) : '';
-                    $snippets[] = "- [Source: $url]\n  Title: $title\n  Snippet: $text";
-                    $urls[] = $url;
-                  }
-                }
-              }
-
-              // 2. Wikipedia Search Fallback
-              if (count($urls) < 3) {
-                $wikiUrl = "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=" . urlencode($query) . "&utf8=&format=json";
-                $wikiOpts = ['http' => ['method' => 'GET', 'header' => "User-Agent: PHPMusicAI/1.0\r\n", 'timeout' => 2.0, 'ignore_errors' => true], 'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]];
-                $wikiJson = @file_get_contents($wikiUrl, false, stream_context_create($wikiOpts));
-                if ($wikiJson) {
-                  $wikiData = json_decode($wikiJson, true);
-                  if (!empty($wikiData['query']['search'])) {
-                    foreach ($wikiData['query']['search'] as $result) {
-                      if (count($urls) >= 8) break;
-                      $wUrl = 'https://en.wikipedia.org/wiki/' . urlencode(str_replace(' ', '_', $result['title']));
-                      if (!in_array($wUrl, $urls)) {
-                        $snippets[] = "- [Source: $wUrl]\n  Title: {$result['title']}\n  Snippet: " . strip_tags($result['snippet']);
-                        $urls[] = $wUrl;
-                      }
-                    }
-                  }
-                }
-              }
-
-              $searchContext = "";
-              if (!empty($snippets)) {
-                $searchContext = "[REAL-TIME WEB SEARCH RESULTS (" . count($urls) . " sources)]:\n" . implode("\n\n", $snippets) . "\n[END OF WEB SEARCH RESULTS]\n\n";
-              }
-              echo json_encode(['success' => true, 'context' => $searchContext, 'urls' => $urls]);
-              break;
-
-            case 'ai_chat':
-              $db = get_db();
-              $master_stmt = $db->query("SELECT settings FROM users WHERE status = 'super_admin' LIMIT 1");
-              $userSettings = json_decode($master_stmt->fetchColumn() ?: '{}', true) ?? [];
-
-              $provider = $input['provider'] ?? ($userSettings['ai_provider'] ?? 'gemini');
-              $geminiToken = trim($userSettings['ai_gemini_token'] ?? '');
-              $hfToken = trim($userSettings['ai_hf_token'] ?? '');
-              $model = $input['model'] ?? ($provider === 'gemini' ? ($userSettings['ai_gemini_model'] ?? 'gemini-3.1-flash-lite') : ($userSettings['ai_hf_model'] ?? 'Qwen/Qwen2.5-Coder-32B-Instruct'));
-
-              // Clear all output buffers to prepare SSE streaming
-              while (ob_get_level() > 0) {
-                ob_end_clean();
-              }
-
-              header('Content-Type: text/event-stream; charset=utf-8');
-              header('Cache-Control: no-cache, no-transform');
-              header('Connection: keep-alive');
-              header('X-Accel-Buffering: no');
-              if (function_exists('apache_setenv')) {
-                @apache_setenv('no-gzip', '1');
-              }
-              @ini_set('zlib.output_compression', '0');
-              @ini_set('implicit_flush', '1');
-              ob_implicit_flush(true);
-
-              $isGemini = ($provider === 'gemini');
-              if ($isGemini && empty($geminiToken)) {
-                echo "data: " . json_encode(['error' => 'Google Gemini API Key has not been configured in Settings by the Super Administrator.']) . "\n\n";
-                exit;
-              }
-              if (!$isGemini && empty($hfToken)) {
-                echo "data: " . json_encode(['error' => 'HuggingFace API Token has not been configured in Settings by the Super Administrator.']) . "\n\n";
-                exit;
-              }
-
-              $rawMessages = $input['messages'] ?? [];
-              $fileContext = $input['file_context'] ?? '';
-              $searchContext = $input['search_context'] ?? '';
-              $thinkMode = !empty($input['think']);
-
-              // Filter out empty messages
-              $validMessages = [];
-              foreach ($rawMessages as $m) {
-                $txt = trim($m['content'] ?? '');
-                if ($txt !== '') {
-                  $validMessages[] = ['role' => $m['role'], 'content' => $txt];
-                }
-              }
-
-              if (empty($validMessages)) {
-                $validMessages[] = ['role' => 'user', 'content' => 'Hello'];
-              }
-
-              $instructionBlock = "You are an expert software engineer integrated directly into PHPEditor IDE. Provide clean, secure, production-ready code wrapped in Markdown blocks (e.g. ```php, ```js).";
-              if (!empty($fileContext)) {
-                $instructionBlock .= "\n\n[ACTIVE CODE CONTEXT]:\n" . $fileContext;
-              }
-              if (!empty($searchContext)) {
-                $instructionBlock .= "\n\n" . $searchContext;
-              }
-              if ($thinkMode) {
-                $instructionBlock .= "\n\n[INSTRUCTION: Think step-by-step inside `<think>...</think>` tags before your final code output.]";
-              } else {
-                $instructionBlock .= "\n\n[INSTRUCTION: Provide the direct solution immediately without `<think>` tags or internal reasoning.]";
-              }
-
-              if ($isGemini) {
-                $geminiContents = [];
-                $lastRole = null;
-
-                foreach ($validMessages as $m) {
-                  $role = ($m['role'] === 'assistant' || $m['role'] === 'model') ? 'model' : 'user';
-                  if ($role === $lastRole && !empty($geminiContents)) {
-                    $geminiContents[count($geminiContents) - 1]['parts'][0]['text'] .= "\n\n" . $m['content'];
-                  } else {
-                    $geminiContents[] = [
-                      'role' => $role,
-                      'parts' => [['text' => $m['content']]]
-                    ];
-                    $lastRole = $role;
-                  }
-                }
-
-                if (!empty($geminiContents) && $geminiContents[0]['role'] !== 'user') {
-                  array_unshift($geminiContents, ['role' => 'user', 'parts' => [['text' => 'Hello']]]);
-                }
-
-                $lastIdx = count($geminiContents) - 1;
-                $geminiContents[$lastIdx]['parts'][0]['text'] .= "\n\n[SYSTEM INSTRUCTIONS]:\n" . $instructionBlock;
-
-                $payload = [
-                  'contents' => $geminiContents,
-                  'generationConfig' => [
-                    'temperature' => 0.4,
-                    'maxOutputTokens' => 8192
-                  ]
-                ];
-
-                $url = "https://generativelanguage.googleapis.com/v1beta/models/" . urlencode($model) . ":streamGenerateContent?alt=sse&key=" . urlencode($geminiToken);
-                $headers = ["Content-Type: application/json"];
-              } else {
-                $hfMessages = [['role' => 'system', 'content' => $instructionBlock]];
-                foreach ($validMessages as $m) {
-                  $hfMessages[] = ['role' => $m['role'], 'content' => $m['content']];
-                }
-                $payload = [
-                  'model' => $model,
-                  'messages' => $hfMessages,
-                  'max_tokens' => 8192,
-                  'temperature' => 0.4,
-                  'stream' => true
-                ];
-                $url = "https://router.huggingface.co/v1/chat/completions";
-                $headers = [
-                  "Content-Type: application/json",
-                  "Authorization: Bearer " . $hfToken
-                ];
-              }
-
-              $payloadJson = json_encode($payload);
-
-              // Dual-Engine Streamer: cURL (Primary) with fallback to stream_context fopen
-              if (function_exists('curl_init')) {
-                $ch = curl_init($url);
-                curl_setopt_array($ch, [
-                  CURLOPT_POST => true,
-                  CURLOPT_POSTFIELDS => $payloadJson,
-                  CURLOPT_HTTPHEADER => $headers,
-                  CURLOPT_RETURNTRANSFER => false,
-                  CURLOPT_FOLLOWLOCATION => true,
-                  CURLOPT_SSL_VERIFYPEER => false,
-                  CURLOPT_SSL_VERIFYHOST => 0,
-                  CURLOPT_TIMEOUT => 120,
-                  CURLOPT_WRITEFUNCTION => function($ch, $data) {
-                    echo $data;
-                    if (ob_get_level() > 0) @ob_flush();
-                    flush();
-                    return strlen($data);
-                  }
-                ]);
-                $curlSuccess = curl_exec($ch);
-                if (!$curlSuccess || curl_errno($ch)) {
-                  $cErr = curl_error($ch);
-                  echo "data: " . json_encode(['error' => 'cURL Error: ' . $cErr]) . "\n\n";
-                }
-                curl_close($ch);
-                exit;
-              }
-
-              $options = [
-                'http' => [
-                  'header' => implode("\r\n", $headers) . "\r\n",
-                  'method' => 'POST',
-                  'content' => $payloadJson,
-                  'ignore_errors' => true,
-                  'timeout' => 120
-                ],
-                'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
+            } else {
+              $size = $item->getSize();
+              $ext = strtolower($item->getExtension());
+              $type = driveGetFileType($ext, $driveConfig);
+              $foundFiles[] = [
+                'name'     => $name,
+                'path'     => $rel,
+                'size'     => $size,
+                'size_fmt' => driveFormatBytes($size),
+                'mtime'    => $mtime,
+                'ext'      => $ext,
+                'type'     => $type,
+                'width'    => 0,
+                'height'   => 0
               ];
-
-              $context = stream_context_create($options);
-              $fp = @fopen($url, 'r', false, $context);
-              if (!$fp) {
-                echo "data: " . json_encode(['error' => 'Failed to establish connection to AI provider API (allow_url_fopen disabled).']) . "\n\n";
-                exit;
-              }
-
-              while (!feof($fp)) {
-                $chunk = fgets($fp);
-                if ($chunk !== false) {
-                  echo $chunk;
-                  if (ob_get_level() > 0) @ob_flush();
-                  flush();
-                }
-              }
-              fclose($fp);
-              exit;
-
-            default:
-              throw new Exception('Unknown POST action');
-          }
-        } else {
-          switch ($action) {
-            case 'search_drive':
-              $q = strtolower($_GET['q'] ?? '');
-              $db = get_db();
-              $starredPaths = $db->query("SELECT path FROM drive_starred")->fetchAll(PDO::FETCH_COLUMN);
-              $folders = [];
-              $files = [];
-              if ($q !== '') {
-                $dir = new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS);
-                $filter = new RecursiveCallbackFilterIterator($dir, function ($current) {
-                  $exclude = ['.git', 'getid3', '.drive_trash_bin', '.drive_thumbnails', '.file_version', '.tmp_db', 'covers'];
-                  if ($current->isDir() && in_array($current->getFilename(), $exclude)) return false;
-                  return true;
-                });
-                $iter = new RecursiveIteratorIterator($filter, RecursiveIteratorIterator::SELF_FIRST);
-                foreach ($iter as $item) {
-                  $filename = $item->getFilename();
-                  if (stripos($filename, $q) !== false) {
-                    $rel = ltrim(str_replace($baseDir, '', $item->getPathname()), '/');
-                    $stat = stat($item->getPathname());
-                    $starred = in_array($rel, $starredPaths);
-                    if ($item->isDir()) {
-                      $folders[] = [
-                        'name' => $filename,
-                        'path' => $rel,
-                        'mtime' => $stat['mtime'],
-                        'size' => 0,
-                        'formatSize' => '-',
-                        'ext' => '',
-                        'isImage' => false,
-                        'starred' => $starred
-                      ];
-                    } elseif ($item->isFile() && isAllowedExtension($filename)) {
-                      $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
-                      $files[] = [
-                        'name' => $filename,
-                        'path' => $rel,
-                        'mtime' => $stat['mtime'],
-                        'size' => $stat['size'],
-                        'formatSize' => formatBytes($stat['size']),
-                        'ext' => $ext,
-                        'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
-                        'starred' => $starred
-                      ];
-                    }
-                  }
-                }
-              }
-              echo json_encode(['success' => true, 'folders' => array_slice($folders, 0, 50), 'files' => array_slice($files, 0, 100)]);
-              break;
-
-            case 'list':
-              $db = get_db();
-              $starredPaths = $db->query("SELECT path FROM drive_starred")->fetchAll(PDO::FETCH_COLUMN);
-              $files = [];
-              $folders = [];
-              
-              if (!is_dir($absPath)) {
-                echo json_encode(['success' => true, 'folders' => [], 'files' => [], 'breadcrumbs' => []]);
-                exit;
-              }
-              
-              $items = array_diff(scandir($absPath), ['.', '..', '.drive_trash_bin', '.drive_thumbnails']);
-              foreach ($items as $item) {
-                $path = $absPath . '/' . $item;
-                $stat = stat($path);
-                $ext = strtolower(pathinfo($item, PATHINFO_EXTENSION));
-                $rel = ltrim(str_replace($baseDir, '', $path), '/');
-                $starred = in_array($rel, $starredPaths);
-                
-                $itemMeta = [
-                  'name' => $item,
-                  'path' => $rel,
-                  'mtime' => $stat['mtime'],
-                  'size' => $stat['size'],
-                  'formatSize' => formatBytes($stat['size']),
-                  'ext' => $ext,
-                  'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
-                  'starred' => $starred
-                ];
-                if (is_dir($path)) {
-                  $folders[] = $itemMeta;
-                } elseif (is_file($path) && isAllowedExtension($item)) {
-                  $files[] = $itemMeta;
-                }
-              }
-              
-              $pathDisplay = ltrim(str_replace($baseDir, '', $absPath), '/');
-              $breadcrumbs = [];
-              if (!empty($pathDisplay)) {
-                $segments = explode('/', $pathDisplay);
-                $curr = '';
-                foreach ($segments as $seg) {
-                  if (empty($seg)) continue;
-                  $curr .= $seg . '/';
-                  $breadcrumbs[] = ['name' => $seg, 'path' => rtrim($curr, '/')];
-                }
-              }
-              
-              echo json_encode([
-                'success' => true, 
-                'folders' => $folders, 
-                'files' => $files, 
-                'breadcrumbs' => $breadcrumbs
-              ]);
-              break;
-
-            case 'list_trash':
-              $db = get_db();
-              $trashList = [];
-              $rows = $db->query("SELECT uniq, original_name, original_parent, deleted_at FROM drive_trash ORDER BY deleted_at DESC")->fetchAll(PDO::FETCH_ASSOC);
-              foreach ($rows as $info) {
-                $trashList[] = [
-                  'uniq' => $info['uniq'],
-                  'name' => $info['original_name'],
-                  'original_parent' => $info['original_parent'],
-                  'deleted_at' => date("Y-m-d H:i:s", $info['deleted_at'])
-                ];
-              }
-              echo json_encode(['success' => true, 'trash' => $trashList]);
-              break;
-
-            case 'list_file_versions':
-              $historyList = [];
-              $verDir = $baseDir . '/.file_version';
-              if (is_dir($verDir)) {
-                $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($verDir, FilesystemIterator::SKIP_DOTS));
-                foreach ($iter as $file) {
-                  if ($file->isFile()) {
-                    $origName = basename(dirname($file->getPathname()));
-                    $historyList[] = [
-                      'name' => $file->getFilename(),
-                      'path' => ltrim(str_replace($baseDir, '', $file->getPathname()), '/'),
-                      'mtime' => $file->getMTime(),
-                      'size' => $file->getSize(),
-                      'formatSize' => formatBytes($file->getSize()),
-                      'ext' => strtolower($file->getExtension()),
-                      'isImage' => in_array(strtolower($file->getExtension()), ['png', 'jpg', 'jpeg', 'gif', 'svg']),
-                      'starred' => false,
-                      'original_file' => $origName
-                    ];
-                  }
-                }
-                usort($historyList, function($a, $b) { return $b['mtime'] - $a['mtime']; });
-              }
-              echo json_encode(['success' => true, 'history_files' => $historyList]);
-              break;
-
-            case 'list_history':
-              $historyFiles = [];
-              $verDir = $baseDir . '/.file_version';
-              if (is_dir($verDir)) {
-                $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($verDir, FilesystemIterator::SKIP_DOTS));
-                foreach ($iter as $file) {
-                  if ($file->isFile()) {
-                    $origName = basename(dirname($file->getPathname()));
-                    $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
-                    $historyFiles[] = [
-                      'name' => $file->getFilename() . ' (Version of ' . $origName . ')',
-                      'path' => ltrim(str_replace($baseDir, '', $file->getPathname()), '/'),
-                      'mtime' => $file->getMTime(),
-                      'size' => $file->getSize(),
-                      'formatSize' => formatBytes($file->getSize()),
-                      'ext' => $ext,
-                      'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg']),
-                      'starred' => false,
-                      'is_version' => true,
-                      'original_file' => $origName,
-                      'version_name' => $file->getFilename()
-                    ];
-                  }
-                }
-                usort($historyFiles, function($a, $b) { return $b['mtime'] - $a['mtime']; });
-              }
-              echo json_encode(['success' => true, 'history' => $historyFiles]);
-              break;
-
-            case 'list_starred':
-              $db = get_db();
-              $starredPaths = $db->query("SELECT path FROM drive_starred")->fetchAll(PDO::FETCH_COLUMN);
-              $starredList = [];
-              foreach ($starredPaths as $rel) {
-                $full = $baseDir . '/' . $rel;
-                if (file_exists($full)) {
-                  $stat = stat($full);
-                  $ext = strtolower(pathinfo($rel, PATHINFO_EXTENSION));
-                  $starredList[] = [
-                    'name' => basename($rel),
-                    'path' => $rel,
-                    'parent' => dirname($rel) === '.' ? '' : dirname($rel),
-                    'isDir' => is_dir($full),
-                    'mtime' => $stat['mtime'],
-                    'size' => $stat['size'],
-                    'formatSize' => formatBytes($stat['size']),
-                    'ext' => $ext,
-                    'isImage' => in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'svg'])
-                  ];
-                }
-              }
-              echo json_encode(['success' => true, 'starred' => $starredList]);
-              break;
-
-            case 'activity':
-              $db = get_db();
-              // Housekeeping: purge activity records older than 90 days to keep the database fast
-              $ninetyDaysAgo = time() - (90 * 24 * 60 * 60);
-              $db->prepare("DELETE FROM drive_activity WHERE timestamp < ?")->execute([$ninetyDaysAgo]);
-
-              $stmt = $db->prepare("SELECT file_name, file_path, action, timestamp FROM drive_activity ORDER BY timestamp DESC LIMIT 25");
-              $stmt->execute();
-              $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-              
-              $grouped = [];
-              $today = strtotime("today");
-              $yesterday = strtotime("yesterday");
-              $week = strtotime("-1 week");
-              
-              foreach ($rows as $row) {
-                if ($row['timestamp'] >= $today) $group = 'Today';
-                elseif ($row['timestamp'] >= $yesterday) $group = 'Yesterday';
-                elseif ($row['timestamp'] >= $week) $group = 'Previous 7 Days';
-                else $group = date('F Y', $row['timestamp']);
-                
-                $grouped[$group][] = [
-                  'name' => $row['file_name'],
-                  'path' => $row['file_path'],
-                  'action' => $row['action'],
-                  'mtime' => $row['timestamp']
-                ];
-              }
-              echo json_encode(['success' => true, 'activity' => $grouped]);
-              break;
-
-            case 'recents':
-              $db = get_db();
-              $limit = isset($_GET['all']) ? 100 : 15;
-              $recentFiles = [];
-              
-              // Optimized Directory Scanner: Skip scanning massive or irrelevant system directories
-              $dir = new RecursiveDirectoryIterator($baseDir, FilesystemIterator::SKIP_DOTS);
-              $filter = new RecursiveCallbackFilterIterator($dir, function ($current) {
-                $exclude = ['getid3', '.drive_trash_bin', '.drive_thumbnails', '.git', 'uploads', 'covers', 'brain'];
-                if ($current->isDir() && in_array($current->getFilename(), $exclude)) {
-                  return false;
-                }
-                return true;
-              });
-              
-              $iter = new RecursiveIteratorIterator($filter);
-              foreach ($iter as $file) {
-                if ($file->isFile() && isAllowedExtension($file->getFilename())) {
-                  $path = $file->getPathname();
-                  $recentFiles[] = [
-                    'name' => $file->getFilename(),
-                    'path' => ltrim(str_replace($baseDir, '', $path), '/'),
-                    'mtime' => $file->getMTime(),
-                    'size' => $file->getSize(),
-                    'formatSize' => formatBytes($file->getSize()),
-                    'ext' => strtolower($file->getExtension()),
-                    'isImage' => in_array(strtolower($file->getExtension()), ['png', 'jpg', 'jpeg', 'gif', 'svg'])
-                  ];
-                }
-              }
-              usort($recentFiles, function($a, $b) { return $b['mtime'] - $a['mtime']; });
-              echo json_encode(['success' => true, 'recents' => array_slice($recentFiles, 0, $limit)]);
-              break;
-
-            case 'read':
-              @ini_set('memory_limit', '512M');
-              $file = $_GET['file'] ?? '';
-              $full = $baseDir . '/' . $file;
-              if (!isValidPath($baseDir, $full) || !is_file($full) || !isAllowedExtension($file)) throw new Exception('Invalid file');
-              $content = '';
-              $size = filesize($full);
-              $offset = isset($_GET['offset']) ? max(0, (int)$_GET['offset']) : 0;
-              $pos = 0;
-              if ($size > 0 && $offset < $size) {
-                $fp = @fopen($full, 'rb');
-                if ($fp) {
-                  if ($offset > 0) {
-                    fseek($fp, $offset, SEEK_SET);
-                  }
-                  $length = isset($_GET['length']) ? min($size - $offset, max(1, (int)$_GET['length'])) : ($size - $offset);
-                  $content = @fread($fp, $length);
-                  $pos = ftell($fp);
-                  fclose($fp);
-                }
-              }
-              echo json_encode(['success' => true, 'content' => $content, 'pos' => $pos, 'size' => $size], JSON_INVALID_UTF8_SUBSTITUTE);
-              break;
-
-            case 'properties':
-              $fileParam = $_GET['file'] ?? '';
-              $files = array_filter(explode('|', $fileParam));
-              if (empty($files)) throw new Exception('Invalid item');
-              
-              if (count($files) === 1) {
-                $file = $files[0];
-                $full = $baseDir . '/' . $file;
-                if (!isValidPath($baseDir, $full) || !file_exists($full)) throw new Exception('Invalid item');
-                $stat = stat($full);
-                $is_dir = is_dir($full);
-                $size = $stat['size'];
-                $typeStr = $is_dir ? 'Folder' : 'File (' . strtoupper(pathinfo($file, PATHINFO_EXTENSION)) . ')';
-                $contentStr = '';
-                
-                if ($is_dir) {
-                  $total_files = 0;
-                  $total_folders = 0;
-                  $total_size = 0;
-                  $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
-                  foreach ($iter as $f) {
-                    if ($f->isDir()) {
-                      $total_folders++;
-                    } else {
-                      $total_files++;
-                      $total_size += $f->getSize();
-                    }
-                  }
-                  $size = $total_size;
-                  $contentStr = $total_files . ' files, ' . $total_folders . ' folders';
-                }
-
-                echo json_encode([
-                  'success' => true,
-                  'data' => [
-                    'name' => basename($file),
-                    'type' => $typeStr,
-                    'size' => formatBytes($size),
-                    'contents' => $contentStr,
-                    'modified' => date("Y-m-d H:i:s", $stat['mtime']),
-                    'created' => date("Y-m-d H:i:s", $stat['ctime']),
-                    'permissions' => substr(sprintf('%o', fileperms($full)), -4)
-                  ]
-                ]);
-              } else {
-                $total_size = 0;
-                $total_files = 0;
-                $total_folders = 0;
-                foreach ($files as $f) {
-                   $full = $baseDir . '/' . $f;
-                   if (isValidPath($baseDir, $full) && file_exists($full)) {
-                      if (is_dir($full)) {
-                         $total_folders++;
-                         $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
-                         foreach ($iter as $item) {
-                           if ($item->isDir()) $total_folders++;
-                           else { $total_files++; $total_size += $item->getSize(); }
-                         }
-                      } else {
-                         $total_files++;
-                         $total_size += filesize($full);
-                      }
-                   }
-                }
-                echo json_encode([
-                  'success' => true,
-                  'data' => [
-                    'name' => count($files) . ' items selected',
-                    'type' => 'Multiple Selection',
-                    'size' => formatBytes($total_size),
-                    'contents' => $total_files . ' files, ' . $total_folders . ' folders',
-                    'modified' => '-',
-                    'created' => '-',
-                    'permissions' => '-'
-                  ]
-                ]);
-              }
-              break;
-
-            default:
-              throw new Exception('Unknown GET action');
+            }
+            $count++;
           }
         }
-      } catch (Exception $e) {
-        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
-      }
-      ob_end_flush();
-      exit;
-    }
 
-    if (isset($_GET['download'])) {
-      $file = $_GET['download'];
-      $full = $baseDir . '/' . $file;
-      if (isValidPath($baseDir, $full) && is_file($full) && isAllowedExtension($file)) {
-        header('Content-Type: application/octet-stream');
-        header('Content-Disposition: attachment; filename="' . basename($full) . '"');
-        header('Content-Length: ' . filesize($full));
-        readfile($full);
-      }
-      exit;
-    }
+        usort($foundFolders, fn($a, $b) => strnatcasecmp($a['name'], $b['name']));
+        usort($foundFiles, fn($a, $b) => strnatcasecmp($a['name'], $b['name']));
 
-    if (isset($_GET['batch'])) {
-      $type = $_GET['batch'];
-      $zip = new ZipArchive();
-      $zipName = 'download_' . date('Ymd_His') . '.zip';
-      
-      if ($zip->open($zipName, ZipArchive::CREATE) === TRUE) {
-        if ($type === 'context') {
-          $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($absPath, FilesystemIterator::SKIP_DOTS));
-          foreach ($iter as $file) {
-            if ($file->isFile() && isAllowedExtension($file->getFilename())) {
-              $localPath = ltrim(str_replace($absPath, '', $file->getPathname()), '/');
-              $zip->addFile($file->getPathname(), $localPath);
-            }
-          }
-        } elseif ($type === 'selected' && isset($_GET['items'])) {
-          $items = explode(',', $_GET['items']);
+        driveJsonResponse([
+          'folders' => $foundFolders,
+          'files'   => $foundFiles,
+          'query'   => $query,
+          'count'   => $count
+        ]);
+      }
+
+      if ($driveAction === 'tree') {
+        function driveBuildTree($base, $currentRel = '', $depth = 0) {
+          if ($depth > 3) return [];
+          $realBase = driveSafePath($base, $currentRel);
+          if (!$realBase || !is_dir($realBase)) return [];
+          $items = @scandir($realBase) ?: [];
+          $nodes = [];
+          $skipDirs = ['.git', '.gallery_cache', '.drive_trash_bin', '.file_version', 'node_modules', 'vendor'];
           foreach ($items as $item) {
-            $full = $baseDir . '/' . $item;
-            if (isValidPath($baseDir, $full) && file_exists($full)) {
-              if (is_file($full) && isAllowedExtension($item)) {
-                $zip->addFile($full, basename($item));
-              } elseif (is_dir($full)) {
-                $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, FilesystemIterator::SKIP_DOTS));
-                foreach ($iter as $f) {
-                  if ($f->isFile() && isAllowedExtension($f->getFilename())) {
-                    $localPath = ltrim(str_replace($baseDir, '', $f->getPathname()), '/');
-                    $zip->addFile($f->getPathname(), $localPath);
-                  }
+            if ($item === '.' || $item === '..' || $item[0] === '.' || in_array($item, $skipDirs)) continue;
+            $full = $realBase . DIRECTORY_SEPARATOR . $item;
+            if (!is_dir($full)) continue;
+            $rel = $currentRel ? ($currentRel . '/' . $item) : $item;
+            $nodes[] = [
+              'name'     => $item,
+              'path'     => $rel,
+              'children' => driveBuildTree($base, $rel, $depth + 1)
+            ];
+          }
+          usort($nodes, fn($a, $b) => strnatcasecmp($a['name'], $b['name']));
+          return $nodes;
+        }
+        driveJsonResponse(driveBuildTree($driveConfig['root_dir']));
+      }
+
+      if ($driveAction === 'thumb') {
+        $file = $_GET['f'] ?? ($_GET['file'] ?? '');
+        $fullPath = driveSafePath($driveConfig['root_dir'], $file);
+        if (!$fullPath || !is_file($fullPath)) {
+          header('HTTP/1.0 404 Not Found');
+          exit;
+        }
+
+        $mtime = (int)@filemtime($fullPath);
+        $size = (int)@filesize($fullPath);
+        $hash = md5($fullPath . $mtime . $size);
+        $etag = '"' . $hash . '"';
+
+        if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && trim($_SERVER['HTTP_IF_NONE_MATCH']) === $etag) {
+          header('HTTP/1.1 304 Not Modified');
+          exit;
+        }
+
+        $cachePath = $driveConfig['cache_dir'] . DIRECTORY_SEPARATOR . $hash . '.jpg';
+
+        if (!file_exists($cachePath)) {
+          $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+          if (in_array($ext, ['mp3', 'm4a', 'flac', 'mp4', 'mov'])) {
+            $mediaMeta = driveGetMediaMetadata($fullPath);
+            if (!empty($mediaMeta['raw_cover'])) {
+              $tmpCover = tempnam(sys_get_temp_dir(), 'cov_');
+              @file_put_contents($tmpCover, $mediaMeta['raw_cover']);
+              driveCreateThumbnail($tmpCover, $cachePath, $driveConfig['thumb_size'], $driveConfig['thumb_quality']);
+              @unlink($tmpCover);
+            }
+          }
+          if (!file_exists($cachePath)) {
+            driveCreateThumbnail($fullPath, $cachePath, $driveConfig['thumb_size'], $driveConfig['thumb_quality']);
+          }
+        }
+
+        if (file_exists($cachePath)) {
+          header('Content-Type: image/jpeg');
+          header('ETag: ' . $etag);
+          header('Cache-Control: public, max-age=31536000, immutable');
+          header('Content-Length: ' . filesize($cachePath));
+          readfile($cachePath);
+        } else {
+          $mime = mime_content_type($fullPath) ?: 'application/octet-stream';
+          header('Content-Type: ' . $mime);
+          header('ETag: ' . $etag);
+          readfile($fullPath);
+        }
+        exit;
+      }
+
+      if ($driveAction === 'raw' || $driveAction === 'file' || $driveAction === 'stream') {
+        $file = $_GET['f'] ?? ($_GET['file'] ?? '');
+        $fullPath = driveSafePath($driveConfig['root_dir'], $file);
+        if (!$fullPath || !is_file($fullPath)) {
+          header('HTTP/1.0 404 Not Found');
+          exit;
+        }
+        $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+        $mimeMap = [
+          'mp4'  => 'video/mp4', 'webm' => 'video/webm', 'mov'  => 'video/quicktime',
+          'm4v'  => 'video/mp4', 'ogv'  => 'video/ogg',       'mkv'  => 'video/x-matroska',
+          'avi'  => 'video/x-msvideo', 'ts' => 'video/mp2t',  '3gp'  => 'video/3gpp',
+          'wmv'  => 'video/x-ms-wmv', 'flv' => 'video/x-flv',  'mp3'  => 'audio/mpeg',
+          'wav'  => 'audio/wav', 'ogg'  => 'audio/ogg',       'flac' => 'audio/flac',
+          'm4a'  => 'audio/mp4', 'aac'  => 'audio/aac',       'opus' => 'audio/opus',
+          'wma'  => 'audio/x-ms-wma', 'm4r' => 'audio/mp4',   'mid'  => 'audio/midi',
+          'midi' => 'audio/midi', 'svg'  => 'image/svg+xml',   'js'   => 'application/javascript',
+          'css'  => 'text/css',  'pdf'  => 'application/pdf',
+        ];
+        $mime = $mimeMap[$ext] ?? (mime_content_type($fullPath) ?: 'application/octet-stream');
+        driveStreamRangeFile($fullPath, $mime);
+      }
+
+      if ($driveAction === 'download') {
+        $file = $_GET['f'] ?? ($_GET['file'] ?? ($_GET['download'] ?? ''));
+        $fullPath = driveSafePath($driveConfig['root_dir'], $file);
+        if (!$fullPath || !is_file($fullPath)) driveJsonResponse(['error' => 'File not found'], 404);
+
+        while (ob_get_level()) ob_end_clean();
+        header('Content-Description: File Transfer');
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . basename($fullPath) . '"');
+        header('Expires: 0');
+        header('Cache-Control: must-revalidate');
+        header('Pragma: public');
+        header('Content-Length: ' . filesize($fullPath));
+        readfile($fullPath);
+        exit;
+      }
+
+      if ($driveAction === 'details') {
+        $items = $_POST['items'] ?? ($_GET['items'] ?? null);
+        $singleFile = $_GET['f'] ?? ($_POST['f'] ?? ($_GET['file'] ?? null));
+
+        if ($items && is_array($items)) {
+          $totalBytes = 0;
+          $fileCount = 0;
+          $folderCount = 0;
+          $types = [];
+
+          foreach ($items as $rel) {
+            $full = driveSafePath($driveConfig['root_dir'], $rel);
+            if (!$full || !file_exists($full)) continue;
+            if (is_dir($full)) {
+              $st = driveGetFolderStats($full, $driveConfig['cache_dir']);
+              $folderCount += 1 + $st['folders'];
+              $fileCount += $st['files'];
+              $totalBytes += $st['size'];
+            } else {
+              $fileCount++;
+              $sz = filesize($full);
+              $totalBytes += $sz;
+              $ext = strtolower(pathinfo($full, PATHINFO_EXTENSION)) ?: 'other';
+              $types[$ext] = ($types[$ext] ?? 0) + 1;
+            }
+          }
+
+          driveJsonResponse([
+            'type'    => 'batch',
+            'title'   => count($items) . ' Selected Items',
+            'general' => [
+              'Total Elements' => count($items),
+              'Total Files'    => $fileCount,
+              'Total Folders'  => $folderCount,
+              'Combined Size'  => driveFormatBytes($totalBytes),
+              'File Breakdown' => empty($types) ? 'None' : implode(', ', array_map(fn($k, $v) => "$k ($v)", array_keys($types), $types))
+            ]
+          ]);
+        }
+
+        $fullPath = driveSafePath($driveConfig['root_dir'], $singleFile);
+        if (!$fullPath || !file_exists($fullPath)) driveJsonResponse(['error' => 'Target not found'], 404);
+
+        $isDir = is_dir($fullPath);
+        $relPath = ltrim(str_replace(['\\', '//'], '/', substr($fullPath, strlen(realpath($driveConfig['root_dir'])))), '/');
+
+        if ($isDir) {
+          $stats = driveGetFolderStats($fullPath, $driveConfig['cache_dir']);
+          driveJsonResponse([
+            'type'    => 'folder',
+            'title'   => basename($fullPath) ?: 'Root Directory',
+            'general' => [
+              'Folder Name'   => basename($fullPath) ?: 'Root',
+              'Relative Path' => $relPath ?: '/',
+              'Total Files'   => $stats['files'],
+              'Subfolders'    => $stats['folders'],
+              'Total Size'    => driveFormatBytes($stats['size']),
+              'Last Modified' => date('Y-m-d H:i:s', filemtime($fullPath)),
+              'Permissions'   => substr(sprintf('%o', fileperms($fullPath)), -4)
+            ]
+          ]);
+        }
+
+        $meta = driveGetExifMetadata($fullPath);
+        $media = driveGetMediaMetadata($fullPath);
+        $meta['type'] = 'file';
+        $meta['title'] = basename($fullPath);
+        $meta['media'] = [
+          'tags'      => $media['tags'] ?? [],
+          'cover_art' => $media['cover_art'] ?? null
+        ];
+        $meta['general'] = [
+          'File Name'     => basename($fullPath),
+          'Relative Path' => $relPath,
+          'File Size'     => driveFormatBytes(filesize($fullPath)),
+          'Last Modified' => date('Y-m-d H:i:s', filemtime($fullPath)),
+          'MIME Type'     => mime_content_type($fullPath) ?: 'application/octet-stream',
+          'Permissions'   => substr(sprintf('%o', fileperms($fullPath)), -4)
+        ];
+
+        $img = @getimagesize($fullPath);
+        if ($img) {
+          $meta['general']['Dimensions'] = "{$img[0]} × {$img[1]} px";
+        }
+        driveJsonResponse($meta);
+      }
+
+      if ($driveAction === 'upload_chunk') {
+        $targetDir = driveSafePath($driveConfig['root_dir'], $_POST['dir'] ?? ($_GET['dir'] ?? ''));
+        if (!$targetDir || !is_dir($targetDir) || !is_writable($targetDir)) driveJsonResponse(['error' => 'Invalid upload directory'], 400);
+
+        $uploadId = preg_replace('/[^\w\-]/', '', $_POST['upload_id'] ?? '');
+        $chunkIndex = intval($_POST['chunk_index'] ?? 0);
+        $totalChunks = intval($_POST['total_chunks'] ?? 1);
+        $fileName = preg_replace('/[^\w\s\d\.\-_~()[\]]/', '', basename($_POST['file_name'] ?? ''));
+        $relPath = trim(str_replace(['\\', '..'], ['/', ''], $_POST['relative_path'] ?? ''), '/');
+
+        if (!$uploadId || !$fileName || empty($_FILES['chunk']['tmp_name'])) {
+          driveJsonResponse(['error' => 'Missing chunk data'], 400);
+        }
+
+        $tempChunkDir = $driveConfig['cache_dir'] . DIRECTORY_SEPARATOR . 'chunks' . DIRECTORY_SEPARATOR . $uploadId;
+        if (!is_dir($tempChunkDir)) {
+          @mkdir($tempChunkDir, 0777, true);
+        }
+
+        $chunkFile = $tempChunkDir . DIRECTORY_SEPARATOR . "chunk_{$chunkIndex}";
+        if (!@move_uploaded_file($_FILES['chunk']['tmp_name'], $chunkFile)) {
+          driveJsonResponse(['error' => 'Failed to save chunk'], 500);
+        }
+
+        $allReady = true;
+        for ($i = 0; $i < $totalChunks; $i++) {
+          if (!file_exists($tempChunkDir . DIRECTORY_SEPARATOR . "chunk_{$i}")) {
+            $allReady = false;
+            break;
+          }
+        }
+
+        if ($allReady) {
+          $destDir = $targetDir;
+          if ($relPath) {
+            $subPath = dirname($relPath);
+            if ($subPath && $subPath !== '.') {
+              $destDir = $targetDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $subPath);
+              if (!is_dir($destDir)) {
+                @mkdir($destDir, 0777, true);
+              }
+            }
+          }
+
+          $finalDest = $destDir . DIRECTORY_SEPARATOR . $fileName;
+          $out = fopen($finalDest, 'wb');
+          if (!$out) {
+            driveJsonResponse(['error' => 'Cannot create destination file'], 500);
+          }
+
+          for ($i = 0; $i < $totalChunks; $i++) {
+            $cPath = $tempChunkDir . DIRECTORY_SEPARATOR . "chunk_{$i}";
+            $in = fopen($cPath, 'rb');
+            if ($in) {
+              while ($buff = fread($in, 65536)) {
+                fwrite($out, $buff);
+              }
+              fclose($in);
+              @unlink($cPath);
+            }
+          }
+          fclose($out);
+          @rmdir($tempChunkDir);
+
+          $uploadedRel = ltrim(str_replace(['\\', '//'], '/', substr(realpath($finalDest), strlen(realpath($driveConfig['root_dir'])))), '/');
+          driveLogActivity($driveConfig['meta_file'], 'uploaded', $uploadedRel, 'Uploaded file');
+
+          driveJsonResponse(['success' => true, 'completed' => true, 'file' => $fileName]);
+        }
+
+        driveJsonResponse(['success' => true, 'completed' => false, 'chunk' => $chunkIndex]);
+      }
+
+      if ($driveAction === 'create') {
+        $parent = driveSafePath($driveConfig['root_dir'], $_POST['dir'] ?? '');
+        $name = trim($_POST['name'] ?? '');
+        $type = $_POST['type'] ?? 'folder';
+        if (!$parent || !is_dir($parent) || !$name) driveJsonResponse(['error' => 'Invalid parameters'], 400);
+
+        $name = preg_replace('/[^\w\s\d\.\-_~()[\]]/', '', $name);
+        $dest = $parent . DIRECTORY_SEPARATOR . $name;
+        if (file_exists($dest)) driveJsonResponse(['error' => 'Item already exists'], 400);
+
+        if ($type === 'folder') {
+          $ok = @mkdir($dest, 0777, true);
+        } else {
+          $ok = @file_put_contents($dest, "") !== false;
+        }
+        if ($ok) {
+          driveLogActivity($driveConfig['meta_file'], 'created', $name, "Created new {$type}");
+        }
+        driveJsonResponse(['success' => $ok]);
+      }
+
+      if ($driveAction === 'rename') {
+        $item = driveSafePath($driveConfig['root_dir'], $_POST['path'] ?? '');
+        $newName = trim($_POST['new_name'] ?? '');
+        if (!$item || !file_exists($item) || !$newName) driveJsonResponse(['error' => 'Invalid parameters'], 400);
+
+        $newName = preg_replace('/[^\w\s\d\.\-_~()[\]]/', '', $newName);
+        $dest = dirname($item) . DIRECTORY_SEPARATOR . $newName;
+        if (file_exists($dest)) driveJsonResponse(['error' => 'Destination already exists'], 400);
+
+        $renamed = @rename($item, $dest);
+        if ($renamed) {
+          driveLogActivity($driveConfig['meta_file'], 'renamed', $newName, 'Renamed from ' . basename($item));
+        }
+        driveJsonResponse(['success' => $renamed]);
+      }
+
+      if ($driveAction === 'delete') {
+        $items = $_POST['items'] ?? [];
+        if (!is_array($items) || empty($items)) driveJsonResponse(['error' => 'No items specified'], 400);
+
+        $deleted = 0;
+        foreach ($items as $rel) {
+          $full = driveSafePath($driveConfig['root_dir'], $rel);
+          if ($full && $full !== realpath($driveConfig['root_dir']) && file_exists($full)) {
+            if (driveDeleteRecursive($full)) {
+              $deleted++;
+              driveLogActivity($driveConfig['meta_file'], 'deleted', $rel, 'Permanently deleted');
+            }
+          }
+        }
+        driveJsonResponse(['success' => true, 'deleted_count' => $deleted]);
+      }
+
+      if ($driveAction === 'read_text') {
+        $file = $_GET['f'] ?? ($_GET['file'] ?? '');
+        $fullPath = driveFindRealFile($driveConfig['root_dir'], $file);
+        if (!$fullPath || !is_file($fullPath)) {
+          driveJsonResponse(['error' => 'File not found'], 404);
+        }
+        driveJsonResponse([
+          'content' => @file_get_contents($fullPath),
+          'real_file' => ltrim(str_replace(['\\', '//'], '/', substr(realpath($fullPath), strlen(realpath($driveConfig['root_dir'])))), '/')
+        ]);
+      }
+
+      if ($driveAction === 'save_text') {
+        $file = $_POST['f'] ?? ($_POST['file'] ?? '');
+        $content = $_POST['content'] ?? '';
+        $fullPath = driveFindRealFile($driveConfig['root_dir'], $file);
+        if (!$fullPath) {
+          $fullPath = driveSafePath($driveConfig['root_dir'], $file);
+          $parentDir = dirname($fullPath);
+          if (!is_dir($parentDir)) @mkdir($parentDir, 0777, true);
+        }
+
+        driveBackupVersion($fullPath, $driveConfig);
+        $saved = @file_put_contents($fullPath, $content) !== false;
+        if ($saved) {
+          driveLogActivity($driveConfig['meta_file'], 'modified', $file, 'File edited and saved');
+        }
+        driveJsonResponse(['success' => $saved]);
+      }
+
+      if ($driveAction === 'trash') {
+        $items = $_POST['items'] ?? [];
+        if (!is_array($items) || empty($items)) driveJsonResponse(['error' => 'No items specified'], 400);
+
+        driveCleanOldTrash($driveConfig);
+        $meta = driveGetMeta($driveConfig['meta_file']);
+        $trashed = 0;
+
+        foreach ($items as $rel) {
+          $full = driveSafePath($driveConfig['root_dir'], $rel);
+          if ($full && $full !== realpath($driveConfig['root_dir']) && file_exists($full)) {
+            $trashId = uniqid('trash_') . '_' . basename($full);
+            $dest = $driveConfig['trash_dir'] . DIRECTORY_SEPARATOR . $trashId;
+            if (@rename($full, $dest)) {
+              $meta['trash'][$trashId] = [
+                'trash_name'   => $trashId,
+                'original_rel' => $rel,
+                'original_name'=> basename($full),
+                'trashed_at'   => time(),
+                'is_dir'       => is_dir($dest)
+              ];
+              $trashed++;
+              driveLogActivity($driveConfig['meta_file'], 'trashed', $rel, 'Moved to trash');
+            }
+          }
+        }
+        driveSaveMeta($driveConfig['meta_file'], $meta);
+        driveJsonResponse(['success' => true, 'trashed_count' => $trashed]);
+      }
+
+      if ($driveAction === 'trash_list') {
+        driveCleanOldTrash($driveConfig);
+        $meta = driveGetMeta($driveConfig['meta_file']);
+        driveJsonResponse(['trash' => array_values($meta['trash'] ?? [])]);
+      }
+
+      if ($driveAction === 'trash_restore') {
+        $trashId = $_POST['trash_id'] ?? '';
+        $meta = driveGetMeta($driveConfig['meta_file']);
+        if (!isset($meta['trash'][$trashId])) driveJsonResponse(['error' => 'Trash item not found'], 404);
+
+        $info = $meta['trash'][$trashId];
+        $source = $driveConfig['trash_dir'] . DIRECTORY_SEPARATOR . $info['trash_name'];
+        $target = driveSafePath($driveConfig['root_dir'], $info['original_rel']);
+
+        if (!file_exists($source)) {
+          unset($meta['trash'][$trashId]);
+          driveSaveMeta($driveConfig['meta_file'], $meta);
+          driveJsonResponse(['error' => 'Source file missing'], 404);
+        }
+
+        if (file_exists($target)) {
+          $dir = dirname($target);
+          $ext = pathinfo($target, PATHINFO_EXTENSION);
+          $base = pathinfo($target, PATHINFO_FILENAME);
+          $counter = 1;
+          while (file_exists($target)) {
+            $target = $dir . DIRECTORY_SEPARATOR . "{$base}_restored_{$counter}" . ($ext ? ".{$ext}" : '');
+            $counter++;
+          }
+        }
+
+        if (@rename($source, $target)) {
+          unset($meta['trash'][$trashId]);
+          driveSaveMeta($driveConfig['meta_file'], $meta);
+          driveLogActivity($driveConfig['meta_file'], 'restored', $info['original_rel'], 'Restored from trash');
+          driveJsonResponse(['success' => true]);
+        }
+        driveJsonResponse(['error' => 'Failed to restore item'], 500);
+      }
+
+      if ($driveAction === 'trash_delete') {
+        $trashId = $_POST['trash_id'] ?? '';
+        $meta = driveGetMeta($driveConfig['meta_file']);
+        if (isset($meta['trash'][$trashId])) {
+          $p = $driveConfig['trash_dir'] . DIRECTORY_SEPARATOR . $meta['trash'][$trashId]['trash_name'];
+          if (file_exists($p)) driveDeleteRecursive($p);
+          unset($meta['trash'][$trashId]);
+          driveSaveMeta($driveConfig['meta_file'], $meta);
+          driveJsonResponse(['success' => true]);
+        }
+        driveJsonResponse(['error' => 'Trash item not found'], 404);
+      }
+
+      if ($driveAction === 'trash_empty') {
+        $meta = driveGetMeta($driveConfig['meta_file']);
+        foreach ($meta['trash'] as $item) {
+          $p = $driveConfig['trash_dir'] . DIRECTORY_SEPARATOR . $item['trash_name'];
+          if (file_exists($p)) driveDeleteRecursive($p);
+        }
+        $meta['trash'] = [];
+        driveSaveMeta($driveConfig['meta_file'], $meta);
+        driveJsonResponse(['success' => true]);
+      }
+
+      if ($driveAction === 'versions_list') {
+        $file = $_GET['f'] ?? ($_GET['file'] ?? '');
+        $full = driveSafePath($driveConfig['root_dir'], $file);
+        if (!$full || !is_file($full)) driveJsonResponse(['versions' => []]);
+
+        $rel = ltrim(str_replace(['\\', '//'], '/', substr(realpath($full), strlen(realpath($driveConfig['root_dir'])))), '/');
+        $hashDir = $driveConfig['version_dir'] . DIRECTORY_SEPARATOR . md5($rel);
+        $versions = [];
+
+        if (is_dir($hashDir)) {
+          foreach (scandir($hashDir) as $v) {
+            if ($v === '.' || $v === '..') continue;
+            $vp = $hashDir . DIRECTORY_SEPARATOR . $v;
+            $versions[] = [
+              'filename' => $v,
+              'mtime'    => filemtime($vp),
+              'size'     => driveFormatBytes(filesize($vp)),
+              'date'     => date('Y-m-d H:i:s', filemtime($vp))
+            ];
+          }
+          usort($versions, fn($a, $b) => $b['mtime'] - $a['mtime']);
+        }
+        driveJsonResponse(['versions' => $versions]);
+      }
+
+      if ($driveAction === 'version_read') {
+        $file = $_GET['f'] ?? ($_GET['file'] ?? '');
+        $versionName = $_GET['version'] ?? '';
+        $full = driveSafePath($driveConfig['root_dir'], $file);
+        if (!$full || !is_file($full)) driveJsonResponse(['error' => 'Target file not found'], 404);
+
+        $rel = ltrim(str_replace(['\\', '//'], '/', substr(realpath($full), strlen(realpath($driveConfig['root_dir'])))), '/');
+        $vFile = $driveConfig['version_dir'] . DIRECTORY_SEPARATOR . md5($rel) . DIRECTORY_SEPARATOR . basename($versionName);
+        if (!file_exists($vFile)) driveJsonResponse(['error' => 'Version snapshot not found'], 404);
+
+        driveJsonResponse([
+          'success'  => true,
+          'current'  => @file_get_contents($full),
+          'version'  => @file_get_contents($vFile),
+          'filename' => basename($versionName)
+        ]);
+      }
+
+      if ($driveAction === 'version_restore') {
+        $file = $_POST['f'] ?? ($_POST['file'] ?? '');
+        $versionName = $_POST['version'] ?? '';
+        $full = driveSafePath($driveConfig['root_dir'], $file);
+        if (!$full || !is_file($full)) driveJsonResponse(['error' => 'Target file not found'], 404);
+
+        $rel = ltrim(str_replace(['\\', '//'], '/', substr(realpath($full), strlen(realpath($driveConfig['root_dir'])))), '/');
+        $vFile = $driveConfig['version_dir'] . DIRECTORY_SEPARATOR . md5($rel) . DIRECTORY_SEPARATOR . basename($versionName);
+        if (!file_exists($vFile)) driveJsonResponse(['error' => 'Version file not found'], 404);
+
+        driveBackupVersion($full, $driveConfig);
+        $restored = @copy($vFile, $full);
+        if ($restored) {
+          driveLogActivity($driveConfig['meta_file'], 'restored', $file, 'Restored version ' . basename($versionName));
+        }
+        driveJsonResponse(['success' => $restored]);
+      }
+
+      if ($driveAction === 'star_toggle') {
+        $path = trim($_POST['path'] ?? '');
+        $meta = driveGetMeta($driveConfig['meta_file']);
+        $starred = $meta['starred'] ?? [];
+        if (in_array($path, $starred)) {
+          $starred = array_values(array_diff($starred, [$path]));
+          $isStarred = false;
+        } else {
+          $starred[] = $path;
+          $isStarred = true;
+        }
+        $meta['starred'] = $starred;
+        driveSaveMeta($driveConfig['meta_file'], $meta);
+        driveJsonResponse(['success' => true, 'is_starred' => $isStarred]);
+      }
+
+      if ($driveAction === 'starred_list') {
+        $meta = driveGetMeta($driveConfig['meta_file']);
+        $starred = $meta['starred'] ?? [];
+        $folders = [];
+        $files = [];
+        $totalSize = 0;
+
+        foreach ($starred as $rel) {
+          $full = driveSafePath($driveConfig['root_dir'], $rel);
+          if ($full && file_exists($full)) {
+            $isDir = is_dir($full);
+            $ext = strtolower(pathinfo($full, PATHINFO_EXTENSION));
+            $type = $isDir ? 'folder' : driveGetFileType($ext, $driveConfig);
+            $size = $isDir ? 0 : @filesize($full);
+            if (!$isDir) $totalSize += $size;
+
+            $itemData = [
+              'name'        => basename($full),
+              'path'        => $rel,
+              'is_dir'      => $isDir,
+              'size'        => $size,
+              'size_fmt'    => $isDir ? '' : driveFormatBytes($size),
+              'mtime'       => @filemtime($full),
+              'ext'         => $ext,
+              'type'        => $type,
+              'width'       => 0,
+              'height'      => 0,
+              'items_count' => $isDir ? count(array_diff(@scandir($full) ?: [], ['.', '..', '.gallery_cache', '.drive_trash_bin', '.file_version'])) : 0
+            ];
+
+            if ($isDir) {
+              $folders[] = $itemData;
+            } else {
+              $files[] = $itemData;
+            }
+          }
+        }
+        driveJsonResponse([
+          'starred'       => array_merge($folders, $files),
+          'starred_paths' => array_values($starred),
+          'folders'       => $folders,
+          'files'         => $files,
+          'stats'         => [
+            'folders'    => count($folders),
+            'files'      => count($files),
+            'total_size' => driveFormatBytes($totalSize)
+          ]
+        ]);
+      }
+
+      if ($driveAction === 'recents_list') {
+        $max = 100;
+        $folders = [];
+        $files = [];
+        $seen = [];
+        $realRoot = realpath($driveConfig['root_dir']);
+        $rootLen = strlen($realRoot);
+        $ignoreDirs = [
+          realpath($driveConfig['cache_dir']),
+          realpath($driveConfig['trash_dir']),
+          realpath($driveConfig['version_dir'])
+        ];
+
+        $dirIterator = new RecursiveDirectoryIterator($driveConfig['root_dir'], FilesystemIterator::SKIP_DOTS);
+        $filterIterator = new RecursiveCallbackFilterIterator($dirIterator, function ($current) use ($ignoreDirs) {
+          $path = $current->getPathname();
+          $filename = $current->getFilename();
+          if ($filename[0] === '.' || in_array($filename, ['.git', '.gallery_cache', '.drive_trash_bin', '.file_version', 'node_modules', 'vendor'])) {
+            return false;
+          }
+          foreach ($ignoreDirs as $ign) {
+            if ($ign && strpos($path, $ign) === 0) return false;
+          }
+          return true;
+        });
+
+        $it = new RecursiveIteratorIterator($filterIterator, RecursiveIteratorIterator::SELF_FIRST);
+        $it->setMaxDepth(6);
+
+        foreach ($it as $item) {
+          $realPath = $item->getRealPath();
+          if (!$realPath || isset($seen[$realPath])) continue;
+          $seen[$realPath] = true;
+
+          $rel = ltrim(str_replace(['\\', '//'], '/', substr($realPath, $rootLen)), '/');
+          if ($rel === '') continue;
+
+          $mtime = (int)$item->getMTime();
+
+          if ($item->isDir()) {
+            $subCount = count(array_diff(@scandir($realPath) ?: [], ['.', '..', '.gallery_cache', '.drive_trash_bin', '.file_version']));
+            $folders[] = [
+              'name'        => $item->getFilename(),
+              'path'        => $rel,
+              'mtime'       => $mtime,
+              'items_count' => $subCount,
+              'thumb_image' => driveGetFolderPreviewImage($realPath, $rel, $driveConfig)
+            ];
+          } else {
+            if (preg_match('/\.(part|crdownload|tmp|swp)$/i', $item->getFilename())) continue;
+            $size = (float)$item->getSize();
+            $ext = strtolower($item->getExtension());
+
+            $files[] = [
+              'name'     => $item->getFilename(),
+              'path'     => $rel,
+              'size'     => $size,
+              'size_fmt' => driveFormatBytes($size),
+              'mtime'    => $mtime,
+              'ext'      => $ext,
+              'type'     => driveGetFileType($ext, $driveConfig),
+              'width'    => 0,
+              'height'   => 0
+            ];
+          }
+        }
+
+        usort($folders, fn($a, $b) => $b['mtime'] - $a['mtime']);
+        usort($files, fn($a, $b) => $b['mtime'] - $a['mtime']);
+
+        driveJsonResponse([
+          'folders' => array_slice($folders, 0, $max),
+          'files'   => array_slice($files, 0, $max)
+        ]);
+      }
+
+      if ($driveAction === 'clipboard_paste') {
+        $targetDir = driveSafePath($driveConfig['root_dir'], $_POST['target_dir'] ?? '');
+        $op = $_POST['operation'] ?? 'copy';
+        $items = $_POST['items'] ?? [];
+        if (!$targetDir || !is_dir($targetDir) || !is_array($items)) driveJsonResponse(['error' => 'Invalid parameters'], 400);
+
+        $processed = 0;
+        foreach ($items as $rel) {
+          $src = driveSafePath($driveConfig['root_dir'], $rel);
+          if (!$src || !file_exists($src)) continue;
+          $name = basename($src);
+          $dest = $targetDir . DIRECTORY_SEPARATOR . $name;
+
+          if (file_exists($dest) && $src !== $dest) {
+            $ext = pathinfo($name, PATHINFO_EXTENSION);
+            $baseName = pathinfo($name, PATHINFO_FILENAME);
+            $counter = 1;
+            while (file_exists($dest)) {
+              $dest = $targetDir . DIRECTORY_SEPARATOR . "{$baseName}_({$counter})" . ($ext ? ".{$ext}" : '');
+              $counter++;
+            }
+          }
+
+          if ($op === 'cut') {
+            if (@rename($src, $dest)) {
+              $processed++;
+              driveLogActivity($driveConfig['meta_file'], 'moved', $dest, 'Moved item');
+            }
+          } else {
+            if (is_dir($src)) {
+              $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($src, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+              @mkdir($dest, 0777, true);
+              foreach ($it as $item) {
+                $subDest = $dest . DIRECTORY_SEPARATOR . $it->getSubPathName();
+                if ($item->isDir()) {
+                  @mkdir($subDest, 0777, true);
+                } else {
+                  @copy($item->getPathname(), $subDest);
                 }
               }
+              $processed++;
+              driveLogActivity($driveConfig['meta_file'], 'copied', $dest, 'Copied folder');
+            } else {
+              if (@copy($src, $dest)) {
+                $processed++;
+                driveLogActivity($driveConfig['meta_file'], 'copied', $dest, 'Copied file');
+              }
+            }
+          }
+        }
+        driveJsonResponse(['success' => true, 'processed' => $processed]);
+      }
+
+      if ($driveAction === 'fetch_url') {
+        $url = trim($_POST['url'] ?? '');
+        $customName = trim($_POST['custom_name'] ?? '');
+        $targetDir = driveSafePath($driveConfig['root_dir'], $_POST['dir'] ?? '');
+
+        if (!$url || !$targetDir || !is_dir($targetDir) || !is_writable($targetDir)) {
+          driveJsonResponse(['error' => 'Invalid destination directory'], 400);
+        }
+
+        if (!preg_match('/^https?:\/\//i', $url)) {
+          $url = 'https://' . $url;
+        }
+
+        $tempDest = tempnam(sys_get_temp_dir(), 'phpfiles_dl_');
+        $fp = @fopen($tempDest, 'wb');
+        if (!$fp) driveJsonResponse(['error' => 'Cannot create temporary download buffer'], 500);
+
+        $responseHeaders = [];
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+          CURLOPT_FILE           => $fp,
+          CURLOPT_FOLLOWLOCATION => true,
+          CURLOPT_MAXREDIRS      => 10,
+          CURLOPT_TIMEOUT        => 300,
+          CURLOPT_CONNECTTIMEOUT => 15,
+          CURLOPT_SSL_VERIFYPEER => false,
+          CURLOPT_SSL_VERIFYHOST => false,
+          CURLOPT_USERAGENT      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          CURLOPT_AUTOREFERER    => true,
+          CURLOPT_ENCODING       => '',
+          CURLOPT_HEADERFUNCTION => function($curl, $header) use (&$responseHeaders) {
+            $len = strlen($header);
+            $headerParts = explode(':', $header, 2);
+            if (count($headerParts) === 2) {
+              $responseHeaders[strtolower(trim($headerParts[0]))] = trim($headerParts[1]);
+            }
+            return $len;
+          }
+        ]);
+
+        $success = curl_exec($ch);
+        $curlError = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $effectiveUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL) ?: $url;
+        curl_close($ch);
+        fclose($fp);
+
+        if (!$success || $httpCode < 200 || $httpCode >= 400 || !file_exists($tempDest) || filesize($tempDest) <= 0) {
+          @unlink($tempDest);
+          $msg = $curlError ? $curlError : "Remote server returned HTTP {$httpCode}";
+          driveJsonResponse(['error' => "Download failed: {$msg}"], 500);
+        }
+
+        $detectedName = '';
+        if (!empty($customName)) {
+          $detectedName = $customName;
+        } elseif (!empty($responseHeaders['content-disposition'])) {
+          $cd = $responseHeaders['content-disposition'];
+          if (preg_match('/filename\*=UTF-8\'\'([^;\r\n]+)/i', $cd, $m)) {
+            $detectedName = rawurldecode($m[1]);
+          } elseif (preg_match('/filename="?([^";\r\n]+)"?/i', $cd, $m)) {
+            $detectedName = $m[1];
+          }
+        }
+
+        if (empty($detectedName)) {
+          $pathFromUrl = parse_url($effectiveUrl, PHP_URL_PATH);
+          $detectedName = $pathFromUrl ? rawurldecode(basename($pathFromUrl)) : '';
+        }
+
+        $detectedName = preg_replace('/[^\w\s\d\.\-_~()[\]]/u', '', trim($detectedName));
+        $ext = strtolower(pathinfo($detectedName, PATHINFO_EXTENSION));
+
+        if (!$ext) {
+          $ct = explode(';', $responseHeaders['content-type'] ?? '')[0];
+          $mimeMap = [
+            'image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp',
+            'image/avif' => 'avif', 'image/bmp' => 'bmp', 'image/svg+xml' => 'svg', 'video/mp4' => 'mp4',
+            'video/webm' => 'webm', 'video/x-matroska' => 'mkv', 'video/quicktime' => 'mov',
+            'audio/mpeg' => 'mp3', 'audio/wav' => 'wav', 'audio/ogg' => 'ogg', 'audio/flac' => 'flac',
+            'audio/mp4' => 'm4a', 'application/pdf' => 'pdf', 'application/zip' => 'zip',
+            'application/x-zip-compressed' => 'zip', 'application/json' => 'json', 'text/plain' => 'txt',
+            'text/html' => 'html', 'text/css' => 'css', 'application/javascript' => 'js'
+          ];
+          $ext = $mimeMap[strtolower(trim($ct))] ?? '';
+        }
+
+        $baseName = pathinfo($detectedName, PATHINFO_FILENAME) ?: ('download_' . date('Ymd_His'));
+        $finalName = $ext ? "{$baseName}.{$ext}" : $baseName;
+        $dest = $targetDir . DIRECTORY_SEPARATOR . $finalName;
+
+        $counter = 1;
+        while (file_exists($dest)) {
+          $finalName = $ext ? "{$baseName}_({$counter}).{$ext}" : "{$baseName}_({$counter})";
+          $dest = $targetDir . DIRECTORY_SEPARATOR . $finalName;
+          $counter++;
+        }
+
+        if (@rename($tempDest, $dest) || @copy($tempDest, $dest)) {
+          @unlink($tempDest);
+          driveLogActivity($driveConfig['meta_file'], 'uploaded', $finalName, 'Fetched from URL');
+          driveJsonResponse(['success' => true, 'filename' => $finalName]);
+        }
+
+        @unlink($tempDest);
+        driveJsonResponse(['error' => 'Failed to save downloaded file to storage'], 500);
+      }
+
+      if ($driveAction === 'encrypt_file' || $driveAction === 'decrypt_file') {
+        $file = driveFindRealFile($driveConfig['root_dir'], $_POST['f'] ?? '');
+        $pass = trim($_POST['password'] ?? '');
+        if ($pass === '') $pass = $driveConfig['encryption_key'];
+        if (!$file || !is_file($file)) driveJsonResponse(['error' => 'File not found'], 404);
+
+        $content = @file_get_contents($file);
+        if ($content === false) driveJsonResponse(['error' => 'Cannot read file content'], 500);
+        driveBackupVersion($file, $driveConfig);
+
+        $key = hash('sha256', $pass, true);
+
+        if ($driveAction === 'encrypt_file') {
+          $iv = openssl_random_pseudo_bytes(16);
+          $ciphertext = openssl_encrypt($content, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
+          if ($ciphertext === false) driveJsonResponse(['error' => 'Encryption failed'], 500);
+
+          $final = base64_encode($iv . $ciphertext);
+          $newPath = dirname($file) . DIRECTORY_SEPARATOR . basename($file) . '.enc';
+          if (@file_put_contents($newPath, $final) === false) {
+            driveJsonResponse(['error' => 'Cannot write encrypted file'], 500);
+          }
+          @unlink($file);
+          driveLogActivity($driveConfig['meta_file'], 'modified', $newPath, 'Encrypted file');
+          driveJsonResponse(['success' => true, 'file' => basename($newPath)]);
+        } else {
+          $rawPayload = base64_decode($content, true);
+          if ($rawPayload === false || strlen($rawPayload) < 17) {
+            driveJsonResponse(['error' => 'Invalid or corrupted encrypted payload'], 400);
+          }
+
+          $iv = substr($rawPayload, 0, 16);
+          $ciphertext = substr($rawPayload, 16);
+          $decrypted = openssl_decrypt($ciphertext, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
+
+          if ($decrypted === false) {
+            driveJsonResponse(['error' => 'Decryption failed. Incorrect password.'], 400);
+          }
+
+          $newPath = preg_replace('/\.enc$/i', '', $file);
+          if ($newPath === $file) $newPath .= '_decrypted';
+          if (@file_put_contents($newPath, $decrypted) === false) {
+            driveJsonResponse(['error' => 'Cannot write decrypted file'], 500);
+          }
+          @unlink($file);
+          driveLogActivity($driveConfig['meta_file'], 'modified', $newPath, 'Decrypted file');
+          driveJsonResponse(['success' => true, 'file' => basename($newPath)]);
+        }
+      }
+
+      if ($driveAction === 'share_create') {
+        $file = driveSafePath($driveConfig['root_dir'], $_POST['f'] ?? '');
+        if (!$file || !is_file($file)) driveJsonResponse(['error' => 'File not found'], 404);
+
+        $token = bin2hex(random_bytes(16));
+        $meta = driveGetMeta($driveConfig['meta_file']);
+        $meta['shares'][$token] = [
+          'rel'     => ltrim(str_replace(['\\', '//'], '/', substr(realpath($file), strlen(realpath($driveConfig['root_dir'])))), '/'),
+          'created' => time()
+        ];
+        driveSaveMeta($driveConfig['meta_file'], $meta);
+        driveJsonResponse(['success' => true, 'token' => $token]);
+      }
+
+      if ($driveAction === 'archive_preview') {
+        $file = driveFindRealFile($driveConfig['root_dir'], $_GET['f'] ?? '');
+        if (!$file || !is_file($file)) driveJsonResponse(['error' => 'Archive file not found'], 404);
+
+        $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+        $entries = [];
+        $totalSize = 0;
+
+        if ($ext === 'zip' && class_exists('ZipArchive')) {
+          $zip = new ZipArchive();
+          if ($zip->open($file) === true) {
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+              $stat = $zip->statIndex($i);
+              $isDir = substr($stat['name'], -1) === '/';
+              $size = (float)($stat['size'] ?? 0);
+              if (!$isDir) $totalSize += $size;
+              $entries[] = [
+                'name'       => $stat['name'],
+                'size'       => $size,
+                'size_fmt'   => $isDir ? '' : driveFormatBytes($size),
+                'comp_size'  => driveFormatBytes((float)($stat['comp_size'] ?? 0)),
+                'mtime'      => $stat['mtime'] ? date('Y-m-d H:i:s', $stat['mtime']) : '',
+                'is_dir'     => $isDir
+              ];
+            }
+            $zip->close();
+          }
+        } elseif (in_array($ext, ['tar', 'gz', 'tgz']) && class_exists('PharData')) {
+          try {
+            $phar = new PharData($file);
+            foreach (new RecursiveIteratorIterator($phar) as $item) {
+              $isDir = $item->isDir();
+              $size = (float)$item->getSize();
+              if (!$isDir) $totalSize += $size;
+              $entries[] = [
+                'name'      => $item->getPathname(),
+                'size'      => $size,
+                'size_fmt'  => $isDir ? '' : driveFormatBytes($size),
+                'comp_size' => '-',
+                'mtime'     => date('Y-m-d H:i:s', $item->getMTime()),
+                'is_dir'    => $isDir
+              ];
+            }
+          } catch (Exception $e) {}
+        } elseif ($ext === 'rar' && class_exists('RarArchive')) {
+          $rar = @RarArchive::open($file);
+          if ($rar) {
+            $list = @$rar->getEntries();
+            if ($list) {
+              foreach ($list as $entry) {
+                $isDir = $entry->isDirectory();
+                $size = (float)$entry->getUnpackedSize();
+                if (!$isDir) $totalSize += $size;
+                $entries[] = [
+                  'name'      => $entry->getName(),
+                  'size'      => $size,
+                  'size_fmt'  => $isDir ? '' : driveFormatBytes($size),
+                  'comp_size' => driveFormatBytes((float)$entry->getPackedSize()),
+                  'mtime'     => $entry->getFileTime(),
+                  'is_dir'    => $isDir
+                ];
+              }
+            }
+            $rar->close();
+          }
+        }
+
+        driveJsonResponse([
+          'success'        => true,
+          'archive_name'   => basename($file),
+          'path'           => $_GET['f'],
+          'entries'        => $entries,
+          'total_elements' => count($entries),
+          'total_size'     => driveFormatBytes($totalSize)
+        ]);
+      }
+
+      if ($driveAction === 'zip') {
+        $parent = driveSafePath($driveConfig['root_dir'], $_POST['dir'] ?? '');
+        $items = $_POST['items'] ?? [];
+        $format = strtolower(trim($_POST['format'] ?? 'zip'));
+        $zipName = trim($_POST['zip_name'] ?? ('archive.' . ($format === 'tar.gz' ? 'tar.gz' : $format)));
+
+        if (!$parent || empty($items)) driveJsonResponse(['error' => 'Invalid parameters'], 400);
+
+        $zipName = preg_replace('/[^\w\s\d\.\-_~()[\]]/u', '', $zipName);
+        $ext = '';
+        $baseName = $zipName;
+        if (preg_match('/\.tar\.(gz|bz2)$/i', $zipName, $m)) {
+          $ext = 'tar.' . strtolower($m[1]);
+          $baseName = substr($zipName, 0, -strlen('.' . $ext));
+        } else {
+          $ext = pathinfo($zipName, PATHINFO_EXTENSION);
+          $baseName = pathinfo($zipName, PATHINFO_FILENAME);
+        }
+
+        $destPath = $parent . DIRECTORY_SEPARATOR . $zipName;
+        $counter = 1;
+        while (file_exists($destPath)) {
+          $zipName = $ext ? "{$baseName}_({$counter}).{$ext}" : "{$baseName}_({$counter})";
+          $destPath = $parent . DIRECTORY_SEPARATOR . $zipName;
+          $counter++;
+        }
+
+        if ($format === 'tar' || $format === 'tar.gz' || $format === 'tgz') {
+          if (!class_exists('PharData')) driveJsonResponse(['error' => 'PharData extension required for TAR creation'], 500);
+          $tempTar = $parent . DIRECTORY_SEPARATOR . uniqid('tar_') . '.tar';
+          $phar = new PharData($tempTar);
+
+          foreach ($items as $rel) {
+            $full = driveSafePath($driveConfig['root_dir'], $rel);
+            if ($full && file_exists($full)) {
+              if (is_dir($full)) {
+                $phar->buildFromDirectory($full);
+              } else {
+                $phar->addFile($full, basename($full));
+              }
+            }
+          }
+
+          if ($format === 'tar.gz' || $format === 'tgz') {
+            $phar->compress(Phar::GZ);
+            @unlink($tempTar);
+            @rename($tempTar . '.gz', $destPath);
+          } else {
+            @rename($tempTar, $destPath);
+          }
+          driveLogActivity($driveConfig['meta_file'], 'uploaded', $destPath, "Created {$format} archive");
+          driveJsonResponse(['success' => true, 'archive' => basename($destPath)]);
+        }
+
+        if (!class_exists('ZipArchive')) driveJsonResponse(['error' => 'ZipArchive unavailable'], 500);
+        $zip = new ZipArchive();
+        if ($zip->open($destPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+          driveJsonResponse(['error' => 'Cannot create zip archive'], 500);
+        }
+
+        foreach ($items as $rel) {
+          $full = driveSafePath($driveConfig['root_dir'], $rel);
+          if ($full && file_exists($full)) {
+            if (is_dir($full)) {
+              $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, RecursiveDirectoryIterator::SKIP_DOTS));
+              foreach ($files as $f) {
+                $zip->addFile($f->getPathname(), substr($f->getPathname(), strlen($parent) + 1));
+              }
+            } else {
+              $zip->addFile($full, basename($full));
             }
           }
         }
         $zip->close();
-        header('Content-Type: application/zip');
-        header('Content-Disposition: attachment; filename=' . $zipName);
-        header('Content-Length: ' . filesize($zipName));
-        readfile($zipName);
-        unlink($zipName);
+        driveLogActivity($driveConfig['meta_file'], 'uploaded', $destPath, 'Created ZIP archive');
+        driveJsonResponse(['success' => true, 'archive' => basename($destPath)]);
       }
-      exit;
+
+      if ($driveAction === 'unzip') {
+        $file = driveFindRealFile($driveConfig['root_dir'], $_POST['f'] ?? '');
+        if (!$file || !is_file($file)) driveJsonResponse(['error' => 'Archive not found'], 404);
+
+        $destDir = dirname($file);
+        $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+
+        if ($ext === 'zip' && class_exists('ZipArchive')) {
+          $zip = new ZipArchive();
+          if ($zip->open($file) === true) {
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+              $entryName = $zip->getNameIndex($i);
+              $cleanEntry = ltrim(str_replace(['\\', '..'], ['/', ''], $entryName), '/');
+              if ($cleanEntry === '') continue;
+
+              $isDir = substr($entryName, -1) === '/';
+              $target = $destDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cleanEntry);
+
+              if ($isDir) {
+                if (!is_dir($target)) @mkdir($target, 0777, true);
+              } else {
+                $targetParent = dirname($target);
+                if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
+
+                if (file_exists($target)) {
+                  $fExt = pathinfo($target, PATHINFO_EXTENSION);
+                  $fBase = pathinfo($target, PATHINFO_FILENAME);
+                  $cnt = 1;
+                  while (file_exists($target)) {
+                    $target = $targetParent . DIRECTORY_SEPARATOR . "{$fBase}_({$cnt})" . ($fExt ? ".{$fExt}" : '');
+                    $cnt++;
+                  }
+                }
+
+                $stream = $zip->getStream($entryName);
+                if ($stream) {
+                  $out = @fopen($target, 'wb');
+                  if ($out) {
+                    while (!feof($stream)) {
+                      fwrite($out, fread($stream, 65536));
+                    }
+                    fclose($out);
+                  }
+                  fclose($stream);
+                }
+              }
+            }
+            $zip->close();
+            driveLogActivity($driveConfig['meta_file'], 'modified', $destDir, 'Extracted ZIP archive');
+            driveJsonResponse(['success' => true]);
+          }
+        } elseif (in_array($ext, ['tar', 'gz', 'tgz']) && class_exists('PharData')) {
+          try {
+            $phar = new PharData($file);
+            foreach (new RecursiveIteratorIterator($phar, RecursiveIteratorIterator::SELF_FIRST) as $item) {
+              $subPath = ltrim(str_replace(['\\', '..'], ['/', ''], $item->getPathname()), '/');
+              $rel = substr($subPath, strlen(realpath($file)));
+              $cleanRel = ltrim(str_replace(['\\', '..'], ['/', ''], $rel), '/');
+              if ($cleanRel === '') continue;
+
+              $target = $destDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cleanRel);
+
+              if ($item->isDir()) {
+                if (!is_dir($target)) @mkdir($target, 0777, true);
+              } else {
+                $targetParent = dirname($target);
+                if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
+
+                if (file_exists($target)) {
+                  $fExt = pathinfo($target, PATHINFO_EXTENSION);
+                  $fBase = pathinfo($target, PATHINFO_FILENAME);
+                  $cnt = 1;
+                  while (file_exists($target)) {
+                    $target = $targetParent . DIRECTORY_SEPARATOR . "{$fBase}_({$cnt})" . ($fExt ? ".{$fExt}" : '');
+                    $cnt++;
+                  }
+                }
+                @copy($item->getPathname(), $target);
+              }
+            }
+            driveLogActivity($driveConfig['meta_file'], 'modified', $destDir, 'Extracted TAR archive');
+            driveJsonResponse(['success' => true]);
+          } catch (Exception $e) {}
+        } elseif ($ext === 'rar' && class_exists('RarArchive')) {
+          $rar = @RarArchive::open($file);
+          if ($rar) {
+            $entries = @$rar->getEntries();
+            if ($entries) {
+              foreach ($entries as $entry) {
+                $cleanEntry = ltrim(str_replace(['\\', '..'], ['/', ''], $entry->getName()), '/');
+                if ($cleanEntry === '') continue;
+
+                $target = $destDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cleanEntry);
+
+                if ($entry->isDirectory()) {
+                  if (!is_dir($target)) @mkdir($target, 0777, true);
+                } else {
+                  $targetParent = dirname($target);
+                  if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
+
+                  if (file_exists($target)) {
+                    $fExt = pathinfo($target, PATHINFO_EXTENSION);
+                    $fBase = pathinfo($target, PATHINFO_FILENAME);
+                    $cnt = 1;
+                    while (file_exists($target)) {
+                      $target = $targetParent . DIRECTORY_SEPARATOR . "{$fBase}_({$cnt})" . ($fExt ? ".{$fExt}" : '');
+                      $cnt++;
+                    }
+                  }
+
+                  $stream = @$entry->getStream();
+                  if ($stream) {
+                    $out = @fopen($target, 'wb');
+                    if ($out) {
+                      while (!feof($stream)) {
+                        fwrite($out, fread($stream, 65536));
+                      }
+                      fclose($out);
+                    }
+                    fclose($stream);
+                  }
+                }
+              }
+            }
+            $rar->close();
+            driveLogActivity($driveConfig['meta_file'], 'modified', $destDir, 'Extracted RAR archive');
+            driveJsonResponse(['success' => true]);
+          }
+        }
+
+        driveJsonResponse(['error' => 'Failed to extract archive format'], 500);
+      }
+
+      if ($driveAction === 'download_zip') {
+        $dir = driveSafePath($driveConfig['root_dir'], $_GET['dir'] ?? '');
+        $items = $_POST['items'] ?? null;
+
+        if (!$dir || !is_dir($dir) || !class_exists('ZipArchive')) driveJsonResponse(['error' => 'Invalid directory'], 400);
+
+        $zipName = (basename($dir) ?: 'drive_backup') . '.zip';
+        $tempZip = tempnam(sys_get_temp_dir(), 'zip_');
+        $zip = new ZipArchive();
+        $zip->open($tempZip, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+
+        if ($items && is_array($items)) {
+          foreach ($items as $rel) {
+            $full = driveSafePath($driveConfig['root_dir'], $rel);
+            if ($full && file_exists($full)) {
+              if (is_dir($full)) {
+                $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, RecursiveDirectoryIterator::SKIP_DOTS));
+                foreach ($files as $f) {
+                  if (strpos($f->getPathname(), realpath($driveConfig['cache_dir'])) === 0) continue;
+                  $zip->addFile($f->getPathname(), substr($f->getPathname(), strlen($dir) + 1));
+                }
+              } else {
+                $zip->addFile($full, basename($full));
+              }
+            }
+          }
+        } else {
+          $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, RecursiveDirectoryIterator::SKIP_DOTS));
+          foreach ($files as $f) {
+            if (strpos($f->getPathname(), realpath($driveConfig['cache_dir'])) === 0) continue;
+            $zip->addFile($f->getPathname(), substr($f->getPathname(), strlen($dir) + 1));
+          }
+        }
+        $zip->close();
+
+        while (ob_get_level()) ob_end_clean();
+        header('Content-Type: application/zip');
+        header('Content-Disposition: attachment; filename="' . $zipName . '"');
+        header('Content-Length: ' . filesize($tempZip));
+        readfile($tempZip);
+        @unlink($tempZip);
+        exit;
+      }
+
+      if ($driveAction === 'activity_list') {
+        $meta = driveGetMeta($driveConfig['meta_file']);
+        $activities = $meta['activity'] ?? [];
+        $now = time();
+        $todayCount = 0;
+        $weekCount = 0;
+        $modifiedToday = 0;
+        $uniqueFiles = [];
+
+        foreach ($activities as $act) {
+          $ts = $act['timestamp'] ?? 0;
+          $path = $act['path'] ?? '';
+          if ($now - $ts <= 86400) {
+            $todayCount++;
+            if (($act['action'] ?? '') === 'modified') $modifiedToday++;
+          }
+          if ($now - $ts <= (7 * 86400)) {
+            $weekCount++;
+          }
+          if ($path) {
+            $uniqueFiles[$path] = true;
+          }
+        }
+
+        driveJsonResponse([
+          'activities' => $activities,
+          'stats'      => [
+            'total_events'   => count($activities),
+            'today_count'    => $todayCount,
+            'week_count'     => $weekCount,
+            'modified_today' => $modifiedToday,
+            'unique_files'   => count($uniqueFiles)
+          ]
+        ]);
+      }
+
+      if ($driveAction === 'manga_offline') {
+        $dir = driveSafePath($driveConfig['root_dir'], $_GET['dir'] ?? '');
+        if (!$dir || !is_dir($dir)) driveJsonResponse(['error' => 'Directory not found'], 404);
+
+        $title = htmlspecialchars(basename($dir) ?: 'Manga Reader');
+        $scanned = @scandir($dir) ?: [];
+        $imageFiles = [];
+
+        foreach ($scanned as $item) {
+          if ($item === '.' || $item === '..' || substr($item, 0, 1) === '.') continue;
+          $full = $dir . DIRECTORY_SEPARATOR . $item;
+          if (is_file($full)) {
+            $ext = strtolower(pathinfo($full, PATHINFO_EXTENSION));
+            if (in_array($ext, $driveConfig['image_extensions'])) {
+              $imageFiles[] = $full;
+            }
+          }
+        }
+
+        usort($imageFiles, fn($a, $b) => strnatcasecmp(basename($a), basename($b)));
+
+        while (ob_get_level()) ob_end_clean();
+        header('Content-Type: text/html; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . ($title ?: 'manga') . '_offline.html"');
+
+        echo "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n";
+        echo "  <meta charset=\"UTF-8\">\n";
+        echo "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n";
+        echo "  <title>{$title} - Offline Reader</title>\n";
+        echo "  <style>\n";
+        echo "    * { box-sizing: border-box; margin: 0; padding: 0; }\n";
+        echo "    body { background: #050505; color: #fff; display: flex; flex-direction: column; align-items: center; min-height: 100dvh; overflow-x: hidden; font-family: sans-serif; }\n";
+        echo "    .header { position: sticky; top: 0; width: 100%; background: rgba(10,10,10,0.85); backdrop-filter: blur(10px); padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center; z-index: 100; font-size: 0.9rem; border-bottom: 1px solid rgba(255,255,255,0.1); }\n";
+        echo "    .wrap { width: 100%; max-width: 1000px; display: flex; flex-direction: column; align-items: center; gap: 0; margin: 0 auto; }\n";
+        echo "    .wrap img { display: block; width: 100%; height: auto; margin: 0 auto; padding: 0; border: none; }\n";
+        echo "  </style>\n</head>\n<body>\n";
+        echo "  <div class=\"header\"><strong>{$title}</strong><span>" . count($imageFiles) . " Pages</span></div>\n";
+        echo "  <div class=\"wrap\">\n";
+
+        foreach ($imageFiles as $img) {
+          $mime = mime_content_type($img) ?: 'image/jpeg';
+          $base64 = base64_encode(file_get_contents($img));
+          echo "    <img src=\"data:{$mime};base64,{$base64}\" alt=\"Page\" loading=\"lazy\">\n";
+        }
+
+        echo "  </div>\n</body>\n</html>";
+        exit;
+      }
+
+      driveJsonResponse(['error' => 'Invalid action'], 400);
     }
   }
 
@@ -3758,7 +4241,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               });
             }
 
-            // Seamless Admin Panel SPA Page Transition Router (No Hard Load & Anti-Conflict)
+            // Seamless Admin Panel SPA Page Transition Router (Disabled for Drive)
             const overlay = document.getElementById('admin-loader-overlay');
             let adminNavSeq = 0;
 
@@ -3783,7 +4266,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               showAdminLoader();
               try {
                 const res = await fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-                if (seq !== adminNavSeq) return; // Cancel stale navigation requests
+                if (seq !== adminNavSeq) return;
                 if (!res.ok) throw new Error('HTTP Error ' + res.status);
                 const htmlText = await res.text();
 
@@ -3796,7 +4279,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (newMain && currentMain) {
                   const activeOverlay = document.getElementById('admin-loader-overlay');
 
-                  // Sync Fullscreen IDE state safely without throwing reference errors
                   const appContainer = document.querySelector('.app-container');
                   if (appContainer) {
                     if (url.includes('page=ide') && localStorage.getItem('admin_ide_fullscreen') === 'true') {
@@ -3806,7 +4288,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     }
                   }
 
-                  // Wipe old page content cleanly before injecting
                   currentMain.innerHTML = '';
                   currentMain.appendChild(document.importNode(newMain, true).firstElementChild ? newMain.cloneNode(true) : newMain);
                   currentMain.innerHTML = newMain.innerHTML;
@@ -3863,6 +4344,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const href = link.getAttribute('href');
               if (!href) return;
 
+              // 1. BYPASS SPA FOR DRIVE: Allow clean native browser execution for Drive page
+              if (href.includes('page=drive') || window.location.search.includes('page=drive')) {
+                return;
+              }
+
               if (href.includes('access=admin') && !href.includes('logout=1') && link.target !== '_blank' && !link.hasAttribute('download')) {
                 e.preventDefault();
                 const adminSidebarEl = document.getElementById('admin-sidebar');
@@ -3877,6 +4363,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             });
 
             window.addEventListener('popstate', () => {
+              // 2. BYPASS SPA ON POPSTATE FOR DRIVE: Prevents hash changes (#/folder, #/image) from triggering full SPA reloads
+              if (location.search.includes('page=drive')) {
+                return;
+              }
               if (location.search.includes('access=admin')) {
                 loadAdminPage(location.href, false);
               }
@@ -12542,749 +13032,678 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </script>
 
         <?php elseif (($_GET['page'] ?? '') === 'drive'): ?>
-          <!-- PHPDrive UI -->
+          <!-- HDMarkDown, Highlight.js, CodeMirror, Mermaid & Document Engine CDNs -->
+          <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js"></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+          <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
+          
+          <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+          <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/nord.min.css">
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/search/searchcursor.min.js" defer></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js" defer></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/xml/xml.min.js" defer></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/htmlmixed/htmlmixed.min.js" defer></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/markdown/markdown.min.js" defer></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/php/php.min.js" defer></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/clike/clike.min.js" defer></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js" defer></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js" defer></script>
+
+          <script type="module">
+            import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.esm.min.mjs';
+            mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+            window.mermaid = mermaid;
+            window.dispatchEvent(new Event('mermaidLoaded'));
+          </script>
+
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer></script>
+          <script src="https://cdn.jsdelivr.net/npm/docx-preview@0.1.15/dist/docx-preview.min.js" defer></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
+
           <style>
-            .drive-app-container {
-              --theme-primary: #ff3333;
-              --theme-on-primary: #ffffff;
-              --theme-primary-container: #4a0000;
-              --theme-on-primary-container: #ffc2c2;
-              --theme-surface: #0a0a0a;
-              --theme-surface-container-low: #121212;
-              --theme-surface-container: #1a1a1a;
-              --theme-surface-container-high: #262626;
-              --theme-on-surface: #e3e3e3;
-              --theme-on-surface-variant: #aaaaaa;
-              --theme-outline: #555555;
-              --theme-outline-variant: #2d2d2d;
-              --theme-secondary-container: #ff0000;
-              --theme-on-secondary-container: #ffffff;
-
-              --font-body: 'Roboto', sans-serif;
-              --font-title: 'Google Sans', sans-serif;
-              --transition: 0.2s cubic-bezier(0.2, 0, 0, 1);
+            #phpfiles-app-root {
+              --md-sys-color-surface: #0a0a0a;
+              --md-sys-color-surface-container-lowest: #030303;
+              --md-sys-color-surface-container-low: #121212;
+              --md-sys-color-surface-container: #181818;
+              --md-sys-color-surface-container-high: #222222;
+              --md-sys-color-surface-container-highest: #2c2c2c;
+              --md-sys-color-on-surface: #f1f1f1;
+              --md-sys-color-on-surface-variant: #aaaaaa;
+              --md-sys-color-outline: #555555;
+              --md-sys-color-outline-variant: #333333;
+              --md-sys-color-primary: #ff0000;
+              --md-sys-color-on-primary: #ffffff;
+              --md-sys-color-primary-container: #4a0000;
+              --md-sys-color-on-primary-container: #ffc2c2;
+              --md-sys-color-secondary-container: rgba(255, 0, 0, 0.18);
+              --md-sys-color-on-secondary-container: #ffffff;
+              --md-sys-color-error: #ef4444;
+              --md-sys-color-error-container: #7f1d1d;
+              --md-sys-color-on-error-container: #fecaca;
+              --md-elevation-1: 0px 1px 3px 1px rgba(0, 0, 0, 0.5), 0px 1px 2px 0px rgba(0, 0, 0, 0.7);
+              --md-elevation-2: 0px 2px 6px 2px rgba(0, 0, 0, 0.6), 0px 1px 2px 0px rgba(0, 0, 0, 0.8);
             }
 
-            /* Compact Modern Dark Theme for Ace Editor Searchbox (Drive & IDE) */
-            .ace_editor,
-            .ace_editor * {
-              box-sizing: content-box !important;
-            }
-
-            .ace_search {
-              background-color: #121212 !important;
-              color: #e3e3e3 !important;
-              border: 1px solid #333333 !important;
-              border-radius: 8px !important;
-              box-shadow: 0 4px 16px rgba(0, 0, 0, 0.8) !important;
-              font-family: 'Roboto', system-ui, sans-serif !important;
-              font-size: 11px !important;
-              padding: 8px !important;
-              max-width: 220px !important;
-              width: 100% !important;
-              box-sizing: border-box !important;
-              z-index: 9999 !important;
-            }
-
-            .ace_search * {
-              box-sizing: border-box !important;
-              font-family: inherit !important;
-              font-size: 11px !important;
-              line-height: normal !important;
-              margin: 0 !important;
-            }
-
-            .ace_search_form {
-              display: flex !important;
-              flex-wrap: wrap !important;
-              gap: 4px !important;
-              margin-bottom: 6px !important;
-              width: 100% !important;
-            }
-
-            .ace_replace_form {
-              display: flex;
-              flex-wrap: wrap !important;
-              gap: 4px !important;
-              margin-bottom: 6px !important;
-              width: 100% !important;
-            }
-
-            /* Respect Ace's default hidden state for Replace form */
-            .ace_replace_form[style*="display: none"],
-            .ace_replace_form[style*="display:none"],
-            .ace_replace_form.ace_hidden {
-              display: none !important;
-            }
-
-            .ace_search_field {
-              background: #030303 !important;
-              color: #ffffff !important;
-              border: 1px solid #333333 !important;
-              border-radius: 4px !important;
-              padding: 4px 20px 4px 6px !important;
-              height: 24px !important;
-              min-height: 24px !important;
-              outline: none !important;
-              flex: 1 1 100% !important;
-              width: 100% !important;
-            }
-
-            .ace_search_field:focus {
-              border-color: #ff0000 !important;
-            }
-
-            .ace_searchbtn {
-              background: #282828 !important;
-              color: #ffffff !important;
-              border: 1px solid #404040 !important;
-              border-radius: 4px !important;
-              padding: 2px 6px !important;
-              height: 22px !important;
-              min-height: 22px !important;
-              line-height: 16px !important;
-              cursor: pointer !important;
-              font-weight: 500 !important;
-              flex: 1 1 auto !important;
-              width: auto !important;
-              text-align: center !important;
-            }
-
-            .ace_searchbtn:hover {
-              background: #ff0000 !important;
-              border-color: #ff0000 !important;
-              color: #ffffff !important;
-            }
-
-            .ace_search_options {
-              display: flex !important;
-              align-items: center !important;
-              flex-wrap: wrap !important;
-              gap: 4px !important;
-              margin-top: 4px !important;
-            }
-
-            .ace_button {
-              background: #282828 !important;
-              color: #aaaaaa !important;
-              border: 1px solid #404040 !important;
-              border-radius: 4px !important;
-              padding: 2px 4px !important;
-              cursor: pointer !important;
-              font-weight: 700 !important;
-              font-size: 10px !important;
-            }
-
-            .ace_button:hover,
-            .ace_button.checked {
-              background: #ff0000 !important;
-              color: #ffffff !important;
-              border-color: #ff0000 !important;
-            }
-
-            .ace_searchbtn_close {
-              position: absolute !important;
-              top: 12px !important;
-              right: 10px !important;
-              width: 16px !important;
-              height: 16px !important;
-              background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 14 14"><path d="M14 1.4L12.6 0 7 5.6 1.4 0 0 1.4 5.6 7 0 12.6 1.4 14 7 8.4 12.6 14 14 12.6 8.4 7z" fill="%23aaaaaa"/></svg>') no-repeat center !important;
-              background-size: 8px !important;
-              border: none !important;
-              cursor: pointer !important;
-              opacity: 0.7 !important;
-              padding: 0 !important;
-            }
-
-            .ace_searchbtn_close:hover {
-              opacity: 1 !important;
-            }
-
-            .ace_search_counter {
-              color: #aaaaaa !important;
-              font-size: 10px !important;
-              margin-top: 2px !important;
-              width: 100% !important;
-              text-align: center;
-            }
-
-            .drive-app-container * {
-              margin: 0;
-              padding: 0;
+            #phpfiles-app-root,
+            #phpfiles-app-root * {
               box-sizing: border-box;
-              -webkit-tap-highlight-color: transparent;
+              scrollbar-width: thin;
+              scrollbar-color: var(--md-sys-color-outline-variant) transparent;
             }
 
-            .drive-app-container {
-              font-family: var(--font-body);
-              background-color: var(--theme-surface);
-              color: var(--theme-on-surface);
+            #phpfiles-app-root *::-webkit-scrollbar {
+              width: 6px;
+              height: 6px;
+            }
+
+            #phpfiles-app-root *::-webkit-scrollbar-track {
+              background: transparent;
+            }
+
+            #phpfiles-app-root *::-webkit-scrollbar-thumb {
+              background: var(--md-sys-color-outline-variant);
+              border-radius: 4px;
+            }
+
+            #phpfiles-app-root *::-webkit-scrollbar-thumb:hover {
+              background: #ff0000;
+            }
+
+            #phpfiles-app-root {
+              font-family: 'Roboto', system-ui, -apple-system, sans-serif;
+              background-color: var(--md-sys-color-surface);
+              color: var(--md-sys-color-on-surface);
               height: 100%;
-              overflow: hidden;
-              display: flex;
-              flex-direction: column;
               width: 100%;
-              position: relative;
+              display: flex;
+              flex-direction: column;
+              overflow: hidden;
               user-select: none;
-              -webkit-user-select: none;
+              -webkit-font-smoothing: antialiased;
+              position: relative;
             }
 
-            .drive-app-container .icon-folder { color: #ff3333 !important; }
-            .drive-app-container .icon-zip { color: #f97316 !important; }
-            .drive-app-container .icon-image { color: #10b981 !important; }
-            .drive-app-container .icon-code { color: #3b82f6 !important; }
-            .drive-app-container .icon-media { color: #ef4444 !important; }
-            .drive-app-container .icon-doc { color: #a855f7 !important; }
+            #phpfiles-app-root a {
+              color: inherit;
+              text-decoration: none;
+            }
 
-            .drive-app-container .list-view {
+            #phpfiles-app-root button,
+            #phpfiles-app-root input,
+            #phpfiles-app-root select,
+            #phpfiles-app-root textarea {
+              font-family: inherit;
+              font-size: inherit;
+              color: inherit;
+              border: none;
+              background: none;
+            }
+
+            #phpfiles-app-root button {
+              cursor: pointer;
               display: flex;
-              flex-direction: column;
-              gap: 6px;
-            }
-
-            .drive-app-container .list-view .item-card {
-              height: auto;
-              min-height: 52px;
-              border-radius: 10px;
-              border: 1px solid var(--theme-outline-variant);
-              background-color: var(--theme-surface-container-low);
-              flex-direction: row;
               align-items: center;
-              padding: 8px 40px;
-              gap: 12px;
+              justify-content: center;
             }
 
-            .drive-app-container .list-view .item-card:hover {
-              background-color: var(--theme-surface-container-high);
-              border-color: #ff3333;
+            #phpfiles-app-root svg {
+              width: 20px;
+              height: 20px;
+              fill: currentColor;
+              flex-shrink: 0;
             }
 
-            .drive-app-container .list-view .item-details {
+            .app-topbar {
+              height: 56px;
+              background: var(--md-sys-color-surface);
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0 0.8rem;
+              z-index: 100;
+              gap: 0.6rem;
+              flex-shrink: 0;
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+            }
+
+            .topbar-left,
+            .topbar-right {
+              display: flex;
+              align-items: center;
+              gap: 0.4rem;
+            }
+
+            .topbar-center {
+              flex: 1;
+              display: flex;
+              justify-content: center;
+              max-width: 540px;
+            }
+
+            .brand {
+              font-weight: 700;
+              font-size: 1.05rem;
+              color: var(--md-sys-color-primary);
+              display: flex;
+              align-items: center;
+              gap: 0.5rem;
+              white-space: nowrap;
+              margin-left: 0.2rem;
+            }
+
+            .subbar-path {
+              height: 36px;
+              background: var(--md-sys-color-surface-container-low);
+              display: flex;
+              align-items: center;
+              padding: 0 1rem;
+              font-size: 0.8rem;
+              overflow: hidden;
+              white-space: nowrap;
+              text-overflow: ellipsis;
+              flex-shrink: 0;
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+            }
+
+            .breadcrumbs {
+              display: flex;
+              align-items: center;
+              gap: 0.35rem;
+              overflow-x: auto;
+              white-space: nowrap;
+              scrollbar-width: none;
+              width: 100%;
+            }
+
+            .breadcrumbs::-webkit-scrollbar {
+              display: none;
+            }
+
+            .bc-item {
+              padding: 0.2rem 0.5rem;
+              border-radius: 8px;
+              color: var(--md-sys-color-on-surface-variant);
+              font-weight: 500;
+              max-width: 140px;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+
+            .bc-item:hover {
+              background: var(--md-sys-color-surface-container-high);
+              color: var(--md-sys-color-on-surface);
+            }
+
+            .bc-item.active {
+              color: #ffffff;
+              font-weight: 700;
+              background: var(--md-sys-color-primary);
+            }
+
+            .bc-sep {
+              color: var(--md-sys-color-outline);
+              font-size: 0.75rem;
+            }
+
+            .search-box {
+              position: relative;
+              display: flex;
+              align-items: center;
+              background: var(--md-sys-color-surface-container-high);
+              border-radius: 28px;
+              padding: 0 0.9rem;
+              gap: 0.55rem;
+              width: 100%;
+              height: 40px;
+              transition: all 0.2s ease;
+              border: 1px solid var(--md-sys-color-outline-variant);
+            }
+
+            .search-box:focus-within {
+              background: var(--md-sys-color-surface-container-highest);
+              border-color: var(--md-sys-color-primary);
+              box-shadow: 0 0 0 1px var(--md-sys-color-primary);
+            }
+
+            .search-box input {
+              width: 100%;
+              height: 100%;
+              outline: none;
+              font-size: 0.88rem;
+              color: var(--md-sys-color-on-surface);
+            }
+
+            .search-box svg {
+              color: var(--md-sys-color-on-surface-variant);
+              width: 19px;
+              height: 19px;
+            }
+
+            .btn-icon {
+              width: 40px;
+              height: 40px;
+              border-radius: 20px;
+              color: var(--md-sys-color-on-surface-variant);
+              transition: all 0.15s ease;
+              position: relative;
+            }
+
+            .btn-icon:hover {
+              background: var(--md-sys-color-surface-container-high);
+              color: #ffffff;
+            }
+
+            .btn-icon.active {
+              background: var(--md-sys-color-primary);
+              color: #ffffff;
+            }
+
+            .btn-primary {
+              display: flex;
+              align-items: center;
+              gap: 0.4rem;
+              background: var(--md-sys-color-primary);
+              color: #ffffff;
+              padding: 0.45rem 1rem;
+              height: 40px;
+              border-radius: 20px;
+              font-size: 0.85rem;
+              font-weight: 600;
+              white-space: nowrap;
+              box-shadow: var(--md-elevation-1);
+            }
+
+            .btn-primary:hover {
+              background: #dc2626;
+              color: #ffffff;
+            }
+
+            .app-body {
+              display: flex;
+              flex: 1;
+              overflow: hidden;
+              position: relative;
+              min-height: 0;
+            }
+
+            .sidebar-backdrop {
+              position: fixed;
+              inset: 0;
+              background: rgba(0, 0, 0, 0.7);
+              backdrop-filter: blur(2px);
+              z-index: 140;
+              display: none;
+            }
+
+            .sidebar-backdrop.active {
+              display: block;
+            }
+
+            .sidebar {
+              width: 280px;
+              background: var(--md-sys-color-surface-container-low);
               display: flex;
               flex-direction: column;
+              flex-shrink: 0;
+              overflow-y: auto;
+              transition: margin-left 0.25s cubic-bezier(0.2, 0, 0, 1), transform 0.25s cubic-bezier(0.2, 0, 0, 1);
+              z-index: 150;
+              border-right: 1px solid var(--md-sys-color-outline-variant);
+            }
+
+            .sidebar.collapsed {
+              margin-left: -280px;
+            }
+
+            .sidebar-section {
+              padding: 1rem;
+            }
+
+            .sidebar-title {
+              font-size: 0.75rem;
+              text-transform: uppercase;
+              letter-spacing: 0.8px;
+              color: var(--md-sys-color-outline);
+              font-weight: 700;
+              margin-bottom: 0.6rem;
+              padding-left: 0.5rem;
+            }
+
+            .tree-node-row {
+              display: flex;
+              align-items: center;
+              gap: 0.2rem;
+              margin-bottom: 0.15rem;
+              position: relative;
+            }
+
+            .tree-toggle {
+              width: 24px;
+              height: 24px;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              cursor: pointer;
+              color: var(--md-sys-color-outline);
+              border-radius: 6px;
+              flex-shrink: 0;
+              transition: transform 0.15s ease, color 0.15s ease;
+            }
+
+            .tree-toggle:hover {
+              color: var(--md-sys-color-on-surface);
+              background: var(--md-sys-color-surface-container-high);
+            }
+
+            .tree-toggle svg {
+              width: 14px;
+              height: 14px;
+              transition: transform 0.2s ease;
+            }
+
+            .tree-branch.collapsed>.tree-node-row .tree-toggle svg {
+              transform: rotate(-90deg);
+            }
+
+            .tree-branch.collapsed>.tree-children {
+              display: none;
+            }
+
+            .tree-spacer {
+              width: 24px;
+              height: 24px;
+              flex-shrink: 0;
+            }
+
+            .tree-node-row .tree-node {
+              flex: 1;
+              margin-bottom: 0;
+              min-width: 0;
+            }
+
+            .tree-node {
+              display: flex;
+              align-items: center;
+              justify-content: flex-start;
+              gap: 0.6rem;
+              padding: 0.45rem 0.75rem;
+              border-radius: 20px;
+              font-size: 0.85rem;
+              color: var(--md-sys-color-on-surface-variant);
+              cursor: pointer;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+
+            .tree-node svg {
+              margin: 0;
+              flex-shrink: 0;
+              width: 18px;
+              height: 18px;
+            }
+
+            .tree-node:hover {
+              background: var(--md-sys-color-surface-container-high);
+              color: #ffffff;
+            }
+
+            .tree-node.active {
+              background: rgba(255, 0, 0, 0.2);
+              color: #ffffff;
+              border-left: 3px solid #ff0000;
+              font-weight: 600;
+            }
+
+            .filter-group {
+              display: flex;
+              flex-direction: column;
+              gap: 0.2rem;
+            }
+
+            .filter-item {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0.5rem 0.8rem;
+              border-radius: 28px;
+              font-size: 0.85rem;
+              color: var(--md-sys-color-on-surface-variant);
+              cursor: pointer;
+            }
+
+            .filter-item:hover {
+              background: var(--md-sys-color-surface-container-high);
+              color: #ffffff;
+            }
+
+            .filter-item.active {
+              background: #ff0000;
+              color: #ffffff;
+              font-weight: 600;
+            }
+
+            .filter-badge {
+              font-size: 0.75rem;
+              background: var(--md-sys-color-surface-container-highest);
+              padding: 0.1rem 0.5rem;
+              border-radius: 12px;
+              color: var(--md-sys-color-on-surface-variant);
+            }
+
+            .filter-item.active .filter-badge {
+              background: rgba(0, 0, 0, 0.4);
+              color: #ffffff;
+            }
+
+            .main-content-drive {
+              flex: 1;
+              display: flex;
+              flex-direction: column;
+              overflow-y: auto;
+              position: relative;
+              padding: 1rem 1.2rem 0 1.2rem;
+              -webkit-overflow-scrolling: touch;
+              min-height: 0;
+              min-width: 0;
+              width: 100%;
+              box-sizing: border-box;
+            }
+
+            .content-header {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              margin-bottom: 1rem;
+              flex-wrap: wrap;
+              gap: 0.75rem;
+              width: 100%;
+            }
+
+            .dir-info {
+              display: flex;
+              flex-direction: column;
+              gap: 0.15rem;
               min-width: 0;
               flex: 1;
             }
 
-            .drive-app-container .list-view .item-name {
-              font-size: 14px;
-              font-weight: 500;
-              color: var(--theme-on-surface);
-              white-space: nowrap;
-              overflow: hidden;
-              text-overflow: ellipsis;
-            }
-
-            .drive-app-container .list-view .item-sub-meta {
-              font-size: 11px;
-              color: var(--theme-on-surface-variant);
-              white-space: nowrap;
-              overflow: hidden;
-              text-overflow: ellipsis;
-              margin-top: 2px;
-            }
-
-            .drive-app-container .material-symbols-rounded {
-              font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-              user-select: none;
-              color: var(--theme-on-surface);
-            }
-
-            .drive-app-container .icon-filled {
-              font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-            }
-
-            .drive-app-container .drive-header {
-              height: 64px;
-              display: flex;
-              align-items: center;
-              padding: 0 16px;
-              gap: 12px;
-              background-color: var(--theme-surface);
-              flex-shrink: 0;
-              border-bottom: 1px solid var(--theme-outline-variant);
-            }
-
-            .drive-app-container .drive-menu-btn {
-              display: flex;
-            }
-
-            .drive-app-container .logo-container {
-              display: flex;
-              align-items: center;
-              gap: 8px;
-              width: auto;
-              cursor: pointer;
-              flex-shrink: 0;
-            }
-
-            .drive-app-container .logo-img {
-              width: 36px;
-              height: 36px;
-              border-radius: 8px;
-              background: #ff0000;
-              color: #ffffff;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-            }
-
-            .drive-app-container .logo-img .material-symbols-rounded {
-              color: #ffffff;
-            }
-
-            .drive-app-container .logo-text {
-              font-family: var(--font-title);
-              font-size: 20px;
+            .dir-info h1 {
+              font-size: 1.3rem;
               font-weight: 700;
-              color: var(--theme-on-surface);
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              margin: 0;
+              color: #ffffff;
             }
 
-            .drive-app-container .search-bar {
-              flex: 1;
-              max-width: 600px;
-              height: 44px;
-              background-color: var(--theme-surface-container-high);
-              border-radius: 22px;
+            .dir-stats {
+              font-size: 0.8rem;
+              color: var(--md-sys-color-on-surface-variant);
+            }
+
+            .toolbar-actions {
               display: flex;
               align-items: center;
-              padding: 0 16px;
-              gap: 10px;
-              transition: background-color var(--transition);
-              margin: 0 12px;
-              border: 1px solid var(--theme-outline-variant);
+              gap: 0.35rem;
+              background: var(--md-sys-color-surface-container);
+              padding: 0.3rem 0.5rem;
+              border-radius: 20px;
+              overflow-x: auto;
+              max-width: 100%;
+              scrollbar-width: none;
+              -webkit-overflow-scrolling: touch;
+              flex-shrink: 0;
+              border: 1px solid var(--md-sys-color-outline-variant);
             }
 
-            .drive-app-container .search-bar:focus-within {
-              background-color: var(--theme-surface-container-low);
-              border-color: #ff3333;
+            .toolbar-actions::-webkit-scrollbar {
+              display: none;
             }
 
-            .drive-app-container .search-bar input {
-              flex: 1;
-              border: none;
-              background: none;
-              outline: none;
-              font-size: 15px;
-              color: var(--theme-on-surface);
-              font-family: var(--font-body);
+            .toolbar-actions>* {
+              flex-shrink: 0;
+            }
+
+            .gallery-container {
               width: 100%;
+              min-width: 0;
+              flex: 1;
+              box-sizing: border-box;
             }
 
-            .drive-app-container .search-bar input::placeholder {
-              color: var(--theme-on-surface-variant);
+            .layout-grid {
+              display: grid;
+              grid-template-columns: repeat(auto-fill, minmax(135px, 1fr));
+              grid-auto-rows: min-content;
+              align-content: start;
+              gap: 0.75rem;
+              width: 100%;
+              min-width: 0;
+              box-sizing: border-box;
             }
 
-            .drive-app-container .search-icon {
-              color: var(--theme-on-surface-variant);
+            .layout-grid[data-cols="1"] {
+              grid-template-columns: repeat(1, minmax(0, 1fr));
             }
 
-            .drive-app-container .header-actions {
-              display: flex;
-              gap: 4px;
-              align-items: center;
-              margin-left: auto;
+            .layout-grid[data-cols="2"] {
+              grid-template-columns: repeat(2, minmax(0, 1fr));
             }
 
-            .drive-app-container .icon-btn {
+            .layout-grid[data-cols="3"] {
+              grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+
+            .layout-grid[data-cols="4"] {
+              grid-template-columns: repeat(4, minmax(0, 1fr));
+            }
+
+            .layout-grid[data-cols="5"] {
+              grid-template-columns: repeat(5, minmax(0, 1fr));
+            }
+
+            .layout-grid[data-cols="6"] {
+              grid-template-columns: repeat(6, minmax(0, 1fr));
+            }
+
+            .layout-grid[data-cols="8"] {
+              grid-template-columns: repeat(8, minmax(0, 1fr));
+            }
+
+            .layout-grid .file-card {
+              aspect-ratio: 1 / 1;
+              width: 100%;
+              height: auto;
+            }
+
+            .layout-grid .file-thumb {
+              aspect-ratio: 1 / 1;
+              width: 100%;
+              height: auto;
+            }
+
+            .layout-grid[data-cols="1"] .type-icon svg,
+            .layout-columns[data-cols="1"] .type-icon svg {
+              width: 72px;
+              height: 72px;
+            }
+
+            .layout-grid[data-cols="2"] .type-icon svg,
+            .layout-columns[data-cols="2"] .type-icon svg {
+              width: 58px;
+              height: 58px;
+            }
+
+            .layout-grid[data-cols="3"] .type-icon svg,
+            .layout-columns[data-cols="3"] .type-icon svg {
+              width: 48px;
+              height: 48px;
+            }
+
+            .layout-grid[data-cols="4"] .type-icon svg,
+            .layout-columns[data-cols="4"] .type-icon svg {
               width: 40px;
               height: 40px;
-              border-radius: 50%;
-              border: none;
-              background: transparent;
-              color: var(--theme-on-surface-variant);
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              cursor: pointer;
-              transition: background-color var(--transition);
-              position: relative;
             }
 
-            .drive-app-container .icon-btn:hover {
-              background-color: var(--theme-surface-container-high);
+            .layout-grid[data-cols="5"] .type-icon svg,
+            .layout-columns[data-cols="5"] .type-icon svg {
+              width: 34px;
+              height: 34px;
             }
 
-            .drive-app-container .icon-btn.active {
-              background-color: #ff0000;
-              color: #ffffff;
+            .layout-grid[data-cols="6"] .type-icon svg,
+            .layout-columns[data-cols="6"] .type-icon svg {
+              width: 28px;
+              height: 28px;
             }
 
-            .drive-app-container .icon-btn .material-symbols-rounded {
-              color: var(--theme-on-surface-variant);
+            .layout-grid[data-cols="8"] .type-icon svg,
+            .layout-columns[data-cols="8"] .type-icon svg {
+              width: 22px;
+              height: 22px;
             }
 
-            .drive-app-container .icon-btn:hover .material-symbols-rounded {
-              color: var(--theme-on-surface);
-            }
-
-            .drive-app-container .main-wrapper {
-              display: flex;
-              flex: 1;
-              min-height: 0;
+            .file-card {
+              background: var(--md-sys-color-surface-container-low);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 14px;
               overflow: hidden;
-              position: relative;
-            }
-
-            .drive-app-container .sidebar-drive {
-              width: 240px;
               display: flex;
               flex-direction: column;
-              padding: 16px 12px;
-              gap: 16px;
-              flex-shrink: 0;
-              background: var(--theme-surface);
-              z-index: 100;
-              transition: width 0.3s ease, padding 0.3s ease, left 0.3s ease;
-              border-right: 1px solid var(--theme-outline-variant);
-              overflow: hidden;
-              white-space: nowrap;
-            }
-
-            @media (min-width: 769px) {
-              .drive-app-container .sidebar-drive.collapsed {
-                width: 0;
-                padding-left: 0;
-                padding-right: 0;
-                border-right-color: transparent;
-              }
-            }
-
-            .drive-app-container .sidebar-overlay {
-              position: fixed;
-              inset: 0;
-              background: rgba(0, 0, 0, 0.6);
-              z-index: 99;
-              display: none;
-              opacity: 0;
-              transition: opacity 0.3s;
-            }
-
-            .drive-app-container .fab {
-              height: 52px;
-              border-radius: 16px;
-              background-color: #ff0000;
-              color: #ffffff;
-              border: none;
-              display: inline-flex;
-              align-items: center;
-              padding: 0 20px 0 16px;
-              gap: 12px;
-              font-family: var(--font-title);
-              font-size: 14px;
-              font-weight: 700;
               cursor: pointer;
-              box-shadow: 0 4px 12px rgba(255, 0, 0, 0.3);
-              transition: transform var(--transition), background-color var(--transition);
-              width: fit-content;
-            }
-
-            .drive-app-container .fab:hover {
-              transform: scale(1.03);
-              background-color: #ff1a1a;
-            }
-
-            .drive-app-container .fab .material-symbols-rounded {
-              color: #ffffff;
-            }
-
-            .drive-app-container .nav-list {
-              display: flex;
-              flex-direction: column;
-              gap: 4px;
-            }
-
-            .drive-app-container .nav-item-drive {
-              display: flex;
-              align-items: center;
-              gap: 12px;
-              height: 44px;
-              padding: 0 16px;
-              border-radius: 22px;
-              color: var(--theme-on-surface-variant);
-              cursor: pointer;
-              font-size: 14px;
-              font-weight: 500;
-              transition: background-color var(--transition);
-              text-decoration: none;
-            }
-
-            .drive-app-container .nav-item-drive:hover {
-              background-color: var(--theme-surface-container-low);
-              color: var(--theme-on-surface);
-            }
-
-            .drive-app-container .nav-item-drive.active {
-              background-color: #ff0000;
-              color: #ffffff;
-              font-weight: 700;
-            }
-
-            .drive-app-container .nav-item-drive .material-symbols-rounded {
-              color: var(--theme-on-surface-variant);
-            }
-
-            .drive-app-container .nav-item-drive.active .material-symbols-rounded {
-              color: #ffffff;
-              font-variation-settings: 'FILL' 1;
-            }
-
-            .drive-app-container .content-area-drive {
-              flex: 1;
-              min-height: 0;
-              display: flex;
-              flex-direction: column;
-              background-color: var(--theme-surface);
-              margin: 0;
-              overflow: hidden;
               position: relative;
+              content-visibility: auto;
+              contain-intrinsic-size: 140px;
+              transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
             }
 
-            .drive-app-container .content-header-drive {
-              height: 52px;
-              display: flex;
-              align-items: center;
-              padding: 0 20px;
-              border-bottom: 1px solid var(--theme-outline-variant);
-              justify-content: space-between;
-            }
-
-            .drive-app-container .breadcrumbs {
-              display: flex;
-              align-items: center;
-              font-family: var(--font-title);
-              font-size: 18px;
-              color: var(--theme-on-surface);
-              gap: 4px;
-              overflow-x: auto;
-              white-space: nowrap;
-              scrollbar-width: none;
-            }
-
-            .drive-app-container .breadcrumb-item {
-              cursor: pointer;
-              border-radius: 8px;
-              padding: 4px 8px;
-              transition: background-color var(--transition);
-              color: var(--theme-on-surface);
-            }
-
-            .drive-app-container .breadcrumb-sep {
-              color: var(--theme-on-surface-variant);
-              font-size: 18px;
-            }
-
-            .drive-app-container .chips-container {
-              display: flex;
-              gap: 8px;
-              padding: 12px 20px;
-              overflow-x: auto;
-              scrollbar-width: none;
-              flex-shrink: 0;
-            }
-
-            .drive-app-container .chip {
-              border: 1px solid var(--theme-outline-variant);
-              padding: 6px 16px;
-              border-radius: 16px;
-              font-size: 13px;
-              cursor: pointer;
-              background: transparent;
-              transition: background var(--transition);
-              display: flex;
-              align-items: center;
-              gap: 6px;
-              color: var(--theme-on-surface);
-            }
-
-            .drive-app-container .chip.active {
-              background: #ff0000;
-              color: #ffffff;
-              border-color: transparent;
-              font-weight: 700;
-            }
-
-            .drive-app-container .chip .material-symbols-rounded {
-              color: inherit;
-            }
-
-            .drive-app-container .recents-container {
-              margin-bottom: 16px;
-              flex-shrink: 0;
-            }
-
-            .drive-app-container .recents-tray {
-              display: flex;
-              gap: 12px;
-              overflow-x: auto;
-              padding: 8px 0;
-              scrollbar-width: none;
-            }
-
-            .drive-app-container .recent-card {
-              width: 140px;
-              background: var(--theme-surface-container-low);
-              border-radius: 12px;
-              padding: 12px;
-              flex-shrink: 0;
-              cursor: pointer;
-              user-select: none;
-              border: 1px solid var(--theme-outline-variant);
-              transition: background var(--transition);
-              color: var(--theme-on-surface);
-            }
-
-            .drive-app-container .recent-card:hover {
-              background: var(--theme-surface-container-high);
-              border-color: #ff3333;
-            }
-
-            .drive-app-container .recent-card .material-symbols-rounded {
-              color: #ff3333;
-            }
-
-            .drive-app-container .recent-name {
-              font-size: 12px;
-              font-weight: 500;
-              white-space: nowrap;
-              overflow: hidden;
-              text-overflow: ellipsis;
-              margin-top: 8px;
-            }
-
-            /* Mobile Bottom Area Padding Fix */
-            .drive-app-container .file-list-container {
-              flex: 1;
-              min-height: 0;
-              overflow-y: auto;
-              -webkit-overflow-scrolling: touch;
-              padding: 12px 20px calc(100px + env(safe-area-inset-bottom, 20px)) 20px;
-              position: relative;
-            }
-
-            .drive-app-container .section-title {
-              font-size: 13px;
-              font-weight: 700;
-              text-transform: uppercase;
-              letter-spacing: 0.5px;
-              color: var(--theme-on-surface-variant);
-              margin: 16px 0 12px 4px;
-            }
-
-            .drive-app-container .grid-view {
-              display: grid;
-              grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-              gap: 12px;
-            }
-
-            .drive-app-container .list-view {
-              display: flex;
-              flex-direction: column;
-              gap: 4px;
-            }
-
-            .drive-app-container .item-card {
-              background-color: var(--theme-surface-container-low);
-              border-radius: 12px;
-              border: 1px solid var(--theme-outline-variant);
-              cursor: pointer;
-              user-select: none;
-              transition: background-color var(--transition), border-color var(--transition);
-              display: flex;
-              flex-direction: column;
-              position: relative;
-              overflow: hidden;
-              color: var(--theme-on-surface);
-            }
-
-            .drive-app-container .item-card:hover {
-              background-color: var(--theme-surface-container-high);
-              border-color: #ff3333;
-            }
-
-            .drive-app-container .item-card.selected {
-              background-color: rgba(255, 0, 0, 0.2);
+            .file-card:hover {
+              background: var(--md-sys-color-surface-container);
               border-color: #ff0000;
-              color: #ffffff;
+              box-shadow: 0 4px 12px rgba(255, 0, 0, 0.15);
             }
 
-            .drive-app-container .card-checkbox {
-              position: absolute;
-              top: 8px;
-              left: 8px;
-              width: 24px;
-              height: 24px;
-              color: var(--theme-on-surface-variant);
-              z-index: 10;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              opacity: 0;
-              transition: opacity var(--transition);
+            .file-card:hover .file-info-overlay {
+              background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.6) 65%, transparent 100%);
             }
 
-            .drive-app-container .item-card:hover .card-checkbox,
-            .drive-app-container .item-card.selected .card-checkbox {
-              opacity: 1;
+            .file-card.selected {
+              border-color: #ff0000;
+              background: var(--md-sys-color-surface-container-high);
+              box-shadow: 0 0 0 2px #ff0000;
             }
 
-            .drive-app-container .item-card.selected .card-checkbox {
-              color: #ff0000;
-              font-variation-settings: 'FILL' 1;
-            }
-
-            .drive-app-container .card-checkbox .material-symbols-rounded {
-              color: inherit;
-            }
-
-            .drive-app-container .card-star {
-              position: absolute;
-              top: 8px;
-              right: 8px;
-              width: 24px;
-              height: 24px;
-              color: var(--theme-on-surface-variant);
-              z-index: 10;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              opacity: 0;
-              transition: opacity var(--transition);
-            }
-
-            .drive-app-container .item-card:hover .card-star,
-            .drive-app-container .item-card.starred .card-star {
-              opacity: 1;
-            }
-
-            .drive-app-container .item-card.starred .card-star {
-              color: #f5b041;
-              font-variation-settings: 'FILL' 1;
-            }
-
-            .drive-app-container .card-star .material-symbols-rounded {
-              color: inherit;
-            }
-
-            .drive-app-container .grid-view .item-card {
-              height: 60px;
-              padding: 0 36px;
-              flex-direction: row;
-              align-items: center;
-              gap: 10px;
-            }
-
-            .drive-app-container .grid-view .file-card {
-              height: 180px;
-              flex-direction: column;
-              align-items: stretch;
-              gap: 0;
-              padding: 0;
-            }
-
-            .drive-app-container .grid-view .file-card .file-preview {
-              flex: 1;
-              background-color: #000000;
+            .file-thumb {
+              width: 100%;
+              min-height: 120px;
+              background: var(--md-sys-color-surface-container-lowest);
               display: flex;
               align-items: center;
               justify-content: center;
@@ -13292,2884 +13711,6484 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               position: relative;
             }
 
-            .drive-app-container .grid-view .file-card .file-preview img {
+            .file-thumb::before {
+              content: '';
+              position: absolute;
+              inset: 0;
+              background: var(--md-sys-color-surface-container);
+              pointer-events: none;
+              z-index: 1;
+            }
+
+            .file-thumb img,
+            .file-thumb .type-icon {
+              position: relative;
+              z-index: 2;
+            }
+
+            .file-thumb img {
               width: 100%;
               height: 100%;
               object-fit: cover;
-            }
-
-            .drive-app-container .grid-view .file-card .file-preview .material-symbols-rounded {
-              font-size: 56px;
-              color: #ff3333;
-            }
-
-            .drive-app-container .grid-view .file-card .file-info-bar {
-              height: 50px;
-              display: flex;
-              align-items: center;
-              padding: 0 36px;
-              gap: 10px;
-              border-top: 1px solid var(--theme-outline-variant);
-            }
-
-            .drive-app-container .list-view .item-card {
-              height: 46px;
-              border-radius: 8px;
-              border: 1px solid transparent;
-              flex-direction: row;
-              align-items: center;
-              padding: 0 36px;
-              gap: 12px;
-              background: transparent;
-            }
-
-            .drive-app-container .list-view .item-card:hover {
-              background-color: var(--theme-surface-container-low);
-              border-color: var(--theme-outline-variant);
-            }
-
-            .drive-app-container .list-view .item-card.selected {
-              background-color: rgba(255, 0, 0, 0.2);
-              border-color: #ff0000;
-            }
-
-            .drive-app-container .item-icon {
-              color: #ff3333;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-            }
-
-            .drive-app-container .folder-icon {
-              color: #ff3333;
-              font-variation-settings: 'FILL' 1;
-            }
-
-            .drive-app-container .item-name {
-              flex: 1;
-              white-space: nowrap;
-              overflow: hidden;
-              text-overflow: ellipsis;
-              font-size: 14px;
-              font-weight: 500;
-            }
-
-            .drive-app-container .item-meta {
-              display: none;
-              font-size: 12px;
-              color: var(--theme-on-surface-variant);
-              width: 100px;
-              text-align: right;
-              white-space: nowrap;
-              overflow: hidden;
-              text-overflow: ellipsis;
-            }
-
-            .drive-app-container .list-view .item-meta {
               display: block;
             }
 
-            .drive-app-container .context-menu,
-            .drive-app-container .floating-menu,
-            .drive-app-container .sort-menu {
-              position: fixed;
-              background-color: var(--theme-surface-container-high);
-              border-radius: 12px;
-              box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-              padding: 8px 0;
-              z-index: 1000;
-              min-width: 200px;
-              display: none;
-              flex-direction: column;
-              border: 1px solid var(--theme-outline-variant);
-            }
-
-            .drive-app-container .menu-item {
+            .file-info-overlay {
+              position: absolute;
+              inset: auto 0 0 0;
+              background: linear-gradient(to top, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0.45) 60%, transparent 100%);
+              padding: 2rem 0.65rem 0.55rem 0.65rem;
+              color: #ffffff;
               display: flex;
-              align-items: center;
-              gap: 12px;
-              padding: 10px 16px;
-              font-size: 14px;
-              color: var(--theme-on-surface);
-              cursor: pointer;
-              transition: background-color var(--transition);
+              flex-direction: column;
+              gap: 0.15rem;
+              pointer-events: none;
+              z-index: 4;
             }
 
-            .drive-app-container .menu-item:hover {
-              background-color: var(--theme-surface-container);
+            .file-info-overlay .file-name {
+              font-size: 0.82rem;
+              font-weight: 600;
               color: #ffffff;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
             }
 
-            .drive-app-container .menu-item .material-symbols-rounded {
-              font-size: 20px;
-              color: var(--theme-on-surface-variant);
+            .file-info-overlay .file-meta {
+              font-size: 0.7rem;
+              color: rgba(255, 255, 255, 0.85);
+              display: flex;
+              justify-content: space-between;
+              text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
             }
 
-            .drive-app-container .menu-item:hover .material-symbols-rounded {
-              color: #ff3333;
+            .layout-columns {
+              display: flex;
+              gap: 0.75rem;
+              align-items: flex-start;
+              width: 100%;
+              box-sizing: border-box;
             }
 
-            .drive-app-container .menu-item.active {
-              background-color: #ff0000;
-              color: #ffffff;
+            .masonry-col {
+              flex: 1;
+              min-width: 0;
+              display: flex;
+              flex-direction: column;
+              gap: 0.75rem;
+              box-sizing: border-box;
             }
 
-            .drive-app-container .menu-divider {
-              height: 1px;
-              background-color: var(--theme-outline-variant);
-              margin: 4px 0;
+            .layout-columns .file-card {
+              width: 100%;
+              height: auto;
+              margin-bottom: 0;
+              position: relative;
+              overflow: hidden;
+              display: flex;
+              flex-direction: column;
+              aspect-ratio: auto;
+              content-visibility: visible !important;
+              contain-intrinsic-size: auto;
+              box-sizing: border-box;
             }
 
-            .drive-app-container .modal-overlay {
-              position: fixed;
-              inset: 0;
-              background: rgba(0, 0, 0, 0.7);
-              z-index: 2000;
-              display: none;
+            .layout-columns .file-card:not(.is-folder) .file-thumb {
+              width: 100%;
+              min-height: 140px;
+              height: auto;
+              display: flex;
               align-items: center;
               justify-content: center;
-              backdrop-filter: blur(2px);
+              position: relative;
+              flex-shrink: 0;
+              background: var(--md-sys-color-surface-container);
             }
 
-            .drive-app-container .modal-drive {
-              background-color: var(--theme-surface-container);
-              border-radius: 20px;
-              width: 90%;
-              max-width: 400px;
-              padding: 24px;
+            .layout-columns .file-card.is-folder,
+            .layout-columns .file-card:not(.has-image) {
+              aspect-ratio: 1 / 1 !important;
+              height: auto;
+            }
+
+            .layout-columns .file-card.is-folder .file-thumb,
+            .layout-columns .file-card:not(.has-image) .file-thumb {
+              aspect-ratio: 1 / 1 !important;
+              width: 100% !important;
+              height: 100% !important;
+              min-height: 120px;
+            }
+
+            .layout-columns .file-card.is-folder .file-thumb img {
+              width: 100%;
+              height: 100%;
+              object-fit: cover !important;
+            }
+
+            .layout-columns .file-thumb img {
+              width: 100%;
+              height: auto;
+              display: block;
+              object-fit: contain;
+            }
+
+            .layout-list {
               display: flex;
               flex-direction: column;
-              gap: 16px;
-              box-shadow: 0 24px 38px 3px rgba(0, 0, 0, 0.5);
-              border: 1px solid var(--theme-outline-variant);
+              gap: 0.5rem;
             }
 
-            .drive-app-container .modal-title-drive {
-              font-family: var(--font-title);
-              font-size: 20px;
-              font-weight: 700;
-              color: var(--theme-on-surface);
-            }
-
-            .drive-app-container .modal-input-drive {
-              background-color: var(--theme-surface-container-high);
-              border: 1px solid var(--theme-outline);
-              border-radius: 8px;
-              padding: 12px 16px;
-              font-size: 15px;
-              color: var(--theme-on-surface);
-              outline: none;
-              border-bottom: 2px solid #ff0000;
-              width: 100%;
-            }
-
-            .drive-app-container .btn-drive {
-              padding: 0 20px;
-              height: 38px;
-              border-radius: 19px;
-              font-weight: 600;
-              font-size: 14px;
-              cursor: pointer;
-              border: none;
-              transition: background-color var(--transition);
-              display: inline-flex;
-              align-items: center;
-              gap: 8px;
-            }
-
-            .drive-app-container .btn-text-drive {
-              background: transparent;
-              color: #ff3333;
-            }
-
-            .drive-app-container .btn-text-drive:hover {
-              background-color: rgba(255, 0, 0, 0.1);
-            }
-
-            .drive-app-container .btn-filled-drive {
-              background-color: #ff0000;
-              color: #ffffff;
-            }
-
-            /* Lock Body Overflow when Drive Editor is Active */
-            body.drive-editor-open {
-              overflow: hidden !important;
-              touch-action: none;
-            }
-
-            .drive-app-container .editor-overlay-drive {
-              position: fixed !important;
-              top: 0 !important;
-              left: 0 !important;
-              right: 0 !important;
-              bottom: 0 !important;
-              width: 100vw !important;
-              height: 100dvh !important;
-              max-height: 100dvh !important;
-              background-color: var(--theme-surface) !important;
-              z-index: 3000 !important;
-              display: none;
-              flex-direction: column !important;
-              overflow: hidden !important;
-            }
-
-            .drive-app-container .editor-header-drive {
-              height: 60px !important;
-              min-height: 60px !important;
-              max-height: 60px !important;
-              flex: 0 0 60px !important;
+            .layout-list .file-card {
               display: flex;
+              flex-direction: row;
               align-items: center;
-              padding: 0 16px;
-              gap: 12px;
-              border-bottom: 1px solid var(--theme-outline-variant);
-              background-color: var(--theme-surface-container-low);
-              box-sizing: border-box;
-              z-index: 10;
+              padding: 0.5rem 0.85rem;
+              gap: 0.85rem;
+              aspect-ratio: auto;
+              height: auto;
+              min-height: 56px;
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 14px;
+              background: var(--md-sys-color-surface-container-low);
+              box-shadow: none;
+              transition: background-color 0.15s ease, border-color 0.15s ease;
             }
 
-            .drive-app-container .editor-title-drive {
+            .layout-list .file-card:hover {
+              background: var(--md-sys-color-surface-container);
+              border-color: #ff0000;
+              box-shadow: var(--md-elevation-1);
+            }
+
+            .layout-list .file-card:hover .file-info-overlay {
+              background: none !important;
+            }
+
+            .layout-list .file-card.selected {
+              border-color: #ff0000;
+              background: var(--md-sys-color-surface-container-high);
+              box-shadow: 0 0 0 2px #ff0000;
+            }
+
+            .layout-list .file-checkbox {
+              position: static;
+              width: 20px;
+              height: 20px;
+              border-radius: 6px;
+              background: transparent;
+              border: 2px solid var(--md-sys-color-outline);
+              flex-shrink: 0;
+            }
+
+            .layout-list .file-card.selected .file-checkbox {
+              background: #ff0000;
+              border-color: #ff0000;
+            }
+
+            .layout-list .file-thumb {
+              width: 38px;
+              height: 38px;
+              min-height: 38px;
+              aspect-ratio: 1 / 1;
+              border-radius: 8px;
+              flex-shrink: 0;
+              background: var(--md-sys-color-surface-container);
+            }
+
+            .layout-list .file-thumb::before {
+              display: none;
+            }
+
+            .layout-list .file-thumb .type-icon svg {
+              width: 26px;
+              height: 26px;
+            }
+
+            .layout-list .file-badge {
+              display: none;
+            }
+
+            .layout-list .file-info-overlay {
+              position: static;
+              background: none !important;
+              padding: 0;
               flex: 1;
-              font-family: var(--font-title);
-              font-size: 18px;
-              color: var(--theme-on-surface);
+              display: flex;
+              flex-direction: column;
+              justify-content: center;
+              gap: 0.15rem;
+              min-width: 0;
+            }
+
+            .layout-list .file-info-overlay .file-name {
+              font-size: 0.88rem;
+              font-weight: 500;
+              color: #ffffff;
+              text-shadow: none;
               white-space: nowrap;
               overflow: hidden;
               text-overflow: ellipsis;
             }
 
-            /* Strict Editor Body Containment */
-            .editor-body-wrapper {
-              flex: 1 1 auto !important;
-              min-height: 0 !important;
-              height: calc(100dvh - 60px) !important;
-              max-height: calc(100dvh - 60px) !important;
-              width: 100% !important;
-              position: relative !important;
-              overflow: hidden !important;
-              display: flex;
-              flex-direction: column;
-            }
-
-            #desktopEditorContainer {
-              flex: 1 1 100% !important;
-              min-height: 0 !important;
-              height: 100% !important;
-              max-height: 100% !important;
-              width: 100% !important;
-              position: relative !important;
-              overflow: hidden !important;
-            }
-
-            #aceEditorInstance {
-              position: absolute !important;
-              top: 0 !important;
-              left: 0 !important;
-              right: 0 !important;
-              bottom: 0 !important;
-              width: 100% !important;
-              height: 100% !important;
-              margin: 0 !important;
-            }
-
-            /* Ace Editor Gutter & Line Numbers Alignment Fix */
-            .ace_editor {
-              font-family: 'Consolas', 'Monaco', 'Courier New', monospace !important;
-              font-size: 14px !important;
-              line-height: 1.5 !important;
-            }
-
-            .ace_gutter {
-              background-color: var(--theme-surface-container-low) !important;
-              color: var(--theme-on-surface-variant) !important;
-            }
-
-            .ace_gutter-cell {
-              padding-left: 8px !important;
-              padding-right: 8px !important;
-            }
-
-            .drive-app-container .versions-list {
-              max-height: 250px;
-              overflow-y: auto;
-              background: var(--theme-surface-container-high);
-              border-radius: 8px;
-              padding: 4px;
-            }
-
-            .drive-app-container .version-item {
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              padding: 10px;
-              border-bottom: 1px solid var(--theme-outline-variant);
-            }
-
-            .drive-app-container .version-item:last-child {
-              border-bottom: none;
-            }
-
-            .drive-app-container .snackbar-container-drive {
-              position: fixed;
-              bottom: calc(24px + env(safe-area-inset-bottom, 0px));
-              left: 50%;
-              transform: translateX(-50%);
-              z-index: 4000;
-              display: flex;
-              flex-direction: column;
-              gap: 8px;
-              align-items: center;
-            }
-
-            .drive-app-container .snackbar-drive {
-              background-color: var(--theme-on-surface);
-              color: var(--theme-surface);
-              padding: 12px 20px;
-              border-radius: 8px;
-              font-size: 14px;
-              font-weight: 500;
+            .layout-list .file-info-overlay .file-meta {
+              font-size: 0.75rem;
+              color: var(--md-sys-color-on-surface-variant);
+              text-shadow: none;
               display: flex;
               align-items: center;
-              justify-content: space-between;
-              min-width: 280px;
-              max-width: 400px;
-              box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-              opacity: 0;
-              margin-bottom: -20px;
-              transition: opacity 0.3s, margin-bottom 0.3s;
+              justify-content: flex-start;
+              gap: 1.2rem;
             }
 
-            .drive-app-container .snackbar-drive.show {
-              opacity: 1;
-              margin-bottom: 0;
+            .file-badge {
+              position: absolute;
+              top: 8px;
+              right: 8px;
+              background: rgba(0, 0, 0, 0.75);
+              color: #fff;
+              font-size: 0.65rem;
+              font-weight: 700;
+              padding: 0.15rem 0.4rem;
+              border-radius: 6px;
+              text-transform: uppercase;
+              z-index: 5;
             }
 
-            .drive-app-container .properties-pane {
-              width: 300px;
-              background-color: var(--theme-surface);
-              border-left: 1px solid var(--theme-outline-variant);
-              flex-direction: column;
+            .file-star-btn {
+              position: absolute;
+              top: 8px;
+              right: 8px;
+              width: 28px;
+              height: 28px;
+              padding: 0;
+              margin: 0;
+              border: none;
+              border-radius: 50%;
+              background: rgba(0, 0, 0, 0.6);
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              color: rgba(255, 255, 255, 0.75);
+              z-index: 10;
+              cursor: pointer;
+              line-height: 0;
+              transition: transform 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+            }
+
+            .file-star-btn svg {
+              width: 16px;
+              height: 16px;
+              display: block;
+              margin: 0 auto;
+              fill: currentColor;
+            }
+
+            .file-star-btn:hover {
+              background: rgba(0, 0, 0, 0.9);
+              color: #f59e0b;
+              transform: scale(1.1);
+            }
+
+            .file-star-btn.active {
+              color: #f59e0b;
+              background: rgba(0, 0, 0, 0.8);
+              display: flex !important;
+            }
+
+            .layout-list .file-star-btn {
+              position: static;
+              width: 32px;
+              height: 32px;
+              background: transparent;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              flex-shrink: 0;
+            }
+
+            .layout-list .file-star-btn:not(.active) {
+              color: var(--md-sys-color-outline);
+            }
+
+            .file-checkbox {
+              position: absolute;
+              top: 8px;
+              left: 8px;
+              width: 22px;
+              height: 22px;
+              border-radius: 6px;
+              border: 2px solid var(--md-sys-color-outline);
+              background: rgba(0, 0, 0, 0.5);
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              z-index: 10;
+              transition: all 0.15s;
+            }
+
+            .file-card.selected .file-checkbox {
+              background: #ff0000;
+              border-color: #ff0000;
+            }
+
+            .file-checkbox svg {
+              width: 14px;
+              height: 14px;
+              fill: #ffffff;
               display: none;
-              color: var(--theme-on-surface);
             }
 
-            .drive-app-container .properties-header {
+            .file-card.selected .file-checkbox svg {
+              display: block;
+            }
+
+            .batch-bar {
+              position: fixed;
+              bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+              left: 50%;
+              transform: translateX(-50%) translateY(160%);
+              background: var(--md-sys-color-surface-container-highest);
+              border: 1px solid #ff0000;
+              padding: 0.35rem 0.75rem;
+              border-radius: 32px;
+              box-shadow: 0 10px 25px rgba(0, 0, 0, 0.8);
+              display: flex;
+              align-items: center;
+              gap: 0.3rem;
+              z-index: 500;
+              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1);
+            }
+
+            .batch-bar.active {
+              transform: translateX(-50%) translateY(0);
+            }
+
+            .batch-bar .btn-icon {
+              width: 36px;
+              height: 36px;
+              border-radius: 18px;
+              color: var(--md-sys-color-on-surface);
+            }
+
+            .batch-bar .btn-icon:hover {
+              background: rgba(255, 0, 0, 0.2);
+              color: #ff0000;
+            }
+
+            .batch-count {
+              font-size: 0.85rem;
+              font-weight: 700;
+              color: #ff0000;
+              padding: 0 0.4rem;
+              white-space: nowrap;
+            }
+
+            .type-icon {
+              width: 100%;
+              height: 100%;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              margin: auto;
+            }
+
+            .type-icon svg {
+              width: 38px;
+              height: 38px;
+            }
+
+            .type-folder {
+              color: #ff0000;
+            }
+
+            .center-state {
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              justify-content: center;
+              width: 100%;
+              min-height: 45dvh;
+              grid-column: 1 / -1;
+              color: var(--md-sys-color-on-surface-variant);
+              text-align: center;
+              gap: 0.75rem;
+            }
+
+            .m3-spinner {
+              width: 40px;
+              height: 40px;
+              animation: m3-rotate 2s linear infinite;
+              display: block;
+              margin: auto;
+            }
+
+            .m3-spinner circle {
+              stroke: #ff0000;
+              stroke-linecap: round;
+              animation: m3-dash 1.5s ease-in-out infinite;
+            }
+
+            @keyframes m3-rotate {
+              100% {
+                transform: rotate(360deg);
+              }
+            }
+
+            @keyframes m3-dash {
+              0% {
+                stroke-dasharray: 1, 150;
+                stroke-dashoffset: 0;
+              }
+
+              50% {
+                stroke-dasharray: 90, 150;
+                stroke-dashoffset: -35;
+              }
+
+              100% {
+                stroke-dasharray: 90, 150;
+                stroke-dashoffset: -124;
+              }
+            }
+
+            .manga-container {
+              position: fixed;
+              inset: 0;
+              height: 100dvh;
+              min-height: 100dvh;
+              background: #030303;
+              z-index: 2000;
+              display: none;
+              flex-direction: column;
+              overflow-y: auto;
+              overflow-x: hidden;
+              scroll-behavior: smooth;
+            }
+
+            .manga-container.active {
+              display: flex;
+            }
+
+            .manga-topbar {
+              position: fixed;
+              top: 0;
+              left: 0;
+              right: 0;
               height: 52px;
+              background: rgba(18, 18, 18, 0.95);
+              backdrop-filter: blur(16px);
+              -webkit-backdrop-filter: blur(16px);
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
               display: flex;
               align-items: center;
               justify-content: space-between;
-              padding: 0 16px;
-              border-bottom: 1px solid var(--theme-outline-variant);
+              padding: 0 1rem;
+              z-index: 2050;
+              color: #ffffff;
+              transition: transform 0.25s ease;
             }
 
-            .drive-app-container .properties-content {
-              padding: 16px;
-              overflow-y: auto;
+            .manga-topbar.autohide {
+              transform: translateY(-100%);
+            }
+
+            .manga-counter {
+              font-weight: 700;
+              font-size: 0.9rem;
+              background: rgba(255, 0, 0, 0.2);
+              color: #ff0000;
+              padding: 0.25rem 0.75rem;
+              border-radius: 16px;
+              letter-spacing: 0.5px;
+              border: 1px solid rgba(255, 0, 0, 0.3);
+            }
+
+            .manga-controls {
+              display: flex;
+              align-items: center;
+              gap: 0.4rem;
+            }
+
+            .manga-pages-wrap {
+              width: 100%;
               display: flex;
               flex-direction: column;
-              gap: 16px;
+              align-items: center;
+              justify-content: flex-start;
+              padding: 52px 0 calc(30px + env(safe-area-inset-bottom, 0px)) 0;
+              gap: 0px;
+              margin: 0 auto;
+            }
+
+            .manga-select {
+              background: #181818;
+              color: #ffffff;
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 12px;
+              padding: 0.35rem 1.75rem 0.35rem 0.75rem;
+              font-size: 0.8rem;
+              font-weight: 500;
+              outline: none;
+              cursor: pointer;
+              -webkit-appearance: none;
+              appearance: none;
+              background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='%23ff0000'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+              background-repeat: no-repeat;
+              background-position: right 0.55rem center;
+              background-size: 16px 16px;
+            }
+
+            .manga-select option {
+              background-color: #181818;
+              color: #ffffff;
+              padding: 0.4rem;
+            }
+
+            .manga-page {
+              width: 100%;
+              max-width: var(--manga-width, 1000px);
+              min-height: 250px;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              line-height: 0;
+              font-size: 0;
+              margin: 0 auto;
+              padding: 0;
+            }
+
+            .manga-page img {
+              width: 100%;
+              height: auto;
+              display: block;
+              margin: 0 auto;
+              padding: 0;
+              border: none;
+              outline: none;
+              object-fit: contain;
+            }
+
+            .manga-pages-wrap.mode-fit-height .manga-page,
+            .manga-pages-wrap.mode-fit-screen .manga-page {
+              max-width: 100%;
+              min-height: auto;
+              padding: 0.25rem 0;
+            }
+
+            .manga-pages-wrap.mode-fit-height .manga-page img {
+              width: auto;
+              max-width: 100%;
+              max-height: calc(100dvh - 64px);
+              object-fit: contain;
+            }
+
+            .manga-pages-wrap.mode-fit-screen .manga-page img {
+              width: auto;
+              max-width: 95vw;
+              max-height: calc(100dvh - 64px);
+              object-fit: contain;
+            }
+
+            .lightbox {
+              position: fixed;
+              inset: 0;
+              height: 100dvh;
+              min-height: 100dvh;
+              background: rgba(5, 5, 5, 0.92);
+              backdrop-filter: blur(24px);
+              -webkit-backdrop-filter: blur(24px);
+              z-index: 1500;
+              display: none;
+              flex-direction: column;
+              touch-action: pan-y;
+            }
+
+            .lightbox.active {
+              display: flex;
+            }
+
+            .lightbox-header {
+              height: 56px;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0 1.2rem;
+              background: rgba(18, 18, 18, 0.85);
+              backdrop-filter: blur(12px);
+              -webkit-backdrop-filter: blur(12px);
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+              color: #fff;
+              position: absolute;
+              top: 0;
+              left: 0;
+              right: 0;
+              z-index: 1550;
+            }
+
+            .lightbox-title {
+              font-weight: 700;
+              font-size: 0.95rem;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              max-width: 60vw;
+              letter-spacing: 0.2px;
+            }
+
+            .lightbox-body {
               flex: 1;
+              position: relative;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              overflow: hidden;
+              user-select: none;
+            }
+
+            .lightbox-media {
+              max-width: 95%;
+              max-height: 86dvh;
+              object-fit: contain;
+              user-select: none;
+              box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
+              border-radius: 16px;
+              opacity: 1;
+              transform: translateZ(0);
+              will-change: transform, opacity;
+              background: transparent;
+            }
+
+            .lightbox-audio-card {
+              background: rgba(24, 24, 24, 0.9);
+              backdrop-filter: blur(24px);
+              -webkit-backdrop-filter: blur(24px);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              padding: 2.2rem 2rem 1.8rem 2rem;
+              border-radius: 32px;
+              text-align: center;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              gap: 1.2rem;
+              max-width: 420px;
+              width: 88%;
+              box-shadow: 0 24px 60px rgba(0, 0, 0, 0.8);
+              position: relative;
+              z-index: 1515;
+            }
+
+            .lightbox-audio-badge {
+              font-size: 0.7rem;
+              font-weight: 700;
+              letter-spacing: 0.8px;
+              text-transform: uppercase;
+              color: #ff0000;
+              background: rgba(255, 0, 0, 0.15);
+              padding: 0.2rem 0.75rem;
+              border-radius: 14px;
+              border: 1px solid rgba(255, 0, 0, 0.3);
+            }
+
+            .lightbox-audio-disc-wrap {
+              position: relative;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              padding: 0.4rem;
+            }
+
+            .lightbox-audio-disc {
+              width: 124px;
+              height: 124px;
+              border-radius: 50%;
+              background: radial-gradient(circle, #1a1721 0%, #121016 45%, #24202e 48%, #121016 52%, #1e1b26 70%, #0d0c10 100%);
+              box-shadow: 0 10px 28px rgba(0, 0, 0, 0.8), inset 0 0 0 2px rgba(255, 255, 255, 0.08), inset 0 0 0 8px rgba(0, 0, 0, 0.6);
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              position: relative;
+              transition: transform 0.3s ease, box-shadow 0.3s ease;
+            }
+
+            .lightbox-audio-disc::after {
+              content: '';
+              position: absolute;
+              width: 44px;
+              height: 44px;
+              border-radius: 50%;
+              background: linear-gradient(135deg, #ff0000, #990000);
+              box-shadow: inset 0 0 0 3px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.4);
+            }
+
+            .lightbox-audio-disc svg {
+              position: relative;
+              z-index: 2;
+              width: 20px;
+              height: 20px;
+              fill: #ffffff;
+            }
+
+            .lightbox-audio-disc.spinning {
+              animation: spin-record 8s linear infinite;
+              box-shadow: 0 14px 36px rgba(255, 0, 0, 0.3), inset 0 0 0 2px rgba(255, 0, 0, 0.3), inset 0 0 0 8px rgba(0, 0, 0, 0.6);
+            }
+
+            @keyframes spin-record {
+              100% {
+                transform: rotate(360deg);
+              }
+            }
+
+            .lightbox-audio-title {
+              font-weight: 700;
+              font-size: 1.05rem;
+              color: #ffffff;
+              line-height: 1.4;
+              word-break: break-word;
+              max-width: 100%;
+            }
+
+            .lightbox-audio-card audio {
+              width: 100%;
+              height: 44px;
+              outline: none;
+              border-radius: 22px;
+              color-scheme: dark;
+            }
+
+            .lb-spinner {
+              position: absolute;
+              inset: 0;
+              margin: auto;
+              width: 48px;
+              height: 48px;
+              display: none;
+              z-index: 1510;
+              pointer-events: none;
+            }
+
+            .lb-spinner.active {
+              display: block;
+            }
+
+            .lightbox-nav {
+              position: absolute;
+              top: 50%;
+              transform: translateY(-50%);
+              width: 46px;
+              height: 46px;
+              background: rgba(30, 30, 30, 0.8);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              backdrop-filter: blur(16px);
+              -webkit-backdrop-filter: blur(16px);
+              color: #ffffff;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              cursor: pointer;
+              border-radius: 50%;
+              z-index: 1520;
+              box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+              transition: all 0.2s cubic-bezier(0.2, 0, 0, 1);
+            }
+
+            .lightbox-nav:hover {
+              background: #ff0000;
+              border-color: #ff0000;
+              transform: translateY(-50%) scale(1.08);
+            }
+
+            .lightbox-nav.prev {
+              left: 1.2rem;
+            }
+
+            .lightbox-nav.next {
+              right: 1.2rem;
+            }
+
+            .modal-backdrop {
+              position: fixed;
+              inset: 0;
+              background: rgba(0, 0, 0, 0.75);
+              backdrop-filter: blur(4px);
+              z-index: 3000;
+              display: none;
+              align-items: center;
+              justify-content: center;
+              padding: 1rem;
+            }
+
+            .modal-backdrop.active {
+              display: flex;
+            }
+
+            .modal-box {
+              background: var(--md-sys-color-surface-container);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 28px;
+              width: 100%;
+              max-width: 480px;
+              box-shadow: var(--md-elevation-2);
+              overflow: hidden;
+              display: flex;
+              flex-direction: column;
+            }
+
+            .modal-box.large {
+              max-width: 95vw;
+              width: 95vw;
+              height: 92dvh;
+              border-radius: 20px;
+            }
+
+            .editor-modal-header {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0.6rem 1rem;
+              background: var(--md-sys-color-surface-container);
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+              gap: 0.75rem;
+              flex-shrink: 0;
+              min-height: 56px;
+            }
+
+            .editor-header-left {
+              display: flex;
+              align-items: center;
+              gap: 0.6rem;
+              min-width: 0;
+              flex: 1;
+              overflow: hidden;
+            }
+
+            .editor-title-wrap {
+              display: flex;
+              flex-direction: column;
+              min-width: 0;
+              overflow: hidden;
+            }
+
+            .editor-title {
+              font-weight: 700;
+              font-size: 0.95rem;
+              color: #ffffff !important;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              display: flex;
+              align-items: center;
+              gap: 0.4rem;
+            }
+
+            .editor-metrics-badge {
+              font-size: 0.7rem;
+              font-weight: 500;
+              color: var(--md-sys-color-on-surface-variant);
+              background: var(--md-sys-color-surface-container-highest);
+              padding: 0.15rem 0.5rem;
+              border-radius: 12px;
+              display: inline-flex;
+              align-items: center;
+              gap: 0.3rem;
+              width: fit-content;
+              margin-top: 0.15rem;
+            }
+
+            .editor-header-actions {
+              display: flex;
+              align-items: center;
+              gap: 0.4rem;
+              flex-shrink: 0;
+            }
+
+            .doc-viewer-container {
+              flex: 1;
+              width: 100%;
+              height: 100%;
+              overflow-y: auto;
+              overflow-x: auto;
+              -webkit-overflow-scrolling: touch;
+              background: var(--md-sys-color-surface-container-lowest);
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              padding: 1rem 0.6rem;
+              box-sizing: border-box;
+            }
+
+            .pdf-page-canvas {
+              max-width: 100% !important;
+              height: auto !important;
+              margin-bottom: 12px;
+              border-radius: 6px;
+              box-shadow: var(--md-elevation-1);
+              display: block;
+            }
+
+            .docx-viewer-wrapper {
+              background: #ffffff !important;
+              color: #111111 !important;
+              padding: 1.5rem !important;
+              border-radius: 12px;
+              width: 100% !important;
+              max-width: 860px;
+              box-sizing: border-box;
+              box-shadow: var(--md-elevation-1);
+            }
+
+            .sheet-viewer-table {
+              width: 100%;
+              border-collapse: collapse;
+              font-size: 0.85rem;
+              background: var(--md-sys-color-surface-container-low);
+              border-radius: 10px;
+              overflow: hidden;
+            }
+
+            .sheet-viewer-table th,
+            .sheet-viewer-table td {
+              border: 1px solid var(--md-sys-color-outline-variant);
+              padding: 0.45rem 0.75rem;
+              text-align: left;
+              white-space: nowrap;
+            }
+
+            .sheet-viewer-table th {
+              background: var(--md-sys-color-surface-container-high);
+              color: #ff0000;
+              font-weight: 600;
+            }
+
+            .hdm-workspace {
+              display: flex;
+              flex-direction: column;
+              height: 100%;
+              width: 100%;
+              overflow: hidden;
+              background: var(--md-sys-color-surface-container-lowest);
+            }
+
+            .hdm-toolbar {
+              background: var(--md-sys-color-surface-container);
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+              display: flex;
+              align-items: center;
+              gap: 0.3rem;
+              padding: 0.35rem 0.6rem;
+              overflow-x: auto;
+              flex-shrink: 0;
+              scrollbar-width: none;
+              -webkit-overflow-scrolling: touch;
+            }
+
+            .hdm-toolbar::-webkit-scrollbar {
+              display: none;
+            }
+
+            .hdm-toolbar .btn-icon {
+              width: 32px;
+              height: 32px;
+              border-radius: 8px;
+              flex-shrink: 0;
+            }
+
+            .hdm-find-card {
+              position: absolute;
+              top: 60px;
+              right: 1rem;
+              z-index: 1000;
+              background: var(--md-sys-color-surface-container-high);
+              border: 1px solid #ff0000;
+              border-radius: 16px;
+              padding: 0.35rem 0.55rem;
+              box-shadow: var(--md-elevation-2);
+              display: flex;
+              flex-direction: column;
+              gap: 0.2rem;
+              width: 320px;
+              max-width: calc(100vw - 2rem);
+              backdrop-filter: blur(14px);
+            }
+
+            .find-card-row {
+              display: flex;
+              align-items: center;
+              gap: 0.45rem;
+              padding: 0.2rem 0.25rem;
+            }
+
+            .find-card-divider {
+              height: 1px;
+              background: var(--md-sys-color-outline-variant);
+              margin: 0.1rem 0;
+            }
+
+            .find-card-icon {
+              width: 17px;
+              height: 17px;
+              color: var(--md-sys-color-on-surface-variant);
+              flex-shrink: 0;
+            }
+
+            .find-card-input {
+              flex: 1;
+              border: none;
+              background: transparent;
+              color: var(--md-sys-color-on-surface);
+              font-size: 0.88rem;
+              outline: none;
+              min-width: 50px;
+            }
+
+            .find-card-counter {
+              font-size: 0.76rem;
+              color: #ff0000;
+              font-variant-numeric: tabular-nums;
+              padding: 0 0.2rem;
+              white-space: nowrap;
+              font-weight: 700;
+            }
+
+            .find-card-btn-icon {
+              width: 26px;
+              height: 26px;
+              border-radius: 6px;
+              color: var(--md-sys-color-on-surface-variant);
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              cursor: pointer;
+            }
+
+            .find-card-btn-icon:hover {
+              background: var(--md-sys-color-surface-container-highest);
+              color: #ffffff;
+            }
+
+            .find-card-btn-icon svg {
+              width: 16px;
+              height: 16px;
+            }
+
+            .find-card-actions {
+              display: flex;
+              gap: 0.35rem;
+              margin-left: auto;
+            }
+
+            .find-card-btn {
+              border: 1px solid var(--md-sys-color-outline-variant);
+              background: var(--md-sys-color-surface-container);
+              color: var(--md-sys-color-on-surface);
+              padding: 0.2rem 0.6rem;
+              border-radius: 8px;
+              font-size: 0.78rem;
+              font-weight: 600;
+              cursor: pointer;
+              transition: all 0.15s ease;
+            }
+
+            .find-card-btn:hover {
+              background: #ff0000;
+              border-color: #ff0000;
+              color: #ffffff;
+            }
+
+            .hdm-panes {
+              display: flex;
+              flex: 1;
+              width: 100%;
+              height: 100%;
+              min-height: 0;
+              overflow: hidden;
+              position: relative;
+            }
+
+            .hdm-pane {
+              height: 100%;
+              overflow-y: auto;
+              min-width: 0;
               min-height: 0;
             }
 
-            .drive-app-container .prop-row {
+            .hdm-editor-pane {
+              width: 100%;
+              height: 100%;
+              flex: 1;
+              background: var(--md-sys-color-surface-container-lowest);
               display: flex;
               flex-direction: column;
+            }
+
+            .hdm-preview-pane {
+              flex: 1;
+              padding: 1.5rem;
+              background: var(--md-sys-color-surface-container-lowest);
+              color: var(--md-sys-color-on-surface);
+              line-height: 1.6;
+            }
+
+            .hdm-resizer {
+              width: 6px;
+              background: var(--md-sys-color-outline-variant);
+              cursor: col-resize;
+              transition: background 0.2s;
+            }
+
+            .hdm-resizer:hover {
+              background: #ff0000;
+            }
+
+            .hdm-preview-pane h1,
+            .hdm-preview-pane h2,
+            .hdm-preview-pane h3,
+            .hdm-preview-pane h4 {
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+              padding-bottom: 0.3rem;
+              margin: 1.2rem 0 0.8rem 0;
+              color: #ffffff;
+            }
+
+            .hdm-preview-pane img {
+              max-width: 100%;
+              height: auto;
+              border-radius: 10px;
+              margin: 0.8rem 0;
+              box-shadow: var(--md-elevation-1);
+              display: inline-block;
+            }
+
+            .hdm-preview-pane mark {
+              background: rgba(255, 0, 0, 0.3);
+              color: #ffffff;
+              padding: 0.1rem 0.3rem;
+              border-radius: 4px;
+            }
+
+            .hdm-preview-pane u {
+              text-decoration: underline;
+            }
+
+            .hdm-preview-pane pre code {
+              border-radius: 8px;
+              padding: 1rem !important;
+              display: block;
+              overflow-x: auto;
+            }
+
+            .hdm-preview-pane blockquote {
+              border-left: 4px solid #ff0000;
+              padding-left: 1rem;
+              color: var(--md-sys-color-on-surface-variant);
+              margin: 1rem 0;
+              background: var(--md-sys-color-surface-container-low);
+              border-radius: 0 8px 8px 0;
+              padding: 0.6rem 1rem;
+            }
+
+            .hdm-preview-pane table {
+              display: block;
+              width: 100%;
+              overflow-x: auto;
+              -webkit-overflow-scrolling: touch;
+              border-collapse: collapse;
+              margin: 1.2rem 0;
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 8px;
+            }
+
+            .hdm-preview-pane th,
+            .hdm-preview-pane td {
+              border: 1px solid var(--md-sys-color-outline-variant);
+              padding: 0.6rem 0.9rem;
+              white-space: nowrap;
+            }
+
+            .hdm-preview-pane th {
+              background: var(--md-sys-color-surface-container-high);
+              color: #ff0000;
+              font-weight: 700;
+            }
+
+            .hdm-preview-pane hr {
+              border: none;
+              height: 1px;
+              background: var(--md-sys-color-outline-variant);
+              margin: 1.5rem 0;
+            }
+
+            .hdm-preview-pane details {
+              background: var(--md-sys-color-surface-container-low);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 8px;
+              padding: 0.6rem 0.9rem;
+              margin: 0.8rem 0;
+            }
+
+            .hdm-preview-pane summary {
+              font-weight: 700;
+              cursor: pointer;
+              color: #ff0000;
+            }
+
+            .mermaid-container {
+              position: relative;
+              background: var(--md-sys-color-surface-container);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 12px;
+              padding: 1rem;
+              margin: 1.5rem 0;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              overflow: hidden;
+              min-height: 240px;
+              resize: vertical;
+            }
+
+            .mermaid-container svg {
+              cursor: grab;
+              max-width: none !important;
+            }
+
+            .mermaid-container svg:active {
+              cursor: grabbing;
+            }
+
+            .mermaid-controls {
+              position: absolute;
+              top: 8px;
+              right: 8px;
+              display: flex;
               gap: 4px;
+              background: var(--md-sys-color-surface-container-high);
+              padding: 4px;
+              border-radius: 8px;
+              opacity: 0.2;
+              transition: opacity 0.2s;
             }
 
-            .drive-app-container .prop-label {
-              font-size: 12px;
-              color: var(--theme-on-surface-variant);
+            .mermaid-container:hover .mermaid-controls {
+              opacity: 1;
             }
 
-            .drive-app-container .prop-val {
-              font-size: 14px;
-              color: var(--theme-on-surface);
+            .shortcuts-grid {
+              display: grid;
+              grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+              gap: 0.8rem;
+            }
+
+            .shortcuts-group {
+              background: var(--md-sys-color-surface-container-low);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 14px;
+              padding: 0.8rem;
+            }
+
+            .shortcuts-group-title {
+              font-size: 0.75rem;
+              font-weight: 700;
+              text-transform: uppercase;
+              color: #ff0000;
+              letter-spacing: 0.6px;
+              margin-bottom: 0.6rem;
+            }
+
+            .shortcut-row {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0.3rem 0;
+              font-size: 0.82rem;
+              border-bottom: 1px solid var(--md-sys-color-surface-container-high);
+            }
+
+            .shortcut-row:last-child {
+              border-bottom: none;
+            }
+
+            .shortcut-key-badge {
+              background: var(--md-sys-color-surface-container-highest);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              color: #ffffff;
+              padding: 0.15rem 0.45rem;
+              border-radius: 6px;
+              font-family: 'JetBrains Mono', monospace;
+              font-size: 0.75rem;
+              font-weight: 700;
+            }
+
+            .archive-table {
+              width: 100%;
+              border-collapse: collapse;
+              font-size: 0.82rem;
+            }
+
+            .archive-table th,
+            .archive-table td {
+              padding: 0.5rem 0.75rem;
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+              text-align: left;
+            }
+
+            .archive-table th {
+              background: var(--md-sys-color-surface-container-high);
+              color: #ff0000;
+              font-weight: 700;
+              position: sticky;
+              top: 0;
+              z-index: 2;
+            }
+
+            .activity-view-wrapper {
+              grid-column: 1 / -1;
+              width: 100%;
+              display: flex;
+              flex-direction: column;
+              gap: 1rem;
+            }
+
+            .activity-stats-grid {
+              display: grid;
+              grid-template-columns: repeat(2, 1fr);
+              gap: 0.6rem;
+              width: 100%;
+            }
+
+            @media (min-width: 680px) {
+              .activity-stats-grid {
+                grid-template-columns: repeat(4, 1fr);
+                gap: 0.75rem;
+              }
+            }
+
+            .activity-stat-card {
+              background: var(--md-sys-color-surface-container-low);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 14px;
+              padding: 0.75rem 0.85rem;
+              display: flex;
+              flex-direction: column;
+              gap: 0.2rem;
+            }
+
+            .activity-stat-num {
+              font-size: 1.35rem;
+              font-weight: 700;
+              color: #ff0000;
+              line-height: 1.2;
+            }
+
+            .activity-stat-label {
+              font-size: 0.72rem;
+              color: var(--md-sys-color-on-surface-variant);
+              font-weight: 500;
+              line-height: 1.3;
+            }
+
+            .activity-list-container {
+              display: flex;
+              flex-direction: column;
+              gap: 0.5rem;
+              width: 100%;
+            }
+
+            .activity-row {
+              background: var(--md-sys-color-surface-container-low);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 14px;
+              padding: 0.7rem 0.85rem;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 0.6rem;
+              cursor: pointer;
+              transition: background 0.15s ease, border-color 0.15s ease;
+            }
+
+            .activity-row:hover {
+              background: var(--md-sys-color-surface-container);
+              border-color: #ff0000;
+            }
+
+            .activity-badge {
+              font-size: 0.68rem;
+              font-weight: 700;
+              padding: 0.2rem 0.5rem;
+              border-radius: 6px;
+              text-transform: uppercase;
+              letter-spacing: 0.4px;
+              flex-shrink: 0;
+            }
+
+            .activity-badge.modified {
+              background: rgba(255, 0, 0, 0.2);
+              color: #ff4d4d;
+            }
+
+            .activity-badge.uploaded {
+              background: rgba(74, 222, 128, 0.2);
+              color: #4ade80;
+            }
+
+            .activity-badge.renamed {
+              background: rgba(251, 191, 36, 0.2);
+              color: #fbbf24;
+            }
+
+            .activity-badge.trashed,
+            .activity-badge.deleted {
+              background: rgba(248, 113, 113, 0.2);
+              color: #f87171;
+            }
+
+            .activity-badge.restored {
+              background: rgba(192, 132, 252, 0.2);
+              color: #c084fc;
+            }
+
+            .presentation-overlay {
+              position: fixed;
+              inset: 0;
+              background: #050505;
+              color: #ffffff;
+              z-index: 9999;
+              display: none;
+              flex-direction: column;
+            }
+
+            .presentation-overlay.active {
+              display: flex;
+            }
+
+            .slide-content {
+              flex: 1;
+              display: flex;
+              flex-direction: column;
+              justify-content: center;
+              align-items: center;
+              padding: 2.5rem;
+              font-size: 1.5rem;
+              max-width: 1000px;
+              margin: 0 auto;
+              overflow-y: auto;
+              text-align: center;
+            }
+
+            .slide-content h1 {
+              font-size: 3.5rem;
+              margin-bottom: 1.5rem;
+              color: #ffffff;
+            }
+
+            .slide-content h2 {
+              font-size: 2.5rem;
+              color: #ff0000;
+            }
+
+            .CodeMirror {
+              width: 100% !important;
+              height: 100% !important;
+              flex: 1;
+              min-height: 0;
+              font-family: 'JetBrains Mono', Consolas, monospace !important;
+              font-size: 0.88rem !important;
+              line-height: 1.6 !important;
+              background: var(--md-sys-color-surface-container-lowest) !important;
+              color: var(--md-sys-color-on-surface) !important;
+            }
+
+            .CodeMirror-gutters {
+              background: var(--md-sys-color-surface-container-low) !important;
+              border-right: 1px solid var(--md-sys-color-outline-variant) !important;
+              padding-right: 4px !important;
+            }
+
+            .CodeMirror-linenumber {
+              color: var(--md-sys-color-outline) !important;
+              font-size: 0.78rem !important;
+              padding: 0 6px 0 2px !important;
+            }
+
+            .CodeMirror-cursor {
+              border-left: 2px solid #ff0000 !important;
+            }
+
+            .CodeMirror-selected {
+              background: rgba(255, 0, 0, 0.25) !important;
+            }
+
+            .CodeMirror-scroll {
+              min-height: 100%;
+              height: 100%;
+            }
+
+            .modal-header {
+              padding: 1.2rem 1.4rem 0.8rem 1.4rem;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              font-weight: 700;
+              font-size: 1.1rem;
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+              gap: 0.75rem;
+              min-width: 0;
+            }
+
+            .modal-header>span,
+            #details-modal-title {
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              min-width: 0;
+              flex: 1;
+              color: #ffffff;
+            }
+
+            .modal-content {
+              padding: 1rem 1.4rem 1.2rem 1.4rem;
+              overflow-y: auto;
+              flex: 1;
+            }
+
+            .modal-footer {
+              padding: 0.8rem 1.4rem 1.2rem 1.4rem;
+              display: flex;
+              justify-content: flex-end;
+              gap: 0.5rem;
+              border-top: 1px solid var(--md-sys-color-outline-variant);
+            }
+
+            .details-section {
+              margin-bottom: 1.2rem;
+            }
+
+            .details-title {
+              display: flex;
+              align-items: center;
+              gap: 0.5rem;
+              font-size: 0.85rem;
+              font-weight: 700;
+              color: #ff0000;
+              text-transform: uppercase;
+              letter-spacing: 0.6px;
+              margin-bottom: 0.6rem;
+            }
+
+            .details-grid {
+              display: flex;
+              flex-direction: column;
+              gap: 0.35rem;
+              background: var(--md-sys-color-surface-container-low);
+              padding: 0.6rem 0.85rem;
+              border-radius: 16px;
+              border: 1px solid var(--md-sys-color-outline-variant);
+            }
+
+            .details-row {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              font-size: 0.85rem;
+              padding: 0.3rem 0;
+              border-bottom: 1px solid var(--md-sys-color-surface-container-highest);
+            }
+
+            .details-row:last-child {
+              border-bottom: none;
+            }
+
+            .details-label {
+              color: var(--md-sys-color-on-surface-variant);
+              font-size: 0.8rem;
+            }
+
+            .details-value {
+              font-weight: 600;
+              color: #ffffff;
+              text-align: right;
               word-break: break-all;
             }
 
-            .drive-app-container .hidden {
-              display: none !important;
+            .form-group {
+              margin-bottom: 1rem;
             }
 
-            .drive-app-container .mobile-only {
+            .form-label {
+              display: block;
+              font-size: 0.8rem;
+              font-weight: 700;
+              color: #ff0000;
+              margin-bottom: 0.4rem;
+            }
+
+            .form-input {
+              width: 100%;
+              background: var(--md-sys-color-surface-container-high);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 12px;
+              padding: 0.65rem 0.85rem;
+              color: #ffffff;
+              outline: none;
+              font-size: 0.9rem;
+            }
+
+            .form-input:focus {
+              border-color: #ff0000;
+              box-shadow: 0 0 0 2px rgba(255, 0, 0, 0.25);
+            }
+
+            .upload-dock {
+              position: fixed;
+              bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+              right: 1.5rem;
+              width: 360px;
+              max-width: calc(100vw - 2rem);
+              background: var(--md-sys-color-surface-container-high);
+              border: 1px solid #ff0000;
+              border-radius: 20px;
+              box-shadow: var(--md-elevation-2);
+              z-index: 6000;
+              display: none;
+              flex-direction: column;
+              overflow: hidden;
+              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1);
+            }
+
+            .upload-dock.active {
+              display: flex;
+            }
+
+            .upload-dock-header {
+              padding: 0.75rem 1rem;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              background: var(--md-sys-color-surface-container-highest);
+              font-size: 0.85rem;
+              font-weight: 700;
+              gap: 0.5rem;
+            }
+
+            .upload-dock-title {
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              flex: 1;
+              color: #ffffff;
+            }
+
+            .upload-dock-controls {
+              display: flex;
+              align-items: center;
+              gap: 0.2rem;
+            }
+
+            .upload-dock-controls button {
+              width: 28px;
+              height: 28px;
+              border-radius: 14px;
+              color: #ffffff;
+            }
+
+            .upload-dock-controls button:hover {
+              background: rgba(255, 0, 0, 0.2);
+            }
+
+            .upload-dock-progress {
+              height: 4px;
+              width: 100%;
+              background: var(--md-sys-color-surface-container-low);
+              overflow: hidden;
+            }
+
+            .upload-dock-progress-bar {
+              height: 100%;
+              width: 0%;
+              background: #ff0000;
+              transition: width 0.15s linear;
+            }
+
+            .upload-dock-body {
+              max-height: 230px;
+              overflow-y: auto;
+              display: flex;
+              flex-direction: column;
+            }
+
+            .upload-dock.minimized .upload-dock-body {
+              display: none;
+            }
+
+            .upload-item-row {
+              padding: 0.6rem 1rem;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 0.6rem;
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+              font-size: 0.8rem;
+            }
+
+            .upload-item-row:last-child {
+              border-bottom: none;
+            }
+
+            .upload-item-info {
+              flex: 1;
+              overflow: hidden;
+            }
+
+            .upload-item-name {
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              font-weight: 600;
+              color: #ffffff;
+            }
+
+            .upload-item-sub {
+              font-size: 0.7rem;
+              color: var(--md-sys-color-on-surface-variant);
+              margin-top: 0.15rem;
+            }
+
+            .upload-item-status {
+              display: flex;
+              align-items: center;
+              font-weight: 700;
+              font-size: 0.75rem;
+              gap: 0.3rem;
+              flex-shrink: 0;
+            }
+
+            .dropdown-menu {
+              position: fixed;
+              background: #1a1a1a;
+              border-radius: 16px;
+              padding: 0.4rem;
+              box-shadow: 0 10px 30px rgba(0, 0, 0, 0.9);
+              z-index: 9500;
+              display: none;
+              flex-direction: column;
+              min-width: 220px;
+              max-height: calc(100dvh - 20px);
+              overflow-y: auto;
+              border: 1px solid var(--md-sys-color-outline-variant);
+            }
+
+            .dropdown-menu.active {
+              display: flex;
+            }
+
+            .dm-item {
+              display: flex;
+              align-items: center;
+              justify-content: flex-start;
+              gap: 0.6rem;
+              padding: 0.55rem 0.8rem;
+              border-radius: 12px;
+              font-size: 0.85rem;
+              color: #ffffff;
+              cursor: pointer;
+              font-weight: 500;
+            }
+
+            .dm-item svg {
+              margin: 0;
+              flex-shrink: 0;
+              width: 18px;
+              height: 18px;
+            }
+
+            .dm-item:hover {
+              background: rgba(255, 0, 0, 0.2);
+              color: #ff0000;
+            }
+
+            .dm-item.active {
+              background: #ff0000;
+              color: #ffffff;
+              font-weight: 700;
+            }
+
+            .dm-sep {
+              height: 1px;
+              background: var(--md-sys-color-outline-variant);
+              margin: 0.3rem 0;
+            }
+
+            .version-timeline {
+              display: flex;
+              flex-direction: column;
+              position: relative;
+              padding-left: 1.2rem;
+              margin: 0.3rem 0;
+            }
+
+            .version-timeline::before {
+              content: '';
+              position: absolute;
+              left: 5px;
+              top: 14px;
+              bottom: 14px;
+              width: 2px;
+              background: var(--md-sys-color-outline-variant);
+            }
+
+            .version-item {
+              position: relative;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0.65rem 0.85rem;
+              background: var(--md-sys-color-surface-container-low);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 14px;
+              margin-bottom: 0.65rem;
+              transition: all 0.15s ease;
+              gap: 0.6rem;
+            }
+
+            .version-item:hover {
+              background: var(--md-sys-color-surface-container);
+              border-color: #ff0000;
+              box-shadow: var(--md-elevation-1);
+            }
+
+            .version-item::before {
+              content: '';
+              position: absolute;
+              left: -1.2rem;
+              top: 18px;
+              transform: translateX(-50%);
+              width: 10px;
+              height: 10px;
+              border-radius: 50%;
+              background: #ff0000;
+              border: 2px solid var(--md-sys-color-surface);
+              z-index: 2;
+            }
+
+            .version-info {
+              display: flex;
+              flex-direction: column;
+              gap: 0.25rem;
+              min-width: 0;
+              flex: 1 1 auto;
+            }
+
+            .version-date {
+              font-size: 0.82rem;
+              font-weight: 700;
+              color: #ffffff;
+              display: flex;
+              align-items: center;
+              gap: 0.35rem;
+              white-space: nowrap;
+            }
+
+            .version-meta {
+              display: flex;
+              align-items: center;
+              gap: 0.45rem;
+              font-size: 0.72rem;
+              color: var(--md-sys-color-on-surface-variant);
+              white-space: nowrap;
+            }
+
+            .version-badge {
+              background: rgba(255, 0, 0, 0.2);
+              color: #ff0000;
+              padding: 0.1rem 0.5rem;
+              border-radius: 6px;
+              font-size: 0.7rem;
+              font-weight: 700;
+            }
+
+            .version-actions {
+              display: flex;
+              gap: 0.35rem;
+              align-items: center;
+              flex-shrink: 0;
+            }
+
+            .diff-container {
+              font-family: 'JetBrains Mono', monospace;
+              font-size: 0.8rem;
+              background: var(--md-sys-color-surface-container-lowest);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 12px;
+              overflow: auto;
+              max-height: 480px;
+              line-height: 1.45;
+            }
+
+            .diff-line {
+              display: flex;
+              padding: 0.12rem 0.6rem;
+              white-space: pre-wrap;
+              word-break: break-all;
+            }
+
+            .diff-line.diff-add {
+              background: rgba(46, 160, 67, 0.25);
+              color: #7ee787;
+            }
+
+            .diff-line.diff-del {
+              background: rgba(248, 81, 73, 0.25);
+              color: #ff7b72;
+            }
+
+            .diff-line.diff-same {
+              color: var(--md-sys-color-on-surface-variant);
+            }
+
+            .diff-num {
+              width: 42px;
+              flex-shrink: 0;
+              user-select: none;
+              opacity: 0.45;
+              text-align: right;
+              padding-right: 0.8rem;
+            }
+
+            .diff-sign {
+              width: 16px;
+              flex-shrink: 0;
+              user-select: none;
+              font-weight: 700;
+            }
+
+            .diff-text {
+              flex: 1;
+            }
+
+            .slider-container {
+              padding: 0.6rem 0.8rem;
+              display: flex;
+              flex-direction: column;
+              gap: 0.4rem;
+            }
+
+            .slider-header {
+              display: flex;
+              justify-content: space-between;
+              font-size: 0.75rem;
+              color: var(--md-sys-color-on-surface-variant);
+              font-weight: 600;
+            }
+
+            /* Enhanced Visible Slider Track & Thumb */
+            .slider-input {
+              width: 100%;
+              height: 6px;
+              background: #383838 !important;
+              border: 1px solid #555555 !important;
+              outline: none;
+              -webkit-appearance: none;
+              appearance: none;
+              border-radius: 4px;
+              cursor: pointer;
+            }
+
+            .slider-input::-webkit-slider-runnable-track {
+              height: 6px;
+              background: #383838;
+              border-radius: 4px;
+            }
+
+            .slider-input::-webkit-slider-thumb {
+              -webkit-appearance: none;
+              appearance: none;
+              width: 14px;
+              height: 14px;
+              margin-top: -4px;
+              background: #ff0000;
+              border: 2px solid #ffffff;
+              border-radius: 50%;
+              cursor: pointer;
+              box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+              transition: transform 0.1s ease, background-color 0.1s ease;
+            }
+
+            .slider-input::-webkit-slider-thumb:hover {
+              transform: scale(1.2);
+              background: #ff3333;
+            }
+
+            .slider-input::-moz-range-track {
+              height: 6px;
+              background: #383838;
+              border: 1px solid #555555;
+              border-radius: 4px;
+            }
+
+            .slider-input::-moz-range-thumb {
+              width: 14px;
+              height: 14px;
+              background: #ff0000;
+              border: 2px solid #ffffff;
+              border-radius: 50%;
+              cursor: pointer;
+              box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+            }
+
+            .toast-container {
+              position: fixed;
+              bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+              left: 50%;
+              transform: translateX(-50%);
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              gap: 0.45rem;
+              z-index: 9999;
+              pointer-events: none;
+              width: max-content;
+              max-width: calc(100vw - 2rem);
+            }
+
+            .toast {
+              background: #1c1c1c;
+              border: 1px solid #ff0000;
+              padding: 0.6rem 1.1rem;
+              border-radius: 24px;
+              box-shadow: var(--md-elevation-2);
+              font-size: 0.82rem;
+              font-weight: 600;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              gap: 0.5rem;
+              color: #ffffff;
+              pointer-events: auto;
+              text-align: center;
+            }
+
+            .dropzone-overlay {
+              position: fixed;
+              inset: 0;
+              background: rgba(255, 0, 0, 0.15);
+              border: 3px dashed #ff0000;
+              backdrop-filter: blur(4px);
+              z-index: 9000;
+              display: none;
+              align-items: center;
+              justify-content: center;
+              font-size: 1.3rem;
+              font-weight: 700;
+              color: #ff0000;
+              pointer-events: none;
+            }
+
+            .dropzone-overlay.active {
+              display: flex;
+            }
+
+            .bottom-pad {
+              height: calc(5.5rem + env(safe-area-inset-bottom, 0px));
+              width: 100%;
+              flex-shrink: 0;
+            }
+
+            .desktop-only {
+              display: flex;
+            }
+
+            .mobile-only {
               display: none;
             }
 
             @media (max-width: 768px) {
-              .drive-app-container .mobile-only {
-                display: flex;
+              .desktop-only {
+                display: none !important;
               }
 
-              .drive-app-container .grid-view {
-                grid-template-columns: repeat(2, 1fr) !important;
-                gap: 8px !important;
+              .mobile-only {
+                display: flex !important;
               }
 
-              .drive-app-container .grid-view .item-card {
-                height: 50px;
-                padding: 0 12px !important;
-              }
-
-              .drive-app-container .grid-view .file-card {
-                height: 160px;
-                padding: 0 !important;
-              }
-
-              .drive-app-container .grid-view .file-card .file-info-bar {
-                padding: 0 10px !important;
-                gap: 6px !important;
-              }
-
-              .drive-app-container .properties-pane {
+              .sidebar {
                 position: fixed;
-                top: 0;
-                bottom: 0;
-                left: 0;
-                right: 0;
-                width: 100% !important;
-                height: 100% !important;
-                z-index: 3100 !important;
-                border: none;
-              }
-
-              .drive-app-container .grid-view {
-                grid-template-columns: repeat(2, 1fr) !important;
-                gap: 8px !important;
-              }
-
-              .drive-app-container .grid-view .item-card {
-                height: 50px;
-                padding: 0 16px;
-              }
-
-              .drive-app-container .grid-view .file-card {
-                height: 160px;
-              }
-
-              .drive-app-container .search-bar {
-                display: none;
-              }
-
-              .drive-app-container .search-bar.mobile-active {
-                display: flex;
-                position: absolute;
-                left: 0;
-                right: 0;
-                top: 0;
-                bottom: 0;
-                height: 64px;
-                margin: 0;
-                border-radius: 0;
-                background: var(--theme-surface);
-                z-index: 10;
-                padding: 0 8px;
-                max-width: 100%;
-                border: none;
-              }
-
-              .drive-app-container .search-bar.mobile-active #searchIcon {
-                display: none;
-              }
-
-              .drive-app-container .search-bar.mobile-active #closeSearchBtn {
-                display: flex;
-              }
-
-              .drive-app-container .sidebar-drive {
-                position: fixed;
-                left: -280px;
-                top: 0;
-                bottom: 0;
+                inset: 0 auto 0 0;
+                transform: translateX(-100%);
+                box-shadow: var(--md-elevation-2);
                 width: 280px;
-                padding-top: 64px;
+                height: 100dvh;
               }
 
-              .drive-app-container .sidebar-drive.open {
-                left: 0;
+              .sidebar.open {
+                transform: translateX(0);
               }
 
-              .drive-app-container .sidebar-overlay.open {
-                display: block;
-                opacity: 1;
+              .layout-columns {
+                column-count: 2;
               }
 
-              .drive-app-container .content-area-drive {
-                margin: 0;
-                border-radius: 0;
+              .main-content-drive {
+                padding: 0.6rem 0.6rem 0 0.6rem;
               }
 
-              .drive-app-container .fab {
+              .modal-box.large {
                 position: fixed;
-                bottom: calc(28px + env(safe-area-inset-bottom, 20px)) !important;
-                right: 20px;
-                z-index: 90;
-                width: 52px;
-                height: 52px;
-                padding: 0;
-                justify-content: center;
-                border-radius: 26px;
-              }
-
-              .drive-app-container .fab .text {
-                display: none;
+                inset: 0;
+                max-width: 100vw;
+                width: 100vw;
+                height: 100dvh;
+                max-height: 100dvh;
+                border-radius: 0;
+                margin: 0;
+                border: none;
               }
             }
           </style>
 
-          <div class="drive-app-container" id="driveAppContainer" data-theme="dark">
-            <div class="drive-header">
-              <button class="icon-btn drive-menu-btn" onclick="driveApp.toggleSidebar()"><span class="material-symbols-rounded">menu</span></button>
-              <div class="logo-container" onclick="driveApp.navigate('')">
-                <div class="logo-img"><span class="material-symbols-rounded">folder_zip</span></div>
-                <div class="logo-text">Drive</div>
-              </div>
-              <div class="search-bar" id="topSearchBar">
-                <button class="icon-btn mobile-only" onclick="driveApp.toggleMobileSearch(false)" id="closeSearchBtn" style="display: none;"><span class="material-symbols-rounded">arrow_back</span></button>
-                <span class="material-symbols-rounded search-icon" id="searchIcon">search</span>
-                <input type="text" id="searchInput" placeholder="Search all files and folders...">
-              </div>
-              <div class="header-actions">
-                <button class="icon-btn mobile-only" onclick="driveApp.toggleMobileSearch(true)" title="Search"><span class="material-symbols-rounded">search</span></button>
-                <button class="icon-btn" onclick="driveApp.toggleActivity()" title="Activity"><span class="material-symbols-rounded">notifications</span></button>
-                <button class="icon-btn" onclick="driveApp.showMoreMenu(event)" title="More options"><span class="material-symbols-rounded">more_vert</span></button>
-              </div>
-            </div>
-
-            <div class="main-wrapper">
-              <div class="sidebar-overlay" id="sidebarOverlay" onclick="driveApp.toggleSidebar()"></div>
-              <aside class="sidebar-drive" id="sidebarDrive">
-                <button class="fab" onclick="driveApp.showNewMenu(event)">
-                  <span class="material-symbols-rounded">add</span>
-                  <span class="text">New</span>
+          <div id="phpfiles-app-root">
+            <header class="app-topbar">
+              <div class="topbar-left">
+                <button class="btn-icon" id="btn-sidebar" title="Toggle Menu">
+                  <svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
                 </button>
-                <nav class="nav-list" style="margin-top: 16px;">
-                  <a class="nav-item-drive active" id="navHome" onclick="driveApp.setViewMode('home')">
-                    <span class="material-symbols-rounded">home</span> Home
-                  </a>
-                  <a class="nav-item-drive" id="navStarred" onclick="driveApp.setViewMode('starred')">
-                    <span class="material-symbols-rounded">star</span> Starred
-                  </a>
-                  <a class="nav-item-drive" id="navHistory" onclick="driveApp.setViewMode('history')">
-                    <span class="material-symbols-rounded">history</span> History
-                  </a>
-                  <a class="nav-item-drive" id="navTrash" onclick="driveApp.setViewMode('trash')">
-                    <span class="material-symbols-rounded">delete</span> Trash
-                  </a>
-                  <div class="menu-divider" style="margin: 8px 16px;"></div>
-                  <a class="nav-item-drive" onclick="driveApp.showSortMenu(event)">
-                    <span class="material-symbols-rounded">sort</span> Sort by
-                  </a>
-                  <a class="nav-item-drive" onclick="driveApp.toggleView()">
-                    <span class="material-symbols-rounded" id="viewIconMenuSide">view_list</span> View mode
-                  </a>
-                </nav>
-              </aside>
+                <a href="#/" class="brand desktop-only">
+                  <svg viewBox="0 0 16 16" style="width:20px;height:20px;"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
+                  PHP Drive
+                </a>
+              </div>
 
-              <main class="content-area-drive" id="dropZone">
-                <div class="content-header-drive">
-                  <div class="breadcrumbs" id="breadcrumbs"></div>
-                  <div class="header-actions" id="multiSelectActions" style="display: none;">
-                    <button class="icon-btn" onclick="driveApp.batchDownload('selected')" title="Download Selected"><span class="material-symbols-rounded">download</span></button>
-                    <button class="icon-btn" onclick="driveApp.deleteSelected()" title="Move to Trash"><span class="material-symbols-rounded">delete</span></button>
-                    <button class="icon-btn" onclick="driveApp.clearSelection(null, true)" title="Clear Selection"><span class="material-symbols-rounded">close</span></button>
-                  </div>
-                  <div class="header-actions" id="trashActions" style="display: none; gap: 8px;">
-                    <button class="btn-drive btn-text-drive" onclick="driveApp.emptyTrash()"><span class="material-symbols-rounded">delete_forever</span> Empty Trash</button>
-                  </div>
-                </div>
-
-                <div class="chips-container" id="chipsContainer">
-                  <button class="chip active" onclick="driveApp.setFilter('all')"><span class="material-symbols-rounded">all_inclusive</span> All</button>
-                  <button class="chip" onclick="driveApp.setFilter('documents')"><span class="material-symbols-rounded">article</span> Documents</button>
-                  <button class="chip" onclick="driveApp.setFilter('images')"><span class="material-symbols-rounded">image</span> Images</button>
-                  <button class="chip" onclick="driveApp.setFilter('audio')"><span class="material-symbols-rounded">audiotrack</span> Audio</button>
-                  <button class="chip" onclick="driveApp.setFilter('video')"><span class="material-symbols-rounded">movie</span> Video</button>
-                </div>
-
-                <div class="file-list-container" id="fileListContainer" onclick="driveApp.clearSelection(event)">
-                  <div class="recents-container" id="recentsSection" style="display: none;">
-                    <div class="section-title" style="margin: 0 0 8px 0; display: flex; justify-content: space-between; align-items: center;">
-                      <span>Recent files</span>
-                      <button class="btn-drive btn-text-drive" style="height: 24px; font-size: 12px; padding: 0 8px;" onclick="driveApp.setViewMode('recents_all')">View all</button>
-                    </div>
-                    <div class="recents-tray" id="recentsTray"></div>
-                  </div>
-                  <div class="section-title hidden" id="foldersTitle">Folders</div>
-                  <div id="foldersList" class="grid-view"></div>
-                  <div class="section-title hidden" id="filesTitle">Files</div>
-                  <div id="filesList" class="grid-view"></div>
-                </div>
-              </main>
-
-              <aside class="properties-pane" id="propertiesPane">
-                <div class="properties-header">
-                  <span style="font-family: var(--font-title); font-size: 16px; font-weight: 500;">Details</span>
-                  <button class="icon-btn" onclick="driveApp.toggleProperties()"><span class="material-symbols-rounded">close</span></button>
-                </div>
-                <div class="properties-content" id="propertiesContent"></div>
-              </aside>
-
-              <aside class="properties-pane" id="activityPane">
-                <div class="properties-header">
-                  <span style="font-family: var(--font-title); font-size: 16px; font-weight: 500;">Activity</span>
-                  <button class="icon-btn" onclick="driveApp.toggleActivity()"><span class="material-symbols-rounded">close</span></button>
-                </div>
-                <div class="properties-content" id="activityContent" style="padding: 0;"></div>
-              </aside>
-            </div>
-
-            <div class="floating-menu" id="newMenu">
-              <div class="menu-item" onclick="driveApp.showModal('addFolder')"><span class="material-symbols-rounded">create_new_folder</span>New folder</div>
-              <div class="menu-item" onclick="driveApp.showModal('addFile')"><span class="material-symbols-rounded">note_add</span>New file</div>
-              <div class="menu-divider"></div>
-              <div class="menu-item" onclick="document.getElementById('fileUploadInput').click()"><span class="material-symbols-rounded">upload_file</span>File upload</div>
-              <div class="menu-item" onclick="document.getElementById('folderUploadInput').click()"><span class="material-symbols-rounded">drive_folder_upload</span>Folder upload</div>
-              <div class="menu-item" onclick="driveApp.showModal('uploadUrl')"><span class="material-symbols-rounded">link</span>Upload via URL</div>
-              <input type="file" id="fileUploadInput" multiple class="hidden" onchange="driveApp.handleFilesSelect(event)">
-              <input type="file" id="folderUploadInput" webkitdirectory directory multiple class="hidden" onchange="driveApp.handleFolderSelect(event)">
-            </div>
-
-            <div class="floating-menu" id="moreMenu">
-              <div class="menu-item" onclick="driveApp.toggleSelectMode()"><span class="material-symbols-rounded">checklist</span>Select</div>
-              <div class="menu-item" onclick="driveApp.selectAll()"><span class="material-symbols-rounded">done_all</span>Select all</div>
-              <div class="menu-item" onclick="driveApp.clearSelection(null, true)"><span class="material-symbols-rounded">deselect</span>Unselect all</div>
-              <div class="menu-divider"></div>
-              <div class="menu-item" onclick="driveApp.pasteClipboard()"><span class="material-symbols-rounded">content_paste</span>Paste</div>
-            </div>
-
-            <div class="sort-menu" id="sortMenu">
-              <div class="menu-item" onclick="driveApp.setSort('name')" id="sort_name"><span class="material-symbols-rounded">sort_by_alpha</span>Name</div>
-              <div class="menu-item" onclick="driveApp.setSort('mtime')" id="sort_mtime"><span class="material-symbols-rounded">calendar_today</span>Last modified</div>
-              <div class="menu-item" onclick="driveApp.setSort('size')" id="sort_size"><span class="material-symbols-rounded">storage</span>Size</div>
-              <div class="menu-divider"></div>
-              <div class="menu-item" onclick="driveApp.toggleSortDirection()"><span class="material-symbols-rounded" id="sortDirIcon">arrow_downward</span>Direction</div>
-            </div>
-
-            <div class="context-menu" id="contextMenu"></div>
-
-            <div class="modal-overlay" id="modalOverlay" onclick="if (event.target===this) driveApp.closeModal()">
-              <div class="modal-drive">
-                <div class="modal-title-drive" id="modalTitle">Title</div>
-                <input type="text" class="modal-input-drive" id="modalInput" autocomplete="off">
-                <div class="modal-actions" style="display:flex; justify-content:flex-end; gap:8px;">
-                  <button class="btn-drive btn-text-drive" onclick="driveApp.closeModal()">Cancel</button>
-                  <button class="btn-drive btn-filled-drive" id="modalSubmit">Create</button>
+              <div class="topbar-center">
+                <div class="search-box">
+                  <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                  <input type="text" id="search-input" placeholder="Search files & subfolders...">
                 </div>
               </div>
-            </div>
 
-            <!-- Dedicated Image Preview Overlay (Auto-fits Image Scale) -->
-            <div class="modal-overlay" id="imageOverlay" style="z-index: 3500; display: none;" onclick="if (event.target===this) driveApp.closeImage()">
-              <button id="drive-image-prev-btn" class="icon-btn" style="position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 3510; color: #fff; background: rgba(0,0,0,0.5); display: none;"><span class="material-symbols-rounded">chevron_left</span></button>
-              <button id="drive-image-next-btn" class="icon-btn" style="position: absolute; right: 16px; top: 50%; transform: translateY(-50%); z-index: 3510; color: #fff; background: rgba(0,0,0,0.5); display: none;"><span class="material-symbols-rounded">chevron_right</span></button>
-              <div style="max-width: 95%; max-height: 95%; width: auto; background: transparent; box-shadow: none; padding: 0; display: flex; align-items: center; justify-content: center; position: relative;">
-                <button class="icon-btn" onclick="driveApp.closeImage()" style="position: absolute; top: -16px; right: -16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.5);"><span class="material-symbols-rounded">close</span></button>
-                <div id="imageModalContent" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; max-height: 90vh;"></div>
-              </div>
-            </div>
-
-            <!-- Structured Media Preview Overlay (Spacious Modal Container) -->
-            <div class="modal-overlay" id="mediaOverlay" style="z-index: 3500; display: none;" onclick="if (event.target===this) driveApp.closeMedia()">
-              <button id="drive-media-prev-btn" class="icon-btn" style="position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 3510; color: #fff; background: rgba(0,0,0,0.5); display: none;"><span class="material-symbols-rounded">chevron_left</span></button>
-              <button id="drive-media-next-btn" class="icon-btn" style="position: absolute; right: 16px; top: 50%; transform: translateY(-50%); z-index: 3510; color: #fff; background: rgba(0,0,0,0.5); display: none;"><span class="material-symbols-rounded">chevron_right</span></button>
-              <div class="modal-drive" id="mediaModalContainer" style="max-width: 550px; width: 90%; position: relative; background: var(--theme-surface-container); border-radius: 20px; padding: 24px; box-shadow: 0 24px 38px 3px rgba(0,0,0,0.5); border: 1px solid var(--theme-outline-variant); display: flex; flex-direction: column;">
-                <button class="icon-btn" onclick="driveApp.closeMedia()" style="position: absolute; top: 16px; right: 16px; color: var(--theme-on-surface); background: var(--theme-surface-container-high); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.5);"><span class="material-symbols-rounded">close</span></button>
-                <div id="mediaModalContent" style="width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; max-height: 80vh;"></div>
-              </div>
-            </div>
-
-            <div class="editor-overlay-drive" id="editorOverlay">
-              <div class="editor-header-drive">
-                <button class="icon-btn" onclick="driveApp.closeEditor()"><span class="material-symbols-rounded">arrow_back</span></button>
-                <div class="editor-title-drive" id="editorTitle">filename.txt</div>
-                <div class="header-actions d-flex align-items-center gap-2" id="editorActions">
-                  <button class="btn-drive btn-filled-drive" onclick="driveApp.saveFile()">
-                    <span class="material-symbols-rounded" style="font-size:18px;">save</span>
-                    <span>Save</span>
+              <div class="topbar-right">
+                <div class="desktop-only" style="display:flex; align-items:center; gap:0.5rem;">
+                  <div id="desk-cols-container" style="display:flex; align-items:center; gap:0.4rem; padding:0 0.6rem; background:var(--md-sys-color-surface-container-high); border-radius:20px; height:40px; border: 1px solid var(--md-sys-color-outline-variant);">
+                    <span style="font-size:0.75rem; font-weight:700; color:var(--md-sys-color-on-surface-variant);">Cols:</span>
+                    <input type="range" id="slider-cols-desk" class="slider-input" min="0" max="8" value="0" style="width:70px;">
+                    <span id="slider-cols-desk-val" style="font-size:0.75rem; font-weight:700; min-width:28px; color:#ff0000;">Auto</span>
+                  </div>
+                  <button class="btn-icon" id="btn-clear-cache-desk" title="Clear Cache">
+                    <svg viewBox="0 0 24 24"><path d="M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12V5z"/></svg>
                   </button>
-                  <div class="dropdown">
-                    <button class="icon-btn" data-bs-toggle="dropdown" aria-expanded="false" title="More Options">
-                      <span class="material-symbols-rounded">more_vert</span>
+                  <button class="btn-icon" id="btn-manga-desk" title="Manga Mode">
+                    <svg viewBox="0 0 24 24"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg>
+                  </button>
+                  <button class="btn-icon" id="btn-shortcuts-desk" title="Keyboard Shortcuts (?)">
+                    <svg viewBox="0 0 24 24"><path d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/></svg>
+                  </button>
+                  <button class="btn-primary" id="btn-upload-desk" title="Upload Options">
+                    <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg> Upload <svg viewBox="0 0 24 24" style="width:14px;height:14px;margin-left:2px;"><path d="M7 10l5 5 5-5z"/></svg>
+                  </button>
+                </div>
+
+                <div class="mobile-only">
+                  <button class="btn-icon" id="btn-more-menu" title="More Options">
+                    <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+                  </button>
+                </div>
+                <input type="file" id="file-uploader" multiple style="display:none;">
+                <input type="file" id="folder-uploader" webkitdirectory directory multiple style="display:none;">
+              </div>
+            </header>
+
+            <div class="subbar-path">
+              <nav class="breadcrumbs" id="breadcrumbs"></nav>
+            </div>
+
+            <div class="app-body">
+              <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+              <aside class="sidebar" id="sidebar">
+                <div class="sidebar-section">
+                  <div class="sidebar-title">Drive Navigation</div>
+                  <div class="filter-group">
+                    <div class="filter-item active" id="nav-home" onclick="app.switchDriveSection('home')">
+                      <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg> Home</span>
+                    </div>
+                    <div class="filter-item" id="nav-recents" onclick="app.switchDriveSection('recents')">
+                      <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg> Recents</span>
+                    </div>
+                    <div class="filter-item" id="nav-starred" onclick="app.switchDriveSection('starred')">
+                      <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg> Starred</span>
+                    </div>
+                    <div class="filter-item" id="nav-activity" onclick="app.switchDriveSection('activity')">
+                      <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg> Activity</span>
+                    </div>
+                    <div class="filter-item" id="nav-trash" onclick="app.switchDriveSection('trash')">
+                      <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg> Trash Bin</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="sidebar-section">
+                  <div class="sidebar-title">Categories</div>
+                  <div class="filter-group">
+                    <div class="filter-item active" data-filter="all"><span>All Items</span><span class="filter-badge" id="badge-all">0</span></div>
+                    <div class="filter-item" data-filter="image"><span>Images</span><span class="filter-badge" id="badge-image">0</span></div>
+                    <div class="filter-item" data-filter="video"><span>Videos</span><span class="filter-badge" id="badge-video">0</span></div>
+                    <div class="filter-item" data-filter="audio"><span>Audio</span><span class="filter-badge" id="badge-audio">0</span></div>
+                    <div class="filter-item" data-filter="text"><span>Documents</span><span class="filter-badge" id="badge-text">0</span></div>
+                    <div class="filter-item" data-filter="archive"><span>Archives</span><span class="filter-badge" id="badge-archive">0</span></div>
+                  </div>
+                </div>
+
+                <div class="sidebar-section">
+                  <div class="sidebar-title">Folder Tree</div>
+                  <div id="tree-container"></div>
+                </div>
+              </aside>
+
+              <main class="main-content-drive" id="main-content">
+                <div class="content-header">
+                  <div class="dir-info">
+                    <h1 id="dir-title">PHP Drive</h1>
+                    <div class="dir-stats" id="dir-stats">Loading...</div>
+                  </div>
+
+                  <div class="toolbar-actions">
+                    <button class="btn-icon active" data-layout="grid" title="Grid Layout">
+                      <svg viewBox="0 0 24 24"><path d="M3 3h8v8H3zm0 10h8v8H3zM13 3h8v8h-8zm0 10h8v8h-8z"/></svg>
                     </button>
-                    <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary p-2" style="font-size: 0.85rem; min-width: 180px; z-index: 3100;">
-                      <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" onclick="driveApp.toggleEditorWrap()" id="editorWrapBtn"><span class="material-symbols-rounded" style="font-size: 18px;">wrap_text</span> Toggle Word Wrap</div></li>
-                      <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" onclick="driveApp.editorFind()"><span class="material-symbols-rounded" style="font-size: 18px;">search</span> Find & Replace</div></li>
-                      <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" onclick="driveApp.editorUndo()"><span class="material-symbols-rounded" style="font-size: 18px;">undo</span> Undo</div></li>
-                      <li><div class="dropdown-item py-2 d-flex align-items-center gap-2" style="cursor:pointer;" onclick="driveApp.editorRedo()"><span class="material-symbols-rounded" style="font-size: 18px;">redo</span> Redo</div></li>
-                    </ul>
+                    <button class="btn-icon" data-layout="columns" title="Masonry Layout">
+                      <svg viewBox="0 0 24 24"><path d="M3 3h8v11H3zm10 0h8v6h-8zM3 16h8v5H3zm10-8h8v13h-8z"/></svg>
+                    </button>
+                    <button class="btn-icon" data-layout="list" title="List View">
+                      <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
+                    </button>
+                    <div style="width:1px; height:20px; background:var(--md-sys-color-outline-variant); margin:0 0.1rem;"></div>
+                    <button class="btn-icon" id="btn-sort" title="Sort Items">
+                      <svg viewBox="0 0 24 24"><path d="M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z"/></svg>
+                    </button>
+                    <button class="btn-icon" id="btn-folder-info" title="Folder Details">
+                      <svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>
+                    </button>
+                    <button class="btn-icon" id="btn-new-folder" title="New Folder">
+                      <svg viewBox="0 0 24 24"><path d="M20 6h-8l-2-2H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-1 8h-3v3h-2v-3h-3v-2h3v-3h2v3h3v2z"/></svg>
+                    </button>
+                    <button class="btn-icon" id="btn-new-file" title="New Text File">
+                      <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 14h-3v3h-2v-3H8v-2h3v-3h2v3h3v2zm-3-7V3.5L18.5 9H13z"/></svg>
+                    </button>
+                    <button class="btn-icon" id="btn-download-dir" title="Download ZIP">
+                      <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="gallery-container layout-grid" id="gallery-container"></div>
+                <div id="infinite-scroll-trigger" style="height:20px;"></div>
+                <div class="bottom-pad"></div>
+              </main>
+            </div>
+
+            <!-- Desktop Upload Dropdown -->
+            <div class="dropdown-menu" id="dropdown-upload">
+              <div class="dm-item" id="du-upload-files"><svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg> Upload Files</div>
+              <div class="dm-item" id="du-upload-folder"><svg viewBox="0 0 24 24"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg> Upload Folder</div>
+              <div class="dm-item" id="du-upload-url"><svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg> Upload from URL</div>
+            </div>
+
+            <!-- Mobile More Menu -->
+            <div class="dropdown-menu" id="dropdown-more">
+              <div class="dm-item" id="dm-upload-files"><svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg> Upload Files</div>
+              <div class="dm-item" id="dm-upload-folder"><svg viewBox="0 0 24 24"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg> Upload Folder</div>
+              <div class="dm-item" id="dm-upload-url"><svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg> Upload from URL</div>
+              <div class="dm-item" id="dm-manga"><svg viewBox="0 0 24 24"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg> Manga Mode</div>
+              <div class="dm-item desktop-only" id="dm-shortcuts"><svg viewBox="0 0 24 24"><path d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/></svg> Keyboard Shortcuts</div>
+              <div class="dm-item" id="dm-clear-cache"><svg viewBox="0 0 24 24"><path d="M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12V5z"/></svg> Clear Cache</div>
+              <div class="dm-sep" id="mobile-cols-sep"></div>
+              <div class="slider-container" id="mobile-cols-container">
+                <div class="slider-header"><span>Grid Columns</span><span id="slider-cols-val" style="color:#ff0000; font-weight:700;">Auto</span></div>
+                <input type="range" class="slider-input" id="slider-cols" min="0" max="8" value="0">
+              </div>
+            </div>
+
+            <!-- Sort Dropdown -->
+            <div class="dropdown-menu" id="dropdown-sort">
+              <div class="dm-item" data-sort="name_asc">
+                <svg viewBox="0 0 24 24"><path d="M9.25 5v14l-4.5-4.5 1.41-1.41L8 14.92V5h1.25zm11.75 0v2h-8V5h8zm-2 6v2h-6v-2h6zm-2 6v2h-4v-2h4z"/></svg>
+                <span>Name (A to Z)</span>
+                <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </div>
+              <div class="dm-item" data-sort="name_desc">
+                <svg viewBox="0 0 24 24"><path d="M9.25 19V5L4.75 9.5l1.41 1.41L8 9.08V19h1.25zm11.75-14v2h-4V5h4zm-2 6v2h-6v-2h6zm-2 6v2h-8v-2h8z"/></svg>
+                <span>Name (Z to A)</span>
+                <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </div>
+              <div class="dm-item" data-sort="date_desc">
+                <svg viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/></svg>
+                <span>Date (Newest first)</span>
+                <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </div>
+              <div class="dm-item" data-sort="date_asc">
+                <svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+                <span>Date (Oldest first)</span>
+                <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </div>
+            </div>
+
+            <!-- Batch Selection Floating Action Bar -->
+            <div class="batch-bar" id="batch-bar">
+              <span class="batch-count" id="batch-count">0 selected</span>
+              <div style="width:1px; height:20px; background:var(--md-sys-color-outline-variant); margin:0 0.15rem;"></div>
+              <button class="btn-icon" id="btn-batch-info" title="Information">
+                <svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>
+              </button>
+              <button class="btn-icon" id="btn-batch-download" title="Download ZIP">
+                <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
+              </button>
+              <button class="btn-icon" id="btn-batch-compress" title="Compress to ZIP (Server)">
+                <svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>
+              </button>
+              <button class="btn-icon" id="btn-batch-delete" title="Delete Items">
+                <svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+              </button>
+              <div style="width:1px; height:20px; background:var(--md-sys-color-outline-variant); margin:0 0.15rem;"></div>
+              <button class="btn-icon" id="btn-batch-clear" title="Clear selection">
+                <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+              </button>
+            </div>
+
+            <!-- Upload Progress Dock Widget -->
+            <div class="upload-dock" id="upload-dock">
+              <div class="upload-dock-header">
+                <div class="upload-dock-title" id="upload-dock-title">Uploading items...</div>
+                <div class="upload-dock-controls">
+                  <button id="btn-dock-toggle" title="Minimize / Expand"><svg viewBox="0 0 24 24" id="dock-toggle-icon"><path d="M19 13H5v-2h14v2z"/></svg></button>
+                  <button id="btn-dock-close" title="Close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+              </div>
+              <div class="upload-dock-progress">
+                <div class="upload-dock-progress-bar" id="upload-dock-bar"></div>
+              </div>
+              <div class="upload-dock-body" id="upload-dock-body"></div>
+            </div>
+
+            <!-- Manga Reader Overlay -->
+            <div class="manga-container" id="manga-viewer">
+              <div class="manga-topbar" id="manga-topbar">
+                <div class="manga-counter" id="manga-counter">1 / 1</div>
+                <div class="manga-controls">
+                  <select id="manga-width-select" class="manga-select">
+                    <option value="800px">800px</option>
+                    <option value="1000px" selected>1000px</option>
+                    <option value="1200px">1200px</option>
+                    <option value="100%">Fit Width</option>
+                    <option value="fit-height">Fit Height</option>
+                    <option value="fit-screen">Fit Screen</option>
+                  </select>
+                  <button class="btn-icon" id="btn-manga-offline" title="Download as Offline HTML">
+                    <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
+                  </button>
+                  <button class="btn-icon" id="btn-manga-fs" title="Fullscreen">
+                    <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+                  </button>
+                  <button class="btn-icon" id="btn-manga-close" title="Close">
+                    <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="manga-pages-wrap" id="manga-pages"></div>
+            </div>
+
+            <!-- Full Lightbox Media Viewer -->
+            <div class="lightbox" id="lightbox">
+              <div class="lightbox-header">
+                <div class="lightbox-title" id="lb-title">image.jpg</div>
+                <div style="display:flex; gap:0.4rem;">
+                  <button class="btn-icon" id="btn-lb-details" title="Metadata"><svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg></button>
+                  <button class="btn-icon" id="btn-lb-download" title="Download"><svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg></button>
+                  <button class="btn-icon" id="btn-lb-close" title="Close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+              </div>
+              <div class="lightbox-body" id="lb-body">
+                <img class="lightbox-media" id="lb-img" src="" alt="">
+                <div class="lightbox-nav prev" id="lb-prev"><svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg></div>
+                <div class="lightbox-nav next" id="lb-next"><svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg></div>
+              </div>
+            </div>
+
+            <!-- Modal Backdrops -->
+            <div class="modal-backdrop" id="modal-backdrop">
+              <div class="modal-box" id="modal-input" style="display:none;">
+                <div class="modal-header">
+                  <span id="modal-input-title">Create Item</span>
+                  <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-content">
+                  <div class="form-group">
+                    <label class="form-label" id="modal-input-label">Name</label>
+                    <input type="text" class="form-input" id="modal-input-val">
+                  </div>
+                </div>
+                <div class="modal-footer">
+                  <button class="btn-icon modal-close" style="width:auto; padding:0 0.8rem;">Cancel</button>
+                  <button class="btn-primary" id="modal-input-confirm">Confirm</button>
+                </div>
+              </div>
+
+              <!-- Remote Download Modal -->
+              <div class="modal-box" id="modal-remote-download" style="display:none;">
+                <div class="modal-header">
+                  <span>Remote URL Download</span>
+                  <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-content">
+                  <div class="form-group">
+                    <label class="form-label">File URL</label>
+                    <input type="text" class="form-input" id="remote-url-input" placeholder="https://example.com/file.zip" autofocus>
+                  </div>
+                  <div class="form-group" style="margin-bottom:0.2rem;">
+                    <label class="form-label">Custom Filename (Optional)</label>
+                    <input type="text" class="form-input" id="remote-name-input" placeholder="Leave blank to auto-detect">
+                  </div>
+                </div>
+                <div class="modal-footer">
+                  <button class="btn-icon modal-close" style="width:auto; padding:0 0.8rem;">Cancel</button>
+                  <button class="btn-primary" id="remote-download-confirm">Download</button>
+                </div>
+              </div>
+
+              <!-- Full HDMarkDown & Code Editor Modal -->
+              <div class="modal-box large" id="modal-editor" style="display:none; padding:0; position:relative;">
+                <div id="editor-loader" style="position:absolute; inset:0; background:var(--md-sys-color-surface-container-lowest); display:none; align-items:center; justify-content:center; flex-direction:column; gap:0.8rem; z-index:500; border-radius:inherit;">
+                  <svg class="m3-spinner" style="margin:0;" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                  <span style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500; margin:0;">Loading document...</span>
+                </div>
+                <div class="editor-modal-header">
+                  <div class="editor-header-left">
+                    <button class="btn-icon modal-close" title="Back / Close" style="width:34px;height:34px;flex-shrink:0;">
+                      <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+                    </button>
+                    <div class="editor-title-wrap">
+                      <div id="editor-title" class="editor-title">Document.md</div>
+                      <div id="editor-metrics" class="editor-metrics-badge">0 chars • 0 words</div>
+                    </div>
+                  </div>
+                  <div class="editor-header-actions">
+                    <button class="btn-icon" id="hdm-btn-find-header" title="Find & Replace">
+                      <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                    </button>
+                    <button class="btn-icon" id="hdm-btn-undo" title="Undo">
+                      <svg viewBox="0 0 24 24"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
+                    </button>
+                    <button class="btn-icon" id="hdm-btn-redo" title="Redo">
+                      <svg viewBox="0 0 24 24"><path d="M18.4 10.6C16.55 8.99 14.15 8 11.5 8c-4.65 0-8.58 3.03-9.96 7.22L3.9 16c1.05-3.19 4.05-5.5 7.6-5.5 1.95 0 3.73.72 5.12 1.88L13 16h9V7l-3.6 3.6z"/></svg>
+                    </button>
+                    <button class="btn-icon" id="editor-save-btn" title="Save Document" style="color:#ff0000;">
+                      <svg viewBox="0 0 24 24"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg>
+                    </button>
+                    <button class="btn-icon" id="btn-editor-more" title="More Options">
+                      <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="dropdown-menu" id="dropdown-editor-more">
+                  <div class="dm-item" id="dem-wrap">
+                    <svg viewBox="0 0 24 24"><path d="M4 19h6v-2H4v2zM20 5H4v2h16V5zm-3 6H4v2h13.25c1.1 0 2 .9 2 2s-.9 2-2 2H15v-2l-3 3 3 3v-2h2c2.21 0 4-1.79 4-4s-1.79-4-4-4z"/></svg>
+                    <span id="dem-wrap-text">Word Wrap: On</span>
+                  </div>
+                  <div class="dm-item" id="dem-versions">
+                    <svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                    <span>Version History</span>
+                  </div>
+                  <div class="dm-item" id="dem-mode-edit">
+                    <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                    <span>Editor Only</span>
+                  </div>
+                  <div class="dm-item desktop-only" id="dem-mode-split">
+                    <svg viewBox="0 0 24 24"><path d="M3 3h8v18H3zm10 0h8v18h-8z"/></svg>
+                    <span>Split View</span>
+                  </div>
+                  <div class="dm-item" id="dem-mode-preview">
+                    <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                    <span>Preview Only</span>
+                  </div>
+                  <div class="dm-item" id="dem-present">
+                    <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                    <span>Presentation Mode</span>
+                  </div>
+                </div>
+
+                <div class="hdm-workspace">
+                  <div class="hdm-toolbar" id="hdm-toolbar">
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('bold')" title="Bold (Ctrl+B)"><svg viewBox="0 0 24 24"><path d="M15.6 10.79c.97-.67 1.65-1.77 1.65-2.79 0-2.26-1.75-4-4-4H7v14h7.04c2.09 0 3.71-1.7 3.71-3.79 0-1.52-.86-2.82-2.15-3.42zM10 6.5h3c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5h-3v-3zm3.5 9H10v-3h3.5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('italic')" title="Italic (Ctrl+I)"><svg viewBox="0 0 24 24"><path d="M10 4v3h2.21l-3.42 8H6v3h8v-3h-2.21l3.42-8H18V4z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('underline')" title="Underline"><svg viewBox="0 0 24 24"><path d="M12 17c3.31 0 6-2.69 6-6V3h-2.5v8c0 1.93-1.57 3.5-3.5 3.5S8.5 12.93 8.5 11V3H6v8c0 3.31 2.69 6 6 6zm-7 2v2h14v-2H5z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('strikethrough')" title="Strikethrough"><svg viewBox="0 0 24 24"><path d="M10 19h4v-3h-4v3zM5 4v3h5v3h4V7h5V4H5zM3 14h18v-2H3v2z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('mark')" title="Highlight"><svg viewBox="0 0 24 24"><path d="M15.24 3.76L13.77 2.3c-.39-.39-1.02-.39-1.41 0L3 11.66V16h4.34l9.31-9.31c.39-.39.39-1.02 0-1.41l-1.41-1.52zM6.21 14H5v-1.21l7.35-7.35 1.21 1.21L6.21 14zM20 18H4v2h16v-2z"/></svg></button>
+                    <div style="width:1px;height:16px;background:var(--md-sys-color-outline-variant);"></div>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('h1')" title="Heading 1" style="font-weight:700; font-size:0.85rem;">H1</button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('h2')" title="Heading 2" style="font-weight:700; font-size:0.85rem;">H2</button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('h3')" title="Heading 3" style="font-weight:700; font-size:0.85rem;">H3</button>
+                    <div style="width:1px;height:16px;background:var(--md-sys-color-outline-variant);"></div>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('align-left')" title="Align Left"><svg viewBox="0 0 24 24"><path d="M15 15H3v2h12v-2zm0-8H3v2h12V7zM3 13h18v-2H3v2zm0 8h18v-2H3v2zM3 3v2h18V3H3z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('align-center')" title="Align Center"><svg viewBox="0 0 24 24"><path d="M7 15v2h10v-2H7zm-4 6h18v-2H3v2zm0-8h18v-2H3v2zm4-6v2h10V7H7zM3 3v2h18V3H3z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('align-right')" title="Align Right"><svg viewBox="0 0 24 24"><path d="M3 21h18v-2H3v2zm6-4h12v-2H9v2zm-6-4h18v-2H3v2zm6-4h12V7H9v2zM3 3v2h18V3H3z"/></svg></button>
+                    <div style="width:1px;height:16px;background:var(--md-sys-color-outline-variant);"></div>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('ul')" title="Bulleted List"><svg viewBox="0 0 24 24"><path d="M4 10.5c-.83 0-1.5.67-1.5 1.5s.67 1.5 1.5 1.5 1.5-.67 1.5-1.5-.67-1.5-1.5-1.5zm0-6c-.83 0-1.5.67-1.5 1.5S3.17 7.5 4 7.5 5.5 6.83 5.5 6 4.83 4.5 4 4.5zm0 12c-.83 0-1.5.68-1.5 1.5s.68 1.5 1.5 1.5 1.5-.68 1.5-1.5-.67-1.5-1.5-1.5zM7 19h14v-2H7v2zm0-6h14v-2H7v2zm0-8v2h14V5H7z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('ol')" title="Numbered List"><svg viewBox="0 0 24 24"><path d="M2 17h2v.5H3v1h1v.5H2v1h3v-4H2v1zm1-9h1V4H2v1h1v3zm-1 3h1.8L2 13.1v.9h3v-1H3.2L5 10.9V10H2v1zm5-6v2h14V5H7zm0 14h14v-2H7v2zm0-6h14v-2H7v2z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('task')" title="Task Checklist"><svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM17.99 9l-1.41-1.42-6.59 6.59-2.58-2.57-1.42 1.41 4 4z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('quote')" title="Blockquote"><svg viewBox="0 0 24 24"><path d="M6 17h3l2-4V7H5v6h3zm8 0h3l2-4V7h-6v6h3z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('codeblock')" title="Code Block"><svg viewBox="0 0 24 24"><path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('link')" title="Insert Link"><svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('image')" title="Insert Image"><svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('table')" title="Table"><svg viewBox="0 0 24 24"><path d="M20 3H5C3.9 3 3 3.9 3 5v14c0 1.1.9 2 2 2h15c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 2v3H5V5h15zm-5 5v4h-4v-4h4zM5 10h4v4H5v-4zm0 6h4v3H5v-3zm6 3v-3h4v3h-4zm6 0v-3h3v3h-3zm3-5h-3v-4h3v4z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('hr')" title="Horizontal Rule"><svg viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('details')" title="Spoiler / Collapse"><svg viewBox="0 0 24 24"><path d="M12 8l-6 6 1.41 1.41L12 10.83l4.59 4.58L18 14z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('mermaid')" title="Mermaid Diagram" style="color:#ff0000;"><svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.66 0 3 1.34 3 3 0 .74-.27 1.41-.71 1.93l1.85 3.19.86-.5V12h2v4.5l-2 1.15-2-1.15V15.3l-1.85-3.19C12.72 12.19 12.38 12.2 12 12.2c-.38 0-.72-.01-1.15-.09L9 15.3v1.2l-2 1.15-2-1.15V12h2v1.62l.86.5 1.85-3.19C9.27 10.41 9 9.74 9 9c0-1.66 1.34-3 3-3z"/></svg></button>
+                    <button class="btn-icon" onclick="hdmEngine.insertSyntax('youtube')" title="YouTube Video"><svg viewBox="0 0 24 24"><path d="M10 15l5.19-3L10 9v6m11.56-7.83c.13.47.22 1.1.28 1.9.07.8.1 1.49.1 2.09L22 12c0 2.19-.16 3.8-.44 4.83-.25.9-.83 1.48-1.73 1.73-.47.13-1.33.22-2.65.28-1.3.07-2.49.1-3.59.1L12 19c-4.19 0-6.8-.16-7.83-.44-.9-.25-1.48-.83-1.73-1.73-.13-.47-.22-1.1-.28-1.9-.07-.8-.1-1.49-.1-2.09L2 12c0-2.19.16-3.8.44-4.83.25-.9.83-1.48 1.73-1.73.47-.13 1.33-.22 2.65-.28 1.3-.07 2.49-.1 3.59-.1L12 5c4.19 0 6.8.16 7.83.44.9.25 1.48.83 1.73 1.73z"/></svg></button>
+                  </div>
+
+                  <!-- Floating Find & Replace Card -->
+                  <div class="hdm-find-card" id="hdm-find-bar" style="display:none;">
+                    <div class="find-card-row">
+                      <svg viewBox="0 0 24 24" class="find-card-icon"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                      <input type="text" id="hdm-find-input" class="find-card-input" placeholder="Find">
+                      <span class="find-card-counter" id="hdm-find-count">0/0</span>
+                      <button class="find-card-btn-icon" id="hdm-btn-find-prev" title="Previous match">
+                        <svg viewBox="0 0 24 24"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg>
+                      </button>
+                      <button class="find-card-btn-icon" id="hdm-btn-find-next" title="Next match">
+                        <svg viewBox="0 0 24 24"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+                      </button>
+                      <button class="find-card-btn-icon" id="hdm-btn-find-close" title="Close">
+                        <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                      </button>
+                    </div>
+                    <div class="find-card-divider"></div>
+                    <div class="find-card-row">
+                      <svg viewBox="0 0 24 24" class="find-card-icon"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                      <input type="text" id="hdm-replace-input" class="find-card-input" placeholder="Replace">
+                      <div class="find-card-actions">
+                        <button class="find-card-btn" id="hdm-btn-replace-one">Replace</button>
+                        <button class="find-card-btn" id="hdm-btn-replace-all">All</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="hdm-panes" id="hdm-panes">
+                    <div class="hdm-pane hdm-editor-pane" id="hdm-editor-pane">
+                      <textarea id="hdm-raw-textarea" style="display:none;"></textarea>
+                    </div>
+                    <div class="hdm-resizer" id="hdm-resizer"></div>
+                    <div class="hdm-pane hdm-preview-pane" id="hdm-preview-pane"></div>
                   </div>
                 </div>
               </div>
-              <div class="editor-body-wrapper">
-                <div id="desktopEditorContainer">
-                  <!-- Ace Editor Instance Mount Point -->
+
+              <!-- Archive Contents Inspector Modal -->
+              <div class="modal-box large" id="modal-archive-preview" style="display:none; max-width:900px; height:85dvh;">
+                <div class="modal-header">
+                  <div style="display:flex; align-items:center; gap:0.6rem; overflow:hidden;">
+                    <svg viewBox="0 0 24 24" style="width:22px;height:22px;color:#ff0000;"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>
+                    <span id="archive-preview-title" style="font-weight:700; font-size:1.05rem;">Archive Contents</span>
+                  </div>
+                  <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
                 </div>
-                <div id="mobileEditorContainer" style="flex: 1; min-height: 0; width: 100%; height: 100%; display: none; flex-direction: column;">
-                  <textarea style="flex:1; border:none; outline:none; background:transparent; padding:16px; font-family:monospace; font-size:16px; color:var(--theme-on-surface); resize:none; width:100%; line-height:1.5; height:100%; box-sizing:border-box;" id="mobileTextarea" spellcheck="false"></textarea>
+                <div style="padding:0.6rem 1.4rem; background:var(--md-sys-color-surface-container-low); display:flex; justify-content:space-between; align-items:center; font-size:0.8rem; border-bottom:1px solid var(--md-sys-color-outline-variant);">
+                  <span id="archive-preview-stats" style="color:var(--md-sys-color-on-surface-variant);">0 files found</span>
+                  <button class="btn-primary" id="archive-extract-btn" style="height:32px; padding:0 0.8rem; gap:0.35rem;">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg> Extract Archive
+                  </button>
+                </div>
+                <div class="modal-content" style="padding:0; overflow-y:auto;" id="archive-preview-body"></div>
+              </div>
+
+              <!-- Keyboard Shortcuts Cheat Sheet Modal -->
+              <div class="modal-box large" id="modal-shortcuts" style="display:none; max-width:680px; height:auto; max-height:85dvh;">
+                <div class="modal-header">
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <svg viewBox="0 0 24 24" style="width:20px;height:20px;color:#ff0000;"><path d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/></svg>
+                    <span style="font-weight:700;">Keyboard Shortcuts</span>
+                  </div>
+                  <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-content" style="padding:1rem 1.4rem;">
+                  <div class="shortcuts-grid">
+                    <div class="shortcuts-group">
+                      <div class="shortcuts-group-title">File Manager</div>
+                      <div class="shortcut-row"><span>Search Files</span><span class="shortcut-key-badge">Ctrl + F</span></div>
+                      <div class="shortcut-row"><span>Select All</span><span class="shortcut-key-badge">Ctrl + A</span></div>
+                      <div class="shortcut-row"><span>New Folder</span><span class="shortcut-key-badge">Ctrl + Shift + N</span></div>
+                      <div class="shortcut-row"><span>New Text File</span><span class="shortcut-key-badge">Ctrl + Shift + F</span></div>
+                      <div class="shortcut-row"><span>Copy / Cut</span><span class="shortcut-key-badge">Ctrl + C / X</span></div>
+                      <div class="shortcut-row"><span>Paste</span><span class="shortcut-key-badge">Ctrl + V</span></div>
+                      <div class="shortcut-row"><span>Rename Item</span><span class="shortcut-key-badge">F2</span></div>
+                      <div class="shortcut-row"><span>Delete Item</span><span class="shortcut-key-badge">Delete</span></div>
+                      <div class="shortcut-row"><span>Shortcuts Guide</span><span class="shortcut-key-badge">? / F1</span></div>
+                    </div>
+                    <div class="shortcuts-group">
+                      <div class="shortcuts-group-title">Editor & Lightbox</div>
+                      <div class="shortcut-row"><span>Save Document</span><span class="shortcut-key-badge">Ctrl + S</span></div>
+                      <div class="shortcut-row"><span>Find & Replace</span><span class="shortcut-key-badge">Ctrl + F</span></div>
+                      <div class="shortcut-row"><span>Bold Text</span><span class="shortcut-key-badge">Ctrl + B</span></div>
+                      <div class="shortcut-row"><span>Italic Text</span><span class="shortcut-key-badge">Ctrl + I</span></div>
+                      <div class="shortcut-row"><span>Undo / Redo</span><span class="shortcut-key-badge">Ctrl + Z / Y</span></div>
+                      <div class="shortcut-row"><span>Next / Prev Media</span><span class="shortcut-key-badge">← / →</span></div>
+                      <div class="shortcut-row"><span>Play / Pause</span><span class="shortcut-key-badge">Space</span></div>
+                      <div class="shortcut-row"><span>Close Active View</span><span class="shortcut-key-badge">Esc</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Version History Modal -->
+              <div class="modal-box" id="modal-versions" style="display:none; max-width:560px;">
+                <div class="modal-header">
+                  <div style="display:flex; flex-direction:column; gap:0.15rem; overflow:hidden;">
+                    <span style="font-weight:700; font-size:1.05rem;">Version History</span>
+                    <span id="versions-title-sub" style="font-size:0.75rem; color:var(--md-sys-color-on-surface-variant); font-weight:400; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
+                  </div>
+                  <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-content" id="versions-content" style="max-height:420px; overflow-y:auto; padding:1.2rem;"></div>
+              </div>
+
+              <!-- In-App Document & PDF Viewer Modal -->
+              <div class="modal-box large" id="modal-doc-viewer" style="display:none; padding:0;">
+                <div class="editor-modal-header">
+                  <div class="editor-header-left">
+                    <svg viewBox="0 0 24 24" style="width:20px;height:20px;color:#ff0000;"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+                    <div class="editor-title" id="doc-viewer-title">Document</div>
+                  </div>
+                  <div class="editor-header-actions">
+                    <button class="btn-primary" id="doc-viewer-direct-btn" style="height:32px; padding:0 0.8rem;">Download / Raw</button>
+                    <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                  </div>
+                </div>
+                <div class="doc-viewer-container" id="doc-viewer-container"></div>
+              </div>
+
+              <!-- Diff Preview Modal -->
+              <div class="modal-box large" id="modal-diff" style="display:none; max-width:860px; height:85dvh;">
+                <div class="modal-header">
+                  <div style="display:flex; flex-direction:column; gap:0.15rem;">
+                    <span style="font-weight:700; font-size:1.05rem;" id="diff-modal-title">Diff Preview</span>
+                    <span id="diff-modal-subtitle" style="font-size:0.75rem; color:var(--md-sys-color-on-surface-variant);"></span>
+                  </div>
+                  <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-content" style="display:flex; flex-direction:column; gap:0.6rem; padding:1rem; overflow:hidden;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.8rem; flex-wrap:wrap; gap:0.4rem;">
+                    <div id="diff-stats" style="display:flex; gap:0.6rem; font-weight:700;"></div>
+                    <div style="color:var(--md-sys-color-on-surface-variant); font-size:0.75rem;">Showing comparison: <span style="color:#ff7b72;">Current</span> ↔ <span style="color:#7ee787;">Rollback Version</span></div>
+                  </div>
+                  <div class="diff-container" id="diff-content" style="flex:1;"></div>
+                </div>
+                <div class="modal-footer" style="display:flex; justify-content:space-between; align-items:center;">
+                  <button class="btn-primary modal-close" style="background:var(--md-sys-color-surface-container-high); color:var(--md-sys-color-on-surface); border:1px solid var(--md-sys-color-outline-variant);">Close</button>
+                  <button class="btn-primary" id="diff-rollback-btn" style="gap:0.4rem;">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                    <span>Rollback to this Version</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Fullscreen Presentation Mode -->
+              <div class="presentation-overlay" id="presentation-overlay">
+                <div style="position:absolute; top:1rem; right:1rem; z-index:100;">
+                  <button class="btn-icon" onclick="hdmEngine.closePresentation()"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="slide-content" id="presentation-slide-box"></div>
+                <div style="position:absolute; bottom:1rem; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:1rem;">
+                  <button class="btn-primary" onclick="hdmEngine.prevSlide()">← Prev</button>
+                  <span id="presentation-indicator" style="font-weight:700;">1 / 1</span>
+                  <button class="btn-primary" onclick="hdmEngine.nextSlide()">Next →</button>
+                </div>
+              </div>
+
+              <!-- Item Details Modal -->
+              <div class="modal-box" id="modal-details" style="display:none;">
+                <div class="modal-header">
+                  <span id="details-modal-title">Item Information</span>
+                  <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-content" id="details-content"></div>
+                <div class="modal-footer">
+                  <button class="btn-primary modal-close" style="padding:0 1.2rem;">Close</button>
                 </div>
               </div>
             </div>
 
-            <!-- Google Drive-Style Upload Progress Widget -->
-            <div id="uploadWidget" style="position: fixed; bottom: 16px; right: 16px; width: calc(100% - 32px); max-width: 360px; background: var(--theme-surface-container-high); border: 1px solid var(--theme-outline-variant); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 5000; display: none; flex-direction: column; overflow: hidden; border-bottom: 2px solid var(--theme-primary);">
-              <div id="uploadWidgetHeader" style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--theme-surface-container); border-bottom: 1px solid var(--theme-outline-variant); cursor: pointer; user-select: none;" onclick="driveApp.uploadQueue.toggleCollapse()">
-                <span id="uploadWidgetTitle" style="font-family: var(--font-title); font-size: 14px; font-weight: 500; color: var(--theme-on-surface);">Uploading files...</span>
-                <div style="display: flex; align-items: center; gap: 4px;" onclick="event.stopPropagation()">
-                  <button class="icon-btn" id="uploadWidgetToggleBtn" style="width: 28px; height: 28px;" onclick="driveApp.uploadQueue.toggleCollapse()" title="Show more/less"><span class="material-symbols-rounded">expand_more</span></button>
-                  <button class="icon-btn" id="uploadWidgetCloseBtn" style="width: 28px; height: 28px;" onclick="driveApp.uploadQueue.cancelAll()" title="Cancel all"><span class="material-symbols-rounded">close</span></button>
-                </div>
-              </div>
-              <div id="uploadWidgetList" style="max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; padding: 4px 0; background: var(--theme-surface);"></div>
-            </div>
-
-            <div class="snackbar-container-drive" id="snackbarContainer"></div>
+            <div class="dropdown-menu" id="context-menu"></div>
+            <div class="toast-container" id="toast-container"></div>
+            <div class="dropzone-overlay" id="dropzone"><svg viewBox="0 0 24 24" style="width:36px; height:36px; margin-right:8px;"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg> Drop files or folders here</div>
           </div>
-
+          
           <script>
-            class DriveFileManager {
+            class OPFSCacheManager {
               constructor() {
-                this.currentPath = new URLSearchParams(window.location.search).get('path') || '';
-                this.viewMode = localStorage.getItem('drive_viewMode') || 'grid';
-                this.sortBy = localStorage.getItem('drive_sortBy') || 'name';
-                this.sortDesc = localStorage.getItem('drive_sortDesc') === 'true';
-                this.currentViewMode = 'home';
-                this.currentFilter = 'all';
-                this.apiPrefix = '?access=admin&page=drive&';
-                this.loadSeq = 0;
-                
-                this.selectedItems = new Set();
-                this.data = { folders: [], files: [], breadcrumbs: [] };
-                this.searchResults = null;
-                this.searchDebounce = null;
-                this.editor = null;
-                this.currentEditFile = null;
-                this.searchQuery = '';
-                this.isPropertiesOpen = false;
-                this.isActivityOpen = false;
-                this.clipboard = null;
-                this.isSelectMode = false;
-                this.visibleFoldersCount = 25;
-                this.visibleFilesCount = 25;
-                this.filteredFolders = [];
-                this.filteredFiles = [];
-                this.editorWrap = localStorage.getItem('drive_editorWrap') !== 'false';
-                this.frBound = false;
-                this.initEditFile = new URLSearchParams(window.location.search).get('edit') || null;
-                this.uploadQueue = new UploadQueue(this);
-
-                this.init();
+                this.supported = 'storage' in navigator && 'getDirectory' in navigator.storage;
+                this.rootPromise = this.supported ? navigator.storage.getDirectory() : null;
+                this.objectUrls = new Map();
               }
-
-              init() {
-                this.updateViewIcon();
-                this.bindEvents();
-                this.loadDirectory(this.currentPath);
+        
+              async getSubdir() {
+                if (!this.supported) return null;
+                const root = await this.rootPromise;
+                return await root.getDirectoryHandle('phpfiles_opfs_cache', { create: true });
               }
-
-              bindItemEvents(el, item, isFolder) {
-                let touchTimer;
-                let isLongPress = false;
-                let touchStartX = 0;
-                let touchStartY = 0;
-
-                el.addEventListener('touchstart', (e) => {
-                  if (e.target.closest('.card-checkbox') || e.target.closest('.card-star')) return;
-                  isLongPress = false;
-                  touchStartX = e.touches[0].clientX;
-                  touchStartY = e.touches[0].clientY;
-                  
-                  touchTimer = setTimeout(() => {
-                    isLongPress = true;
-                    if (navigator.vibrate) navigator.vibrate([100]);
-                    this.showContextMenu({
-                      preventDefault: () => {},
-                      stopPropagation: () => {},
-                      clientX: touchStartX,
-                      clientY: touchStartY
-                    }, item, isFolder);
-                  }, 500);
-                });
-                
-                el.addEventListener('touchend', (e) => {
-                  clearTimeout(touchTimer);
-                  if (isLongPress) {
-                    if (e.cancelable) e.preventDefault();
-                    e.stopPropagation();
-                  }
-                });
-
-                el.addEventListener('touchmove', (e) => {
-                  if (Math.abs(e.touches[0].clientX - touchStartX) > 10 || Math.abs(e.touches[0].clientY - touchStartY) > 10) {
-                    clearTimeout(touchTimer);
-                  }
-                });
-
-                el.onclick = (e) => {
-                  if (isLongPress) {
-                    isLongPress = false;
-                    return;
-                  }
-                  this.handleItemClick(e, item, isFolder);
-                };
-
-                el.oncontextmenu = (e) => {
-                  e.preventDefault();
-                  this.showContextMenu(e, item, isFolder);
-                };
+        
+              async hash(key) {
+                const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
+                return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
               }
-
-              bindEvents() {
-                document.addEventListener('click', () => {
-                  document.getElementById('newMenu').style.display = 'none';
-                  document.getElementById('contextMenu').style.display = 'none';
-                  document.getElementById('sortMenu').style.display = 'none';
-                  document.getElementById('moreMenu').style.display = 'none';
-                });
-
-                document.addEventListener('keydown', (e) => {
-                  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-                    const editorOverlay = document.getElementById('editorOverlay');
-                    if (editorOverlay && editorOverlay.style.display === 'flex') {
-                      e.preventDefault();
-                      this.saveFile();
-                    }
-                  }
-                });
-
-                const dropZone = document.getElementById('dropZone');
-
-                // Right click and touch-hold handlers for empty drive space
-                dropZone.addEventListener('contextmenu', (e) => {
-                  if (!e.target.closest('.item-card') && !e.target.closest('.chip') && !e.target.closest('.header-actions') && !e.target.closest('.breadcrumb-item') && !e.target.closest('.recent-card')) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    this.clearSelection(null, true);
-                    this.showRootContextMenu(e);
-                  }
-                });
-                
-                let dzTouchTimer;
-                let dzIsLongPress = false;
-                let dzStartX = 0, dzStartY = 0;
-                
-                dropZone.addEventListener('touchstart', (e) => {
-                  if (e.target.closest('.item-card') || e.target.closest('.header-actions') || e.target.closest('.chip')) return;
-                  dzIsLongPress = false;
-                  dzStartX = e.touches[0].clientX;
-                  dzStartY = e.touches[0].clientY;
-                  dzTouchTimer = setTimeout(() => {
-                    dzIsLongPress = true;
-                    if (navigator.vibrate) navigator.vibrate([50]);
-                    this.clearSelection(null, true);
-                    this.showRootContextMenu({
-                      clientX: dzStartX,
-                      clientY: dzStartY
-                    });
-                  }, 600);
-                }, { passive: true });
-                dropZone.addEventListener('touchmove', (e) => {
-                  if (Math.abs(e.touches[0].clientX - dzStartX) > 10 || Math.abs(e.touches[0].clientY - dzStartY) > 10) {
-                    clearTimeout(dzTouchTimer);
-                  }
-                }, { passive: true });
-                dropZone.addEventListener('touchend', () => clearTimeout(dzTouchTimer));
-
-                dropZone.addEventListener('dragover', (e) => {
-                  if (window.innerWidth <= 768) return;
-                  e.preventDefault(); 
-                  dropZone.classList.add('drag-over'); 
-                });
-                dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-                dropZone.addEventListener('drop', async (e) => {
-                  if (window.innerWidth <= 768) return;
-                  e.preventDefault();
-                  dropZone.classList.remove('drag-over');
-                  
-                  if (e.dataTransfer.items && e.dataTransfer.items.length) {
-                    this.showToast('Scanning dropped items...');
-                    let { files, paths } = await this.scanDroppedItems(e.dataTransfer.items);
-                    if (files.length > 0) {
-                      const listRes = await this.fetchAPI('list');
-                      const existingFolders = (listRes && listRes.success && listRes.folders) ? listRes.folders.map(f => f.name) : [];
-                      
-                      const renamedRoots = {};
-                      paths = paths.map(p => {
-                         if (p.includes('/')) {
-                            const root = p.split('/')[0];
-                            if (!renamedRoots[root] && existingFolders.includes(root)) {
-                               let counter = 1;
-                               let newRoot = `${root}_(${counter})`;
-                               while(existingFolders.includes(newRoot)) {
-                                  counter++;
-                                  newRoot = `${root}_(${counter})`;
-                               }
-                               renamedRoots[root] = newRoot;
-                               existingFolders.push(newRoot); 
-                            }
-                            if (renamedRoots[root]) {
-                               const parts = p.split('/');
-                               parts[0] = renamedRoots[root];
-                               return parts.join('/');
-                            }
-                         }
-                         return p;
-                      });
-                      
-                      const renamedKeys = Object.keys(renamedRoots);
-                      if (renamedKeys.length > 0) {
-                         this.showToast(`Renamed ${renamedKeys.length} folder(s) to avoid collision.`);
-                      }
-
-                      this.uploadFiles(files, paths);
-                    }
-                  } else if (e.dataTransfer.files.length) {
-                    this.uploadFiles(e.dataTransfer.files);
-                  }
-                });
-
-                document.getElementById('searchInput').addEventListener('input', (e) => {
-                  this.handleSearchInput(e.target.value);
-                });
-
-                const scrollContainer = document.getElementById('fileListContainer');
-                if (scrollContainer) {
-                  scrollContainer.addEventListener('scroll', () => {
-                    if (scrollContainer.scrollTop + scrollContainer.clientHeight >= scrollContainer.scrollHeight - 100) {
-                      this.loadMoreItems();
-                    }
-                  });
-                }
-              }
-
-              async handleSearchInput(value) {
-                this.searchQuery = value.trim().toLowerCase();
-                if (!this.searchQuery) {
-                  this.searchResults = null;
-                  this.render();
-                  return;
-                }
-
-                clearTimeout(this.searchDebounce);
-                this.searchDebounce = setTimeout(async () => {
-                  const res = await this.fetchAPI(`search_drive&q=${encodeURIComponent(this.searchQuery)}`);
-                  if (res && res.success) {
-                    this.searchResults = res;
-                    this.render();
-                  }
-                }, 300);
-              }
-
-              async fetchAPI(action, method = 'GET', body = null, isOverrideRetry = false) {
-                const url = `${this.apiPrefix}api=true&action=${action}&path=${encodeURIComponent(this.currentPath)}`;
-                const options = { method };
-                
-                if (body) {
-                  const csrfToken = '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>';
-                  if (body instanceof FormData) {
-                    body.append('csrf_token', csrfToken);
-                    options.body = body;
-                  } else {
-                    body.csrf_token = csrfToken;
-                    options.headers = { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrfToken };
-                    options.body = JSON.stringify(body);
-                  }
-                }
-                
+        
+              async getJSON(key) {
+                if (!this.supported) return null;
                 try {
-                  const res = await fetch(url, options);
-                  const text = await res.text();
-                  let data;
-                  try { data = JSON.parse(text); } catch (e) { throw new Error('Invalid response from server'); }
-                  
-                  // Handle File Exists Conflict System
-                  if (!data.success) {
-                    if (data.error && data.error.startsWith('CONFLICT|')) {
-                      const conflictFilename = data.error.split('|')[1];
-                      if (confirm(`The file "${conflictFilename}" already exists. Do you want to overwrite it and save a version history?`)) {
-                        if (body instanceof FormData) body.append('override', '1');
-                        else body.override = true;
-                        return await this.fetchAPI(action, method, body, true);
-                      } else {
-                        return null; // Cancelled
-                      }
-                    }
-                    throw new Error(data.error || 'Unknown error');
-                  }
-                  return data;
-                } catch (err) {
-                  this.showToast(err.message);
+                  const dir = await this.getSubdir();
+                  const filename = (await this.hash(key)) + '.json';
+                  const fileHandle = await dir.getFileHandle(filename);
+                  const file = await fileHandle.getFile();
+                  return JSON.parse(await file.text());
+                } catch (e) {
                   return null;
                 }
               }
-
-              navigate(path, pushState = true) {
-                this.currentPath = path;
-                this.searchQuery = '';
-                this.searchResults = null;
-                const searchInp = document.getElementById('searchInput');
-                if (searchInp) searchInp.value = '';
-                
-                if (pushState) {
-                  const url = `?access=admin&page=drive` + (path ? `&path=${encodeURIComponent(path).replace(/%2F/g, '/')}` : '');
-                  window.history.pushState({ path }, '', url);
-                }
-                this.clearSelection(null, true);
-                this.setViewMode('home');
+        
+              async setJSON(key, data) {
+                if (!this.supported) return;
+                try {
+                  const dir = await this.getSubdir();
+                  const filename = (await this.hash(key)) + '.json';
+                  const fileHandle = await dir.getFileHandle(filename, { create: true });
+                  const writable = await fileHandle.createWritable();
+                  await writable.write(JSON.stringify(data));
+                  await writable.close();
+                } catch (e) {}
               }
-
-              async setViewMode(mode) {
-                this.currentViewMode = mode;
-                this.clearSelection(null, true);
-                
-                const navHome = document.getElementById('navHome');
-                const navStarred = document.getElementById('navStarred');
-                const navHistory = document.getElementById('navHistory');
-                const navTrash = document.getElementById('navTrash');
-                
-                if (navHome) navHome.classList.toggle('active', mode === 'home');
-                if (navStarred) navStarred.classList.toggle('active', mode === 'starred');
-                if (navHistory) navHistory.classList.toggle('active', mode === 'history');
-                if (navTrash) navTrash.classList.toggle('active', mode === 'trash');
-                
-                document.getElementById('chipsContainer').style.display = (mode === 'home' || mode === 'recents_all') ? 'flex' : 'none';
-                document.getElementById('recentsSection').style.display = mode === 'home' ? 'block' : 'none';
-                document.getElementById('trashActions').style.display = mode === 'trash' ? 'flex' : 'none';
-
-                this.closeSidebarOnMobile();
-                this.loadDirectory(this.currentPath);
+        
+              async clear() {
+                this.objectUrls.forEach(url => URL.revokeObjectURL(url));
+                this.objectUrls.clear();
+                if (!this.supported) return;
+                try {
+                  const root = await this.rootPromise;
+                  await root.removeEntry('phpfiles_opfs_cache', { recursive: true });
+                } catch (e) {}
               }
-
-              setFilter(filter) {
-                this.currentFilter = filter;
-                const chips = document.querySelectorAll('.chip');
-                chips.forEach(c => {
-                  c.classList.toggle('active', c.textContent.toLowerCase().includes(filter));
+            }
+        
+            function formatBytes(bytes, precision = 2) {
+              if (!bytes || bytes === 0) return '0 B';
+              const k = 1024;
+              const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+              const i = Math.floor(Math.log(bytes) / Math.log(k));
+              return parseFloat((bytes / Math.pow(k, i)).toFixed(precision)) + ' ' + sizes[i];
+            }
+        
+            function ltrim(str, chr) {
+              const rgx = new RegExp('^[' + chr + ']+');
+              return str.replace(rgx, '');
+            }
+        
+            class UploadManager {
+              constructor() {
+                this.queue = [];
+                this.isProcessing = false;
+                this.chunkSize = 2 * 1024 * 1024;
+                this.dock = document.getElementById('upload-dock');
+                this.title = document.getElementById('upload-dock-title');
+                this.bar = document.getElementById('upload-dock-bar');
+                this.body = document.getElementById('upload-dock-body');
+                this.toggleBtn = document.getElementById('btn-dock-toggle');
+                this.closeBtn = document.getElementById('btn-dock-close');
+                this.toggleIcon = document.getElementById('dock-toggle-icon');
+                this.bindEvents();
+              }
+        
+              bindEvents() {
+                this.toggleBtn.addEventListener('click', () => {
+                  this.dock.classList.toggle('minimized');
+                  const isMin = this.dock.classList.contains('minimized');
+                  this.toggleIcon.innerHTML = isMin ? '<path d="M12 8l-6 6 1.41 1.41L12 10.83l4.59 4.58L18 14z"/>' : '<path d="M19 13H5v-2h14v2z"/>';
                 });
+        
+                this.closeBtn.addEventListener('click', () => {
+                  if (this.isProcessing && !confirm('Uploads are in progress. Cancel remaining uploads?')) return;
+                  this.queue.forEach(item => {
+                    if (item.status === 'uploading') item.aborted = true;
+                  });
+                  this.queue = [];
+                  this.isProcessing = false;
+                  this.dock.classList.remove('active');
+                });
+              }
+        
+              enqueue(items, targetDir) {
+                if (!items || !items.length) return;
+                const newTasks = items.map((item, idx) => ({
+                  id: 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9) + '_' + idx,
+                  file: item.file,
+                  fileName: item.file.name,
+                  relativePath: item.relativePath || item.file.name,
+                  targetDir: targetDir,
+                  size: item.file.size,
+                  uploadedBytes: 0,
+                  status: 'pending',
+                  aborted: false
+                }));
+        
+                this.queue.push(...newTasks);
+                this.dock.classList.add('active');
+                this.renderDock();
+                if (!this.isProcessing) this.processQueue();
+              }
+        
+              enqueueRemoteDownload(url, customName, targetDir) {
+                const id = 'remote_' + Date.now();
+                const displayName = customName || url.split('/').pop().split('?')[0] || url;
+                const task = {
+                  id: id,
+                  fileName: displayName,
+                  relativePath: 'Remote Download',
+                  targetDir: targetDir,
+                  size: 0,
+                  uploadedBytes: 0,
+                  status: 'uploading'
+                };
+
+                this.queue.push(task);
+                this.dock.classList.remove('minimized');
+                this.dock.classList.add('active');
+                this.renderDock();
+
+                const fd = new FormData();
+                fd.append('action', 'fetch_url');
+                fd.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>');
+                fd.append('url', url);
+                fd.append('custom_name', customName);
+                fd.append('dir', targetDir);
+
+                fetch('?access=admin&page=drive', { method: 'POST', body: fd })
+                  .then(r => r.json())
+                  .then(res => {
+                    if (res.success) {
+                      task.status = 'completed';
+                      task.fileName = res.filename;
+                      this.renderDock();
+                      if (window.app) {
+                        app.toast(`Downloaded: ${res.filename}`);
+                        app.refresh();
+                      }
+                    } else {
+                      task.status = 'error';
+                      this.renderDock();
+                      if (window.app) app.toast(res.error || 'Remote download failed');
+                    }
+                  })
+                  .catch(() => {
+                    task.status = 'error';
+                    this.renderDock();
+                    if (window.app) app.toast('Network error during remote download');
+                  });
+              }
+        
+              renderDock() {
+                const total = this.queue.length;
+                const completed = this.queue.filter(i => i.status === 'completed').length;
+                const totalBytes = this.queue.reduce((acc, i) => acc + i.size, 0) || 1;
+                const loadedBytes = this.queue.reduce((acc, i) => acc + i.uploadedBytes, 0);
+                const percent = Math.min(100, Math.round((loadedBytes / totalBytes) * 100));
+        
+                this.title.innerText = completed === total ? `${total} upload(s) complete` : `Uploading ${completed} of ${total} item(s) (${percent}%)`;
+                this.bar.style.width = `${percent}%`;
+        
+                this.body.innerHTML = this.queue.map(item => {
+                  let statusText = 'Pending';
+                  let statusColor = 'var(--md-sys-color-on-surface-variant)';
+        
+                  if (item.status === 'uploading') {
+                    const itemPercent = item.size ? Math.round((item.uploadedBytes / item.size) * 100) : 100;
+                    statusText = `${itemPercent}%`;
+                    statusColor = '#ff0000';
+                  } else if (item.status === 'completed') {
+                    statusText = '<svg viewBox="0 0 24 24" style="width:16px;height:16px;color:#4caf50;"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
+                  } else if (item.status === 'error') {
+                    statusText = '<span style="color:var(--md-sys-color-error);">Failed</span>';
+                  }
+        
+                  return `
+                    <div class="upload-item-row" id="row_${item.id}">
+                      <div class="upload-item-info">
+                        <div class="upload-item-name" title="${item.relativePath}">${item.fileName}</div>
+                        <div class="upload-item-sub">${item.relativePath !== item.fileName ? item.relativePath + ' • ' : ''}${formatBytes(item.size)}</div>
+                      </div>
+                      <div class="upload-item-status" style="color:${statusColor}">${statusText}</div>
+                    </div>
+                  `;
+                }).join('');
+              }
+        
+              updateItemProgress(item, uploadedChunkBytes) {
+                item.uploadedBytes = Math.min(item.size, uploadedChunkBytes);
+                const totalBytes = this.queue.reduce((acc, i) => acc + i.size, 0) || 1;
+                const loadedBytes = this.queue.reduce((acc, i) => acc + i.uploadedBytes, 0);
+                const percent = Math.min(100, Math.round((loadedBytes / totalBytes) * 100));
+        
+                const completed = this.queue.filter(i => i.status === 'completed').length;
+                this.title.innerText = `Uploading ${completed} of ${this.queue.length} item(s) (${percent}%)`;
+                this.bar.style.width = `${percent}%`;
+        
+                const row = document.getElementById(`row_${item.id}`);
+                if (row) {
+                  const st = row.querySelector('.upload-item-status');
+                  if (st) {
+                    const itemPercent = item.size ? Math.round((item.uploadedBytes / item.size) * 100) : 100;
+                    st.innerText = `${itemPercent}%`;
+                    st.style.color = '#ff0000';
+                  }
+                }
+              }
+        
+              async processQueue() {
+                this.isProcessing = true;
+        
+                while (true) {
+                  const nextItem = this.queue.find(i => i.status === 'pending');
+                  if (!nextItem) break;
+                  await this.uploadFileChunked(nextItem);
+                }
+        
+                this.isProcessing = false;
+                const allDone = this.queue.every(i => i.status === 'completed');
+                if (allDone) {
+                  this.title.innerText = `${this.queue.length} upload(s) complete`;
+                  this.bar.style.width = '100%';
+                  if (window.app) app.refresh();
+                }
+              }
+        
+              async uploadFileChunked(item) {
+                item.status = 'uploading';
+                const file = item.file;
+                const totalChunks = Math.max(1, Math.ceil(file.size / this.chunkSize));
+        
+                for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+                  if (item.aborted) {
+                    item.status = 'error';
+                    this.renderDock();
+                    return;
+                  }
+        
+                  const start = chunkIdx * this.chunkSize;
+                  const end = Math.min(file.size, start + this.chunkSize);
+                  const chunkBlob = file.slice(start, end);
+        
+                  const fd = new FormData();
+                  fd.append('action', 'upload_chunk');
+                  fd.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>');
+                  fd.append('upload_id', item.id);
+                  fd.append('chunk_index', chunkIdx);
+                  fd.append('total_chunks', totalChunks);
+                  fd.append('file_name', item.fileName);
+                  fd.append('relative_path', item.relativePath);
+                  fd.append('dir', item.targetDir);
+                  fd.append('chunk', chunkBlob, item.fileName);
+        
+                  try {
+                    const res = await fetch('?access=admin&page=drive', { method: 'POST', body: fd });
+                    if (!res.ok) throw new Error('Chunk upload failed');
+                    const data = await res.json();
+                    if (!data.success) throw new Error(data.error || 'Upload error');
+                    this.updateItemProgress(item, end);
+                  } catch (e) {
+                    item.status = 'error';
+                    this.renderDock();
+                    return;
+                  }
+                }
+        
+                item.status = 'completed';
+                item.uploadedBytes = item.size;
+                this.renderDock();
+              }
+            }
+        
+            class MangaViewer {
+              constructor() {
+                this.el = document.getElementById('manga-viewer');
+                this.topbar = document.getElementById('manga-topbar');
+                this.pagesWrap = document.getElementById('manga-pages');
+                this.counter = document.getElementById('manga-counter');
+                this.widthSelect = document.getElementById('manga-width-select');
+                this.images = [];
+                this.currentDirPath = '';
+                this.observer = null;
+                this.bindEvents();
+              }
+        
+              bindEvents() {
+                document.getElementById('btn-manga-close').addEventListener('click', () => this.close());
+                document.getElementById('btn-manga-fs').addEventListener('click', () => {
+                  if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen().catch(() => {});
+                  } else {
+                    document.exitFullscreen().catch(() => {});
+                  }
+                });
+        
+                document.getElementById('btn-manga-offline').addEventListener('click', () => {
+                  const dir = this.currentDirPath !== undefined ? this.currentDirPath : (window.app ? window.app.currentPath : '');
+                  window.location.href = `?access=admin&page=drive&action=manga_offline&dir=${encodeURIComponent(dir)}`;
+                });
+        
+                this.widthSelect.addEventListener('change', (e) => {
+                  const val = e.target.value;
+                  this.pagesWrap.classList.remove('mode-fit-height', 'mode-fit-screen');
+                  if (val === 'fit-height') {
+                    this.pagesWrap.classList.add('mode-fit-height');
+                  } else if (val === 'fit-screen') {
+                    this.pagesWrap.classList.add('mode-fit-screen');
+                  } else {
+                    document.documentElement.style.setProperty('--manga-width', val);
+                  }
+                });
+        
+                let lastScroll = 0;
+                this.el.addEventListener('scroll', () => {
+                  const current = this.el.scrollTop;
+                  if (current > lastScroll && current > 80) {
+                    this.topbar.classList.add('autohide');
+                  } else {
+                    this.topbar.classList.remove('autohide');
+                  }
+                  lastScroll = current;
+                });
+        
+                window.addEventListener('keydown', (e) => {
+                  if (this.el.classList.contains('active') && e.key === 'Escape') this.close();
+                });
+              }
+        
+              async open() {
+                const appInstance = window.app;
+                const currentPath = appInstance ? (appInstance.currentPath || '') : '';
+                this.currentDirPath = currentPath;
+                this.images = [];
+
+                try {
+                  const res = await fetch(`?access=admin&page=drive&action=list&dir=${encodeURIComponent(currentPath)}`);
+                  const data = await res.json();
+                  const files = data.files || [];
+                  this.images = files.filter(f => f.type === 'image');
+                  this.images.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+                } catch (e) {
+                  this.images = [];
+                }
+
+                if (!this.images.length) {
+                  if (appInstance) appInstance.toast('No images in this folder');
+                  return;
+                }
                 this.render();
               }
 
-              async loadDirectory(path) {
-                const seq = ++this.loadSeq;
-                if (this.currentViewMode === 'home') {
-                  const data = await this.fetchAPI('list');
-                  if (seq !== this.loadSeq) return; // Prevent async view merging
-                  if (data) {
-                    this.data = data;
-                    this.render();
-                    this.loadRecents();
+              async openPath(path) {
+                this.currentDirPath = path || '';
+                this.images = [];
+
+                try {
+                  const res = await fetch(`?access=admin&page=drive&action=list&dir=${encodeURIComponent(path || '')}`);
+                  const data = await res.json();
+                  this.images = (data.files || []).filter(f => f.type === 'image');
+                  this.images.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+                  if (!this.images.length) {
+                    if (window.app) window.app.toast('No images in folder');
+                    return;
                   }
-                } else if (this.currentViewMode === 'starred') {
-                  const data = await this.fetchAPI('list_starred');
-                  if (seq !== this.loadSeq) return;
-                  if (data) {
-                    this.data = { folders: data.starred.filter(i => i.isDir), files: data.starred.filter(i => !i.isDir), breadcrumbs: [] };
-                    this.render();
-                  }
-                } else if (this.currentViewMode === 'history') {
-                  const data = await this.fetchAPI('list_history');
-                  if (seq !== this.loadSeq) return;
-                  if (data) {
-                    this.data = { folders: [], files: data.history, breadcrumbs: [] };
-                    this.render();
-                  }
-                } else if (this.currentViewMode === 'trash') {
-                  const data = await this.fetchAPI('list_trash');
-                  if (seq !== this.loadSeq) return;
-                  if (data) {
-                    this.renderTrash(data.trash);
-                  }
-                } else if (this.currentViewMode === 'recents_all') {
-                  const data = await this.fetchAPI('recents&all=1');
-                  if (seq !== this.loadSeq) return;
-                  if (data) {
-                    this.data = { folders: [], files: data.recents, breadcrumbs: [] };
-                    this.render();
-                  }
+                  this.render();
+                } catch (e) {
+                  if (window.app) window.app.toast('Failed to load folder images');
                 }
               }
-
-              async loadRecents() {
-                const data = await this.fetchAPI('recents');
-                const tray = document.getElementById('recentsTray');
-                tray.innerHTML = '';
-                if (data && data.recents.length > 0 && this.currentViewMode === 'home') {
-                  document.getElementById('recentsSection').style.display = 'block';
-                  data.recents.forEach(item => {
-                    const el = document.createElement('div');
-                    el.className = 'recent-card';
-                    let icon = 'description';
-                    if (item.isImage) icon = 'image';
-                    if (['mp4','webm'].includes(item.ext)) icon = 'movie';
-                    if (['mp3','wav','ogg'].includes(item.ext)) icon = 'audiotrack';
-                    el.innerHTML = `
-                      <div style="display:flex; justify-content:center;"><span class="material-symbols-rounded" style="font-size:36px;">${icon}</span></div>
-                      <div class="recent-name" title="${item.name}">${item.name}</div>
-                    `;
-                    this.bindItemEvents(el, item, false);
-                    tray.appendChild(el);
+        
+              render() {
+                if (this.observer) this.observer.disconnect();
+                this.pagesWrap.innerHTML = '';
+                this.el.classList.add('active');
+                this.counter.innerText = `1 / ${this.images.length}`;
+        
+                this.observer = new IntersectionObserver((entries) => {
+                  entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                      const idx = parseInt(entry.target.dataset.index);
+                      this.counter.innerText = `${idx + 1} / ${this.images.length}`;
+                    }
                   });
+                }, { root: this.el, threshold: 0.1 });
+        
+                let html = '';
+                this.images.forEach((img, idx) => {
+                  const rawUrl = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(img.path)}`;
+                  html += `
+                    <div class="manga-page" data-index="${idx}" id="mpage-${idx}">
+                      <img src="${rawUrl}" alt="${img.name}" loading="lazy" decoding="async">
+                    </div>
+                  `;
+                });
+                this.pagesWrap.innerHTML = html;
+                this.pagesWrap.querySelectorAll('.manga-page').forEach(page => this.observer.observe(page));
+                this.el.scrollTop = 0;
+              }
+        
+              close() {
+                if (this.observer) this.observer.disconnect();
+                this.el.classList.remove('active');
+                this.pagesWrap.innerHTML = '';
+                this.images = [];
+                this.currentDirPath = '';
+                if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+              }
+            }
+        
+            class LightboxViewer {
+              constructor() {
+                this.el = document.getElementById('lightbox');
+                this.title = document.getElementById('lb-title');
+                this.body = document.getElementById('lb-body');
+                this.currentIndex = 0;
+                this.mediaList = [];
+                this.touchStartX = 0;
+                this.touchStartY = 0;
+                this.bindEvents();
+              }
+
+              bindEvents() {
+                document.getElementById('btn-lb-close').addEventListener('click', () => this.close());
+
+                document.getElementById('btn-lb-download').addEventListener('click', () => {
+                  const item = this.mediaList[this.currentIndex];
+                  if (item) window.location.href = `?access=admin&page=drive&action=download&f=${encodeURIComponent(item.path)}`;
+                });
+
+                document.getElementById('btn-lb-details').addEventListener('click', () => {
+                  const item = this.mediaList[this.currentIndex];
+                  if (item && window.app) app.showDetails(item.path);
+                });
+
+                window.addEventListener('keydown', (e) => {
+                  if (!this.el.classList.contains('active')) return;
+                  if (e.key === 'Escape') this.close();
+                  if (e.key === 'ArrowLeft') this.nav(-1);
+                  if (e.key === 'ArrowRight') this.nav(1);
+                  if (e.key === ' ' && (e.target === document.body || e.target === this.el)) {
+                    const vid = this.body.querySelector('video, audio');
+                    if (vid) {
+                      e.preventDefault();
+                      if (vid.paused) vid.play(); else vid.pause();
+                    }
+                  }
+                });
+
+                this.body.addEventListener('touchstart', (e) => {
+                  if (e.target.closest('video, audio, .lightbox-audio-card, .lightbox-nav')) {
+                    this.touchStartX = null;
+                    return;
+                  }
+                  this.touchStartX = e.changedTouches[0].screenX;
+                  this.touchStartY = e.changedTouches[0].screenY;
+                }, { passive: true });
+
+                this.body.addEventListener('touchend', (e) => {
+                  if (this.touchStartX === null) return;
+                  const diffX = e.changedTouches[0].screenX - this.touchStartX;
+                  const diffY = e.changedTouches[0].screenY - this.touchStartY;
+                  if (Math.abs(diffX) > 40 && Math.abs(diffX) > Math.abs(diffY) * 1.3) {
+                    this.nav(diffX > 0 ? -1 : 1);
+                  }
+                }, { passive: true });
+              }
+
+              open(mediaList, startIndex) {
+                this.mediaList = mediaList || [];
+                this.currentIndex = startIndex || 0;
+                this.el.classList.add('active');
+                this.loadCurrent();
+              }
+
+              cleanupMedia() {
+                const activeMedia = this.body.querySelectorAll('video, audio');
+                activeMedia.forEach(m => {
+                  try {
+                    m.pause();
+                    m.removeAttribute('src');
+                    m.load();
+                  } catch(e) {}
+                });
+              }
+
+              loadCurrent() {
+                const item = this.mediaList[this.currentIndex];
+                if (!item) return;
+
+                this.cleanupMedia();
+
+                const targetRel = ltrim(item.path, '/');
+                let currentDecoded = '';
+                try { currentDecoded = decodeURIComponent(window.location.hash.replace(/^#\/?/, '')); } catch (e) { currentDecoded = window.location.hash.replace(/^#\/?/, ''); }
+
+                if (currentDecoded !== targetRel) {
+                  window.location.hash = '#/' + encodeURI(targetRel);
+                }
+
+                const fileName = item.name || item.path.split('/').pop() || '';
+                this.title.innerText = `${fileName} (${this.currentIndex + 1}/${this.mediaList.length})`;
+                if (window.app) app.updateDocTitle(fileName);
+
+                const rawUrl = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(item.path)}`;
+                const navPrev = `<div class="lightbox-nav prev" id="lb-prev"><svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg></div>`;
+                const navNext = `<div class="lightbox-nav next" id="lb-next"><svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg></div>`;
+
+                const ext = (fileName.split('.').pop() || '').toLowerCase();
+                const isAudio = item.type === 'audio' || ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'm4r', 'mid', 'midi'].includes(ext);
+                const isVideo = item.type === 'video' || ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv', 'avi', 'ts', '3gp', 'wmv', 'flv'].includes(ext);
+
+                if (isVideo) {
+                  this.body.innerHTML = `
+                    <video class="lightbox-media" src="${rawUrl}" controls autoplay playsinline preload="auto" style="max-height:82dvh; max-width:95%; background:#000;">
+                      Your browser does not support HTML5 video.
+                    </video>
+                    ${navPrev}
+                    ${navNext}
+                  `;
+                  const vid = this.body.querySelector('video');
+                  if (vid) {
+                    vid.load();
+                    vid.play().catch(() => { vid.controls = true; });
+                  }
+                } else if (isAudio) {
+                  const thumbUrl = `?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}`;
+                  this.body.innerHTML = `
+                    <div class="lightbox-audio-card">
+                      <div class="lightbox-audio-badge">Audio Track</div>
+                      <div class="lightbox-audio-disc-wrap">
+                        <div class="lightbox-audio-disc" id="lb-audio-disc" style="background-image:url('${thumbUrl}'); background-size:cover; background-position:center;">
+                          <svg viewBox="0 0 24 24" style="background:rgba(0,0,0,0.45); border-radius:50%; padding:2px;"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg>
+                        </div>
+                      </div>
+                      <div class="lightbox-audio-title">${fileName}</div>
+                      <audio src="${rawUrl}" controls autoplay preload="auto">
+                        Your browser does not support HTML5 audio.
+                      </audio>
+                    </div>
+                    ${navPrev}
+                    ${navNext}
+                  `;
+                  const aud = this.body.querySelector('audio');
+                  const disc = document.getElementById('lb-audio-disc');
+                  if (aud) {
+                    aud.addEventListener('play', () => disc?.classList.add('spinning'));
+                    aud.addEventListener('pause', () => disc?.classList.remove('spinning'));
+                    aud.addEventListener('ended', () => disc?.classList.remove('spinning'));
+                    aud.load();
+                    aud.play().catch(() => { aud.controls = true; });
+                  }
                 } else {
-                  document.getElementById('recentsSection').style.display = 'none';
+                  this.body.innerHTML = `
+                    <svg class="m3-spinner lb-spinner active" id="lb-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                    <img class="lightbox-media" id="lb-img" src="" alt="${fileName}" style="opacity:0;">
+                    ${navPrev}
+                    ${navNext}
+                  `;
+
+                  const img = document.getElementById('lb-img');
+                  const spinner = document.getElementById('lb-spinner');
+                  const preloader = new Image();
+                  preloader.onload = () => {
+                    if (!this.mediaList[this.currentIndex] || this.mediaList[this.currentIndex].path !== item.path) return;
+                    if (spinner) spinner.classList.remove('active');
+                    if (img) {
+                      img.src = rawUrl;
+                      img.style.opacity = '1';
+                    }
+                  };
+                  preloader.onerror = () => {
+                    if (spinner) spinner.classList.remove('active');
+                    if (img) {
+                      img.src = rawUrl;
+                      img.style.opacity = '1';
+                    }
+                  };
+                  preloader.src = rawUrl;
+                }
+
+                const btnPrev = document.getElementById('lb-prev');
+                if (btnPrev) btnPrev.onclick = (e) => { e.stopPropagation(); this.nav(-1); };
+
+                const btnNext = document.getElementById('lb-next');
+                if (btnNext) btnNext.onclick = (e) => { e.stopPropagation(); this.nav(1); };
+              }
+
+              nav(dir) {
+                if (!this.mediaList || this.mediaList.length <= 1) return;
+                this.currentIndex = (this.currentIndex + dir + this.mediaList.length) % this.mediaList.length;
+                this.loadCurrent();
+              }
+
+              close(updateHash = true) {
+                this.cleanupMedia();
+                this.el.classList.remove('active');
+                this.body.innerHTML = '';
+
+                if (updateHash && window.app) {
+                  const returnSection = app.originSection || (app.currentSection !== 'home' ? app.currentSection : null);
+                  if (returnSection) {
+                    app.originSection = null;
+                    const targetHash = `#/${returnSection}`;
+                    if (window.location.hash !== targetHash) {
+                      window.location.hash = targetHash;
+                    } else {
+                      app.switchDriveSection(returnSection, false);
+                    }
+                    return;
+                  }
+
+                  let parentDir = '';
+                  const currentItem = this.mediaList[this.currentIndex];
+                  if (currentItem && currentItem.path && currentItem.path.includes('/')) {
+                    const parts = currentItem.path.split('/');
+                    parts.pop();
+                    parentDir = parts.join('/');
+                  } else if (app.currentPath) {
+                    parentDir = app.currentPath;
+                  }
+
+                  const targetHash = parentDir ? '#/' + ltrim(parentDir, '/') : '#/';
+                  if (window.location.hash !== targetHash) {
+                    window.location.hash = targetHash;
+                  } else {
+                    app.currentPath = parentDir;
+                    app.updateDocTitle(parentDir ? parentDir.split('/').pop() : '');
+                  }
+                }
+              }
+            }
+        
+            class GalleryApp {
+              constructor() {
+                this.appTitle = 'PHP Drive';
+                this.currentPath = null;
+                this.data = { folders: [], files: [], stats: {} };
+                this.filter = 'all';
+                this.sortBy = localStorage.getItem('pg_sort') || 'name_asc';
+                this.searchQuery = '';
+                this.selectedItems = new Set();
+                this.layout = localStorage.getItem('pg_layout') || 'grid';
+                this.gridCols = parseInt(localStorage.getItem('pg_grid_cols')) || 0;
+                this.renderLimit = 25;
+                this.filteredList = [];
+                this.searchDebounceTimer = null;
+                this.isSearching = false;
+                this.starredSet = new Set();
+                this.currentSection = 'home';
+                this.expandedTreeNodes = new Set(JSON.parse(localStorage.getItem('pg_tree_expanded') || '[]'));
+                this.modalStack = [];
+        
+                this.initDOM();
+                this.convertLegacyUrl();
+                this.loadStarredSet();
+                this.bindEvents();
+                this.setLayout(this.layout);
+                this.applyGridSizing();
+                this.updateSortUI();
+                this.loadTree();
+        
+                this.handleHashChange();
+              }
+        
+              initDOM() {
+                this.container = document.getElementById('gallery-container');
+                this.breadcrumbs = document.getElementById('breadcrumbs');
+                this.dirTitle = document.getElementById('dir-title');
+                this.dirStats = document.getElementById('dir-stats');
+                this.sidebar = document.getElementById('sidebar');
+                this.sidebarBackdrop = document.getElementById('sidebar-backdrop');
+                this.contextMenu = document.getElementById('context-menu');
+                this.batchBar = document.getElementById('batch-bar');
+                this.batchCount = document.getElementById('batch-count');
+                this.dropdownMore = document.getElementById('dropdown-more');
+                this.dropdownSort = document.getElementById('dropdown-sort');
+                this.btnSort = document.getElementById('btn-sort');
+                this.sliderCols = document.getElementById('slider-cols');
+                this.sliderColsVal = document.getElementById('slider-cols-val');
+                this.sliderColsDesk = document.getElementById('slider-cols-desk');
+                this.sliderColsDeskVal = document.getElementById('slider-cols-desk-val');
+                this.scrollTrigger = document.getElementById('infinite-scroll-trigger');
+              }
+        
+              bindEvents() {
+                document.getElementById('btn-sidebar').addEventListener('click', () => {
+                  if (window.innerWidth <= 768) {
+                    this.sidebar.classList.toggle('open');
+                    this.sidebarBackdrop.classList.toggle('active');
+                  } else {
+                    this.sidebar.classList.toggle('collapsed');
+                    localStorage.setItem('pg_sidebar_collapsed', this.sidebar.classList.contains('collapsed') ? '1' : '0');
+                  }
+                });
+
+                document.getElementById('dm-shortcuts')?.addEventListener('click', () => {
+                  this.dropdownMore.classList.remove('active');
+                  this.showModal('modal-shortcuts');
+                });
+
+                document.getElementById('btn-shortcuts-desk')?.addEventListener('click', () => {
+                  this.showModal('modal-shortcuts');
+                });
+
+                window.addEventListener('keydown', (e) => {
+                  const inInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.classList.contains('CodeMirror-code');
+                  const hasModalOpen = document.getElementById('modal-backdrop').classList.contains('active');
+                  const isLightbox = document.getElementById('lightbox').classList.contains('active');
+
+                  if (!inInput && !hasModalOpen && !isLightbox) {
+                    if (e.key === '?' || e.key === 'F1') {
+                      e.preventDefault();
+                      this.showModal('modal-shortcuts');
+                    } else if (e.key === '/' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f')) {
+                      e.preventDefault();
+                      document.getElementById('search-input')?.focus();
+                    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+                      e.preventDefault();
+                      this.filteredList.forEach(item => this.selectedItems.add(item.path));
+                      this.renderGallery(true);
+                      this.updateBatchBar();
+                    } else if (e.key === 'Escape') {
+                      this.clearSelection();
+                    } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'n') {
+                      e.preventDefault();
+                      document.getElementById('btn-new-folder')?.click();
+                    } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
+                      e.preventDefault();
+                      document.getElementById('btn-new-file')?.click();
+                    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+                      if (this.selectedItems.size > 0) {
+                        e.preventDefault();
+                        this.setClipboard('copy');
+                      }
+                    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
+                      if (this.selectedItems.size > 0) {
+                        e.preventDefault();
+                        this.setClipboard('cut');
+                      }
+                    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+                      if (this.clipboard && this.clipboard.items.length > 0) {
+                        e.preventDefault();
+                        this.pasteClipboard();
+                      }
+                    } else if (e.key === 'Delete') {
+                      if (this.selectedItems.size > 0) {
+                        e.preventDefault();
+                        this.batchDelete();
+                      }
+                    } else if (e.key === 'F2') {
+                      if (this.selectedItems.size === 1) {
+                        e.preventDefault();
+                        const target = Array.from(this.selectedItems)[0];
+                        this.renameItem(target, target.split('/').pop());
+                      }
+                    }
+                  }
+                });
+
+                this.sidebar.addEventListener('transitionend', (e) => {
+                  if (e.propertyName === 'margin-left' && this.layout === 'columns') {
+                    this.renderLimit = 25;
+                    this.renderGallery();
+                  }
+                });
+
+                if (window.ResizeObserver && this.container) {
+                  let lastCols = this.getMasonryColCount();
+                  const ro = new ResizeObserver(() => {
+                    if (this.layout === 'columns') {
+                      const currentCols = this.getMasonryColCount();
+                      if (currentCols !== lastCols) {
+                        lastCols = currentCols;
+                        this.renderLimit = 25;
+                        this.renderGallery();
+                      }
+                    }
+                  });
+                  ro.observe(this.container);
+                }
+        
+                if (window.innerWidth > 768 && localStorage.getItem('pg_sidebar_collapsed') === '1') {
+                  this.sidebar.classList.add('collapsed');
+                }
+        
+                this.sidebarBackdrop.addEventListener('click', () => {
+                  this.sidebar.classList.remove('open');
+                  this.sidebarBackdrop.classList.remove('active');
+                });
+        
+                const handleClearCache = async () => {
+                  if (window.opfsCache) {
+                    await window.opfsCache.clear();
+                    this.toast('Cache cleared');
+                    this.refresh();
+                  }
+                };
+        
+                const clearCacheBtn = document.getElementById('dm-clear-cache');
+                if (clearCacheBtn) clearCacheBtn.addEventListener('click', handleClearCache);
+        
+                const clearCacheDeskBtn = document.getElementById('btn-clear-cache-desk');
+                if (clearCacheDeskBtn) clearCacheDeskBtn.addEventListener('click', handleClearCache);
+        
+                document.querySelectorAll('[data-layout]').forEach(btn => {
+                  btn.addEventListener('click', (e) => this.setLayout(e.currentTarget.dataset.layout));
+                });
+        
+                document.querySelectorAll('.filter-item[data-filter]').forEach(pill => {
+                  pill.addEventListener('click', (e) => {
+                    document.querySelectorAll('.filter-item[data-filter]').forEach(p => p.classList.remove('active'));
+                    e.currentTarget.classList.add('active');
+                    this.filter = e.currentTarget.dataset.filter || 'all';
+                    this.sidebar.classList.remove('open');
+                    this.sidebarBackdrop.classList.remove('active');
+                    this.renderLimit = 25;
+
+                    if (this.currentSection === 'activity') {
+                      this.renderActivityView();
+                    } else if (this.currentSection === 'trash') {
+                      this.loadTrash();
+                    } else {
+                      this.renderGallery();
+                    }
+                  });
+                });
+        
+                document.getElementById('search-input').addEventListener('input', (e) => {
+                  const q = e.target.value.trim();
+                  clearTimeout(this.searchDebounceTimer);
+                  this.searchDebounceTimer = setTimeout(() => {
+                    this.searchQuery = q;
+                    if (q.length > 0) {
+                      this.performSearch(q);
+                    } else {
+                      this.isSearching = false;
+                      this.renderLimit = 25;
+                      this.renderGallery();
+                    }
+                  }, 280);
+                });
+        
+                const openManga = () => mangaViewer.open();
+                document.getElementById('btn-manga-desk').addEventListener('click', openManga);
+                document.getElementById('dm-manga').addEventListener('click', openManga);
+        
+                const fileInput = document.getElementById('file-uploader');
+                const folderInput = document.getElementById('folder-uploader');
+                const dropdownUpload = document.getElementById('dropdown-upload');
+
+                const toggleUploadDropdown = (e) => {
+                  e.stopPropagation();
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  dropdownUpload.style.top = `${rect.bottom + 8}px`;
+                  dropdownUpload.style.right = `${window.innerWidth - rect.right}px`;
+                  dropdownUpload.classList.toggle('active');
+                };
+
+                document.getElementById('btn-upload-desk').addEventListener('click', toggleUploadDropdown);
+                document.getElementById('du-upload-files').addEventListener('click', () => { dropdownUpload.classList.remove('active'); fileInput.click(); });
+                document.getElementById('du-upload-folder').addEventListener('click', () => { dropdownUpload.classList.remove('active'); folderInput.click(); });
+                document.getElementById('du-upload-url').addEventListener('click', () => { dropdownUpload.classList.remove('active'); this.promptUploadUrl(); });
+
+                document.getElementById('dm-upload-files').addEventListener('click', () => fileInput.click());
+                document.getElementById('dm-upload-folder').addEventListener('click', () => folderInput.click());
+                document.getElementById('dm-upload-url').addEventListener('click', () => this.promptUploadUrl());
+        
+                fileInput.addEventListener('change', (e) => {
+                  if (e.target.files.length) {
+                    const list = Array.from(e.target.files).map(f => ({ file: f, relativePath: f.name }));
+                    uploadManager.enqueue(list, this.currentPath);
+                    e.target.value = '';
+                  }
+                });
+        
+                folderInput.addEventListener('change', (e) => {
+                  if (e.target.files.length) {
+                    const list = Array.from(e.target.files).map(f => ({
+                      file: f,
+                      relativePath: f.webkitRelativePath || f.name
+                    }));
+                    uploadManager.enqueue(list, this.currentPath);
+                    e.target.value = '';
+                  }
+                });
+        
+                const toggleMoreMenu = (e) => {
+                  e.stopPropagation();
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  this.dropdownMore.style.top = `${rect.bottom + 8}px`;
+                  this.dropdownMore.style.right = `${window.innerWidth - rect.right}px`;
+                  this.dropdownMore.classList.toggle('active');
+                };
+                document.getElementById('btn-more-menu').addEventListener('click', toggleMoreMenu);
+        
+                const handleColChange = (val) => {
+                  this.gridCols = parseInt(val);
+                  localStorage.setItem('pg_grid_cols', this.gridCols);
+                  if (this.sliderCols) this.sliderCols.value = this.gridCols;
+                  if (this.sliderColsDesk) this.sliderColsDesk.value = this.gridCols;
+                  this.applyGridSizing();
+                };
+        
+                if (this.sliderCols) {
+                  this.sliderCols.value = this.gridCols;
+                  this.sliderCols.addEventListener('input', (e) => handleColChange(e.target.value));
+                }
+        
+                if (this.sliderColsDesk) {
+                  this.sliderColsDesk.value = this.gridCols;
+                  this.sliderColsDesk.addEventListener('input', (e) => handleColChange(e.target.value));
+                }
+        
+                window.addEventListener('dragover', (e) => {
+                  e.preventDefault();
+                  document.getElementById('dropzone').classList.add('active');
+                });
+                window.addEventListener('dragleave', (e) => {
+                  if (e.clientX <= 0 || e.clientY <= 0) {
+                    document.getElementById('dropzone').classList.remove('active');
+                  }
+                });
+                window.addEventListener('drop', async (e) => {
+                  e.preventDefault();
+                  document.getElementById('dropzone').classList.remove('active');
+                  if (e.dataTransfer.items && e.dataTransfer.items.length) {
+                    const items = await this.readDropData(e.dataTransfer.items);
+                    if (items.length) uploadManager.enqueue(items, this.currentPath);
+                  } else if (e.dataTransfer.files.length) {
+                    const list = Array.from(e.dataTransfer.files).map(f => ({ file: f, relativePath: f.name }));
+                    uploadManager.enqueue(list, this.currentPath);
+                  }
+                });
+        
+                document.getElementById('btn-new-folder').addEventListener('click', () => {
+                  this.showInputModal('Create Folder', 'Folder Name', '', (name) => {
+                    this.api('create', { dir: this.currentPath, name, type: 'folder' }, () => this.refresh());
+                  });
+                });
+        
+                document.getElementById('btn-new-file').addEventListener('click', () => {
+                  this.showInputModal('Create Text File', 'File Name (e.g. notes.txt)', '', (name) => {
+                    this.api('create', { dir: this.currentPath, name, type: 'file' }, () => this.refresh());
+                  });
+                });
+        
+                document.getElementById('btn-folder-info').addEventListener('click', () => {
+                  this.showDetails(this.currentPath);
+                });
+        
+                document.getElementById('btn-download-dir').addEventListener('click', () => {
+                  const targetDir = this.currentPath || '';
+                  const zipName = (targetDir.split('/').pop() || 'drive_backup') + '.zip';
+                  this.downloadZipWithProgress(`?access=admin&page=drive&action=download_zip&dir=${encodeURIComponent(targetDir)}`, null, zipName);
+                });
+        
+                document.getElementById('btn-batch-clear').addEventListener('click', () => this.clearSelection());
+                document.getElementById('btn-batch-download').addEventListener('click', () => this.batchDownload());
+                document.getElementById('btn-batch-delete').addEventListener('click', () => this.batchDelete());
+                document.getElementById('btn-batch-compress')?.addEventListener('click', () => this.batchCompress());
+                document.getElementById('btn-batch-info').addEventListener('click', () => this.showBatchDetails());
+        
+                window.addEventListener('hashchange', () => this.handleHashChange());
+        
+                if (this.btnSort) {
+                  this.btnSort.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    this.dropdownSort.style.top = `${rect.bottom + 8}px`;
+                    this.dropdownSort.style.left = `${Math.min(rect.left, window.innerWidth - 220)}px`;
+                    this.dropdownSort.classList.toggle('active');
+                    this.updateSortUI();
+                  });
+                }
+        
+                document.querySelectorAll('#dropdown-sort .dm-item').forEach(item => {
+                  item.addEventListener('click', (e) => {
+                    const sortMode = e.currentTarget.dataset.sort;
+                    if (sortMode) {
+                      this.sortBy = sortMode;
+                      localStorage.setItem('pg_sort', sortMode);
+                      this.dropdownSort.classList.remove('active');
+                      this.renderLimit = 25;
+                      this.renderGallery();
+                    }
+                  });
+                });
+        
+                window.addEventListener('click', () => {
+                  this.contextMenu.classList.remove('active');
+                  this.dropdownMore.classList.remove('active');
+                  if (this.dropdownSort) this.dropdownSort.classList.remove('active');
+                  const du = document.getElementById('dropdown-upload');
+                  if (du) du.classList.remove('active');
+                });
+                this.dropdownMore.addEventListener('click', (e) => {
+                  if (e.target.closest('.dm-item')) {
+                    this.dropdownMore.classList.remove('active');
+                  } else {
+                    e.stopPropagation();
+                  }
+                });
+                if (this.dropdownSort) this.dropdownSort.addEventListener('click', (e) => e.stopPropagation());
+        
+                const scrollObserver = new IntersectionObserver((entries) => {
+                  entries.forEach(entry => {
+                    if (entry.isIntersecting && this.renderLimit < this.filteredList.length) {
+                      this.renderLimit += 25;
+                      this.appendBatch();
+                    }
+                  });
+                }, { root: document.getElementById('main-content'), rootMargin: '300px' });
+                scrollObserver.observe(this.scrollTrigger);
+              }
+        
+              async readDropData(items) {
+                const fileList = [];
+                const queue = [];
+                for (let i = 0; i < items.length; i++) {
+                  const entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+                  if (entry) queue.push({ entry, path: '' });
+                }
+        
+                while (queue.length > 0) {
+                  const { entry, path } = queue.shift();
+                  if (entry.isFile) {
+                    const f = await new Promise(r => entry.file(r));
+                    fileList.push({ file: f, relativePath: path ? `${path}/${f.name}` : f.name });
+                  } else if (entry.isDirectory) {
+                    const reader = entry.createReader();
+                    const readEntries = async () => new Promise(r => reader.readEntries(r));
+                    let entries = await readEntries();
+                    while (entries.length > 0) {
+                      for (const child of entries) {
+                        queue.push({ entry: child, path: path ? `${path}/${entry.name}` : entry.name });
+                      }
+                      entries = await readEntries();
+                    }
+                  }
+                }
+                return fileList;
+              }
+        
+              getMasonryColCount() {
+                if (this.gridCols > 0) return this.gridCols;
+                const w = this.container ? this.container.clientWidth : window.innerWidth;
+                let cols = 5;
+                if (w < 520) cols = 2;
+                else if (w < 840) cols = 3;
+                else if (w < 1200) cols = 4;
+                else if (w < 1600) cols = 5;
+                else cols = 6;
+
+                const isCollapsed = this.sidebar && this.sidebar.classList.contains('collapsed');
+                if (isCollapsed && window.innerWidth > 768) {
+                  cols += 1;
+                }
+                return cols;
+              }
+        
+              setLayout(layout) {
+                this.layout = layout;
+                localStorage.setItem('pg_layout', layout);
+                document.querySelectorAll('[data-layout]').forEach(b => b.classList.remove('active'));
+                document.querySelector(`[data-layout="${layout}"]`)?.classList.add('active');
+                this.container.className = `gallery-container layout-${layout}`;
+                this.applyGridSizing();
+                this.renderLimit = 25;
+                this.renderGallery();
+              }
+        
+              updateControlsVisibility() {
+                const isStarred = this.currentSection === 'starred';
+                const isTrash = this.currentSection === 'trash';
+                const isActivity = this.currentSection === 'activity';
+                const hideUpload = isStarred || isTrash || isActivity;
+                const hideNewItems = isStarred || isTrash || isActivity;
+          
+                const btnUploadDesk = document.getElementById('btn-upload-desk');
+                if (btnUploadDesk) btnUploadDesk.style.display = hideUpload ? 'none' : 'flex';
+          
+                ['dm-upload-files', 'dm-upload-folder', 'dm-upload-url'].forEach(id => {
+                  const el = document.getElementById(id);
+                  if (el) el.style.display = hideUpload ? 'none' : 'flex';
+                });
+          
+                const btnNewFolder = document.getElementById('btn-new-folder');
+                const btnNewFile = document.getElementById('btn-new-file');
+                if (btnNewFolder) btnNewFolder.style.display = hideNewItems ? 'none' : 'flex';
+                if (btnNewFile) btnNewFile.style.display = hideNewItems ? 'none' : 'flex';
+          
+                const showCols = !isTrash && !isActivity;
+                const deskCols = document.getElementById('desk-cols-container');
+                const mobCols = document.getElementById('mobile-cols-container');
+                const mobSep = document.getElementById('mobile-cols-sep');
+                if (deskCols) deskCols.style.display = showCols ? 'flex' : 'none';
+                if (mobCols) mobCols.style.display = showCols ? 'flex' : 'none';
+                if (mobSep) mobSep.style.display = showCols ? 'block' : 'none';
+              }
+          
+              applyGridSizing() {
+                const text = this.gridCols > 0 ? `${this.gridCols}` : 'Auto';
+                if (this.gridCols > 0) {
+                  this.container.setAttribute('data-cols', this.gridCols);
+                } else {
+                  this.container.removeAttribute('data-cols');
+                }
+                if (this.sliderColsVal) this.sliderColsVal.innerText = text;
+                if (this.sliderColsDeskVal) this.sliderColsDeskVal.innerText = text;
+
+                if (this.currentSection === 'activity' || this.currentSection === 'trash') {
+                  return;
+                }
+
+                if (this.layout === 'columns') {
+                  this.renderLimit = 25;
+                  this.renderGallery(true);
+                }
+              }
+        
+              updateDocTitle(sub, count = null) {
+                const countPrefix = count !== null && count !== undefined ? `(${count}) ` : '';
+                const namePart = sub || '';
+                if (namePart) {
+                  document.title = `${countPrefix}${namePart} · ${this.appTitle}`;
+                } else {
+                  document.title = `${countPrefix}${this.appTitle}`;
+                }
+              }
+        
+              convertLegacyUrl() {
+                const urlParams = new URLSearchParams(window.location.search);
+                const pathParam = urlParams.get('path') || urlParams.get('dir') || '';
+                const fileParam = urlParams.get('edit') || urlParams.get('file') || urlParams.get('f') || urlParams.get('open') || '';
+
+                if (pathParam || fileParam) {
+                  let target = '';
+                  if (pathParam && fileParam) {
+                    const cleanP = pathParam.replace(/^\/+|\/+$/g, '');
+                    const cleanF = fileParam.replace(/^\/+|\/+$/g, '');
+                    target = cleanP ? `${cleanP}/${cleanF}` : cleanF;
+                  } else {
+                    target = (pathParam || fileParam).replace(/^\/+|\/+$/g, '');
+                  }
+
+                  if (target) {
+                    const cleanUrl = window.location.pathname + '?access=admin&page=drive#/' + encodeURI(target);
+                    window.history.replaceState(null, '', cleanUrl);
+                  }
                 }
               }
 
-              sortData(arr) {
-                const m = this.sortDesc ? -1 : 1;
-                return arr.sort((a, b) => {
-                  if (this.sortBy === 'name') return a.name.localeCompare(b.name) * m;
-                  if (this.sortBy === 'mtime') return (a.mtime - b.mtime) * m;
-                  if (this.sortBy === 'size') return (a.size - b.size) * m;
+              navigate(path) {
+                window.location.hash = '#/' + ltrim(path, '/');
+              }
+        
+              handleHashChange() {
+                const raw = window.location.hash.replace(/^#\/?/, '');
+                let decoded = '';
+                try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
+                decoded = decoded.replace(/^\/+|\/+$/g, '').replace(/\.part$/i, '');
+
+                const specialSections = ['recents', 'starred', 'activity', 'trash'];
+                const lowerDecoded = decoded.toLowerCase();
+
+                if (specialSections.includes(lowerDecoded)) {
+                  if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
+                    lightbox.close(false);
+                  }
+                  this.switchDriveSection(lowerDecoded, false);
+                  return;
+                }
+
+                if (!decoded) {
+                  if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
+                    lightbox.close(false);
+                  }
+                  if (this.currentSection !== 'home' || this.currentPath !== '') {
+                    this.switchDriveSection('home', false);
+                  }
+                  return;
+                }
+        
+                const segments = decoded.split('/');
+                const lastSegment = segments[segments.length - 1];
+                const isFilePath = /\.[a-zA-Z0-9]{1,8}$/.test(lastSegment);
+
+                if (isFilePath) {
+                  const dirPath = segments.slice(0, -1).join('/');
+                  const targetFile = decoded.replace(/^\/+/, '');
+
+                  const activeItem = (window.lightbox && lightbox.el && lightbox.el.classList.contains('active'))
+                    ? (lightbox.mediaList ? lightbox.mediaList[lightbox.currentIndex] : null)
+                    : null;
+                  const activePath = activeItem ? (activeItem.path || '').replace(/^\/+/, '') : '';
+
+                  if (activePath && activePath === targetFile) {
+                    return;
+                  }
+
+                  const specialSections = ['recents', 'starred', 'activity', 'trash'];
+                  if (this.currentSection && specialSections.includes(this.currentSection)) {
+                    this.originSection = this.currentSection;
+                    this.openFile(targetFile, false);
+                    return;
+                  }
+
+                  if (this.currentPath !== dirPath) {
+                    this.loadDir(dirPath).finally(() => {
+                      this.openFile(targetFile, false);
+                    });
+                  } else {
+                    this.openFile(targetFile, false);
+                  }
+                } else {
+                  if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
+                    lightbox.close(false);
+                  }
+                  if (this.currentPath !== decoded) {
+                    this.loadDir(decoded);
+                  } else {
+                    this.updateDocTitle(decoded ? decoded.split('/').pop() : '');
+                  }
+                }
+              }
+        
+              updateTreeActive() {
+                const cur = this.currentPath || '';
+                if (cur) {
+                  const parts = cur.split('/');
+                  let accum = '';
+                  parts.forEach(p => {
+                    accum = accum ? `${accum}/${p}` : p;
+                    this.expandedTreeNodes.add(accum);
+                    const branch = document.querySelector(`.tree-branch[data-branch="${accum}"]`);
+                    if (branch) branch.classList.remove('collapsed');
+                  });
+                  localStorage.setItem('pg_tree_expanded', JSON.stringify(Array.from(this.expandedTreeNodes)));
+                }
+                document.querySelectorAll('.tree-node').forEach(node => {
+                  const p = node.getAttribute('data-path') || '';
+                  if (p === cur) {
+                    node.classList.add('active');
+                  } else {
+                    node.classList.remove('active');
+                  }
+                });
+              }
+        
+              async loadDir(path) {
+                this.currentSection = 'home';
+                this.updateControlsVisibility();
+                const toolbar = document.querySelector('.toolbar-actions');
+                if (toolbar) toolbar.style.display = 'flex';
+                document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash').forEach(el => el.classList.remove('active'));
+                document.getElementById('nav-home')?.classList.add('active');
+                this.currentPath = path;
+                this.selectedItems.clear();
+                this.updateBatchBar();
+                this.renderLimit = 25;
+                this.isSearching = false;
+                const searchInput = document.getElementById('search-input');
+                if (searchInput) searchInput.value = '';
+                this.searchQuery = '';
+                this.sidebar.classList.remove('open');
+                this.sidebarBackdrop.classList.remove('active');
+                this.updateTreeActive();
+
+                const cacheKey = 'dir_list_' + path;
+                let hasValidCache = false;
+
+                if (window.opfsCache) {
+                  try {
+                    const cachedData = await window.opfsCache.getJSON(cacheKey);
+                    if (cachedData && ((cachedData.folders && cachedData.folders.length > 0) || (cachedData.files && cachedData.files.length > 0))) {
+                      this.data = cachedData;
+                      this.renderGallery();
+                      this.updateBreadcrumbs();
+                      this.updateBadges();
+                      hasValidCache = true;
+                    }
+                  } catch (e) {}
+                }
+
+                if (!hasValidCache) {
+                  this.container.innerHTML = `
+                    <div class="center-state">
+                      <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                      <div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading files...</div>
+                    </div>
+                  `;
+                }
+
+                try {
+                  const res = await fetch(`?access=admin&page=drive&action=list&dir=${encodeURIComponent(path || '')}`);
+                  if (!res.ok) {
+                    if (path && path !== '') {
+                      this.toast(`Folder "${path}" not found. Redirecting to Home...`);
+                      this.navigate('');
+                      return;
+                    }
+                    throw new Error('Failed to load directory');
+                  }
+                  const freshData = await res.json();
+                  this.data = freshData;
+                  if (window.opfsCache) window.opfsCache.setJSON(cacheKey, freshData);
+                  this.renderGallery();
+                  this.updateBreadcrumbs();
+                  this.updateBadges();
+                  const totalItems = (freshData.folders ? freshData.folders.length : 0) + (freshData.files ? freshData.files.length : 0);
+                  this.updateDocTitle(this.data.path ? this.data.path.split('/').pop() : '', totalItems);
+                } catch (e) {
+                  if (!hasValidCache) {
+                    this.container.innerHTML = `
+                      <div class="center-state" style="color:var(--md-sys-color-error);">
+                        <p>${e.message}</p>
+                        <button class="btn-primary" style="margin-top:0.6rem;" onclick="app.navigate('')">Back to Home</button>
+                      </div>
+                    `;
+                  }
+                }
+              }
+        
+              async performSearch(query) {
+                this.isSearching = true;
+                this.dirStats.innerText = `Searching for "${query}" in subfolders...`;
+                this.container.innerHTML = `
+                  <div class="center-state">
+                    <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                  </div>
+                `;
+        
+                try {
+                  const res = await fetch(`?access=admin&page=drive&action=search&dir=${encodeURIComponent(this.currentPath || '')}&q=${encodeURIComponent(query)}`);
+                  if (!res.ok) throw new Error('Search failed');
+                  const results = await res.json();
+        
+                  let filteredFiles = results.files.filter(f => this.filter === 'all' || f.type === this.filter);
+                  let filteredFolders = results.folders;
+        
+                  this.filteredList = [
+                    ...filteredFolders.map(f => ({ ...f, isDir: true })),
+                    ...filteredFiles.map(f => ({ ...f, isDir: false }))
+                  ];
+        
+                  this.dirTitle.innerText = `Search: "${query}"`;
+                  this.dirStats.innerText = `${results.count} matching item(s) found`;
+        
+                  this.container.innerHTML = '';
+                  this.renderedCount = 0;
+                  this.renderLimit = 25;
+        
+                  if (!this.filteredList.length) {
+                    this.container.innerHTML = `<div class="center-state"><svg viewBox="0 0 24 24" style="width:48px; height:48px; opacity:0.4;"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg><p>No matches found</p></div>`;
+                    return;
+                  }
+        
+                  this.appendBatch();
+                  this.updateBatchBar();
+                } catch (e) {
+                  this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
+                }
+              }
+        
+              toggleTreeNode(path) {
+                if (this.expandedTreeNodes.has(path)) {
+                  this.expandedTreeNodes.delete(path);
+                } else {
+                  this.expandedTreeNodes.add(path);
+                }
+                localStorage.setItem('pg_tree_expanded', JSON.stringify(Array.from(this.expandedTreeNodes)));
+                this.loadTree();
+              }
+        
+              async loadTree() {
+                try {
+                  const cacheKey = 'tree_cache';
+                  const cachedTree = window.opfsCache ? await window.opfsCache.getJSON(cacheKey) : null;
+                  const container = document.getElementById('tree-container');
+        
+                  if (this.currentPath) {
+                    const parts = this.currentPath.split('/');
+                    let accum = '';
+                    parts.forEach(p => {
+                      accum = accum ? `${accum}/${p}` : p;
+                      this.expandedTreeNodes.add(accum);
+                    });
+                  }
+        
+                  const renderNodes = (nodes) => {
+                    let html = '';
+                    nodes.forEach(n => {
+                      const hasChildren = n.children && n.children.length > 0;
+                      const isExpanded = this.expandedTreeNodes.has(n.path);
+                      const isCollapsed = hasChildren && !isExpanded;
+        
+                      html += `
+                        <div class="tree-branch ${isCollapsed ? 'collapsed' : ''}" data-branch="${n.path}">
+                          <div class="tree-node-row">
+                            ${hasChildren ? `
+                              <span class="tree-toggle" onclick="event.stopPropagation(); app.toggleTreeNode('${n.path}')">
+                                <svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z" fill="currentColor"/></svg>
+                              </span>
+                            ` : '<span class="tree-spacer"></span>'}
+                            <div class="tree-node ${n.path === (this.currentPath || '') ? 'active' : ''}" data-path="${n.path}" onclick="app.navigate('${n.path}')">
+                              <svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
+                              <span>${n.name}</span>
+                            </div>
+                          </div>
+                          ${hasChildren ? `<div class="tree-children" style="padding-left:0.85rem;">${renderNodes(n.children)}</div>` : ''}
+                        </div>
+                      `;
+                    });
+                    return html;
+                  };
+        
+                  const rootRow = `
+                    <div class="tree-node-row">
+                      <span class="tree-spacer"></span>
+                      <div class="tree-node ${!this.currentPath ? 'active' : ''}" data-path="" onclick="app.navigate('')">
+                        <svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
+                        <span>Root</span>
+                      </div>
+                    </div>
+                  `;
+        
+                  if (cachedTree) {
+                    container.innerHTML = rootRow + renderNodes(cachedTree);
+                  }
+        
+                  const res = await fetch('?access=admin&page=drive&action=tree');
+                  const tree = await res.json();
+                  if (window.opfsCache) window.opfsCache.setJSON(cacheKey, tree);
+                  container.innerHTML = rootRow + renderNodes(tree);
+                  this.updateTreeActive();
+                } catch (e) {}
+              }
+        
+              applySort(items) {
+                return [...items].sort((a, b) => {
+                  if (this.sortBy === 'name_asc') {
+                    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+                  }
+                  if (this.sortBy === 'name_desc') {
+                    return b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' });
+                  }
+                  if (this.sortBy === 'date_desc') {
+                    return (b.mtime || 0) - (a.mtime || 0);
+                  }
+                  if (this.sortBy === 'date_asc') {
+                    return (a.mtime || 0) - (b.mtime || 0);
+                  }
                   return 0;
                 });
               }
-
-              filterByType(files) {
-                if (this.currentFilter === 'all') return files;
-                const map = {
-                  documents: ['txt', 'php', 'html', 'css', 'js', 'json', 'xml', 'pdf', 'zip'],
-                  images: ['png', 'jpg', 'jpeg', 'gif', 'svg'],
-                  audio: ['mp3', 'wav', 'ogg'],
-                  video: ['mp4', 'webm']
+        
+              updateSortUI() {
+                const labels = {
+                  name_asc: 'Name (A-Z)',
+                  name_desc: 'Name (Z-A)',
+                  date_desc: 'Date (Newest)',
+                  date_asc: 'Date (Oldest)'
                 };
-                return files.filter(f => map[this.currentFilter].includes(f.ext));
-              }
-
-              highlightMatch(name) {
-                if (!this.searchQuery) return name;
-                const index = name.toLowerCase().indexOf(this.searchQuery);
-                if (index === -1) return name;
-                return name.substring(0, index) + `<mark style="background:#ff0000;color:#ffffff;border-radius:2px;">${name.substring(index, index + this.searchQuery.length)}</mark>` + name.substring(index + this.searchQuery.length);
-              }
-
-              loadMoreItems() {
-                let changed = false;
-                const fList = document.getElementById('foldersList');
-                const fiList = document.getElementById('filesList');
-
-                if (this.currentFilter === 'all' && this.visibleFoldersCount < this.filteredFolders.length) {
-                  const nextFolders = this.filteredFolders.slice(this.visibleFoldersCount, this.visibleFoldersCount + 25);
-                  nextFolders.forEach(f => fList.appendChild(this.createItemNode(f, true)));
-                  this.visibleFoldersCount += 25;
-                  changed = true;
-                } else if (this.visibleFilesCount < this.filteredFiles.length) {
-                  const nextFiles = this.filteredFiles.slice(this.visibleFilesCount, this.visibleFilesCount + 25);
-                  nextFiles.forEach(f => fiList.appendChild(this.createItemNode(f, false)));
-                  this.visibleFilesCount += 25;
-                  changed = true;
+                if (this.btnSort) {
+                  this.btnSort.title = `Sort: ${labels[this.sortBy] || 'Sort Items'}`;
                 }
-                if (changed) this.syncSelectionUI();
-              }
-
-              render() {
-                const scrollContainer = document.getElementById('fileListContainer');
-                const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
-
-                this.renderBreadcrumbs();
-                
-                const viewClass = this.viewMode === 'grid' ? 'grid-view' : 'list-view';
-                const fList = document.getElementById('foldersList');
-                const fiList = document.getElementById('filesList');
-                
-                fList.className = viewClass;
-                fiList.className = viewClass;
-                fList.innerHTML = '';
-                fiList.innerHTML = '';
-
-                this.visibleFoldersCount = 25;
-                this.visibleFilesCount = 25;
-
-                let sourceFolders = this.data.folders;
-                let sourceFiles = this.data.files;
-
-                if (this.searchQuery && this.searchResults) {
-                  sourceFolders = this.searchResults.folders || [];
-                  sourceFiles = this.searchResults.files || [];
-                }
-
-                const filterFn = (i) => i.name.toLowerCase().includes(this.searchQuery);
-                this.filteredFolders = this.sortData(sourceFolders.filter(filterFn));
-                this.filteredFiles = this.sortData(this.filterByType(sourceFiles.filter(filterFn)));
-
-                // Update dynamic title with path and files indicator
-                const totalItems = this.filteredFolders.length + this.filteredFiles.length;
-                const folderName = this.currentPath ? this.currentPath.split('/').pop() : 'Drive';
-                document.title = `${folderName} (${totalItems} items) - Admin Panel`;
-
-                document.getElementById('foldersTitle').classList.toggle('hidden', this.filteredFolders.length === 0 || this.currentFilter !== 'all');
-                document.getElementById('filesTitle').classList.toggle('hidden', this.filteredFiles.length === 0);
-
-                if (this.currentFilter === 'all') {
-                  this.filteredFolders.slice(0, this.visibleFoldersCount).forEach(f => fList.appendChild(this.createItemNode(f, true)));
-                }
-                this.filteredFiles.slice(0, this.visibleFilesCount).forEach(f => fiList.appendChild(this.createItemNode(f, false)));
-                
-                document.getElementById('multiSelectActions').style.display = this.selectedItems.size > 0 ? 'flex' : 'none';
-                
-                if (scrollContainer) scrollContainer.scrollTop = savedScrollTop;
-
-                // Execute deep link directly on initial load
-                if (this.initEditFile) {
-                  const fileToOpen = sourceFiles.find(f => f.name === this.initEditFile || f.path === this.initEditFile);
-                  if (fileToOpen) {
-                    this.openPreviewOrEditor(fileToOpen);
+                document.querySelectorAll('#dropdown-sort .dm-item').forEach(el => {
+                  if (el.dataset.sort === this.sortBy) {
+                    el.classList.add('active');
+                  } else {
+                    el.classList.remove('active');
                   }
-                  this.initEditFile = null; 
-                }
+                });
               }
+        
+              renderGallery(preserveScroll = false) {
+                this.container.className = `gallery-container layout-${this.layout}`;
+                const toolbar = document.querySelector('.toolbar-actions');
+                if (toolbar && this.currentSection !== 'trash' && this.currentSection !== 'activity') {
+                  toolbar.style.display = 'flex';
+                }
 
-              renderTrash(trashItems) {
-                const scrollContainer = document.getElementById('fileListContainer');
-                const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+                const scrollEl = document.getElementById('main-content');
+                const savedScroll = (preserveScroll || this.savedScrollTop) ? (this.savedScrollTop || (scrollEl ? scrollEl.scrollTop : 0)) : 0;
+                const activeFilter = this.filter || 'all';
+                let filteredFiles = (this.data.files || []).filter(f => activeFilter === 'all' || f.type === activeFilter);
+                let filteredFolders = activeFilter === 'all' ? (this.data.folders || []) : [];
 
-                this.renderBreadcrumbs();
-                document.getElementById('foldersTitle').classList.add('hidden');
-                document.getElementById('filesTitle').classList.remove('hidden');
-                document.getElementById('foldersList').innerHTML = '';
-                
-                const container = document.getElementById('filesList');
-                container.className = this.viewMode === 'grid' ? 'grid-view' : 'list-view';
-                container.innerHTML = '';
+                if (this.currentSection === 'recents') {
+                  this.filteredList = [
+                    ...filteredFolders.map(f => ({ ...f, isDir: true })),
+                    ...filteredFiles.map(f => ({ ...f, isDir: false }))
+                  ];
+                  this.filteredList.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+                } else {
+                  filteredFolders = this.applySort(filteredFolders);
+                  filteredFiles = this.applySort(filteredFiles);
 
-                if (trashItems.length === 0) {
-                  container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--theme-on-surface-variant); padding: 32px;">Trash is empty</div>`;
+                  this.filteredList = [
+                    ...filteredFolders.map(f => ({ ...f, isDir: true })),
+                    ...filteredFiles.map(f => ({ ...f, isDir: false }))
+                  ];
+                }
+        
+                if (this.currentSection === 'starred') {
+                  this.dirTitle.innerText = 'Starred Items';
+                  this.dirStats.innerText = `${filteredFolders.length} Folders, ${filteredFiles.length} Files (${this.data.stats?.total_size || '0 B'})`;
+                } else if (this.currentSection === 'recents') {
+                  this.dirTitle.innerText = 'Recents';
+                  this.dirStats.innerText = `${filteredFolders.length} Folders, ${filteredFiles.length} Files`;
+                } else if (this.currentSection === 'activity') {
+                  this.dirTitle.innerText = 'File Activity';
+                } else if (this.currentSection === 'trash') {
+                  this.dirTitle.innerText = 'Trash Bin';
+                } else {
+                  this.dirTitle.innerText = this.data.path ? this.data.path.split('/').pop() : this.appTitle;
+                  this.dirStats.innerText = `${filteredFolders.length} Folders, ${filteredFiles.length} Files (${this.data.stats?.total_size || '0 B'})`;
+                }
+        
+                this.container.innerHTML = '';
+                this.renderedCount = 0;
+                this.masonryCols = [];
+                this.hasUpCard = false;
+        
+                if (this.layout === 'columns') {
+                  const numCols = this.getMasonryColCount();
+                  for (let i = 0; i < numCols; i++) {
+                    const col = document.createElement('div');
+                    col.className = 'masonry-col';
+                    this.container.appendChild(col);
+                    this.masonryCols.push(col);
+                  }
+                }
+        
+                if (this.data.path && this.currentSection === 'home') {
+                  this.hasUpCard = true;
+                  const parts = this.data.path.split('/');
+                  parts.pop();
+                  const parent = parts.join('/');
+                  const upCard = document.createElement('div');
+                  upCard.className = 'file-card';
+                  upCard.onclick = () => app.navigate(parent);
+                  const upRatio = this.layout === 'list' ? '' : 'style="aspect-ratio: 1 / 1; min-height: 140px;"';
+                  upCard.innerHTML = `
+                    <div class="file-thumb" ${upRatio}>
+                      <div class="type-icon type-folder">
+                        <svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
+                      </div>
+                    </div>
+                    <div class="file-info-overlay">
+                      <div class="file-name">.. (Go Up)</div>
+                      <div class="file-meta"><span>Parent Directory</span></div>
+                    </div>
+                  `;
+                  if (this.layout === 'columns' && this.masonryCols.length > 0) {
+                    this.masonryCols[0].appendChild(upCard);
+                  } else {
+                    this.container.appendChild(upCard);
+                  }
+                }
+        
+                if (!this.filteredList.length && !this.data.path) {
+                  this.container.innerHTML = `<div class="center-state"><svg viewBox="0 0 16 16" style="width:48px; height:48px; opacity:0.4;"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg><p>Folder is empty</p></div>`;
                   return;
                 }
+        
+                this.appendBatch();
+                this.updateBatchBar();
 
-                trashItems.forEach(item => {
-                  const el = document.createElement('div');
-                  const isSelected = this.selectedItems.has(item.uniq);
-                  el.className = `item-card ${isSelected ? 'selected' : ''}`;
-                  el.dataset.uniq = item.uniq;
-                  
-                  el.innerHTML = `
-                    <div class="card-checkbox" onclick="driveApp.toggleSelect(event, '${item.uniq}')"><span class="material-symbols-rounded">check_circle</span></div>
-                    <div class="item-icon"><span class="material-symbols-rounded">delete</span></div>
-                    <div class="item-name">${item.name} <span style="font-size:11px;color:var(--theme-on-surface-variant);">(${item.original_parent || 'root'})</span></div>
-                    <div class="item-meta">${item.deleted_at}</div>
-                  `;
-                  
-                  el.onclick = () => this.toggleSelect(null, item.uniq);
-                  el.oncontextmenu = (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    this.selectedItems.clear();
-                    this.selectedItems.add(item.uniq);
-                    this.syncSelectionUI();
-                    this.showTrashContextMenu(e, item);
-                  };
-                  
-                  container.appendChild(el);
-                });
-                
-                if (scrollContainer) scrollContainer.scrollTop = savedScrollTop;
-              }
-
-              renderBreadcrumbs() {
-                const container = document.getElementById('breadcrumbs');
-                container.innerHTML = '';
-                
-                const root = document.createElement('div');
-                root.className = 'breadcrumb-item';
-                root.textContent = this.searchQuery ? `Search: "${this.searchQuery}"` : (this.currentViewMode === 'trash' ? 'Trash' : (this.currentViewMode === 'starred' ? 'Starred' : (this.currentViewMode === 'history' ? 'File Versions History' : (this.currentViewMode === 'recents_all' ? 'Recent Files' : 'Drive'))));
-                root.onclick = () => this.navigate('');
-                container.appendChild(root);
-
-                if (this.currentViewMode === 'home' && !this.searchQuery) {
-                  this.data.breadcrumbs.forEach(bc => {
-                    const sep = document.createElement('span');
-                    sep.className = 'material-symbols-rounded breadcrumb-sep';
-                    sep.textContent = 'chevron_right';
-                    container.appendChild(sep);
-                    
-                    const item = document.createElement('div');
-                    item.className = 'breadcrumb-item';
-                    item.textContent = bc.name;
-                    item.onclick = () => this.navigate(bc.path);
-                    container.appendChild(item);
+                if (savedScroll && scrollEl) {
+                  requestAnimationFrame(() => {
+                    scrollEl.scrollTop = savedScroll;
+                    this.savedScrollTop = 0;
                   });
                 }
               }
+        
+              appendBatch() {
+                const toRender = this.filteredList.slice(this.renderedCount, this.renderLimit);
+                if (!toRender.length) return;
 
-              createItemNode(item, isFolder) {
-                const el = document.createElement('div');
-                const isSelected = this.selectedItems.has(item.path);
-                el.dataset.path = item.path;
-                if (item.uniq) el.dataset.uniq = item.uniq;
-                
-                let icon = isFolder ? 'folder' : 'description';
-                let iconColorClass = isFolder ? 'icon-folder' : 'icon-doc';
-                if (!isFolder) {
-                  if (item.ext === 'zip') { icon = 'folder_zip'; iconColorClass = 'icon-zip'; }
-                  else if (['js','json','ts','php','html','css','xml','md'].includes(item.ext)) { icon = 'code'; iconColorClass = 'icon-code'; }
-                  else if (item.isImage) { icon = 'image'; iconColorClass = 'icon-image'; }
-                  else if (['mp4','webm','mov'].includes(item.ext)) { icon = 'movie'; iconColorClass = 'icon-media'; }
-                  else if (['mp3','wav','ogg','flac','m4a'].includes(item.ext)) { icon = 'audiotrack'; iconColorClass = 'icon-media'; }
-                  else if (['pdf','doc','docx','xls','xlsx','ppt','pptx','txt'].includes(item.ext)) { icon = 'article'; iconColorClass = 'icon-doc'; }
-                }
+                const isColumns = this.layout === 'columns';
+                const fragment = isColumns ? null : document.createDocumentFragment();
 
-                const checkboxHtml = `<div class="card-checkbox" onclick="driveApp.toggleSelect(event, '${item.path}')"><span class="material-symbols-rounded">check_circle</span></div>`;
-                const starHtml = `<div class="card-star" onclick="driveApp.toggleStar(event, '${item.path}')"><span class="material-symbols-rounded">star</span></div>`;
-                const nameWithHighlight = this.highlightMatch(item.name);
+                toRender.forEach((item, idx) => {
+                  const card = document.createElement('div');
+                  const isSel = this.selectedItems.has(item.path);
+                  card.className = `file-card ${item.isDir ? 'is-folder' : 'is-file'} ${isSel ? 'selected' : ''}`;
 
-                if (this.viewMode === 'grid') {
-                  el.className = `item-card file-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
-                  let previewHtml = `<span class="material-symbols-rounded ${iconColorClass}">${icon}</span>`;
-                  if (!isFolder && item.isImage) {
-                    const streamUrl = `${this.apiPrefix}api=true&action=thumb&file=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
-                    previewHtml = `<img src="${streamUrl}" loading="lazy" alt="${item.name}">`;
+                  const formattedDate = item.mtime ? new Date(item.mtime * 1000).toLocaleDateString(undefined, { year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+                  const isStarred = this.starredSet.has(item.path);
+                  const starSvg = isStarred
+                    ? '<svg viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>'
+                    : '<svg viewBox="0 0 24 24"><path d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>';
+
+                  if (item.isDir) {
+                    const folderRatio = (this.layout === 'columns' || this.layout === 'list') ? '' : 'style="aspect-ratio: 1 / 1; min-height: 140px;"';
+                    card.onclick = (e) => app.handleItemClick(e, 'folder', item.path);
+                    card.oncontextmenu = (e) => app.showContextMenu(e, 'folder', item.path, item.name);
+
+                    if (item.thumb_image) card.classList.add('has-image');
+
+                    let folderThumbHtml = item.thumb_image
+                      ? `<img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.thumb_image)}" alt="" loading="lazy" decoding="async">`
+                      : `<div class="type-icon type-folder"><svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg></div>`;
+
+                    card.innerHTML = `
+                      <div class="file-checkbox"><svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
+                      <div class="file-star-btn ${isStarred ? 'active' : ''}" title="${isStarred ? 'Unstar' : 'Star'}">${starSvg}</div>
+                      <div class="file-thumb" ${folderRatio}>${folderThumbHtml}</div>
+                      <div class="file-info-overlay">
+                        <div class="file-name"></div>
+                        <div class="file-meta">
+                          <span>${this.layout === 'list' && formattedDate ? formattedDate + ' • ' : ''}${item.items_count !== undefined ? item.items_count + ' items' : ''}</span>
+                          <span>FOLDER</span>
+                        </div>
+                      </div>
+                    `;
+                  } else {
+                    let thumbHtml = '';
+                    let thumbRatio = this.layout === 'list' ? '' : (this.layout === 'columns' ? '' : 'style="aspect-ratio: 1 / 1; min-height: 140px;"');
+                    const ext = item.ext || '';
+
+                    if (item.type === 'image') {
+                      card.classList.add('has-image');
+                      thumbHtml = `<img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}" alt="" loading="lazy" decoding="async" onload="this.style.opacity='1';">`;
+                      if (this.layout === 'columns') {
+                        thumbRatio = 'style="min-height:140px; height:auto;"';
+                      }
+                    } else if (item.type === 'video') {
+                      thumbHtml = `<div class="type-icon" style="color:#ef4444;"><svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg></div>`;
+                    } else if (item.type === 'audio') {
+                      thumbHtml = `<div class="type-icon" style="color:#f87171;"><svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg></div>`;
+                    } else if (item.type === 'archive') {
+                      thumbHtml = `<div class="type-icon" style="color:#f59e0b;"><svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg></div>`;
+                    } else {
+                      thumbHtml = `<div class="type-icon" style="color:#60a5fa;"><svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg></div>`;
+                    }
+
+                    card.onclick = (e) => app.handleItemClick(e, 'file', item.path);
+                    card.oncontextmenu = (e) => app.showContextMenu(e, 'file', item.path, item.name, item.type);
+                    card.innerHTML = `
+                      <div class="file-checkbox"><svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
+                      <div class="file-star-btn ${isStarred ? 'active' : ''}" title="${isStarred ? 'Unstar' : 'Star'}">${starSvg}</div>
+                      <div class="file-thumb" ${thumbRatio}>${thumbHtml}</div>
+                      <div class="file-info-overlay">
+                        <div class="file-name"></div>
+                        <div class="file-meta">
+                          <span>${this.layout === 'list' && formattedDate ? formattedDate + ' • ' : ''}${item.size_fmt || '0 B'}</span>
+                          <span>${this.layout === 'list' ? ext.toUpperCase() : (item.width ? `${item.width}×${item.height}` : ext.toUpperCase())}</span>
+                        </div>
+                      </div>
+                    `;
                   }
-                  el.innerHTML = `
-                    ${checkboxHtml}
-                    <div class="file-preview">${previewHtml}</div>
-                    <div class="file-info-bar">
-                      <div class="item-icon ${iconColorClass}"><span class="material-symbols-rounded">${icon}</span></div>
-                      <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
-                    </div>
-                    ${starHtml}
-                  `;
-                } else {
-                  el.className = `item-card ${isSelected ? 'selected' : ''} ${item.starred ? 'starred' : ''}`;
-                  const date = new Date(item.mtime * 1000).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
-                  const metaStr = isFolder ? `${date}` : `${item.formatSize} • ${date}`;
-                  el.innerHTML = `
-                    ${checkboxHtml}
-                    <div class="item-icon ${iconColorClass}"><span class="material-symbols-rounded">${icon}</span></div>
-                    <div class="item-details">
-                      <div class="item-name" title="${item.name}">${nameWithHighlight}</div>
-                      <div class="item-sub-meta">${metaStr}</div>
-                    </div>
-                    ${starHtml}
-                  `;
-                }
 
-                this.bindItemEvents(el, item, isFolder);
-                return el;
-              }
+                  const nameEl = card.querySelector('.file-name');
+                  if (nameEl) {
+                    nameEl.innerText = item.name;
+                    nameEl.title = item.name;
+                  }
 
-              syncSelectionUI() {
-                document.querySelectorAll('.item-card').forEach(card => {
-                  const p = card.dataset.path || card.dataset.uniq;
-                  if (p) card.classList.toggle('selected', this.selectedItems.has(p));
+                  const checkEl = card.querySelector('.file-checkbox');
+                  if (checkEl) checkEl.onclick = (e) => app.toggleSelect(e, item.path);
+
+                  const starEl = card.querySelector('.file-star-btn');
+                  if (starEl) starEl.onclick = (e) => app.toggleStarDirect(e, item.path);
+
+                  if (isColumns && this.masonryCols.length > 0) {
+                    const slotIndex = (this.hasUpCard ? 1 : 0) + this.renderedCount + idx;
+                    const targetCol = slotIndex % this.masonryCols.length;
+                    this.masonryCols[targetCol].appendChild(card);
+                  } else if (fragment) {
+                    fragment.appendChild(card);
+                  }
                 });
-                document.getElementById('multiSelectActions').style.display = this.selectedItems.size > 0 ? 'flex' : 'none';
-                if (this.isPropertiesOpen) {
-                  if (this.selectedItems.size > 0) {
-                    this.loadProperties([...this.selectedItems].join('|'));
-                  } else {
-                    this.renderPropertiesEmpty();
-                  }
+
+                if (!isColumns && fragment) {
+                  this.container.appendChild(fragment);
                 }
+                this.renderedCount += toRender.length;
               }
-
-              toggleSelect(e, path) {
-                if (e) e.stopPropagation();
-                this.selectedItems.has(path) ? this.selectedItems.delete(path) : this.selectedItems.add(path);
-                this.syncSelectionUI();
-                if (this.selectedItems.size === 1) this.loadProperties([...this.selectedItems][0]);
-                else this.renderPropertiesEmpty();
-              }
-
-              async toggleStar(e, path) {
-                e.stopPropagation();
-                const res = await this.fetchAPI('toggle_star', 'POST', { action: 'toggle_star', item: path });
-                if (res) {
-                  this.showToast(res.starred ? 'Starred item' : 'Unstarred item');
-                  this.loadDirectory(this.currentPath);
-                }
-              }
-
-              handleItemClick(e, item, isFolder) {
-                if (e.target.closest('.card-checkbox') || e.target.closest('.card-star')) return;
-                
-                if (this.isSelectMode || e.ctrlKey || e.metaKey || this.selectedItems.size > 0) {
-                  this.toggleSelect(null, item.path);
-                } else {
-                  if (isFolder) {
-                    this.navigate(item.path);
-                  } else {
-                    this.openPreviewOrEditor(item);
-                  }
-                }
-              }
-
-              clearSelection(e, force = false) {
-                if (!force && e && e.target.closest('.item-card')) return;
-                this.selectedItems.clear();
-                this.isSelectMode = false;
-                this.syncSelectionUI();
-                this.renderPropertiesEmpty();
-              }
-
-              toggleSelectMode() {
-                this.isSelectMode = !this.isSelectMode;
-                if (this.isSelectMode) this.showToast('Select mode enabled. Tap items to select.');
-                else this.clearSelection(null, true);
-              }
-
-              selectAll() {
-                this.isSelectMode = true;
-                this.selectedItems.clear();
-                const filterFn = (i) => i.name.toLowerCase().includes(this.searchQuery);
-                const allItems = [
-                  ...(this.currentFilter === 'all' ? this.data.folders.filter(filterFn) : []),
-                  ...this.filterByType(this.data.files.filter(filterFn))
-                ];
-                allItems.forEach(i => this.selectedItems.add(i.path));
-                this.syncSelectionUI();
-              }
-
-              copyToClipboard(action) {
-                if (this.selectedItems.size === 0) return;
-                this.clipboard = { action, items: Array.from(this.selectedItems) };
-                this.showToast(`${this.selectedItems.size} item(s) copied to clipboard`);
-                this.clearSelection(null, true);
-              }
-
-              async pasteClipboard() {
-                if (!this.clipboard || this.clipboard.items.length === 0) {
-                  this.showToast('Clipboard is empty');
+        
+              handleItemClick(e, type, path) {
+                if (e.target.closest('.file-checkbox') || e.target.closest('.file-star-btn')) return;
+                if (this.selectedItems.size > 0) {
+                  this.toggleSelect(e, path);
                   return;
                 }
-                const action = this.clipboard.action === 'cut' ? 'move_items' : 'copy_items';
-                this.showToast(action === 'move_items' ? 'Moving items...' : 'Copying items...');
-                const res = await this.fetchAPI(action, 'POST', { action, items: this.clipboard.items, target: this.currentPath });
-                if (res) {
-                  this.showToast('Paste successful');
-                  if (action === 'move_items') this.clipboard = null;
-                  this.loadDirectory(this.currentPath);
-                }
-              }
-
-              toggleMobileSearch(show) {
-                const sb = document.getElementById('topSearchBar');
-                const closeBtn = document.getElementById('closeSearchBtn');
-                const searchIcon = document.getElementById('searchIcon');
-                if (show) {
-                  sb.classList.add('mobile-active');
-                  if (closeBtn) closeBtn.style.display = 'flex';
-                  if (searchIcon) searchIcon.style.display = 'none';
-                  document.getElementById('searchInput').focus();
+                if (type === 'folder') {
+                  this.navigate(path);
                 } else {
-                  sb.classList.remove('mobile-active');
-                  if (closeBtn) closeBtn.style.display = 'none';
-                  if (searchIcon) searchIcon.style.display = 'block';
-                  document.getElementById('searchInput').value = '';
-                  this.handleSearchInput('');
+                  this.openFile(path, true);
                 }
               }
-
-              toggleView() {
-                this.viewMode = this.viewMode === 'grid' ? 'list' : 'grid';
-                localStorage.setItem('drive_viewMode', this.viewMode);
-                this.updateViewIcon();
-                if (this.currentViewMode === 'trash') {
-                  this.loadDirectory(this.currentPath);
+        
+              toggleSelect(e, path) {
+                e.stopPropagation();
+                const scrollEl = document.getElementById('main-content');
+                const st = scrollEl ? scrollEl.scrollTop : 0;
+                if (this.selectedItems.has(path)) {
+                  this.selectedItems.delete(path);
                 } else {
-                  this.render();
+                  this.selectedItems.add(path);
                 }
-              }
-
-              updateViewIcon() {
-                const el1 = document.getElementById('viewIconMenuSide');
-                if (el1) el1.textContent = this.viewMode === 'grid' ? 'view_list' : 'grid_view';
-              }
-
-              toggleSidebar() {
-                const sb = document.getElementById('sidebarDrive');
-                const ov = document.getElementById('sidebarOverlay');
-                if (window.innerWidth <= 768) {
-                  sb.classList.toggle('open');
-                  ov.classList.toggle('open');
+                if (this.isSearching) {
+                  this.appendBatch();
                 } else {
-                  sb.classList.toggle('collapsed');
+                  this.renderGallery(true);
+                }
+                if (scrollEl) scrollEl.scrollTop = st;
+              }
+        
+              clearSelection() {
+                const scrollEl = document.getElementById('main-content');
+                const st = scrollEl ? scrollEl.scrollTop : 0;
+                this.selectedItems.clear();
+                this.updateBatchBar();
+                if (this.isSearching) {
+                  this.appendBatch();
+                } else {
+                  this.renderGallery(true);
+                }
+                if (scrollEl) scrollEl.scrollTop = st;
+              }
+        
+              updateBatchBar() {
+                const count = this.selectedItems.size;
+                if (count > 0) {
+                  this.batchCount.innerText = `${count} selected`;
+                  this.batchBar.classList.add('active');
+                } else {
+                  this.batchBar.classList.remove('active');
+                }
+              }
+        
+              async downloadZipWithProgress(url, postData = null, defaultFilename = 'drive_backup.zip') {
+                const toastId = 'zip_toast_' + Date.now();
+                const container = document.getElementById('toast-container');
+                const el = document.createElement('div');
+                el.className = 'toast';
+                el.id = toastId;
+                el.style.display = 'flex';
+                el.style.flexDirection = 'column';
+                el.style.alignItems = 'stretch';
+                el.style.gap = '0.4rem';
+                el.style.minWidth = '240px';
+                el.innerHTML = `
+                  <div style="display:flex; justify-content:space-between; font-weight:600; font-size:0.8rem;">
+                    <span id="${toastId}_label">Preparing ZIP archive...</span>
+                    <span id="${toastId}_pct">0%</span>
+                  </div>
+                  <div style="height:5px; width:100%; background:var(--md-sys-color-surface-container-high); border-radius:3px; overflow:hidden;">
+                    <div id="${toastId}_bar" style="height:100%; width:0%; background:#ff0000; transition:width 0.1s linear;"></div>
+                  </div>
+                `;
+                container.appendChild(el);
+
+                try {
+                  const fetchOptions = postData ? { method: 'POST', body: postData } : { method: 'GET' };
+                  const response = await fetch(url, fetchOptions);
+                  if (!response.ok) throw new Error('ZIP generation failed');
+
+                  const totalBytes = parseInt(response.headers.get('Content-Length') || '0', 10);
+                  const reader = response.body.getReader();
+                  let receivedBytes = 0;
+                  const chunks = [];
+
+                  const labelEl = document.getElementById(`${toastId}_label`);
+                  const pctEl = document.getElementById(`${toastId}_pct`);
+                  const barEl = document.getElementById(`${toastId}_bar`);
+
+                  if (labelEl) labelEl.innerText = 'Downloading ZIP...';
+
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    receivedBytes += value.length;
+
+                    if (totalBytes > 0) {
+                      const percent = Math.min(100, Math.round((receivedBytes / totalBytes) * 100));
+                      if (pctEl) pctEl.innerText = `${percent}%`;
+                      if (barEl) barEl.style.width = `${percent}%`;
+                    } else {
+                      if (pctEl) pctEl.innerText = formatBytes(receivedBytes);
+                    }
+                  }
+
+                  if (pctEl) pctEl.innerText = '100%';
+                  if (barEl) barEl.style.width = '100%';
+                  if (labelEl) labelEl.innerText = 'Download complete';
+
+                  const blob = new Blob(chunks, { type: 'application/zip' });
+                  const blobUrl = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = blobUrl;
+                  a.download = defaultFilename;
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+                  setTimeout(() => el.remove(), 2500);
+                } catch (e) {
+                  el.innerHTML = `<span style="color:var(--md-sys-color-error);">${e.message || 'Download failed'}</span>`;
+                  setTimeout(() => el.remove(), 3500);
                 }
               }
 
-              closeSidebarOnMobile() {
-                if (window.innerWidth <= 768) {
-                  document.getElementById('sidebarDrive').classList.remove('open');
-                  document.getElementById('sidebarOverlay').classList.remove('open');
+              batchDownload() {
+                const items = Array.from(this.selectedItems);
+                if (!items.length) return;
+                const fd = new FormData();
+                fd.append('action', 'download_zip');
+                fd.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>');
+                fd.append('dir', this.currentPath || '');
+                items.forEach(i => fd.append('items[]', i));
+                this.downloadZipWithProgress('?access=admin&page=drive&action=download_zip', fd, 'selected_items.zip');
+              }
+        
+              batchCompress() {
+                const items = Array.from(this.selectedItems);
+                if (!items.length) return;
+                const defaultName = (items.length === 1 ? items[0].split('/').pop() : 'archive') + '.zip';
+                this.showInputModal('Compress Items', 'Archive Filename (.zip)', defaultName, (zipName) => {
+                  this.toast('Creating archive...');
+                  this.api('zip', {
+                    dir: this.currentPath || '',
+                    items: items,
+                    zip_name: zipName || defaultName,
+                    format: 'zip'
+                  }, () => {
+                    this.toast('Archive created successfully');
+                    this.clearSelection();
+                    this.refresh();
+                  });
+                });
+              }
+        
+              batchDelete() {
+                const items = Array.from(this.selectedItems);
+                if (confirm(`Delete ${items.length} selected item(s)?`)) {
+                  this.api('delete', { items }, () => {
+                    this.toast('Items deleted');
+                    this.clearSelection();
+                    this.refresh();
+                  });
+                }
+              }
+        
+              showBatchDetails() {
+                const items = Array.from(this.selectedItems);
+                const fd = new FormData();
+                fd.append('action', 'details');
+                fd.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>');
+                items.forEach(i => fd.append('items[]', i));
+        
+                fetch('?access=admin&page=drive', { method: 'POST', body: fd })
+                  .then(r => r.json())
+                  .then(res => this.renderDetailsModal(res));
+              }
+        
+              updateBreadcrumbs() {
+                let html = `<a href="#/" class="bc-item ${this.currentSection === 'home' && !this.currentPath ? 'active' : ''}">Home</a>`;
+                if (this.currentSection === 'recents') {
+                  html += `<span class="bc-sep">/</span><a href="#/recents" class="bc-item active">Recents</a>`;
+                } else if (this.currentSection === 'starred') {
+                  html += `<span class="bc-sep">/</span><a href="#/starred" class="bc-item active">Starred Items</a>`;
+                } else if (this.currentSection === 'activity') {
+                  html += `<span class="bc-sep">/</span><a href="#/activity" class="bc-item active">File Activity</a>`;
+                } else if (this.currentSection === 'trash') {
+                  html += `<span class="bc-sep">/</span><a href="#/trash" class="bc-item active">Trash Bin</a>`;
+                } else if (this.currentPath) {
+                  const parts = this.currentPath.split('/');
+                  let accum = '';
+                  parts.forEach((p, idx) => {
+                    accum += (accum ? '/' : '') + p;
+                    const isLast = idx === parts.length - 1;
+                    html += `<span class="bc-sep">/</span><a href="#/${encodeURIComponent(accum)}" class="bc-item ${isLast ? 'active' : ''}">${p}</a>`;
+                  });
+                }
+                this.breadcrumbs.innerHTML = html;
+              }
+        
+              getFileTypeByExt(ext) {
+                ext = (ext || '').toLowerCase();
+                const img = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'];
+                const vid = ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv', 'avi', 'ts', '3gp', 'wmv', 'flv'];
+                const aud = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'm4r', 'mid', 'midi'];
+                const doc = ['txt', 'md', 'markdown', 'json', 'js', 'css', 'html', 'htm', 'php', 'py', 'c', 'cpp', 'sh', 'log', 'xml', 'yaml', 'yml', 'ini', 'env', 'sql', 'csv', 'enc', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'];
+                const arc = ['zip', 'tar', 'gz', '7z', 'rar', 'tgz'];
+                if (img.includes(ext)) return 'image';
+                if (vid.includes(ext)) return 'video';
+                if (aud.includes(ext)) return 'audio';
+                if (doc.includes(ext)) return 'text';
+                if (arc.includes(ext)) return 'archive';
+                return 'file';
+              }
+
+              updateBadges() {
+                const files = this.data.files || [];
+                const counts = { all: files.length, image: 0, video: 0, audio: 0, text: 0, archive: 0 };
+                files.forEach(f => { if (counts[f.type] !== undefined) counts[f.type]++; });
+                for (let k in counts) {
+                  const el = document.getElementById(`badge-${k}`);
+                  if (el) el.innerText = counts[k];
+                }
+              }
+        
+              openFile(filePath, updateHash = true) {
+                let decodedRaw = String(filePath || '');
+                try { decodedRaw = decodeURIComponent(decodedRaw); } catch (e) {}
+
+                if (this.currentSection && this.currentSection !== 'home') {
+                  this.originSection = this.currentSection;
+                }
+
+                const cleanPath = decodedRaw.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\.part$/i, '');
+                const fileName = cleanPath.split('/').pop();
+                const ext = (fileName.split('.').pop() || '').toLowerCase();
+
+                const videoExts = ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv', 'avi', 'ts', '3gp', 'wmv', 'flv'];
+                const audioExts = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'm4r', 'mid', 'midi'];
+                const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'];
+                const officeExts = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'rtf', 'pages', 'ai', 'psd'];
+                const textExts = ['txt', 'md', 'markdown', 'json', 'js', 'css', 'html', 'htm', 'php', 'py', 'c', 'cpp', 'sh', 'log', 'xml', 'yaml', 'yml', 'ini', 'env', 'sql', 'csv', 'enc'];
+
+                let resolvedType = 'file';
+                if (audioExts.includes(ext)) resolvedType = 'audio';
+                else if (videoExts.includes(ext)) resolvedType = 'video';
+                else if (imageExts.includes(ext)) resolvedType = 'image';
+                else if (officeExts.includes(ext)) resolvedType = 'office';
+                else if (textExts.includes(ext) || ext === 'enc') resolvedType = 'text';
+
+                const normalize = p => {
+                  try { return decodeURIComponent(p || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/\.part$/i, ''); }
+                  catch (e) { return (p || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/\.part$/i, ''); }
+                };
+
+                let file = this.filteredList.find(f => normalize(f.path) === cleanPath)
+                  || (this.data.files || []).find(f => normalize(f.path) === cleanPath);
+
+                if (!file) {
+                  file = { name: fileName, path: cleanPath, ext: ext, type: resolvedType };
+                } else {
+                  file.path = cleanPath;
+                  file.name = fileName;
+                  file.type = resolvedType;
+                }
+
+                if (updateHash) {
+                  window.location.hash = '#/' + encodeURI(ltrim(cleanPath, '/'));
+                }
+
+                if (['image', 'video', 'audio'].includes(resolvedType)) {
+                  let mediaList = this.filteredList
+                    .filter(f => !f.isDir)
+                    .map(f => {
+                      const p = normalize(f.path);
+                      const fName = f.name || p.split('/').pop() || '';
+                      const fExt = (fName.split('.').pop() || '').toLowerCase();
+                      let fType = 'file';
+                      if (audioExts.includes(fExt)) fType = 'audio';
+                      else if (videoExts.includes(fExt)) fType = 'video';
+                      else if (imageExts.includes(fExt)) fType = 'image';
+                      return { ...f, path: p, name: fName, ext: fExt, type: fType };
+                    })
+                    .filter(f => ['image', 'video', 'audio'].includes(f.type));
+
+                  let currentMediaIndex = mediaList.findIndex(f => normalize(f.path) === cleanPath);
+                  if (currentMediaIndex === -1) {
+                    mediaList.push(file);
+                    currentMediaIndex = mediaList.length - 1;
+                  }
+                  lightbox.open(mediaList, currentMediaIndex);
+                } else if (resolvedType === 'office') {
+                  this.openDocViewer(file.path, file.name);
+                } else if (resolvedType === 'text') {
+                  this.openEditor(file.path, file.name);
+                } else {
+                  window.location.href = `?access=admin&page=drive&action=download&f=${encodeURIComponent(file.path)}`;
                 }
               }
 
-              toggleProperties() {
-                this.isPropertiesOpen = !this.isPropertiesOpen;
-                document.getElementById('propertiesPane').style.display = this.isPropertiesOpen ? 'flex' : 'none';
-                if (this.isPropertiesOpen) {
-                  this.isActivityOpen = false;
-                  document.getElementById('activityPane').style.display = 'none';
-                  if (this.selectedItems.size > 0) {
-                    this.loadProperties([...this.selectedItems].join('|'));
+              async openDocViewer(path, name) {
+                this.activeModalPath = path;
+                document.getElementById('doc-viewer-title').innerText = name;
+                const directUrl = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(path)}`;
+                const container = document.getElementById('doc-viewer-container');
+                const ext = (name.split('.').pop() || '').toLowerCase();
+
+                document.getElementById('doc-viewer-direct-btn').onclick = () => {
+                  window.open(directUrl, '_blank');
+                };
+
+                container.innerHTML = `
+                  <div class="center-state" style="min-height:300px;">
+                    <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                    <div style="font-size:0.85rem; font-weight:500;">Rendering ${ext.toUpperCase()} document...</div>
+                  </div>
+                `;
+                this.showModal('modal-doc-viewer');
+
+                try {
+                  const response = await fetch(directUrl);
+                  if (!response.ok) throw new Error('Failed to load file data');
+                  const arrayBuffer = await response.arrayBuffer();
+
+                  if (ext === 'pdf') {
+                    if (window.pdfjsLib) {
+                      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                      const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                      container.innerHTML = '';
+
+                      const dpr = Math.max(window.devicePixelRatio || 1, 2);
+
+                      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+                        const page = await pdf.getPage(pageNum);
+                        const unscaledViewport = page.getViewport({ scale: 1.0 });
+                        const containerWidth = Math.max(320, (container.clientWidth || window.innerWidth) - 24);
+                        const cssScale = Math.min(2.0, containerWidth / unscaledViewport.width);
+                        
+                        const renderViewport = page.getViewport({ scale: cssScale * dpr });
+
+                        const canvas = document.createElement('canvas');
+                        canvas.className = 'pdf-page-canvas';
+                        canvas.width = Math.floor(renderViewport.width);
+                        canvas.height = Math.floor(renderViewport.height);
+                        
+                        canvas.style.width = `${Math.floor(renderViewport.width / dpr)}px`;
+                        canvas.style.height = 'auto';
+
+                        const ctx = canvas.getContext('2d', { alpha: false });
+                        container.appendChild(canvas);
+
+                        await page.render({
+                          canvasContext: ctx,
+                          viewport: renderViewport
+                        }).promise;
+                      }
+                    } else {
+                      throw new Error('PDF viewer library failed to load');
+                    }
+                  } else if (ext === 'docx') {
+                    container.innerHTML = '';
+                    const docxWrapper = document.createElement('div');
+                    docxWrapper.className = 'docx-viewer-wrapper';
+                    container.appendChild(docxWrapper);
+
+                    if (window.docx && window.docx.renderAsync) {
+                      await window.docx.renderAsync(arrayBuffer, docxWrapper, null, { inWrapper: false });
+                    } else {
+                      throw new Error('Word document parser not available');
+                    }
+                  } else if (['xlsx', 'xls', 'csv'].includes(ext)) {
+                    if (window.XLSX) {
+                      const workbook = window.XLSX.read(new Uint8Array(arrayBuffer), { type: 'array' });
+                      const sheetName = workbook.SheetNames[0];
+                      const htmlTable = window.XLSX.utils.sheet_to_html(workbook.Sheets[sheetName], { id: 'sheet-table', editable: false });
+
+                      container.innerHTML = `
+                        <div style="width:100%; max-width:1000px; overflow-x:auto; padding-bottom:1rem;">
+                          <div style="font-weight:700; font-size:0.85rem; margin-bottom:0.6rem; color:#ff0000;">Sheet: ${sheetName}</div>
+                          ${htmlTable}
+                        </div>
+                      `;
+                      const tbl = container.querySelector('table');
+                      if (tbl) tbl.className = 'sheet-viewer-table';
+                    } else {
+                      throw new Error('Spreadsheet parser not available');
+                    }
                   } else {
-                    this.renderPropertiesEmpty();
+                    container.innerHTML = `
+                      <div class="center-state" style="min-height:300px;">
+                        <div style="font-weight:700; font-size:1rem; margin-bottom:0.4rem;">Unsupported Preview Format</div>
+                        <div style="font-size:0.8rem; color:var(--md-sys-color-on-surface-variant); margin-bottom:1rem;">This format can be opened in an external application.</div>
+                        <a href="${directUrl}" class="btn-primary" download style="text-decoration:none;">Download File</a>
+                      </div>
+                    `;
+                  }
+                } catch (err) {
+                  container.innerHTML = `
+                    <div class="center-state" style="min-height:300px; color:var(--md-sys-color-error);">
+                      <div style="font-weight:700; font-size:0.95rem; margin-bottom:0.3rem;">Unable to render document</div>
+                      <div style="font-size:0.8rem; opacity:0.8; margin-bottom:1rem;">${err.message || 'Error occurred during parsing'}</div>
+                      <a href="${directUrl}" class="btn-primary" download style="text-decoration:none;">Download Directly</a>
+                    </div>
+                  `;
+                }
+              }
+
+              openEditor(path, name) {
+                this.activeModalPath = path;
+                document.getElementById('editor-title').innerText = name;
+                const loader = document.getElementById('editor-loader');
+                if (loader) loader.style.display = 'flex';
+                this.showModal('modal-editor');
+
+                fetch(`?access=admin&page=drive&action=read_text&f=${encodeURIComponent(path)}`)
+                  .then(r => r.json())
+                  .then(res => {
+                    if (loader) loader.style.display = 'none';
+                    window.hdmEngine.open(path, name, res.content || '');
+
+                    document.getElementById('editor-save-btn').onclick = () => {
+                      const val = window.hdmEngine.editor.getValue();
+                      this.api('save_text', { f: path, content: val }, () => {
+                        this.toast('Document saved');
+                        window.hdmEngine.updateMetrics();
+                      });
+                    };
+                  })
+                  .catch(err => {
+                    if (loader) loader.style.display = 'none';
+                    this.toast('Failed to load file: ' + err.message);
+                    this.closeModals();
+                  });
+              }
+
+              async loadStarredSet() {
+                try {
+                  const res = await fetch('?access=admin&page=drive&action=starred_list');
+                  const data = await res.json();
+                  this.starredSet = new Set(data.starred_paths || []);
+                } catch(e) {}
+              }
+
+              switchDriveSection(section, updateHash = true) {
+                if (updateHash) {
+                  const targetHash = section === 'home' ? '#/' : `#/${section}`;
+                  if (window.location.hash !== targetHash) {
+                    window.location.hash = targetHash;
+                    return;
                   }
                 }
-              }
 
-              toggleActivity() {
-                this.isActivityOpen = !this.isActivityOpen;
-                document.getElementById('activityPane').style.display = this.isActivityOpen ? 'flex' : 'none';
-                if (this.isActivityOpen) {
-                  this.isPropertiesOpen = false;
-                  document.getElementById('propertiesPane').style.display = 'none';
+                this.currentSection = section;
+                this.sidebar.classList.remove('open');
+                this.sidebarBackdrop.classList.remove('active');
+                document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash').forEach(el => el.classList.remove('active'));
+                document.getElementById(`nav-${section}`)?.classList.add('active');
+
+                this.filter = 'all';
+                document.querySelectorAll('.filter-item[data-filter]').forEach(p => {
+                  if (p.dataset.filter === 'all') p.classList.add('active');
+                  else p.classList.remove('active');
+                });
+
+                if (section === 'home') {
+                  this.currentPath = null;
+                  this.loadDir('');
+                } else if (section === 'recents') {
+                  this.loadRecents();
+                } else if (section === 'starred') {
+                  this.loadStarred();
+                } else if (section === 'activity') {
                   this.loadActivity();
+                } else if (section === 'trash') {
+                  this.loadTrash();
                 }
               }
 
               async loadActivity() {
-                const content = document.getElementById('activityContent');
-                content.innerHTML = '<div style="padding: 32px 16px; text-align: center; color: var(--theme-on-surface-variant);"><span class="material-symbols-rounded" style="font-size:32px; animation: rotate 2s linear infinite;">sync</span><br>Loading timeline...</div>';
-                const data = await this.fetchAPI('activity');
-                if (data && data.success) {
-                  let html = '';
-                  
-                  const verbMap = {
-                    created: 'created',
-                    uploaded: 'uploaded',
-                    deleted: 'moved to trash',
-                    restored: 'restored',
-                    renamed: 'renamed',
-                    modified: 'modified',
-                    extracted: 'extracted'
-                  };
-
-                  const iconMap = {
-                    created: 'add_circle',
-                    uploaded: 'upload_file',
-                    deleted: 'delete',
-                    restored: 'restore_from_trash',
-                    renamed: 'edit_square',
-                    modified: 'edit',
-                    extracted: 'folder_zip'
-                  };
-
-                  if (Object.keys(data.activity).length === 0) {
-                    html = '<div style="padding: 32px 16px; text-align: center; color: var(--theme-on-surface-variant);">No recent activity</div>';
-                  } else {
-                    for (const [group, items] of Object.entries(data.activity)) {
-                      html += `<div style="padding: 16px 20px 8px 20px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--theme-on-surface-variant);">${group}</div>`;
-                      items.forEach(item => {
-                        const date = new Date(item.mtime * 1000);
-                        const timeStr = date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                        const verb = verbMap[item.action] || 'modified';
-                        const icon = iconMap[item.action] || 'edit';
-                        const folderPath = item.path.includes('/') ? item.path.split('/').slice(0, -1).join('/') : '';
-                        
-                        html += `
-                          <div style="display: flex; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--theme-outline-variant); align-items: center; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--theme-surface-container)'" onmouseout="this.style.backgroundColor='transparent'" onclick="driveApp.navigate('${folderPath}')">
-                            <div style="width: 40px; height: 40px; border-radius: 50%; background: var(--theme-surface-container-high); display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 2px 6px rgba(0,0,0,0.4);">
-                              <span class="material-symbols-rounded" style="font-size: 20px; color: var(--theme-on-surface);">${icon}</span>
-                            </div>
-                            <div style="display: flex; flex-direction: column; overflow: hidden;">
-                              <span style="font-size: 14px; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">You ${verb} <b>${item.name}</b></span>
-                              <span style="font-size: 12px; color: var(--theme-on-surface-variant);">${timeStr}</span>
-                            </div>
-                          </div>
-                        `;
-                      });
-                    }
-                  }
-                  content.innerHTML = html;
-                }
-              }
-
-              async loadProperties(path) {
-                if (!this.isPropertiesOpen) return;
-                const data = await this.fetchAPI('properties&file=' + encodeURIComponent(path));
-                if (data && data.success) {
-                  const p = data.data;
-                  const html = `
-                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
-                      <span class="material-symbols-rounded" style="font-size:32px;color:var(--theme-primary);">${p.type.includes('Folder') ? 'folder' : 'description'}</span>
-                      <span style="font-family:var(--font-title);font-size:16px;word-break:break-all;">${p.name}</span>
-                    </div>
-                    <div class="prop-row"><span class="prop-label">Type</span><span class="prop-val">${p.type}</span></div>
-                    <div class="prop-row"><span class="prop-label">Size</span><span class="prop-val">${p.size}</span></div>
-                    ${p.contents ? `<div class="prop-row"><span class="prop-label">Contents</span><span class="prop-val">${p.contents}</span></div>` : ''}
-                    <div class="prop-row"><span class="prop-label">Modified</span><span class="prop-val">${p.modified}</span></div>
-                    <div class="prop-row"><span class="prop-label">Created</span><span class="prop-val">${p.created}</span></div>
-                    <div class="prop-row"><span class="prop-label">Permissions</span><span class="prop-val">${p.permissions}</span></div>
-                  `;
-                  document.getElementById('propertiesContent').innerHTML = html;
-                }
-              }
-
-              renderPropertiesEmpty() {
-                if (!this.isPropertiesOpen) return;
-                document.getElementById('propertiesContent').innerHTML = `<div style="color:var(--theme-on-surface-variant);font-size:14px;text-align:center;margin-top:32px;">Select an item to view details</div>`;
-              }
-
-              showMoreMenu(e) {
-                e.stopPropagation();
-                const menu = document.getElementById('moreMenu');
-                document.getElementById('sortMenu').style.display = 'none';
-                document.getElementById('newMenu').style.display = 'none';
-                document.getElementById('contextMenu').style.display = 'none';
-                
-                if (menu.style.display === 'flex') {
-                  menu.style.display = 'none';
-                } else {
-                  menu.style.display = 'flex';
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  menu.style.top = `${rect.bottom + 8}px`;
-                  menu.style.right = '16px';
-                  menu.style.left = 'auto';
-                }
-              }
-
-              showNewMenu(e) {
-                e.stopPropagation();
-                const menu = document.getElementById('newMenu');
-                
-                if (menu.style.display === 'flex') {
-                  menu.style.display = 'none';
-                } else {
-                  menu.style.display = 'flex';
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  if (window.innerWidth <= 768) {
-                    menu.style.bottom = `${window.innerHeight - rect.top + 8}px`;
-                    menu.style.right = '24px';
-                    menu.style.top = 'auto';
-                    menu.style.left = 'auto';
-                  } else {
-                    menu.style.top = `${rect.bottom + 8}px`;
-                    menu.style.left = `${rect.left}px`;
-                    menu.style.bottom = 'auto';
-                    menu.style.right = 'auto';
-                  }
-                }
-              }
-
-              showSortMenu(e) {
-                e.stopPropagation();
-                document.getElementById('moreMenu').style.display = 'none';
-                const menu = document.getElementById('sortMenu');
-                menu.style.display = 'flex';
-                const rect = e.currentTarget.getBoundingClientRect();
-                menu.style.top = `${rect.bottom + 8}px`;
-                menu.style.right = '16px';
-                menu.style.left = 'auto';
-                
-                ['name','mtime','size'].forEach(k => {
-                  document.getElementById('sort_'+k).classList.toggle('active', this.sortBy === k);
-                });
-                document.getElementById('sortDirIcon').textContent = this.sortDesc ? 'arrow_downward' : 'arrow_upward';
-              }
-
-              setSort(by) {
-                this.sortBy = by;
-                localStorage.setItem('drive_sortBy', by);
-                this.render();
-              }
-
-              toggleSortDirection() {
-                this.sortDesc = !this.sortDesc;
-                localStorage.setItem('drive_sortDesc', this.sortDesc);
-                this.render();
-              }
-
-              showRootContextMenu(e) {
-                const menu = document.getElementById('contextMenu');
-                menu.innerHTML = '';
-                
-                const addMenuItem = (icon, text, action) => {
-                  const div = document.createElement('div');
-                  div.className = 'menu-item';
-                  div.innerHTML = `<span class="material-symbols-rounded">${icon}</span>${text}`;
-                  div.onclick = (ev) => { ev.stopPropagation(); menu.style.display = 'none'; action(); };
-                  menu.appendChild(div);
-                };
-
-                addMenuItem('create_new_folder', 'New folder', () => this.showModal('addFolder'));
-              addMenuItem('note_add', 'New file', () => this.showModal('addFile'));
-              addMenuItem('upload_file', 'File upload', () => document.getElementById('fileUploadInput').click());
-              addMenuItem('drive_folder_upload', 'Folder upload', () => document.getElementById('folderUploadInput').click());
-              addMenuItem('link', 'Download File by URL', () => this.showModal('uploadUrl'));
-              const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
-                addMenuItem('refresh', 'Refresh List', () => this.loadDirectory(this.currentPath));
-                
-                menu.style.display = 'flex';
-                
-                let x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
-                let y = e.clientY || (e.touches && e.touches[0].clientY) || 0;
-                const rect = menu.getBoundingClientRect();
-                
-                if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
-                if (x < 8) x = 8;
-                if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
-                if (y < 8) y = 8;
-                
-                menu.style.left = `${x}px`;
-                menu.style.top = `${y}px`;
-              }
-
-              showContextMenu(e, item, isFolder) {
-                e.preventDefault();
-                e.stopPropagation();
-                
-                if (!this.selectedItems.has(item.path)) {
-                  if (!e.ctrlKey && !e.metaKey) this.selectedItems.clear();
-                  this.selectedItems.add(item.path);
-                  this.syncSelectionUI();
-                }
-                
-                const menu = document.getElementById('contextMenu');
-                menu.innerHTML = '';
-                
-                const addMenuItem = (icon, text, action) => {
-                  const div = document.createElement('div');
-                  div.className = 'menu-item';
-                  div.innerHTML = `<span class="material-symbols-rounded">${icon}</span>${text}`;
-                  div.onclick = (ev) => { ev.stopPropagation(); menu.style.display = 'none'; action(); };
-                  menu.appendChild(div);
-                };
-
-                if (this.selectedItems.size === 1) {
-                  if (isFolder) {
-                    addMenuItem('folder_open', 'Open', () => this.navigate(item.path));
-                    addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
-                    addMenuItem('folder_zip', 'Archive to Zip', () => this.archiveItems());
-                  } else if (item.is_version) {
-                    addMenuItem('history', 'Rollback to this Version', () => this.restoreVersion(item.original_file, item.version_name));
-                    addMenuItem('open_in_new', 'Preview Version', () => window.open(`${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`, '_blank'));
-                    addMenuItem('download', 'Download Version', () => window.location.href = `${this.apiPrefix}download=${encodeURIComponent(item.path)}`);
-                  } else {
-                    if (['mp3', 'wav', 'ogg', 'mp4', 'webm'].includes(item.ext)) {
-                      addMenuItem('play_circle', 'Play in Mini Player', () => this.playDriveMiniMedia(item.path, item.name, item.ext));
-                    }
-                    addMenuItem('visibility', 'Preview / Edit', () => this.openPreviewOrEditor(item));
-                    addMenuItem('open_in_new', 'Open in a new tab', () => window.open(`${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`, '_blank'));
-                    addMenuItem('download', 'Download', () => window.location.href = `${this.apiPrefix}download=${encodeURIComponent(item.path)}`);
-                    addMenuItem('share', 'Public File Link', () => this.shareFile(item.path));
-                    if (item.ext === 'zip') {
-                      addMenuItem('folder_zip', 'Extract Zip', () => this.extractZip(item.path));
-                    } else if (item.ext === 'enc') {
-                      addMenuItem('lock_open', 'Decrypt File', () => this.decryptFile(item.path));
-                    } else {
-                      addMenuItem('lock', 'Encrypt File', () => this.encryptFile(item.path));
-                    }
-                  }
-                  addMenuItem('link', 'Copy Direct URL', () => {
-                    const url = window.location.origin + window.location.pathname + `${this.apiPrefix}download=${encodeURIComponent(item.path)}`;
-                    navigator.clipboard.writeText(url);
-                    this.showToast('URL copied to clipboard!');
-                  });
-                  addMenuItem('edit_square', 'Rename', () => this.showModal('rename', item.path));
-                  if (!isFolder) {
-                    addMenuItem('history', 'Version History', () => this.showVersions(item.path));
-                  }
-                  addMenuItem('info', 'Info', () => {
-                    this.isPropertiesOpen = false;
-                    this.toggleProperties();
-                  });
-                  const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
-                } else {
-                  addMenuItem('download', 'Download as Zip', () => this.batchDownload('selected'));
-                  addMenuItem('folder_zip', 'Archive to Zip', () => this.archiveItems());
-                  addMenuItem('info', 'Properties', () => {
-                    this.isPropertiesOpen = false;
-                    this.toggleProperties();
-                  });
-                  const divider = document.createElement('div'); divider.className = 'menu-divider'; menu.appendChild(divider);
-                }
-                
-                addMenuItem('content_copy', 'Copy', () => this.copyToClipboard('copy'));
-                addMenuItem('content_cut', 'Cut (Move)', () => this.copyToClipboard('cut'));
-                addMenuItem('delete', 'Move to Trash', () => this.deleteSelected());
-                
-                menu.style.display = 'flex';
-                
-                let x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
-                let y = e.clientY || (e.touches && e.touches[0].clientY) || 0;
-                const rect = menu.getBoundingClientRect();
-                
-                // Keep context menu 8px bounded from all edges of the screen
-                if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
-                if (x < 8) x = 8;
-                if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
-                if (y < 8) y = 8;
-                
-                menu.style.left = `${x}px`;
-                menu.style.top = `${y}px`;
-              }
-
-              showTrashContextMenu(e, item) {
-                const menu = document.getElementById('contextMenu');
-                menu.innerHTML = '';
-                
-                const addMenuItem = (icon, text, action) => {
-                  const div = document.createElement('div');
-                  div.className = 'menu-item';
-                  div.innerHTML = `<span class="material-symbols-rounded">${icon}</span>${text}`;
-                  div.onclick = (ev) => { ev.stopPropagation(); menu.style.display = 'none'; action(); };
-                  menu.appendChild(div);
-                };
-
-                addMenuItem('restore_from_trash', 'Restore', () => this.restoreTrash(item.uniq));
-                addMenuItem('delete_forever', 'Delete Permanently', () => this.deleteTrashPermanent(item.uniq));
-                
-                menu.style.display = 'flex';
-                
-                let x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
-                let y = e.clientY || (e.touches && e.touches[0].clientY) || 0;
-                const rect = menu.getBoundingClientRect();
-                
-                if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
-                if (x < 8) x = 8;
-                if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
-                if (y < 8) y = 8;
-                
-                menu.style.left = `${x}px`;
-                menu.style.top = `${y}px`;
-              }
-
-              showTrashContextMenu(e, item) {
-                const menu = document.getElementById('contextMenu');
-                menu.innerHTML = '';
-                
-                const addMenuItem = (icon, text, action) => {
-                  const div = document.createElement('div');
-                  div.className = 'menu-item';
-                  div.innerHTML = `<span class="material-symbols-rounded">${icon}</span>${text}`;
-                  div.onclick = (ev) => { ev.stopPropagation(); menu.style.display = 'none'; action(); };
-                  menu.appendChild(div);
-                };
-
-                addMenuItem('restore_from_trash', 'Restore', () => this.restoreTrash(item.uniq));
-                addMenuItem('delete_forever', 'Delete Permanently', () => this.deleteTrashPermanent(item.uniq));
-                
-                menu.style.display = 'flex';
-                
-                let x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
-                let y = e.clientY || (e.touches && e.touches[0].clientY) || 0;
-                
-                const rect = menu.getBoundingClientRect();
-                if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
-                if (y + rect.height > window.innerHeight) y -= rect.height;
-                if (x < 0) x = 8;
-                
-                menu.style.left = `${x}px`;
-                menu.style.top = `${y}px`;
-              }
-
-              showModal(action, oldPath = '') {
-                const overlay = document.getElementById('modalOverlay');
-                const title = document.getElementById('modalTitle');
-                const input = document.getElementById('modalInput');
-                const submit = document.getElementById('modalSubmit');
-                
-                overlay.style.display = 'flex';
-                input.value = '';
-                input.focus();
-
-                submit.onclick = async () => {
-                  const val = input.value.trim();
-                  if (!val) return;
-                  this.closeModal();
-                  
-                  if (action === 'addFolder') {
-                    const res = await this.fetchAPI('add_folder', 'POST', { action: 'add_folder', name: val });
-                    if (res) { this.showToast('Folder created'); this.loadDirectory(this.currentPath); }
-                  } else if (action === 'addFile') {
-                    const res = await this.fetchAPI('add_file', 'POST', { action: 'add_file', name: val });
-                    if (res) { this.showToast('File created'); this.loadDirectory(this.currentPath); }
-                  } else if (action === 'uploadUrl') {
-                    this.showToast('Downloading from URL...');
-                    const res = await this.fetchAPI('upload_url', 'POST', { action: 'upload_url', url: val });
-                    if (res) { this.showToast('Downloaded successfully'); this.loadDirectory(this.currentPath); }
-                  } else if (action === 'rename') {
-                    const oldName = oldPath.split('/').pop();
-                    const extOld = oldName.split('.').pop();
-                    const extNew = val.split('.').pop();
-                    let targetName = val;
-                    if (oldName.includes('.') && extOld !== extNew) {
-                      if (confirm('Changing extension might break the file. Keep original extension?')) {
-                        targetName = val.split('.')[0] + '.' + extOld;
-                      }
-                    }
-                    const res = await this.fetchAPI('rename', 'POST', { action: 'rename', old: oldPath, new: targetName });
-                    if (res) { this.showToast('Renamed successfully'); this.loadDirectory(this.currentPath); }
-                  }
-                };
-
-                if (action === 'addFolder') {
-                  title.textContent = 'New folder';
-                  input.placeholder = 'Folder name';
-                  submit.textContent = 'Create';
-                } else if (action === 'addFile') {
-                  title.textContent = 'New file';
-                  input.placeholder = 'File name (e.g., script.js)';
-                  submit.textContent = 'Create';
-                } else if (action === 'uploadUrl') {
-                  title.textContent = 'Upload from URL';
-                  input.placeholder = 'https://example.com/video.mp4';
-                  submit.textContent = 'Download';
-                } else if (action === 'rename') {
-                  title.textContent = 'Rename';
-                  input.value = oldPath.split('/').pop();
-                  submit.textContent = 'OK';
-                }
-              }
-
-              closeModal() {
-                document.getElementById('modalOverlay').style.display = 'none';
-              }
-
-              async deleteSelected() {
-                if (this.selectedItems.size === 0) return;
-                
-                if (this.currentViewMode === 'trash') {
-                  if (!confirm('Permanently delete selected items?')) return;
-                  const res = await this.fetchAPI('delete_perm', 'POST', { action: 'delete_perm', items: Array.from(this.selectedItems) });
-                  if (res) {
-                    this.showToast(`${this.selectedItems.size} item(s) permanently deleted`);
-                    this.selectedItems.clear();
-                    this.loadDirectory(this.currentPath);
-                    this.renderPropertiesEmpty();
-                  }
-                  return;
-                }
-
-                const res = await this.fetchAPI('trash', 'POST', { action: 'trash', items: Array.from(this.selectedItems) });
-                if (res) {
-                  this.showToast(`${this.selectedItems.size} item(s) moved to Trash`);
-                  this.selectedItems.clear();
-                  this.loadDirectory(this.currentPath);
-                  this.renderPropertiesEmpty();
-                }
-              }
-
-              async restoreTrash(uniq) {
-                const res = await this.fetchAPI('restore_trash', 'POST', { action: 'restore_trash', items: [uniq] });
-                if (res) {
-                  this.showToast('Item restored');
-                  this.loadDirectory(this.currentPath);
-                }
-              }
-
-              async deleteTrashPermanent(uniq) {
-                if (!confirm('This action is irreversible. Delete permanently?')) return;
-                const res = await this.fetchAPI('delete_perm', 'POST', { action: 'delete_perm', items: [uniq] });
-                if (res) {
-                  this.showToast('Item deleted forever');
-                  this.loadDirectory(this.currentPath);
-                }
-              }
-
-              async emptyTrash() {
-                if (!confirm('Empty entire Trash forever?')) return;
-                const res = await this.fetchAPI('empty_trash', 'POST', { action: 'empty_trash' });
-                if (res) {
-                  this.showToast('Trash cleared');
-                  this.loadDirectory(this.currentPath);
-                }
-              }
-
-              async archiveItems() {
-                const items = Array.from(this.selectedItems);
-                if (items.length === 0) return;
-                this.showToast('Creating Zip Archive... This may take a while.', 'info');
-                const res = await this.fetchAPI('zip_items', 'POST', { action: 'zip_items', items });
-                if (res) {
-                  this.showToast('Archive created successfully');
-                  this.clearSelection(null, true);
-                  this.loadDirectory(this.currentPath);
-                }
-              }
-
-              async encryptFile(path) {
-                this.showToast('Encrypting securely (AES-256)...');
-                const res = await this.fetchAPI('encrypt_file', 'POST', { action: 'encrypt_file', file: path });
-                if (res) {
-                  this.showToast('File encrypted successfully!');
-                  this.loadDirectory(this.currentPath);
-                }
-              }
-
-              async decryptFile(path) {
-                this.showToast('Decrypting file...');
-                const res = await this.fetchAPI('decrypt_file', 'POST', { action: 'decrypt_file', file: path });
-                if (res) {
-                  this.showToast('File decrypted successfully!');
-                  this.loadDirectory(this.currentPath);
-                }
-              }
-
-              async showVersions(path) {
-                const res = await this.fetchAPI('get_versions', 'POST', { action: 'get_versions', file: path });
-                if (res && res.versions.length > 0) {
-                  const overlay = document.getElementById('modalOverlay');
-                  const title = document.getElementById('modalTitle');
-                  title.textContent = 'Version History';
-                  
-                  let html = `<div class="versions-list">`;
-                  res.versions.forEach(v => {
-                    const d = new Date(v.mtime * 1000).toLocaleString();
-                    html += `
-                      <div class="version-item">
-                        <div>
-                          <div style="font-weight:600;font-size:14px;color:var(--theme-on-surface)">${d}</div>
-                          <div style="font-size:12px;color:var(--theme-on-surface-variant)">Size: ${v.size}</div>
-                        </div>
-                        <button class="btn-drive btn-filled-drive" style="height:32px;font-size:12px;padding:0 12px;" onclick="driveApp.restoreVersion('${path}', '${v.name}')">Restore</button>
-                      </div>`;
-                  });
-                  html += `</div>`;
-                  
-                  const input = document.getElementById('modalInput');
-                  input.style.display = 'none';
-                  input.insertAdjacentHTML('afterend', `<div id="versionsContainer">${html}</div>`);
-                  
-                  document.getElementById('modalSubmit').style.display = 'none';
-                  overlay.style.display = 'flex';
-                  
-                  const oldClose = this.closeModal;
-                  this.closeModal = () => {
-                    const c = document.getElementById('versionsContainer');
-                    if (c) c.remove();
-                    input.style.display = 'block';
-                    document.getElementById('modalSubmit').style.display = 'inline-flex';
-                    oldClose.call(this);
-                  };
-                } else {
-                  this.showToast('No version history found for this file.');
-                }
-              }
-
-              async restoreVersion(path, versionName) {
-                if (confirm('Restore this older version? The current file will be backed up.')) {
-                  this.closeModal();
-                  this.showToast('Restoring version...');
-                  const res = await this.fetchAPI('restore_version', 'POST', { action: 'restore_version', file: path, version_name: versionName });
-                  if (res) {
-                    this.showToast('Version restored successfully!');
-                    this.loadDirectory(this.currentPath);
-                  }
-                }
-              }
-
-              async extractZip(path) {
-                this.showToast('Extracting ZIP... This may take a while.', 'info');
-                const res = await this.fetchAPI('unzip', 'POST', { action: 'unzip', item: path });
-                if (res) {
-                  this.showToast('ZIP extracted successfully!');
-                  this.loadDirectory(this.currentPath);
-                }
-              }
-
-              async shareFile(path) {
-                const res = await this.fetchAPI('create_share', 'POST', { action: 'create_share', item: path });
-                if (res && res.token) {
-                  const shareUrl = `${window.location.origin}${window.location.pathname}${this.apiPrefix}share=${res.token}`;
-                  navigator.clipboard.writeText(shareUrl);
-                  this.showToast('Link copied to clipboard!');
-                }
-              }
-
-              handleFilesSelect(e) {
-                if (e.target.files.length) this.uploadFiles(e.target.files);
-                e.target.value = '';
-              }
-
-              async handleFolderSelect(e) {
-                if (e.target.files.length) {
-                  const files = Array.from(e.target.files);
-                  let paths = files.map(f => f.webkitRelativePath || f.name);
-                  
-                  if (paths.length > 0 && paths[0].includes('/')) {
-                     const rootFolderName = paths[0].split('/')[0];
-                     const listRes = await this.fetchAPI('list');
-                     if (listRes && listRes.success && listRes.folders) {
-                        const existingFolders = listRes.folders.map(f => f.name);
-                        if (existingFolders.includes(rootFolderName)) {
-                           let counter = 1;
-                           let newRoot = `${rootFolderName}_(${counter})`;
-                           while(existingFolders.includes(newRoot)) {
-                              counter++;
-                              newRoot = `${rootFolderName}_(${counter})`;
-                           }
-                           paths = paths.map(p => {
-                              const parts = p.split('/');
-                              parts[0] = newRoot;
-                              return parts.join('/');
-                           });
-                           this.showToast(`Folder renamed to ${newRoot} to avoid collision.`);
-                        }
-                     }
-                  }
-                  this.uploadFiles(files, paths);
-                }
-                e.target.value = '';
-              }
-
-              async scanDroppedItems(items) {
-                const files = [];
-                const paths = [];
-                
-                const readAllEntries = async (dirReader) => {
-                  let allEntries = [];
-                  const read = async () => {
-                    const entries = await new Promise((resolve) => dirReader.readEntries(resolve));
-                    if (entries && entries.length > 0) {
-                      allEntries = allEntries.concat(entries);
-                      await read();
-                    }
-                  };
-                  await read();
-                  return allEntries;
-                };
-
-                const traverseEntry = async (entry, path = '') => {
-                  if (entry.isFile) {
-                    const file = await new Promise((resolve) => entry.file(resolve));
-                    files.push(file);
-                    paths.push(path + file.name);
-                  } else if (entry.isDirectory) {
-                    const dirReader = entry.createReader();
-                    const entries = await readAllEntries(dirReader);
-                    for (const childEntry of entries) {
-                      await traverseEntry(childEntry, path + entry.name + '/');
-                    }
-                  }
-                };
-
-                for (let i = 0; i < items.length; i++) {
-                  const entry = items[i].webkitGetAsEntry();
-                  if (entry) {
-                    await traverseEntry(entry);
-                  }
-                }
-
-                return { files, paths };
-              }
-
-              uploadFiles(files, paths = []) {
-                for (let i = 0; i < files.length; i++) {
-                  this.uploadQueue.add(files[i], paths[i] || '');
-                }
-              }
-
-              async openPreviewOrEditor(item) {
-                if (item.ext === 'zip') {
-                  this.showToast('ZIP files cannot be viewed. Use the context menu to extract or download.');
-                  return;
-                }
-                this.currentEditFile = item.path;
-                
-                let qs = '?access=admin&page=drive&';
-                if (this.currentPath) qs += `path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}&`;
-                qs += `edit=${encodeURIComponent(item.path).replace(/%2F/g, '/')}`;
-                window.history.pushState({ path: this.currentPath, edit: item.path }, '', qs);
-                
-                const streamUrl = `${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(item.path)}`;
-
-                const mediaExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'mp4', 'webm', 'mp3', 'wav', 'ogg', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'rtf', 'odt', 'ods', 'odp', 'csv'];
-                const mediaFiles = this.filteredFiles.filter(f => mediaExts.includes(f.ext.toLowerCase()) || f.isImage);
-                const currentIndex = mediaFiles.findIndex(f => f.path === item.path);
-
-                const setupNav = (prevBtnId, nextBtnId) => {
-                  const pBtn = document.getElementById(prevBtnId);
-                  const nBtn = document.getElementById(nextBtnId);
-                  if (pBtn && nBtn) {
-                    pBtn.style.display = currentIndex > 0 ? 'flex' : 'none';
-                    pBtn.onclick = (e) => { e.stopPropagation(); this.openPreviewOrEditor(mediaFiles[currentIndex - 1]); };
-                    
-                    nBtn.style.display = (currentIndex !== -1 && currentIndex < mediaFiles.length - 1) ? 'flex' : 'none';
-                    nBtn.onclick = (e) => { e.stopPropagation(); this.openPreviewOrEditor(mediaFiles[currentIndex + 1]); };
-                  }
-                };
-
-                document.title = `${item.name} - Admin Panel`;
-                if (item.isImage) {
-                  setupNav('drive-image-prev-btn', 'drive-image-next-btn');
-                  const imageOverlay = document.getElementById('imageOverlay');
-                  const imageContent = document.getElementById('imageModalContent');
-                  imageOverlay.style.display = 'flex';
-                  imageContent.innerHTML = `<img src="${streamUrl}" style="max-width: 100%; max-height: 85vh; object-fit: contain; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">`;
-                } else if (['mp4','webm','mp3','wav','ogg','pdf'].includes(item.ext)) {
-                  setupNav('drive-media-prev-btn', 'drive-media-next-btn');
-                  const mediaOverlay = document.getElementById('mediaOverlay');
-                  const mediaContent = document.getElementById('mediaModalContent');
-                  const mediaContainer = document.getElementById('mediaModalContainer');
-                  
-                  const docExts = ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'rtf', 'odt', 'ods', 'odp', 'csv', 'pages', 'numbers', 'key'];
-                  if (item.ext === 'pdf' || docExts.includes(item.ext)) {
-                    mediaContainer.style.maxWidth = '1000px';
-                    mediaContainer.style.width = '95%';
-                    mediaContainer.style.padding = '0';
-                    
-                    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-                    const absoluteStreamUrl = window.location.origin + window.location.pathname + streamUrl;
-                    let viewerSrc = streamUrl; 
-                    if (item.ext !== 'pdf') {
-                       viewerSrc = isLocalhost ? streamUrl : `https://docs.google.com/viewer?url=${encodeURIComponent(absoluteStreamUrl)}&embedded=true`;
-                    }
-                    
-                    mediaContent.innerHTML = `
-                      <div style="width: 100%; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
-                        <div style="padding: 12px 16px; background: var(--theme-surface-container-high); border-bottom: 1px solid var(--theme-outline-variant); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;">
-                          <span style="font-family: var(--font-title); font-size: 14px; font-weight: 500; color: var(--theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 12px;">${item.name}</span>
-                          <button class="btn btn-filled" style="height: 32px; padding: 0 16px; font-size: 12px; flex-shrink: 0; background-color: var(--theme-primary); color: var(--theme-on-primary); border-radius: 16px; border: none; cursor: pointer;" onclick="window.open('${streamUrl}', '_blank')">Download</button>
-                        </div>
-                        ${isLocalhost && item.ext !== 'pdf' ? 
-                          `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 h-100 text-secondary">
-                              <i class="bi bi-file-earmark-x" style="font-size: 4rem; margin-bottom: 1rem;"></i>
-                              <p>Google Docs Viewer cannot access localhost files.<br><a href="${streamUrl}" target="_blank" class="text-info fw-bold">Download file to View</a></p>
-                           </div>` 
-                          : `<iframe src="${viewerSrc}" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>`
-                        }
-                      </div>`;
-                  } else if (['mp4','webm'].includes(item.ext)) {
-                    mediaContainer.style.maxWidth = '550px';
-                    mediaContainer.style.width = '90%';
-                    mediaContainer.style.padding = '24px';
-                    mediaContent.innerHTML = `<video controls autoplay preload="metadata" style="width: 100%; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); background: #000;" onended="const nBtn=document.getElementById('drive-media-next-btn'); if(nBtn && nBtn.style.display!=='none') nBtn.click();"><source src="${streamUrl}" type="video/${item.ext}"></video>`;
-                  } else if (['mp3','wav','ogg'].includes(item.ext)) {
-                    mediaContainer.style.maxWidth = '550px';
-                    mediaContainer.style.width = '90%';
-                    mediaContainer.style.padding = '24px';
-                    mediaContent.innerHTML = `
-                      <div style="display: flex; flex-direction: column; align-items: center; gap: 24px; width: 100%;">
-                        <div style="width: 120px; height: 120px; border-radius: 24px; background: var(--theme-primary-container); color: var(--theme-on-primary-container); display: flex; align-items: center; justify-content: center;"><span class="material-symbols-rounded" style="font-size: 64px; color: var(--theme-primary);">audiotrack</span></div>
-                        <div style="font-family: var(--font-title); font-size: 16px; color: var(--theme-on-surface); text-align: center; word-break: break-all; max-width: 300px;">${item.name}</div>
-                        <audio controls autoplay preload="metadata" style="width: 100%; max-width: 300px;" onended="const nBtn=document.getElementById('drive-media-next-btn'); if(nBtn && nBtn.style.display!=='none') nBtn.click();"><source src="${streamUrl}" type="audio/${item.ext === 'mp3' ? 'mpeg' : item.ext}"></audio>
-                      </div>`;
-                  }
-                  mediaOverlay.style.display = 'flex';
-                } else {
-                  document.body.classList.add('drive-editor-open');
-                const overlay = document.getElementById('editorOverlay');
-                const actions = document.getElementById('editorActions');
-                const desktopContainer = document.getElementById('desktopEditorContainer');
-                const mobileContainer = document.getElementById('mobileEditorContainer');
-                
-                document.getElementById('editorTitle').textContent = item.name;
-                document.title = `${item.name} - Admin Panel`;
-                overlay.style.display = 'flex';
-                  
-                  desktopContainer.style.display = 'none';
-                  mobileContainer.style.display = 'none';
-                  actions.style.display = 'flex';
-
-                  this.updateEditorWrapUI();
-                  const res = await this.fetchAPI(`read&file=${encodeURIComponent(item.path)}`);
-                  if (res && res.success) {
-                    desktopContainer.style.display = 'block';
-                    let mode = 'text/plain';
-                    // Disable complex token parsing on files >= 2MB to keep 60fps interaction responsiveness
-                    if (res.content && res.content.length < 2 * 1024 * 1024) {
-                      if (item.ext === 'js' || item.ext === 'json') mode = 'text/javascript';
-                      if (item.ext === 'html') mode = 'text/html';
-                      if (item.ext === 'css') mode = 'text/css';
-                      if (item.ext === 'php') mode = 'application/x-httpd-php';
-                    }
-
-                    if (this.editor) {
-                      this.editor.destroy();
-                      if (this.editor.container) this.editor.container.remove();
-                      this.editor = null;
-                    }
-
-                    const editorDiv = document.createElement('div');
-                    editorDiv.id = "aceEditorInstance";
-                    editorDiv.style.width = "100%";
-                    editorDiv.style.height = "100%";
-                    desktopContainer.appendChild(editorDiv);
-
-                    this.editor = ace.edit("aceEditorInstance");
-                    this.editor.setTheme("ace/theme/chaos");
-                    
-                    let modelist = ace.require("ace/ext/modelist");
-                    let aceMode = modelist.getModeForPath(item.name).mode;
-                    this.editor.session.setMode(aceMode);
-                    
-                    this.editor.setOptions({
-                      fontSize: "14px",
-                      wrap: this.editorWrap,
-                      showPrintMargin: false,
-                      enableBasicAutocompletion: true,
-                      enableLiveAutocompletion: true
-                    });
-                    
-                    this.editor.setValue(res.content, -1);
-                  }
-                }
-              }
-              
-              restoreDocumentTitle() {
-                const folderName = this.currentPath ? this.currentPath.split('/').pop() : 'Drive';
-                const totalItems = this.filteredFolders.length + this.filteredFiles.length;
-                document.title = `${folderName} (${totalItems} items) - Admin Panel`;
-              }
-              
-              closeImage() {
-                const overlay = document.getElementById('imageOverlay');
-                if (overlay) {
-                  overlay.style.display = 'none';
-                  document.getElementById('imageModalContent').innerHTML = '';
-                }
-                this.currentEditFile = null;
-                this.restoreDocumentTitle();
-                
-                // Revert URL Bar
-                const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '');
-                window.history.pushState({ path: this.currentPath }, '', newUrl);
-              }
-
-              closeMedia() {
-                const overlay = document.getElementById('mediaOverlay');
-                if (overlay) {
-                  overlay.style.display = 'none';
-                  document.getElementById('mediaModalContent').innerHTML = '';
-                }
-                this.currentEditFile = null;
-                this.restoreDocumentTitle();
-                
-                // Revert URL Bar
-                const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '');
-                window.history.pushState({ path: this.currentPath }, '', newUrl);
-              }
-
-              editorUndo() {
-                if (this.editor) {
-                  this.editor.undo();
-                } else if (window.innerWidth <= 768) {
-                  document.execCommand('undo');
-                }
-              }
-
-              editorRedo() {
-                if (this.editor) {
-                  this.editor.redo();
-                } else if (window.innerWidth <= 768) {
-                  document.execCommand('redo');
-                }
-              }
-
-              editorFind() {
-                if (this.editor) {
-                  this.editor.execCommand("find");
-                }
-              }
-
-              toggleEditorWrap() {
-                this.editorWrap = !this.editorWrap;
-                localStorage.setItem('drive_editorWrap', this.editorWrap);
-                this.updateEditorWrapUI();
-                if (this.editor) {
-                  this.editor.setOption('wrap', this.editorWrap);
-                }
-              }
-
-              updateEditorWrapUI() {
-                const btn = document.getElementById('editorWrapBtn');
-                if (btn) {
-                  const icon = btn.querySelector('.material-symbols-rounded');
-                  if (icon) {
-                    icon.textContent = this.editorWrap ? 'wrap_text' : 'segment';
-                    btn.style.color = this.editorWrap ? '#ff3333' : 'var(--theme-on-surface-variant)';
-                  }
-                }
-                const mobileTa = document.getElementById('mobileTextarea');
-                if (mobileTa) {
-                  mobileTa.setAttribute('wrap', this.editorWrap ? 'soft' : 'off');
-                  mobileTa.style.whiteSpace = this.editorWrap ? 'pre-wrap' : 'pre';
-                  mobileTa.style.overflowX = this.editorWrap ? 'hidden' : 'auto';
-                }
-              }
-
-              closeEditor() {
-                document.body.classList.remove('drive-editor-open');
-                document.getElementById('editorOverlay').style.display = 'none';
-                this.currentEditFile = null;
-                if (this.editor) {
-                  this.editor.destroy();
-                  if (this.editor.container) this.editor.container.remove();
-                  this.editor = null;
-                }
-                this.restoreDocumentTitle();
-                
-                const newUrl = `?access=admin&page=drive` + (this.currentPath ? `&path=${encodeURIComponent(this.currentPath).replace(/%2F/g, '/')}` : '');
-                window.history.pushState({ path: this.currentPath }, '', newUrl);
-              }
-
-              async saveFile() {
-                if (!this.currentEditFile) return;
-                let content = '';
-                if (window.innerWidth <= 768) {
-                  content = document.getElementById('mobileTextarea').value;
-                } else if (this.editor) {
-                  content = this.editor.getValue();
-                }
-                const res = await this.fetchAPI('write', 'POST', { action: 'write', file: this.currentEditFile, content });
-                if (res) this.showToast('File saved');
-              }
-
-              batchDownload(type) {
-                if (type === 'selected' && this.selectedItems.size === 0) return;
-                let url = `${this.apiPrefix}batch=${type}&path=${encodeURIComponent(this.currentPath)}`;
-                if (type === 'selected') url += `&items=${encodeURIComponent(Array.from(this.selectedItems).join(','))}`;
-                window.location.href = url;
-                this.clearSelection(null, true);
-              }
-
-              playDriveMiniMedia(path, name, ext) {
-                let miniWidget = document.getElementById('driveMiniPlayerWidget');
-                if (!miniWidget) {
-                  miniWidget = document.createElement('div');
-                  miniWidget.id = 'driveMiniPlayerWidget';
-                  miniWidget.style.cssText = 'position: fixed; bottom: 80px; right: 20px; width: 280px; height: 360px; background: rgba(18, 18, 18, 0.95); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid var(--theme-outline-variant); border-radius: 16px; box-shadow: 0 16px 40px rgba(0,0,0,0.8); z-index: 3500; display: none; flex-direction: column; overflow: hidden; resize: both; min-width: 240px; min-height: 300px; max-width: 600px; max-height: 700px; color: #fff;';
-                  miniWidget.innerHTML = `
-                    <div id="driveMiniHeader" style="padding: 10px 14px; background: rgba(255,255,255,0.05); cursor: move; display: flex; align-items: center; justify-content: space-between; user-select: none; border-bottom: 1px solid rgba(255,255,255,0.08);">
-                      <div class="d-flex align-items-center gap-2" style="min-width: 0;">
-                        <span class="material-symbols-rounded" style="color: var(--theme-primary); font-size: 20px;">play_circle</span>
-                        <span style="font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" id="driveMiniTitle">Mini Player</span>
-                      </div>
-                      <button class="icon-btn" style="width: 24px; height: 24px;" id="driveMiniCloseBtn"><span class="material-symbols-rounded" style="font-size: 18px;">close</span></button>
-                    </div>
-                    <div style="padding: 12px; display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 10px;">
-                      <div style="position: relative; width: 100%; flex: 1; min-height: 120px; background: #000; border-radius: 12px; overflow: hidden; display: flex; align-items: center; justify-content: center;">
-                        <div id="driveMiniSpinner" class="spinner-border text-danger" role="status" style="position: absolute; z-index: 5; width: 2rem; height: 2rem; display: none;"></div>
-                        <img id="driveMiniCover" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg'/>" style="width: 100%; height: 100%; object-fit: cover; display: none;">
-                        <video id="driveMiniVideo" style="width: 100%; height: 100%; object-fit: contain; display: none;"></video>
-                        <div id="driveMiniPlaceholder" style="display: flex; flex-direction: column; align-items: center; justify-content: center; color: #555;">
-                          <span class="material-symbols-rounded" style="font-size: 48px; color: var(--theme-primary);">graphic_eq</span>
-                        </div>
-                      </div>
-                      <div class="text-center" style="min-width: 0;">
-                        <div id="driveMiniName" style="font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #fff;">No Media</div>
-                      </div>
-                      <div style="display: flex; flex-direction: column; gap: 2px; margin-top: 4px;">
-                        <div class="progress-bar-container" style="height: 14px; border-radius: 2px; position: relative; cursor: pointer; width: 100%; display: flex; align-items: center;">
-                          <div class="progress-bar-bg" style="height: 4px; background-color: rgba(255,255,255,0.2); border-radius: 2px; position: absolute; left: 0; right: 0; pointer-events: none;"></div>
-                          <div class="progress-bar-fg" id="driveMiniProgress" style="height: 4px; background-color: var(--theme-primary); border-radius: 2px; width: 0%; position: absolute; left: 0; pointer-events: none;"></div>
-                          <input type="range" id="driveMiniSeek" min="0" max="100" value="0" step="0.1" style="-webkit-appearance: none; width: 100%; background: transparent; height: 100%; position: absolute; top: 0; left: 0; z-index: 10; margin: 0; cursor: pointer; outline: none; opacity: 0;">
-                        </div>
-                        <div style="display: flex; justify-content: space-between; font-family: monospace; font-size: 11px; color: var(--theme-on-surface-variant); margin-top: 4px;">
-                          <span id="driveMiniCurTime">0:00</span>
-                          <span id="driveMiniDurTime">0:00</span>
-                        </div>
-                      </div>
-                      <div style="display: flex; align-items: center; justify-content: center; gap: 16px;">
-                        <button class="icon-btn" id="driveMiniPrevBtn" title="Previous"><span class="material-symbols-rounded">skip_previous</span></button>
-                        <button class="fab" id="driveMiniPlayBtn" style="width: 40px; height: 40px; min-height: 40px; padding: 0; justify-content: center;" title="Play/Pause"><span class="material-symbols-rounded" id="driveMiniPlayIcon">pause</span></button>
-                        <button class="icon-btn" id="driveMiniNextBtn" title="Next"><span class="material-symbols-rounded">skip_next</span></button>
-                      </div>
-                    </div>
-                    <audio id="driveMiniAudio" style="display: none;"></audio>
-                  `;
-                  document.body.appendChild(miniWidget);
-
-                  // Draggable Handler for Drive
-                  const header = document.getElementById('driveMiniHeader');
-                  let isDragging = false, startX = 0, startY = 0, initialLeft = 0, initialTop = 0;
-                  header.onmousedown = (e) => {
-                    if (e.target.closest('button')) return;
-                    isDragging = true;
-                    startX = e.clientX;
-                    startY = e.clientY;
-                    const rect = miniWidget.getBoundingClientRect();
-                    initialLeft = rect.left;
-                    initialTop = rect.top;
-                    miniWidget.style.bottom = 'auto';
-                    miniWidget.style.right = 'auto';
-                    miniWidget.style.left = initialLeft + 'px';
-                    miniWidget.style.top = initialTop + 'px';
-                    e.preventDefault();
-                  };
-                  document.addEventListener('mousemove', (e) => {
-                    if (!isDragging) return;
-                    miniWidget.style.left = (initialLeft + (e.clientX - startX)) + 'px';
-                    miniWidget.style.top = (initialTop + (e.clientY - startY)) + 'px';
-                  });
-                  document.addEventListener('mouseup', () => { isDragging = false; });
-                }
-
-                const streamUrl = `${this.apiPrefix}api=true&action=stream&file=${encodeURIComponent(path)}`;
-                const thumbUrl = `${this.apiPrefix}api=true&action=thumb&file=${encodeURIComponent(path)}`;
-                const isVideo = ['mp4', 'webm'].includes(ext);
-                const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext);
-
-                const audio = document.getElementById('driveMiniAudio');
-                const video = document.getElementById('driveMiniVideo');
-                const cover = document.getElementById('driveMiniCover');
-                const placeholder = document.getElementById('driveMiniPlaceholder');
-                const spinner = document.getElementById('driveMiniSpinner');
-                const title = document.getElementById('driveMiniName');
-                const seek = document.getElementById('driveMiniSeek');
-                const curTime = document.getElementById('driveMiniCurTime');
-                const durTime = document.getElementById('driveMiniDurTime');
-                const playBtn = document.getElementById('driveMiniPlayBtn');
-                const playIcon = document.getElementById('driveMiniPlayIcon');
-                const closeBtn = document.getElementById('driveMiniCloseBtn');
-                const prevBtn = document.getElementById('driveMiniPrevBtn');
-                const nextBtn = document.getElementById('driveMiniNextBtn');
-
-                if (title) title.textContent = name;
-                if (spinner) spinner.style.display = 'block';
-
-                audio.pause();
-                video.pause();
-
-                const formatSec = (s) => isNaN(s) || !isFinite(s) ? '0:00' : Math.floor(s / 60) + ':' + Math.floor(s % 60).toString().padStart(2, '0');
-                let isScrubbing = false;
-
-                const bindEvents = (mediaEl) => {
-                  mediaEl.onwaiting = () => { if (spinner) spinner.style.display = 'block'; };
-                  mediaEl.oncanplay = () => { if (spinner) spinner.style.display = 'none'; };
-                  mediaEl.onloadeddata = () => { if (spinner) spinner.style.display = 'none'; };
-                  mediaEl.onerror = () => { if (spinner) spinner.style.display = 'none'; };
-                  mediaEl.onplaying = () => {
-                    if (spinner) spinner.style.display = 'none';
-                    if (playIcon) playIcon.textContent = 'pause';
-                  };
-                  mediaEl.onpause = () => { if (playIcon) playIcon.textContent = 'play_arrow'; };
-                  mediaEl.onloadedmetadata = () => {
-                    if (durTime) durTime.textContent = formatSec(mediaEl.duration);
-                  };
-                  mediaEl.ontimeupdate = () => {
-                    if (!isScrubbing && isFinite(mediaEl.duration) && mediaEl.duration > 0) {
-                      const pct = (mediaEl.currentTime / mediaEl.duration) * 100;
-                      if (seek) seek.value = pct;
-                      const prog = document.getElementById('driveMiniProgress');
-                      if (prog) prog.style.width = pct + '%';
-                      if (curTime) curTime.textContent = formatSec(mediaEl.currentTime);
-                      if (durTime) durTime.textContent = formatSec(mediaEl.duration);
-                    }
-                  };
-                  mediaEl.onended = () => {
-                    if (playIcon) playIcon.textContent = 'play_arrow';
-                    if (seek) seek.value = 0;
-                    const prog = document.getElementById('driveMiniProgress');
-                    if (prog) prog.style.width = '0%';
-                    if (curTime) curTime.textContent = '0:00';
-                  };
-                };
-
-                bindEvents(audio);
-                bindEvents(video);
-
-                if (isVideo) {
-                  cover.style.display = 'none';
-                  placeholder.style.display = 'none';
-                  video.style.display = 'block';
-                  video.src = streamUrl;
-                  video.play().catch(e => { console.error(e); if (spinner) spinner.style.display = 'none'; });
-                } else if (isImage) {
-                  video.style.display = 'none';
-                  placeholder.style.display = 'none';
-                  cover.style.display = 'block';
-                  cover.src = streamUrl;
-                  cover.onload = () => { if (spinner) spinner.style.display = 'none'; };
-                  cover.onerror = () => { if (spinner) spinner.style.display = 'none'; };
-                } else {
-                  video.style.display = 'none';
-                  placeholder.style.display = 'none';
-                  cover.style.display = 'block';
-                  cover.src = thumbUrl;
-                  cover.onload = () => { if (spinner) spinner.style.display = 'none'; };
-                  cover.onerror = () => { if (spinner) spinner.style.display = 'none'; };
-                  audio.src = streamUrl;
-                  audio.play().catch(e => { console.error(e); if (spinner) spinner.style.display = 'none'; });
-                }
-
-                playBtn.onclick = () => {
-                  const active = video.style.display !== 'none' ? video : audio;
-                  if (active.paused) active.play().catch(e => console.error(e));
-                  else active.pause();
-                };
-
-                seek.oninput = (e) => {
-                  isScrubbing = true;
-                  const active = video.style.display !== 'none' ? video : audio;
-                  const prog = document.getElementById('driveMiniProgress');
-                  if (prog) prog.style.width = e.target.value + '%';
-                  if (isFinite(active.duration) && active.duration > 0) {
-                    const seekTime = (e.target.value / 100) * active.duration;
-                    if (curTime) curTime.textContent = formatSec(seekTime);
-                  }
-                };
-
-                seek.onchange = (e) => {
-                  const active = video.style.display !== 'none' ? video : audio;
-                  if (isFinite(active.duration) && active.duration > 0) {
-                    active.currentTime = (e.target.value / 100) * active.duration;
-                  }
-                  isScrubbing = false;
-                };
-
-                prevBtn.onclick = () => {
-                  const active = video.style.display !== 'none' ? video : audio;
-                  active.currentTime = Math.max(0, active.currentTime - 10);
-                };
-
-                nextBtn.onclick = () => {
-                  const active = video.style.display !== 'none' ? video : audio;
-                  if (isFinite(active.duration)) active.currentTime = Math.min(active.duration, active.currentTime + 10);
-                };
-
-                closeBtn.onclick = () => {
-                  audio.pause();
-                  audio.src = '';
-                  video.pause();
-                  video.src = '';
-                  miniWidget.style.display = 'none';
-                };
-
-                miniWidget.style.display = 'flex';
-                this.showToast(`Opened ${name} in Mini Player`);
-              }
-
-              showToast(msg) {
-                const container = document.getElementById('snackbarContainer');
-                const toast = document.createElement('div');
-                toast.className = 'snackbar-drive';
-                toast.textContent = msg;
-                container.appendChild(toast);
-                
-                requestAnimationFrame(() => {
-                  toast.classList.add('show');
-                  setTimeout(() => {
-                    toast.classList.remove('show');
-                    setTimeout(() => toast.remove(), 300);
-                  }, 3000);
-                });
-              }
-            }
-
-            class UploadQueue {
-              constructor(fileManager) {
-                this.fm = fileManager;
-                this.queue = [];
-                this.activeCount = 0;
-                this.maxConcurrent = 3;
-                this.isCollapsed = false;
-              }
-
-              add(file, path = '') {
-                const id = 'up_' + Math.random().toString(36).substring(2, 9);
-                const item = {
-                  id,
-                  file,
-                  path,
-                  status: 'queued',
-                  progress: 0,
-                  xhr: null
-                };
-                this.queue.push(item);
-                this.renderItem(item);
-                this.updateHeader();
-                this.process();
-              }
-
-              process() {
-                if (this.activeCount >= this.maxConcurrent) return;
-                const nextItem = this.queue.find(item => item.status === 'queued');
-                if (!nextItem) return;
-
-                nextItem.status = 'uploading';
-                this.activeCount++;
-                this.updateItemUI(nextItem);
-                this.updateHeader();
-
-                const uploadNextChunk = (chunkIndex) => {
-                  const chunkSize = 5 * 1024 * 1024; // Slice into 5MB chunks to bypass limits
-                  const totalChunks = Math.ceil(nextItem.file.size / chunkSize) || 1;
-                  const start = chunkIndex * chunkSize;
-                  const end = Math.min(start + chunkSize, nextItem.file.size);
-                  const chunkBlob = nextItem.file.slice(start, end);
-
-                  const formData = new FormData();
-                  formData.append('action', 'upload');
-                  formData.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>');
-                  formData.append('files[]', chunkBlob, nextItem.file.name);
-                  formData.append('paths[]', nextItem.path || '');
-                  formData.append('chunk', chunkIndex);
-                  formData.append('chunks', totalChunks);
-                  formData.append('file_id', nextItem.id);
-
-                  const xhr = new XMLHttpRequest();
-                  nextItem.xhr = xhr;
-
-                  xhr.open('POST', `${this.fm.apiPrefix}api=true&action=upload&path=${encodeURIComponent(this.fm.currentPath)}`);
-
-                  xhr.upload.onprogress = (e) => {
-                    if (e.lengthComputable) {
-                      const chunkProgress = e.loaded / e.total;
-                      const overallProgress = ((chunkIndex + chunkProgress) / totalChunks) * 100;
-                      nextItem.progress = Math.round(overallProgress);
-                      this.updateItemUI(nextItem);
-                    }
-                  };
-
-                  xhr.onload = () => {
-                    if (xhr.status === 200) {
-                      try {
-                        const res = JSON.parse(xhr.responseText);
-                        if (res && res.success) {
-                          if (chunkIndex < totalChunks - 1) {
-                            uploadNextChunk(chunkIndex + 1); // Blast the next chunk
-                          } else {
-                            // Finished stitching
-                            this.activeCount--;
-                            nextItem.status = 'success';
-                            nextItem.progress = 100;
-                            this.updateItemUI(nextItem);
-                            this.updateHeader();
-                            this.fm.loadDirectory(this.fm.currentPath);
-                            this.process();
-                          }
-                        } else {
-                          throw new Error("Server rejected chunk");
-                        }
-                      } catch (err) {
-                        this.activeCount--;
-                        nextItem.status = 'failed';
-                        this.updateItemUI(nextItem);
-                        this.updateHeader();
-                        this.process();
-                      }
-                    } else {
-                      this.activeCount--;
-                      nextItem.status = 'failed';
-                      this.updateItemUI(nextItem);
-                      this.updateHeader();
-                      this.process();
-                    }
-                  };
-
-                  xhr.onerror = () => {
-                    this.activeCount--;
-                    nextItem.status = 'failed';
-                    this.updateItemUI(nextItem);
-                    this.updateHeader();
-                    this.process();
-                  };
-
-                  xhr.send(formData);
-                };
-
-                uploadNextChunk(0);
-                this.process();
-              }
-
-              cancel(id) {
-                const item = this.queue.find(i => i.id === id);
-                if (!item) return;
-                if (item.status === 'uploading' && item.xhr) {
-                  item.xhr.abort();
-                  this.activeCount--;
-                }
-                item.status = 'cancelled';
-                this.updateItemUI(item);
-                this.updateHeader();
-                this.process();
-              }
-
-              cancelAll() {
-                this.queue.forEach(item => {
-                  if (item.status === 'uploading' && item.xhr) {
-                    item.xhr.abort();
-                  }
-                  if (item.status === 'queued' || item.status === 'uploading') {
-                    item.status = 'cancelled';
-                  }
-                });
-                this.activeCount = 0;
-                this.queue = [];
-                document.getElementById('uploadWidgetList').innerHTML = '';
-                document.getElementById('uploadWidget').style.display = 'none';
-              }
-
-              renderItem(item) {
-                const list = document.getElementById('uploadWidgetList');
-                const itemEl = document.createElement('div');
-                itemEl.id = `widget_item_${item.id}`;
-                itemEl.style.cssText = "display: flex; flex-direction: column; padding: 8px 16px; border-bottom: 1px solid var(--theme-outline-variant); background: var(--theme-surface);";
-                
-                itemEl.innerHTML = `
-                  <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px;">
-                    <div style="display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;">
-                      <span class="material-symbols-rounded" id="icon_${item.id}" style="font-size: 20px; color: var(--theme-on-surface-variant); flex-shrink: 0;">upload_file</span>
-                      <span style="font-size: 13px; font-weight: 500; color: var(--theme-on-surface); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; min-width: 0;">${item.file.name}</span>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
-                      <span id="status_${item.id}" style="font-size: 11px; color: var(--theme-on-surface-variant);">Queued</span>
-                      <button class="icon-btn" id="cancel_btn_${item.id}" style="width: 24px; height: 24px;" onclick="driveApp.uploadQueue.cancel('${item.id}')"><span class="material-symbols-rounded" style="font-size: 16px;">close</span></button>
-                    </div>
-                  </div>
-                  <div style="width: 100%; height: 4px; background: var(--theme-surface-container-high); border-radius: 2px; overflow: hidden;">
-                    <div id="progress_${item.id}" style="width: 0%; height: 100%; background: var(--theme-primary); transition: width 0.1s;"></div>
+                this.currentSection = 'activity';
+                this.updateControlsVisibility();
+                this.currentPath = '';
+                this.clearSelection();
+                this.isSearching = false;
+                this.dirTitle.innerText = 'File Activity';
+                this.dirStats.innerText = 'Tracking modified, edited, created, and uploaded files';
+                this.updateBreadcrumbs();
+                this.updateDocTitle('File Activity');
+
+                const toolbar = document.querySelector('.toolbar-actions');
+                if (toolbar) toolbar.style.display = 'none';
+
+                this.container.innerHTML = `
+                  <div class="center-state">
+                    <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
                   </div>
                 `;
-                list.appendChild(itemEl);
-                document.getElementById('uploadWidget').style.display = 'flex';
-              }
 
-              updateItemUI(item) {
-                const progressEl = document.getElementById(`progress_${item.id}`);
-                const statusEl = document.getElementById(`status_${item.id}`);
-                const cancelBtn = document.getElementById(`cancel_btn_${item.id}`);
-                const iconEl = document.getElementById(`icon_${item.id}`);
+                try {
+                  const res = await fetch('?access=admin&page=drive&action=activity_list');
+                  const data = await res.json();
+                  this.activityStats = data.stats || {};
+                  this.rawActivities = data.activities || [];
 
-                if (progressEl) progressEl.style.width = `${item.progress}%`;
-                if (statusEl) {
-                  if (item.status === 'uploading') statusEl.textContent = `${item.progress}%`;
-                  else if (item.status === 'queued') statusEl.textContent = 'Queued';
-                  else if (item.status === 'success') {
-                    statusEl.textContent = 'Completed';
-                    statusEl.style.color = '#4caf50';
-                    if (cancelBtn) cancelBtn.style.display = 'none';
-                    if (iconEl) iconEl.textContent = 'check_circle';
-                  } else if (item.status === 'failed') {
-                    statusEl.textContent = 'Failed';
-                    statusEl.style.color = '#f44336';
-                    if (cancelBtn) cancelBtn.style.display = 'none';
-                    if (iconEl) iconEl.textContent = 'error';
-                  } else if (item.status === 'cancelled') {
-                    statusEl.textContent = 'Cancelled';
-                    statusEl.style.color = 'var(--theme-on-surface-variant)';
-                    if (cancelBtn) cancelBtn.style.display = 'none';
-                    if (iconEl) iconEl.textContent = 'cancel';
-                  }
+                  const seenPaths = new Set();
+                  const activityFiles = [];
+                  this.rawActivities.forEach(act => {
+                    const p = act.path || act.name || '';
+                    if (p && !seenPaths.has(p)) {
+                      seenPaths.add(p);
+                      const ext = (p.split('.').pop() || '').toLowerCase();
+                      activityFiles.push({ path: p, name: act.name, type: this.getFileTypeByExt(ext) });
+                    }
+                  });
+
+                  this.data = { folders: [], files: activityFiles, stats: {} };
+                  this.updateBadges();
+
+                  this.renderActivityView();
+                } catch (e) {
+                  this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
                 }
               }
 
-              updateHeader() {
-                const active = this.queue.filter(i => i.status === 'uploading' || i.status === 'queued');
-                const title = document.getElementById('uploadWidgetTitle');
-                if (title) {
-                  if (active.length > 0) {
-                    title.textContent = `Uploading ${active.length} item(s)...`;
+              renderActivityView() {
+                const stats = this.activityStats || {};
+                let activities = this.rawActivities || [];
+
+                if (this.filter && this.filter !== 'all') {
+                  activities = activities.filter(act => {
+                    const p = act.path || act.name || '';
+                    const ext = (p.split('.').pop() || '').toLowerCase();
+                    return this.getFileTypeByExt(ext) === this.filter;
+                  });
+                }
+
+                let statsHtml = `
+                  <div class="activity-stats-grid">
+                    <div class="activity-stat-card">
+                      <div class="activity-stat-num">${stats.modified_today || 0}</div>
+                      <div class="activity-stat-label">Files Modified Today</div>
+                    </div>
+                    <div class="activity-stat-card">
+                      <div class="activity-stat-num">${stats.today_count || 0}</div>
+                      <div class="activity-stat-label">Total Actions Today</div>
+                    </div>
+                    <div class="activity-stat-card">
+                      <div class="activity-stat-num">${stats.week_count || 0}</div>
+                      <div class="activity-stat-label">Changes Past 7 Days</div>
+                    </div>
+                    <div class="activity-stat-card">
+                      <div class="activity-stat-num">${stats.unique_files || 0}</div>
+                      <div class="activity-stat-label">Unique Files Changed</div>
+                    </div>
+                  </div>
+                `;
+
+                if (!activities.length) {
+                  this.container.innerHTML = `<div class="activity-view-wrapper">${statsHtml}<div class="center-state"><p>${this.filter !== 'all' ? 'No activity found for category: ' + this.filter : 'No recorded activity yet'}</p></div></div>`;
+                  return;
+                }
+
+                let rowsHtml = activities.map(act => {
+                  const d = act.timestamp ? new Date(act.timestamp * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+                  const actType = act.action || 'modified';
+                  return `
+                    <div class="activity-row" onclick="app.openFile('${act.path.replace(/'/g, "\\'")}', true)">
+                      <div style="display:flex; align-items:center; gap:0.6rem; min-width:0; flex:1;">
+                        <span class="activity-badge ${actType}">${actType}</span>
+                        <div style="display:flex; flex-direction:column; gap:0.1rem; min-width:0; overflow:hidden;">
+                          <span style="font-weight:600; font-size:0.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#ffffff;">${act.name || act.path}</span>
+                          <span style="font-size:0.72rem; color:var(--md-sys-color-on-surface-variant); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${act.path}${act.details ? ' • ' + act.details : ''}</span>
+                        </div>
+                      </div>
+                      <span class="activity-row-time" style="font-size:0.75rem; color:var(--md-sys-color-outline); white-space:nowrap; flex-shrink:0;">${d}</span>
+                    </div>
+                  `;
+                }).join('');
+
+                this.container.innerHTML = `
+                  <div class="activity-view-wrapper">
+                    ${statsHtml}
+                    <div class="activity-list-container">
+                      ${rowsHtml}
+                    </div>
+                  </div>
+                `;
+              }
+
+              async loadRecents() {
+                this.currentSection = 'recents';
+                this.updateControlsVisibility();
+                this.currentPath = '';
+                this.clearSelection();
+                this.renderLimit = 25;
+                this.isSearching = false;
+                this.dirTitle.innerText = 'Recents';
+                this.dirStats.innerText = 'Chronologically sorted from newest to oldest';
+                this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg></div>';
+
+                try {
+                  const res = await fetch('?access=admin&page=drive&action=recents_list');
+                  const data = await res.json();
+
+                  const dedupe = (list) => {
+                    const seen = new Set();
+                    return (list || []).filter(item => {
+                      const k = (item.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+                      if (seen.has(k)) return false;
+                      seen.add(k);
+                      return true;
+                    });
+                  };
+
+                  const folders = dedupe(data.folders);
+                  const files = dedupe(data.files);
+
+                  this.data = {
+                    folders: folders,
+                    files: files,
+                    stats: { total_size: '', files: files.length, folders: folders.length },
+                    path: ''
+                  };
+                  this.renderGallery();
+                  this.updateBreadcrumbs();
+                  this.updateBadges();
+                  this.updateDocTitle('Recents', folders.length + files.length);
+                } catch (e) {
+                  this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
+                }
+              }
+
+              async loadStarred() {
+                this.currentSection = 'starred';
+                this.updateControlsVisibility();
+                this.currentPath = '';
+                this.clearSelection();
+                this.renderLimit = 25;
+                this.isSearching = false;
+                this.dirTitle.innerText = 'Starred Items';
+                this.dirStats.innerText = 'Quick access to your favorite files and folders';
+                this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg></div>';
+
+                try {
+                  const res = await fetch('?access=admin&page=drive&action=starred_list');
+                  const data = await res.json();
+                  this.starredSet = new Set(data.starred_paths || []);
+                  this.data = {
+                    folders: data.folders || [],
+                    files: data.files || [],
+                    stats: data.stats || { total_size: '0 B', files: (data.files || []).length, folders: (data.folders || []).length },
+                    path: ''
+                  };
+                  this.renderGallery();
+                  this.updateBreadcrumbs();
+                  this.updateBadges();
+                  this.updateDocTitle('Starred Items');
+                } catch(e) {
+                  this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
+                }
+              }
+
+              toggleStarDirect(e, path) {
+                e.stopPropagation();
+                const scrollEl = document.getElementById('main-content');
+                const savedScroll = scrollEl ? scrollEl.scrollTop : 0;
+                this.api('star_toggle', { path }, (res) => {
+                  if (res.is_starred) {
+                    this.starredSet.add(path);
                   } else {
-                    const succeeded = this.queue.filter(i => i.status === 'success').length;
-                    title.textContent = `Uploaded ${succeeded} item(s)`;
+                    this.starredSet.delete(path);
                   }
+                  this.toast(res.is_starred ? 'Starred' : 'Unstarred');
+                  if (this.currentSection === 'starred') {
+                    this.loadStarred();
+                  } else {
+                    this.renderGallery(true);
+                  }
+                  if (scrollEl) scrollEl.scrollTop = savedScroll;
+                });
+              }
+
+              promptUploadUrl() {
+                const urlInput = document.getElementById('remote-url-input');
+                const nameInput = document.getElementById('remote-name-input');
+                if (urlInput) urlInput.value = '';
+                if (nameInput) nameInput.value = '';
+
+                this.showModal('modal-remote-download');
+                if (urlInput) urlInput.focus();
+
+                document.getElementById('remote-download-confirm').onclick = () => {
+                  const url = urlInput ? urlInput.value.trim() : '';
+                  const customName = nameInput ? nameInput.value.trim() : '';
+                  if (!url) {
+                    this.toast('Please enter a valid URL');
+                    return;
+                  }
+                  this.closeModals();
+                  uploadManager.enqueueRemoteDownload(url, customName, this.currentPath || '');
+                };
+              }
+
+              async loadTrash() {
+                this.currentSection = 'trash';
+                this.updateControlsVisibility();
+                this.currentPath = '';
+                this.clearSelection();
+                this.isSearching = false;
+                this.dirTitle.innerText = 'Trash Bin';
+                this.dirStats.innerText = 'Items are permanently deleted after 30 days';
+                this.updateBreadcrumbs();
+                this.updateDocTitle('Trash Bin');
+
+                const toolbar = document.querySelector('.toolbar-actions');
+                if (toolbar) toolbar.style.display = 'none';
+
+                this.container.className = 'gallery-container layout-grid';
+                this.container.removeAttribute('data-cols');
+                this.container.innerHTML = `
+                  <div class="center-state">
+                    <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                  </div>
+                `;
+
+                try {
+                  const res = await fetch('?access=admin&page=drive&action=trash_list');
+                  const data = await res.json();
+                  const items = data.trash || [];
+
+                  const trashFiles = items.filter(i => !i.is_dir).map(i => {
+                    const ext = (i.original_name.split('.').pop() || '').toLowerCase();
+                    return { type: this.getFileTypeByExt(ext) };
+                  });
+                  this.data = { folders: items.filter(i => i.is_dir), files: trashFiles, stats: {} };
+                  this.updateBadges();
+
+                  if (this.filter && this.filter !== 'all') {
+                    items = items.filter(i => {
+                      if (i.is_dir) return false;
+                      const ext = (i.original_name.split('.').pop() || '').toLowerCase();
+                      return this.getFileTypeByExt(ext) === this.filter;
+                    });
+                  }
+
+                  if (!items.length) {
+                    this.container.innerHTML = `
+                      <div class="center-state" style="grid-column: 1 / -1; padding: 3.5rem 0;">
+                        <svg viewBox="0 0 24 24" style="width:64px; height:64px; opacity:0.3; color:var(--md-sys-color-outline); margin-bottom:0.6rem;"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                        <div style="font-weight:700; font-size:1.1rem; color:var(--md-sys-color-on-surface);">Trash is Empty</div>
+                        <div style="font-size:0.82rem; color:var(--md-sys-color-on-surface-variant);">Deleted files and folders will appear here.</div>
+                      </div>
+                    `;
+                    return;
+                  }
+
+                  let html = `
+                    <div style="grid-column: 1 / -1; display:flex; justify-content:space-between; align-items:center; background:var(--md-sys-color-surface-container-low); border:1px solid var(--md-sys-color-outline-variant); border-radius:16px; padding:0.75rem 1.1rem; margin-bottom:0.6rem;">
+                      <div style="display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; color:var(--md-sys-color-on-surface-variant);">
+                        <span style="font-weight:700; color:#ffffff; font-size:0.95rem;">${items.length}</span> item(s) in trash
+                      </div>
+                      <button class="btn-primary" style="background:#dc2626; height:34px; padding:0 0.95rem; font-size:0.8rem; gap:0.4rem;" onclick="app.emptyTrash()">
+                        <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                        Empty Trash
+                      </button>
+                    </div>
+                    <div style="grid-column: 1 / -1; display:flex; flex-direction:column; gap:0.55rem; width:100%;">
+                  `;
+
+                  items.forEach(t => {
+                    const d = t.trashed_at ? new Date(t.trashed_at * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+                    const icon = t.is_dir
+                      ? '<svg viewBox="0 0 16 16" style="width:22px;height:22px;color:#ff0000;flex-shrink:0;"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>'
+                      : '<svg viewBox="0 0 24 24" style="width:22px;height:22px;color:#ff0000;flex-shrink:0;"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>';
+
+                    const safeName = this.escapeHtml(t.original_name);
+                    const safeRel = this.escapeHtml(t.original_rel);
+                    const paramName = safeName.replace(/'/g, "\\'");
+
+                    html += `
+                      <div style="background:var(--md-sys-color-surface-container-low); border:1px solid var(--md-sys-color-outline-variant); border-radius:14px; padding:0.75rem 1rem; display:flex; align-items:center; justify-content:space-between; gap:0.85rem;">
+                        <div style="display:flex; align-items:center; gap:0.75rem; min-width:0; flex:1;">
+                          ${icon}
+                          <div style="display:flex; flex-direction:column; gap:0.15rem; min-width:0; overflow:hidden;">
+                            <span style="font-weight:600; font-size:0.88rem; color:#ffffff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${safeName}</span>
+                            <span style="font-size:0.72rem; color:var(--md-sys-color-on-surface-variant); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Original: ${safeRel} ${d ? '• Trashed ' + d : ''}</span>
+                          </div>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:0.4rem; flex-shrink:0;">
+                          <button class="btn-primary" style="height:32px; padding:0 0.75rem; font-size:0.78rem; gap:0.35rem;" onclick="app.restoreTrashItem('${t.trash_name}', '${paramName}')">
+                            <svg viewBox="0 0 24 24" style="width:14px; height:14px;"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                            Restore
+                          </button>
+                          <button class="btn-icon" style="width:32px; height:32px; border-radius:8px; color:var(--md-sys-color-error);" title="Delete Permanently" onclick="app.deleteTrashItemPermanently('${t.trash_name}', '${paramName}')">
+                            <svg viewBox="0 0 24 24" style="width:16px; height:16px;"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                          </button>
+                        </div>
+                      </div>
+                    `;
+                  });
+
+                  html += `</div>`;
+                  this.container.innerHTML = html;
+                } catch (e) {
+                  this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
                 }
               }
 
-              toggleCollapse() {
-                this.isCollapsed = !this.isCollapsed;
-                const widget = document.getElementById('uploadWidget');
-                const list = document.getElementById('uploadWidgetList');
-                const toggleBtn = document.getElementById('uploadWidgetToggleBtn');
-                if (toggleBtn) {
-                  const icon = toggleBtn.querySelector('span');
-                  if (icon) icon.textContent = this.isCollapsed ? 'expand_less' : 'expand_more';
+              restoreTrashItem(trashId, originalName) {
+                if (confirm(`Restore "${originalName}" to its original location?`)) {
+                  this.api('trash_restore', { trash_id: trashId }, () => {
+                    this.toast('Item restored');
+                    this.loadTrash();
+                  });
                 }
-                if (this.isCollapsed) {
-                  list.style.display = 'none';
-                  widget.style.height = 'auto';
+              }
+
+              deleteTrashItemPermanently(trashId, originalName) {
+                if (confirm(`Permanently delete "${originalName}"? This action cannot be undone.`)) {
+                  this.api('trash_delete', { trash_id: trashId }, () => {
+                    this.toast('Item deleted permanently');
+                    this.loadTrash();
+                  });
+                }
+              }
+
+              emptyTrash() {
+                if (confirm('Permanently delete all items in trash? This cannot be undone.')) {
+                  this.api('trash_empty', {}, () => {
+                    this.toast('Trash emptied');
+                    this.loadTrash();
+                  });
+                }
+              }
+
+              toggleStar(path) {
+                this.api('star_toggle', { path }, (res) => {
+                  this.toast(res.is_starred ? 'Starred' : 'Unstarred');
+                  this.refresh();
+                });
+              }
+
+              openVersionHistory(path) {
+                const fileName = path.split('/').pop();
+                const subTitle = document.getElementById('versions-title-sub');
+                if (subTitle) subTitle.innerText = fileName;
+
+                fetch(`?access=admin&page=drive&action=versions_list&f=${encodeURIComponent(path)}`)
+                  .then(r => r.json())
+                  .then(res => {
+                    const list = document.getElementById('versions-content');
+                    if (!res.versions || !res.versions.length) {
+                      list.innerHTML = `
+                        <div class="center-state" style="min-height:220px; padding:1.5rem 0;">
+                          <svg viewBox="0 0 24 24" style="width:48px; height:48px; opacity:0.35; color:var(--md-sys-color-outline);"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                          <div style="font-weight:700; font-size:0.95rem; color:#ffffff;">No prior versions recorded</div>
+                          <div style="font-size:0.8rem; color:var(--md-sys-color-on-surface-variant); max-width:280px; text-align:center;">Snapshots are created automatically every time you edit or save changes to this file.</div>
+                        </div>
+                      `;
+                    } else {
+                      const total = res.versions.length;
+                      list.innerHTML = `
+                        <div class="version-timeline">
+                          ${res.versions.map((v, idx) => {
+                            const revNum = total - idx;
+                            return `
+                              <div class="version-item">
+                                <div class="version-info">
+                                  <div class="version-date">
+                                    <svg viewBox="0 0 24 24" style="width:15px; height:15px; color:#ff0000;"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/></svg>
+                                    <span>${v.date}</span>
+                                  </div>
+                                  <div class="version-meta">
+                                    <span class="version-badge">Rev #${revNum}</span>
+                                    <span>${v.size}</span>
+                                  </div>
+                                </div>
+                                <div class="version-actions">
+                                  <button class="btn-primary" style="height:32px; padding:0 0.65rem; font-size:0.78rem; background:var(--md-sys-color-surface-container-high); color:var(--md-sys-color-on-surface); border:1px solid var(--md-sys-color-outline-variant);" onclick="app.previewDiff('${path}', '${v.filename}', '${v.date}')">
+                                    <svg viewBox="0 0 24 24" style="width:14px; height:14px;"><path d="M10 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h5v2h2V1h-2v2zm-5 4h5v2H5V7zm0 4h5v2H5v-2zm0 4h5v2H5v-2zm14-8h-5v2h5v10h-5v2h5c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2z"/></svg>
+                                    <span>Diff</span>
+                                  </button>
+                                  <button class="btn-primary" style="height:32px; padding:0 0.75rem; font-size:0.78rem; gap:0.35rem;" onclick="app.restoreVersion('${path}', '${v.filename}')">
+                                    <svg viewBox="0 0 24 24" style="width:14px; height:14px;"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                                    <span>Rollback</span>
+                                  </button>
+                                </div>
+                              </div>
+                            `;
+                          }).join('')}
+                        </div>
+                      `;
+                    }
+                    this.showModal('modal-versions');
+                  });
+              }
+
+              async previewDiff(path, versionFilename, versionDate) {
+                try {
+                  const res = await fetch(`?access=admin&page=drive&action=version_read&f=${encodeURIComponent(path)}&version=${encodeURIComponent(versionFilename)}`);
+                  const data = await res.json();
+                  if (!data.success) throw new Error(data.error || 'Failed to read version data');
+
+                  document.getElementById('diff-modal-title').innerText = `Diff: ${path.split('/').pop()}`;
+                  document.getElementById('diff-modal-subtitle').innerText = `Comparing snapshot (${versionDate}) with current version`;
+
+                  const diffLines = this.computeLineDiff(data.current || '', data.version || '', 1000);
+                  let adds = 0, dels = 0;
+
+                  const container = document.getElementById('diff-content');
+                  let html = diffLines.map(d => {
+                    if (d.type === 'add') adds++;
+                    if (d.type === 'del') dels++;
+                    const sign = d.type === 'add' ? '+' : (d.type === 'del' ? '-' : ' ');
+                    const cls = d.type === 'add' ? 'diff-add' : (d.type === 'del' ? 'diff-del' : 'diff-same');
+                    return `
+                      <div class="diff-line ${cls}">
+                        <span class="diff-num">${d.oldNum || ''}</span>
+                        <span class="diff-num">${d.newNum || ''}</span>
+                        <span class="diff-sign">${sign}</span>
+                        <span class="diff-text">${this.escapeHtml(d.text)}</span>
+                      </div>
+                    `;
+                  }).join('');
+
+                  if (diffLines.truncated) {
+                    html += `
+                      <div style="padding:0.75rem; text-align:center; background:var(--md-sys-color-surface-container-high); color:#ff0000; font-size:0.75rem; font-weight:700;">
+                        Large file optimized: previewing first modified section (${diffLines.length} lines shown).
+                      </div>
+                    `;
+                  }
+
+                  container.innerHTML = html;
+
+                  document.getElementById('diff-stats').innerHTML = `
+                    <span style="color:#7ee787;">+${adds} lines to restore</span>
+                    <span style="color:#ff7b72;">-${dels} current lines replaced</span>
+                  `;
+
+                  document.getElementById('diff-rollback-btn').onclick = () => {
+                    this.restoreVersion(path, versionFilename);
+                  };
+
+                  this.showModal('modal-diff');
+                } catch (e) {
+                  this.toast(e.message);
+                }
+              }
+
+              computeLineDiff(oldText, newText, maxRender = 1000) {
+                const oldLines = oldText.split('\n');
+                const newLines = newText.split('\n');
+                const M = oldLines.length;
+                const N = newLines.length;
+
+                let start = 0;
+                while (start < M && start < N && oldLines[start] === newLines[start]) {
+                  start++;
+                }
+
+                let oldEnd = M - 1;
+                let newEnd = N - 1;
+                while (oldEnd >= start && newEnd >= start && oldLines[oldEnd] === newLines[newEnd]) {
+                  oldEnd--;
+                  newEnd--;
+                }
+
+                const diff = [];
+                const prefixCtx = Math.min(start, 2);
+                for (let k = start - prefixCtx; k < start; k++) {
+                  if (k >= 0) diff.push({ type: 'same', text: oldLines[k], oldNum: k + 1, newNum: k + 1 });
+                }
+
+                const subM = oldEnd - start + 1;
+                const subN = newEnd - start + 1;
+
+                if (subM > 1200 || subN > 1200 || (subM * subN > 800000)) {
+                  let i = start, j = start;
+                  let count = 0;
+                  while ((i <= oldEnd || j <= newEnd) && count < maxRender) {
+                    if (i <= oldEnd && j <= newEnd && oldLines[i] === newLines[j]) {
+                      diff.push({ type: 'same', text: oldLines[i], oldNum: i + 1, newNum: j + 1 });
+                      i++; j++;
+                    } else {
+                      if (i <= oldEnd) {
+                        diff.push({ type: 'del', text: oldLines[i], oldNum: i + 1 });
+                        i++; count++;
+                      }
+                      if (j <= newEnd && count < maxRender) {
+                        diff.push({ type: 'add', text: newLines[j], newNum: j + 1 });
+                        j++; count++;
+                      }
+                    }
+                  }
+                  if (i <= oldEnd || j <= newEnd) {
+                    diff.truncated = true;
+                  }
                 } else {
-                  list.style.display = 'flex';
+                  const dp = Array.from({ length: subM + 1 }, () => new Int32Array(subN + 1));
+                  for (let i = 0; i < subM; i++) {
+                    for (let j = 0; j < subN; j++) {
+                      if (oldLines[start + i] === newLines[start + j]) {
+                        dp[i + 1][j + 1] = dp[i][j] + 1;
+                      } else {
+                        dp[i + 1][j + 1] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+                      }
+                    }
+                  }
+
+                  let i = subM, j = subN;
+                  const midDiff = [];
+                  while (i > 0 || j > 0) {
+                    if (i > 0 && j > 0 && oldLines[start + i - 1] === newLines[start + j - 1]) {
+                      midDiff.unshift({ type: 'same', text: oldLines[start + i - 1], oldNum: start + i, newNum: start + j });
+                      i--; j--;
+                    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+                      midDiff.unshift({ type: 'add', text: newLines[start + j - 1], newNum: start + j });
+                      j--;
+                    } else if (i > 0 && (j === 0 || dp[i][j - 1] < dp[i - 1][j])) {
+                      midDiff.unshift({ type: 'del', text: oldLines[start + i - 1], oldNum: start + i });
+                      i--;
+                    }
+                  }
+                  diff.push(...midDiff);
                 }
+
+                const suffixStart = oldEnd + 1;
+                const suffixEnd = Math.min(M, suffixStart + 2);
+                for (let k = suffixStart; k < suffixEnd; k++) {
+                  const newK = newEnd + 1 + (k - suffixStart);
+                  diff.push({ type: 'same', text: oldLines[k], oldNum: k + 1, newNum: newK + 1 });
+                }
+
+                return diff;
+              }
+
+              escapeHtml(str) {
+                return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+              }
+
+              restoreVersion(path, version) {
+                if (confirm(`Roll back to version from ${version}? Current state will be backed up.`)) {
+                  this.api('version_restore', { f: path, version }, () => {
+                    this.toast('Rolled back to version');
+                    this.closeModals();
+                    this.openEditor(path, path.split('/').pop());
+                  });
+                }
+              }
+
+              encryptDecryptFile(path, isEncrypted) {
+                const act = isEncrypted ? 'decrypt_file' : 'encrypt_file';
+                this.showInputModal(isEncrypted ? 'Decrypt File' : 'Encrypt File', 'Password (leave blank for default)', '', (pass) => {
+                  this.api(act, { f: path, password: pass }, () => {
+                    this.toast(isEncrypted ? 'File Decrypted' : 'File Encrypted');
+                    this.refresh();
+                  });
+                });
+              }
+
+              createShareLink(path) {
+                this.api('share_create', { f: path }, (res) => {
+                  const url = `${window.location.origin}${window.location.pathname}?share=${res.token}`;
+                  navigator.clipboard.writeText(url);
+                  this.toast('Share link copied to clipboard!');
+                });
+              }
+
+              setClipboard(operation) {
+                const items = this.selectedItems.size ? Array.from(this.selectedItems) : [];
+                if (!items.length) return;
+                this.clipboard = { operation, items };
+                this.toast(`${items.length} item(s) marked to ${operation}`);
+              }
+
+              setClipboardSingle(operation, path) {
+                this.clipboard = { operation, items: [path] };
+                this.toast(`Marked to ${operation}`);
+              }
+
+              pasteClipboard() {
+                if (!this.clipboard || !this.clipboard.items.length) {
+                  this.toast('Clipboard is empty');
+                  return;
+                }
+                this.api('clipboard_paste', {
+                  target_dir: this.currentPath || '',
+                  operation: this.clipboard.operation,
+                  items: this.clipboard.items
+                }, () => {
+                  this.toast('Pasted successfully');
+                  if (this.clipboard.operation === 'cut') this.clipboard = null;
+                  this.refresh();
+                });
+              }
+
+              copyDirectUrl(path) {
+                const directUrl = new URL('?access=admin&page=drive&action=raw&f=' + encodeURIComponent(path), window.location.href).href;
+                navigator.clipboard.writeText(directUrl);
+                this.toast('Direct URL copied to clipboard');
+              }
+
+              openInNewTab(path, type) {
+                if (type === 'folder') {
+                  window.open('?access=admin&page=drive#/' + ltrim(path, '/'), '_blank');
+                } else {
+                  window.open('?access=admin&page=drive&action=raw&f=' + encodeURIComponent(path), '_blank');
+                }
+              }
+        
+              showContextMenu(e, type, path, name, fileType) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                this.activeContextItem = { type, path, name, fileType };
+                this.contextMenu.innerHTML = '';
+
+                const isEnc = (name || '').endsWith('.enc');
+                const isStarred = this.starredSet.has(path);
+
+                const addItem = (iconSvg, text, action, isDanger = false) => {
+                  const div = document.createElement('div');
+                  div.className = `dm-item ${isDanger ? 'danger' : ''}`;
+                  div.innerHTML = `${iconSvg} <span>${text}</span>`;
+                  div.onclick = (ev) => {
+                    ev.stopPropagation();
+                    this.contextMenu.classList.remove('active');
+                    action();
+                  };
+                  this.contextMenu.appendChild(div);
+                };
+
+                const starSvg = isStarred
+                  ? '<svg viewBox="0 0 24 24" style="color:#f59e0b;"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>'
+                  : '<svg viewBox="0 0 24 24"><path d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>';
+
+                if (type === 'folder') {
+                  addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Preview / Open', () => this.navigate(path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>', 'Open in a new tab', () => this.openInNewTab(path, 'folder'));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => this.downloadZipWithProgress(`?access=admin&page=drive&action=download_zip&dir=${encodeURIComponent(path)}`, null, `${name}.zip`));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>', 'Compress to ZIP', () => {
+                    this.showInputModal('Compress Folder', 'Archive Filename (.zip)', `${name}.zip`, (zipName) => {
+                      this.api('zip', { dir: this.currentPath || '', items: [path], zip_name: zipName || `${name}.zip` }, () => {
+                        this.toast('Folder compressed');
+                        this.refresh();
+                      });
+                    });
+                  });
+                  addItem('<svg viewBox="0 0 24 24"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg>', 'Read as Manga', () => mangaViewer.openPath(path));
+                  addItem(starSvg, isStarred ? 'Unstar' : 'Star', () => this.toggleStarDirect(e, path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>', 'Rename', () => this.renameItem(path, name));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>', 'Info', () => this.showDetails(path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>', 'Copy', () => this.setClipboardSingle('copy', path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm0 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3h-3z"/></svg>', 'Cut (Move)', () => this.setClipboardSingle('cut', path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>', 'Move to Trash', () => this.api('trash', { items: [path] }, () => { this.toast('Moved to Trash'); this.refresh(); }), true);
+                } else {
+                  if (fileType === 'archive' || ['zip', 'rar', 'tar', 'gz', 'tgz', '7z'].includes((name.split('.').pop() || '').toLowerCase())) {
+                    addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Inspect Archive', () => this.previewArchive(path, name));
+                    addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Extract Here', () => this.unzipItem(path));
+                  } else {
+                    addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Preview / Play', () => this.openFile(path, true));
+                  }
+                  addItem('<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>', 'Open in a new tab', () => this.openInNewTab(path, 'file'));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => { window.location.href = `?access=admin&page=drive&action=download&f=${encodeURIComponent(path)}`; });
+                  if (fileType !== 'archive') {
+                    addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>', 'Compress to ZIP', () => {
+                      const baseName = name.replace(/\.[^/.]+$/, '');
+                      this.showInputModal('Compress File', 'Archive Filename (.zip)', `${baseName}.zip`, (zipName) => {
+                        this.api('zip', { dir: this.currentPath || '', items: [path], zip_name: zipName || `${baseName}.zip` }, () => {
+                          this.toast('File compressed');
+                          this.refresh();
+                        });
+                      });
+                    });
+                  }
+                  addItem('<svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>', 'Public File Link', () => this.createShareLink(path));
+                  addItem(starSvg, isStarred ? 'Unstar' : 'Star', () => this.toggleStarDirect(e, path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>', isEnc ? 'Decrypt File' : 'Encrypt File', () => this.encryptDecryptFile(path, isEnc));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>', 'Version History', () => this.openVersionHistory(path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>', 'Copy Direct URL', () => this.copyDirectUrl(path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>', 'Rename', () => this.renameItem(path, name));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>', 'Info', () => this.showDetails(path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>', 'Copy', () => this.setClipboardSingle('copy', path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm0 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3h-3z"/></svg>', 'Cut (Move)', () => this.setClipboardSingle('cut', path));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>', 'Move to Trash', () => this.api('trash', { items: [path] }, () => { this.toast('Moved to Trash'); this.refresh(); }), true);
+                }
+
+                this.contextMenu.style.left = '-9999px';
+                this.contextMenu.style.top = '-9999px';
+                this.contextMenu.classList.add('active');
+
+                const menuWidth = this.contextMenu.offsetWidth || 230;
+                const menuHeight = this.contextMenu.offsetHeight || 420;
+                const padding = 12;
+
+                let posX = e.clientX;
+                let posY = e.clientY;
+
+                if (posX + menuWidth > window.innerWidth - padding) {
+                  posX = Math.max(padding, window.innerWidth - menuWidth - padding);
+                }
+                if (posY + menuHeight > window.innerHeight - padding) {
+                  posY = Math.max(padding, window.innerHeight - menuHeight - padding);
+                }
+
+                this.contextMenu.style.left = `${posX}px`;
+                this.contextMenu.style.top = `${posY}px`;
+              }
+        
+              renameItem(path, oldName) {
+                this.showInputModal('Rename Item', 'New Name', oldName, (newName) => {
+                  this.api('rename', { path, new_name: newName }, () => this.refresh());
+                });
+              }
+        
+              deleteItem(path) {
+                if (confirm('Delete this item?')) {
+                  this.api('delete', { items: [path] }, () => {
+                    this.toast('Deleted');
+                    this.refresh();
+                  });
+                }
+              }
+        
+              previewArchive(path, name) {
+                document.getElementById('archive-preview-title').innerText = name || 'Archive Contents';
+                const body = document.getElementById('archive-preview-body');
+                const stats = document.getElementById('archive-preview-stats');
+                stats.innerText = 'Scanning archive...';
+                body.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg></div>';
+                this.showModal('modal-archive-preview');
+
+                document.getElementById('archive-extract-btn').onclick = () => {
+                  this.unzipItem(path);
+                  this.closeModals();
+                };
+
+                fetch(`?access=admin&page=drive&action=archive_preview&f=${encodeURIComponent(path)}`)
+                  .then(r => r.json())
+                  .then(res => {
+                    if (!res.success || !res.entries) throw new Error(res.error || 'Failed to inspect archive');
+                    stats.innerText = `${res.total_elements} item(s) • Total unpacked: ${res.total_size}`;
+
+                    if (!res.entries.length) {
+                      body.innerHTML = '<div class="center-state"><p>Archive is empty or unsupported format</p></div>';
+                      return;
+                    }
+
+                    let html = `
+                      <table class="archive-table">
+                        <thead>
+                          <tr>
+                            <th>File Name / Path</th>
+                            <th>Size</th>
+                            <th>Compressed</th>
+                            <th>Modified Date</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                    `;
+
+                    res.entries.forEach(e => {
+                      const icon = e.is_dir
+                        ? '<svg viewBox="0 0 16 16" style="width:16px;height:16px;color:#ff0000;vertical-align:middle;margin-right:6px;"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14z"/></svg>'
+                        : '<svg viewBox="0 0 24 24" style="width:16px;height:16px;color:#ff0000;vertical-align:middle;margin-right:6px;"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>';
+
+                      html += `
+                        <tr>
+                          <td style="font-weight:600; font-family:'JetBrains Mono', monospace; font-size:0.78rem; color:#ffffff;">${icon}${this.escapeHtml(e.name)}</td>
+                          <td>${e.size_fmt || '-'}</td>
+                          <td>${e.comp_size || '-'}</td>
+                          <td style="color:var(--md-sys-color-outline); font-size:0.75rem;">${e.mtime || '-'}</td>
+                        </tr>
+                      `;
+                    });
+
+                    html += '</tbody></table>';
+                    body.innerHTML = html;
+                  })
+                  .catch(err => {
+                    body.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${err.message}</p></div>`;
+                  });
+              }
+
+              unzipItem(path) {
+                this.toast('Extracting archive...');
+                this.api('unzip', { f: path }, () => {
+                  this.toast('Archive extracted successfully');
+                  this.refresh();
+                });
+              }
+        
+              showDetails(path) {
+                const targetPath = (path !== undefined && path !== null) ? path : (this.currentPath || '');
+                const folderName = targetPath ? targetPath.split('/').pop() : 'Root Directory';
+
+                document.getElementById('details-modal-title').innerText = folderName;
+                document.getElementById('details-content').innerHTML = `
+                  <div class="center-state" style="min-height:180px;">
+                    <svg class="m3-spinner" style="margin:0;" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                    <div style="font-size:0.85rem; font-weight:500; margin-top:0.8rem;">Calculating folder size and contents...</div>
+                  </div>
+                `;
+                this.showModal('modal-details');
+
+                fetch(`?access=admin&page=drive&action=details&f=${encodeURIComponent(targetPath)}`)
+                  .then(r => {
+                    if (!r.ok) throw new Error(`HTTP Error ${r.status}`);
+                    return r.json();
+                  })
+                  .then(res => {
+                    if (res.error) throw new Error(res.error);
+                    this.renderDetailsModal(res);
+                  })
+                  .catch(err => {
+                    document.getElementById('details-content').innerHTML = `
+                      <div class="center-state" style="color:var(--md-sys-color-error); min-height:160px;">
+                        <p>${err.message || 'Failed to calculate folder statistics'}</p>
+                      </div>
+                    `;
+                  });
+              }
+        
+              renderDetailsModal(res) {
+                document.getElementById('details-modal-title').innerText = res.title || 'Information';
+                let html = '';
+
+                if (res.media && res.media.cover_art) {
+                  html += `
+                    <div style="display:flex; justify-content:center; align-items:center; margin-bottom:1.2rem;">
+                      <img src="${res.media.cover_art}" alt="Album Art" style="width:160px; height:160px; border-radius:16px; object-fit:cover; box-shadow:var(--md-elevation-2); border:1px solid var(--md-sys-color-outline-variant);">
+                    </div>
+                  `;
+                }
+
+                if (res.media && res.media.tags && Object.keys(res.media.tags).length) {
+                  html += `
+                    <div class="details-section">
+                      <div class="details-title">
+                        <svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg>
+                        Media & Track Info
+                      </div>
+                      <div class="details-grid">
+                  `;
+                  for (let k in res.media.tags) {
+                    html += `<div class="details-row"><span class="details-label">${k}</span><span class="details-value">${res.media.tags[k]}</span></div>`;
+                  }
+                  html += `</div></div>`;
+                }
+
+                if (res.general && Object.keys(res.general).length) {
+                  html += `
+                    <div class="details-section">
+                      <div class="details-title">
+                        <svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>
+                        General Details
+                      </div>
+                      <div class="details-grid">
+                  `;
+                  for (let k in res.general) {
+                    html += `<div class="details-row"><span class="details-label">${k}</span><span class="details-value">${res.general[k]}</span></div>`;
+                  }
+                  html += `</div></div>`;
+                }
+        
+                if (res.exif && Object.keys(res.exif).length) {
+                  html += `
+                    <div class="details-section">
+                      <div class="details-title">
+                        <svg viewBox="0 0 24 24"><path d="M12 12m-3 0a3 3 0 1 0 6 0 3 3 0 1 0-6 0M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9z"/></svg>
+                        Camera EXIF
+                      </div>
+                      <div class="details-grid">
+                  `;
+                  for (let k in res.exif) {
+                    let val = k === 'Maps' ? `<a href="${res.exif[k]}" target="_blank" style="color:#ff0000; text-decoration:underline;">Open Maps</a>` : res.exif[k];
+                    html += `<div class="details-row"><span class="details-label">${k}</span><span class="details-value">${val}</span></div>`;
+                  }
+                  html += `</div></div>`;
+                }
+        
+                if (res.iptc && Object.keys(res.iptc).length) {
+                  html += `
+                    <div class="details-section">
+                      <div class="details-title">
+                        <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>
+                        IPTC Metadata
+                      </div>
+                      <div class="details-grid">
+                  `;
+                  for (let k in res.iptc) {
+                    html += `<div class="details-row"><span class="details-label">${k}</span><span class="details-value">${res.iptc[k]}</span></div>`;
+                  }
+                  html += `</div></div>`;
+                }
+        
+                document.getElementById('details-content').innerHTML = html;
+                this.showModal('modal-details');
+              }
+        
+              async api(act, data, callback) {
+                const fd = new FormData();
+                fd.append('action', act);
+                fd.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>');
+                for (let k in data) {
+                  if (Array.isArray(data[k])) {
+                    data[k].forEach(val => fd.append(`${k}[]`, val));
+                  } else {
+                    fd.append(k, data[k]);
+                  }
+                }
+                try {
+                  const res = await fetch('?access=admin&page=drive', { method: 'POST', body: fd });
+                  const json = await res.json();
+                  if (json.success) {
+                    if (callback) callback(json);
+                  } else throw new Error(json.error || 'Failed');
+                } catch (e) { this.toast(e.message); }
+              }
+        
+              refresh(preserveScroll = true) {
+                const scrollEl = document.getElementById('main-content');
+                this.savedScrollTop = preserveScroll && scrollEl ? scrollEl.scrollTop : 0;
+                if (this.isSearching && this.searchQuery) {
+                  this.performSearch(this.searchQuery);
+                } else if (this.currentSection === 'starred') {
+                  this.loadStarred();
+                } else if (this.currentSection === 'recents') {
+                  this.loadRecents();
+                } else if (this.currentSection === 'activity') {
+                  this.loadActivity();
+                } else if (this.currentSection === 'trash') {
+                  this.loadTrash();
+                } else {
+                  this.loadDir(this.currentPath);
+                }
+                this.loadTree();
+              }
+        
+              showInputModal(title, label, defaultValue, callback) {
+                document.getElementById('modal-input-title').innerText = title;
+                document.getElementById('modal-input-label').innerText = label;
+                const input = document.getElementById('modal-input-val');
+                input.value = defaultValue || '';
+                this.showModal('modal-input');
+
+                setTimeout(() => {
+                  input.focus();
+                  input.select();
+                }, 50);
+
+                const confirmBtn = document.getElementById('modal-input-confirm');
+                const handleConfirm = () => {
+                  const val = input.value.trim();
+                  this.closeModals();
+                  if (callback) callback(val);
+                };
+
+                const newBtn = confirmBtn.cloneNode(true);
+                confirmBtn.parentNode.replaceChild(newBtn, confirmBtn);
+                newBtn.addEventListener('click', handleConfirm);
+
+                input.onkeydown = (e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleConfirm();
+                  }
+                };
+              }
+        
+              showModal(id) {
+                document.getElementById('modal-backdrop').classList.add('active');
+                const currentVisible = Array.from(document.querySelectorAll('.modal-box')).find(m => m.style.display === 'flex' && m.id !== id);
+
+                if (currentVisible && (id === 'modal-versions' || id === 'modal-diff' || (currentVisible.id === 'modal-versions' && id === 'modal-diff'))) {
+                  if (!this.modalStack.includes(currentVisible.id)) {
+                    this.modalStack.push(currentVisible.id);
+                  }
+                } else if (!this.modalStack.includes(currentVisible?.id)) {
+                  this.modalStack = [];
+                }
+
+                document.querySelectorAll('.modal-box').forEach(m => m.style.display = 'none');
+                document.getElementById(id).style.display = 'flex';
+              }
+        
+              closeModals() {
+                if (this.modalStack && this.modalStack.length > 0) {
+                  const prevModalId = this.modalStack.pop();
+                  document.querySelectorAll('.modal-box').forEach(m => m.style.display = 'none');
+                  const prevEl = document.getElementById(prevModalId);
+                  if (prevEl) {
+                    prevEl.style.display = 'flex';
+                    if (prevModalId === 'modal-editor' && window.hdmEngine && window.hdmEngine.editor) {
+                      setTimeout(() => window.hdmEngine.editor.refresh(), 50);
+                    }
+                    return;
+                  }
+                }
+
+                this.modalStack = [];
+                document.getElementById('modal-backdrop').classList.remove('active');
+                document.querySelectorAll('.modal-box').forEach(m => m.style.display = 'none');
+                const docContainer = document.getElementById('doc-viewer-container');
+                if (docContainer) docContainer.innerHTML = '';
+
+                const prevPane = document.getElementById('hdm-preview-pane');
+                if (prevPane) prevPane.innerHTML = '';
+
+                const activeTarget = this.activeModalPath || (window.hdmEngine ? window.hdmEngine.activePath : '');
+                this.activeModalPath = '';
+                if (window.hdmEngine) window.hdmEngine.activePath = '';
+
+                const specialSections = ['recents', 'starred', 'activity', 'trash'];
+                const returnSection = (this.originSection && specialSections.includes(this.originSection))
+                  ? this.originSection
+                  : (this.currentSection && specialSections.includes(this.currentSection) ? this.currentSection : null);
+
+                if (returnSection) {
+                  this.originSection = null;
+                  this.currentSection = returnSection;
+                  const targetHash = `#/${returnSection}`;
+                  if (window.location.hash !== targetHash) {
+                    window.location.hash = targetHash;
+                  } else {
+                    this.switchDriveSection(returnSection, false);
+                  }
+                  return;
+                }
+
+                let parentDir = '';
+                if (activeTarget && activeTarget.includes('/')) {
+                  const parts = activeTarget.split('/');
+                  parts.pop();
+                  parentDir = parts.join('/');
+                } else if (this.currentPath !== null && this.currentPath !== undefined) {
+                  parentDir = this.currentPath;
+                }
+
+                const targetHash = parentDir ? '#/' + ltrim(parentDir, '/') : '#/';
+                if (window.location.hash !== targetHash) {
+                  window.location.hash = targetHash;
+                } else {
+                  this.loadDir(parentDir);
+                }
+                this.updateDocTitle(parentDir ? parentDir.split('/').pop() : '', (this.data.folders?.length || 0) + (this.data.files?.length || 0));
+              }
+        
+              toast(msg) {
+                const container = document.getElementById('toast-container');
+                const el = document.createElement('div');
+                el.className = 'toast';
+                el.innerHTML = `<span>${msg}</span>`;
+                container.appendChild(el);
+                setTimeout(() => el.remove(), 3000);
+              }
+            }
+        
+            class HDMarkDownEngine {
+              constructor() {
+                this.editor = null;
+                this.activePath = '';
+                this.activeType = 'markdown';
+                this.mode = 'split';
+                this.slides = [];
+                this.slideIdx = 0;
+                this.isWrap = true;
+                this.renderTimer = null;
+                this.initCodeMirror();
+                this.bindEvents();
+              }
+
+              initCodeMirror() {
+                const target = document.getElementById('hdm-raw-textarea');
+                this.editor = CodeMirror.fromTextArea(target, {
+                  lineNumbers: true,
+                  theme: 'nord',
+                  mode: 'markdown',
+                  lineWrapping: true,
+                  viewportMargin: 30,
+                  extraKeys: {
+                    "Ctrl-S": () => document.getElementById('editor-save-btn').click(),
+                    "Cmd-S": () => document.getElementById('editor-save-btn').click(),
+                    "Ctrl-B": () => this.insertSyntax('bold'),
+                    "Cmd-B": () => this.insertSyntax('bold'),
+                    "Ctrl-I": () => this.insertSyntax('italic'),
+                    "Cmd-I": () => this.insertSyntax('italic'),
+                    "Ctrl-F": () => this.toggleFind(),
+                    "Cmd-F": () => this.toggleFind()
+                  }
+                });
+
+                this.editor.on('change', () => {
+                  this.updateMetrics();
+                  if ((this.activeType === 'markdown' || this.activeType === 'html') && this.mode !== 'edit') {
+                    clearTimeout(this.renderTimer);
+                    this.renderTimer = setTimeout(() => this.renderPreview(), 250);
+                  }
+                });
+
+                this.initSyncScroll();
+              }
+
+              initSyncScroll() {
+                const prevPane = document.getElementById('hdm-preview-pane');
+                let isSyncingEditor = false;
+                let isSyncingPreview = false;
+
+                this.editor.on('scroll', () => {
+                  if (this.mode !== 'split' || isSyncingEditor) return;
+                  isSyncingPreview = true;
+                  const info = this.editor.getScrollInfo();
+                  const maxEditor = info.height - info.clientHeight;
+                  if (maxEditor > 0 && prevPane) {
+                    const pct = info.top / maxEditor;
+                    const maxPrev = prevPane.scrollHeight - prevPane.clientHeight;
+                    prevPane.scrollTop = pct * maxPrev;
+                  }
+                  setTimeout(() => { isSyncingPreview = false; }, 50);
+                });
+
+                if (prevPane) {
+                  prevPane.addEventListener('scroll', () => {
+                    if (this.mode !== 'split' || isSyncingPreview) return;
+                    isSyncingEditor = true;
+                    const maxPrev = prevPane.scrollHeight - prevPane.clientHeight;
+                    if (maxPrev > 0) {
+                      const pct = prevPane.scrollTop / maxPrev;
+                      const info = this.editor.getScrollInfo();
+                      const maxEditor = info.height - info.clientHeight;
+                      this.editor.scrollTo(null, pct * maxEditor);
+                    }
+                    setTimeout(() => { isSyncingEditor = false; }, 50);
+                  }, { passive: true });
+                }
+              }
+
+              bindEvents() {
+                const btnMore = document.getElementById('btn-editor-more');
+                const menuMore = document.getElementById('dropdown-editor-more');
+                if (btnMore && menuMore) {
+                  btnMore.onclick = (e) => {
+                    e.stopPropagation();
+                    const rect = btnMore.getBoundingClientRect();
+                    menuMore.style.top = `${rect.bottom + 6}px`;
+                    menuMore.style.right = `${window.innerWidth - rect.right}px`;
+                    menuMore.classList.toggle('active');
+                  };
+                  window.addEventListener('click', () => menuMore.classList.remove('active'));
+                }
+
+                document.getElementById('dem-wrap')?.addEventListener('click', () => { this.toggleWrap(); menuMore?.classList.remove('active'); });
+                document.getElementById('dem-versions')?.addEventListener('click', () => { app.openVersionHistory(this.activePath); menuMore?.classList.remove('active'); });
+                document.getElementById('dem-mode-edit')?.addEventListener('click', () => { this.setMode('edit'); menuMore?.classList.remove('active'); });
+                document.getElementById('dem-mode-split')?.addEventListener('click', () => { this.setMode('split'); menuMore?.classList.remove('active'); });
+                document.getElementById('dem-mode-preview')?.addEventListener('click', () => { this.setMode('preview'); menuMore?.classList.remove('active'); });
+                document.getElementById('dem-present')?.addEventListener('click', () => { this.openPresentation(); menuMore?.classList.remove('active'); });
+
+                const findBtn = document.getElementById('hdm-btn-find-header');
+                if (findBtn) findBtn.onclick = () => this.toggleFind();
+
+                const undoBtn = document.getElementById('hdm-btn-undo');
+                if (undoBtn) undoBtn.onclick = () => {
+                  if (this.editor) { this.editor.undo(); this.editor.focus(); }
+                };
+
+                const redoBtn = document.getElementById('hdm-btn-redo');
+                if (redoBtn) redoBtn.onclick = () => {
+                  if (this.editor) { this.editor.redo(); this.editor.focus(); }
+                };
+
+                document.getElementById('hdm-btn-find-prev')?.addEventListener('click', () => this.findPrev());
+                document.getElementById('hdm-btn-find-next')?.addEventListener('click', () => this.findNext());
+                document.getElementById('hdm-btn-find-close')?.addEventListener('click', () => this.toggleFind(false));
+                document.getElementById('hdm-btn-replace-one')?.addEventListener('click', () => this.replaceOne());
+                document.getElementById('hdm-btn-replace-all')?.addEventListener('click', () => this.replaceAll());
+
+                const findInput = document.getElementById('hdm-find-input');
+                if (findInput) {
+                  findInput.addEventListener('input', () => this.updateFindMatches());
+                  findInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      e.shiftKey ? this.findPrev() : this.findNext();
+                    } else if (e.key === 'Escape') {
+                      this.toggleFind(false);
+                    }
+                  });
+                }
+
+                const replaceInput = document.getElementById('hdm-replace-input');
+                if (replaceInput) {
+                  replaceInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      this.replaceOne();
+                    }
+                  });
+                }
+
+                const resizer = document.getElementById('hdm-resizer');
+                const editPane = document.getElementById('hdm-editor-pane');
+                let isResize = false;
+                resizer.onmousedown = () => { isResize = true; };
+                window.addEventListener('mousemove', (e) => {
+                  if (!isResize) return;
+                  const container = document.getElementById('hdm-panes').getBoundingClientRect();
+                  const pct = ((e.clientX - container.left) / container.width) * 100;
+                  if (pct > 15 && pct < 85) editPane.style.width = `${pct}%`;
+                });
+                window.addEventListener('mouseup', () => { isResize = false; });
+              }
+
+              setMode(mode) {
+                this.mode = mode;
+                const editPane = document.getElementById('hdm-editor-pane');
+                const prevPane = document.getElementById('hdm-preview-pane');
+                const resizer = document.getElementById('hdm-resizer');
+
+                if (mode === 'edit') {
+                  editPane.style.display = 'flex';
+                  editPane.style.width = '100%';
+                  editPane.style.flex = '1';
+                  prevPane.style.display = 'none';
+                  if (resizer) resizer.style.display = 'none';
+                } else if (mode === 'preview') {
+                  editPane.style.display = 'none';
+                  prevPane.style.display = 'block';
+                  prevPane.style.width = '100%';
+                  prevPane.style.flex = '1';
+                  if (resizer) resizer.style.display = 'none';
+                } else {
+                  editPane.style.display = 'flex';
+                  editPane.style.width = '50%';
+                  editPane.style.flex = 'none';
+                  prevPane.style.display = 'block';
+                  prevPane.style.width = 'auto';
+                  prevPane.style.flex = '1';
+                  if (resizer) resizer.style.display = 'block';
+                }
+                setTimeout(() => {
+                  if (this.editor) this.editor.refresh();
+                }, 60);
+              }
+
+              open(path, name, content) {
+                this.activePath = path;
+                const ext = name.split('.').pop().toLowerCase();
+                const titleEl = document.getElementById('editor-title');
+                if (titleEl) titleEl.innerText = name;
+                if (this.editor) this.editor.setValue(content || '');
+
+                const isLarge = (content && content.length > 250000);
+                const toolbar = document.getElementById('hdm-toolbar');
+                const viewModes = document.getElementById('hdm-view-modes');
+                const presentBtn = document.getElementById('hdm-btn-present');
+
+                if (ext === 'md' || ext === 'markdown' || ext === 'html' || ext === 'htm') {
+                  this.activeType = ext.startsWith('m') ? 'markdown' : 'html';
+                  if (this.editor) this.editor.setOption('mode', this.activeType === 'markdown' ? 'markdown' : 'htmlmixed');
+                  if (toolbar) toolbar.style.display = 'flex';
+                  if (viewModes) viewModes.style.display = 'flex';
+                  if (presentBtn) presentBtn.style.display = (window.innerWidth <= 768 || isLarge) ? 'none' : 'block';
+
+                  this.setMode(window.innerWidth <= 768 || isLarge ? 'edit' : 'split');
+                  if (!isLarge && this.mode !== 'edit') {
+                    this.renderPreview();
+                  }
+                } else {
+                  this.activeType = 'code';
+                  if (toolbar) toolbar.style.display = 'none';
+                  if (viewModes) viewModes.style.display = 'none';
+                  if (presentBtn) presentBtn.style.display = 'none';
+                  this.setMode('edit');
+                  let cmMode = 'javascript';
+                  if (['php'].includes(ext)) cmMode = 'php';
+                  if (['py'].includes(ext)) cmMode = 'python';
+                  if (['sql'].includes(ext)) cmMode = 'sql';
+                  if (['xml', 'svg'].includes(ext)) cmMode = 'xml';
+                  if (['c', 'cpp'].includes(ext)) cmMode = 'clike';
+                  if (this.editor) this.editor.setOption('mode', cmMode);
+                }
+
+                if (window.app) app.showModal('modal-editor');
+                setTimeout(() => {
+                  if (this.editor) this.editor.refresh();
+                }, 100);
+                this.updateMetrics();
+              }
+
+              async renderPreview() {
+                const prevPane = document.getElementById('hdm-preview-pane');
+                if (!prevPane || this.mode === 'edit') return;
+                const raw = this.editor.getValue();
+
+                const sanitizeConfig = {
+                  ADD_TAGS: ['iframe', 'video', 'source', 'details', 'summary', 'mark', 'u', 'div', 'span'],
+                  ADD_ATTR: ['allow', 'allowfullscreen', 'frameborder', 'src', 'controls', 'type', 'width', 'height', 'align', 'open'],
+                  FORBID_TAGS: ['style', 'link', 'script', 'base']
+                };
+
+                if (this.activeType === 'markdown') {
+                  const rawHtml = marked.parse(raw);
+                  const clean = DOMPurify.sanitize(rawHtml, sanitizeConfig);
+                  prevPane.innerHTML = clean;
+
+                  const docDir = this.activePath.includes('/') ? this.activePath.split('/').slice(0, -1).join('/') : '';
+                  prevPane.querySelectorAll('img').forEach(img => {
+                    const src = img.getAttribute('src');
+                    if (src && !src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('data:') && !src.startsWith('?action=') && !src.startsWith('?access=')) {
+                      const cleanRel = src.replace(/^\.\//, '');
+                      const fullRel = docDir ? `${docDir}/${cleanRel}` : cleanRel;
+                      img.src = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(fullRel)}`;
+                    }
+                  });
+
+                  if (raw.length < 350000) {
+                    prevPane.querySelectorAll('pre code').forEach(el => {
+                      if (!el.classList.contains('language-mermaid')) hljs.highlightElement(el);
+                    });
+                  }
+
+                  if (window.mermaid && raw.length < 200000) {
+                    const blocks = prevPane.querySelectorAll('code.language-mermaid');
+                    for (let i = 0; i < blocks.length; i++) {
+                      const b = blocks[i];
+                      const code = b.textContent;
+                      const id = `mermaid_div_${Date.now()}_${i}`;
+                      try {
+                        const { svg } = await window.mermaid.render(id, code);
+                        const container = document.createElement('div');
+                        container.className = 'mermaid-container';
+                        container.innerHTML = svg;
+                        b.parentElement.replaceWith(container);
+                        this.attachMermaidPanZoom(container);
+                      } catch(e) {}
+                    }
+                  }
+                } else if (this.activeType === 'html') {
+                  prevPane.innerHTML = DOMPurify.sanitize(raw, sanitizeConfig);
+                }
+              }
+
+              attachMermaidPanZoom(container) {
+                const svg = container.querySelector('svg');
+                if (!svg) return;
+
+                let vb = svg.getAttribute('viewBox');
+                let [x, y, w, h] = vb ? vb.split(' ').map(Number) : [0, 0, container.clientWidth || 800, 400];
+                svg.style.maxWidth = 'none';
+
+                const update = () => svg.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
+
+                let isDrag = false, startX, startY;
+                svg.onpointerdown = (e) => {
+                  isDrag = true;
+                  startX = e.clientX; startY = e.clientY;
+                  svg.setPointerCapture(e.pointerId);
+                };
+                svg.onpointermove = (e) => {
+                  if (!isDrag) return;
+                  const dx = (startX - e.clientX) * (w / container.clientWidth);
+                  const dy = (startY - e.clientY) * (h / container.clientHeight);
+                  x += dx; y += dy;
+                  startX = e.clientX; startY = e.clientY;
+                  update();
+                };
+                svg.onpointerup = (e) => { isDrag = false; svg.releasePointerCapture(e.pointerId); };
+                container.onwheel = (e) => {
+                  e.preventDefault();
+                  const factor = e.deltaY > 0 ? 1.1 : 0.9;
+                  w *= factor; h *= factor;
+                  update();
+                };
+              }
+
+              updateMetrics() {
+                const val = this.editor.getValue();
+                const words = val.trim() ? val.trim().split(/\s+/).length : 0;
+                const el = document.getElementById('editor-metrics');
+                if (el) {
+                  el.innerText = `${val.length.toLocaleString()} chars • ${words.toLocaleString()} words`;
+                }
+              }
+
+              insertSyntax(type) {
+                const doc = this.editor.getDoc();
+                const sel = doc.getSelection();
+                let before = '', after = '', ph = '';
+
+                switch (type) {
+                  case 'bold': before = '**'; after = '**'; ph = 'bold text'; break;
+                  case 'italic': before = '*'; after = '*'; ph = 'italic text'; break;
+                  case 'underline': before = '<u>'; after = '</u>'; ph = 'underlined text'; break;
+                  case 'strikethrough': before = '~~'; after = '~~'; ph = 'strikethrough text'; break;
+                  case 'mark': before = '<mark>'; after = '</mark>'; ph = 'highlighted text'; break;
+                  case 'h1': before = '# '; ph = 'Heading 1'; break;
+                  case 'h2': before = '## '; ph = 'Heading 2'; break;
+                  case 'h3': before = '### '; ph = 'Heading 3'; break;
+                  case 'align-left': before = '<div align="left">\n\n'; after = '\n\n</div>'; ph = 'Left aligned text'; break;
+                  case 'align-center': before = '<div align="center">\n\n'; after = '\n\n</div>'; ph = 'Centered text or image'; break;
+                  case 'align-right': before = '<div align="right">\n\n'; after = '\n\n</div>'; ph = 'Right aligned text'; break;
+                  case 'quote': before = '> '; ph = 'Blockquote'; break;
+                  case 'ul': before = '- '; ph = 'List item'; break;
+                  case 'ol': before = '1. '; ph = 'Numbered item'; break;
+                  case 'task': before = '- [ ] '; ph = 'Task to do'; break;
+                  case 'codeblock': before = '```javascript\n'; after = '\n```'; ph = '// your code here'; break;
+                  case 'link': before = '['; after = '](https://example.com)'; ph = 'Link text'; break;
+                  case 'image': before = '!['; after = '](./image.png)'; ph = 'Image Alt Text'; break;
+                  case 'table':
+                    before = '\n| Header 1 | Header 2 | Header 3 |\n| :--- | :---: | ---: |\n| Left | Center | Right |\n| Row 2 | Row 2 | Row 2 |\n';
+                    break;
+                  case 'hr': before = '\n\n---\n\n'; break;
+                  case 'details': before = '<details>\n<summary>Click to view</summary>\n\n'; after = '\n\n</details>'; ph = 'Hidden content here'; break;
+                  case 'mermaid': before = '```mermaid\ngraph TD;\n  A[Start]-->B[Process];\n  B-->C[End];\n'; after = '```'; break;
+                  case 'youtube': before = '![youtube]('; after = ')'; ph = 'dQw4w9WgXcQ'; break;
+                }
+
+                doc.replaceSelection(before + (sel || ph) + after);
+                this.editor.focus();
+              }
+
+              toggleFind(forceState) {
+                const card = document.getElementById('hdm-find-bar');
+                if (!card) return;
+                const show = forceState !== undefined ? forceState : (card.style.display === 'none');
+                card.style.display = show ? 'flex' : 'none';
+                if (show) {
+                  const input = document.getElementById('hdm-find-input');
+                  const sel = this.editor?.getSelection();
+                  if (sel && input) input.value = sel;
+                  input?.focus();
+                  input?.select();
+                  this.updateFindMatches();
+                } else if (this.editor) {
+                  this.editor.focus();
+                }
+              }
+
+              toggleWrap() {
+                this.isWrap = !this.isWrap;
+                this.editor.setOption('lineWrapping', this.isWrap);
+                const wrapText = document.getElementById('dem-wrap-text');
+                if (wrapText) {
+                  wrapText.innerText = `Word Wrap: ${this.isWrap ? 'On' : 'Off'}`;
+                }
+                if (window.app) window.app.toast(`Word Wrap: ${this.isWrap ? 'Enabled' : 'Disabled'}`);
+              }
+
+              updateFindMatches() {
+                const q = document.getElementById('hdm-find-input')?.value;
+                const counter = document.getElementById('hdm-find-count');
+                if (!q || !this.editor) {
+                  if (counter) counter.innerText = '0/0';
+                  return;
+                }
+
+                let count = 0;
+                let current = 0;
+                const curPos = this.editor.getDoc().getCursor();
+                let cursor = this.editor.getSearchCursor(q, { line: 0, ch: 0 }, { caseFold: true });
+
+                while (cursor.findNext()) {
+                  count++;
+                  const from = cursor.from();
+                  if (from.line < curPos.line || (from.line === curPos.line && from.ch <= curPos.ch)) {
+                    current = count;
+                  }
+                }
+
+                if (current === 0 && count > 0) current = 1;
+                if (counter) counter.innerText = `${count > 0 ? current : 0}/${count}`;
+              }
+
+              findNext() {
+                const q = document.getElementById('hdm-find-input')?.value;
+                if (!q || !this.editor) return;
+                let cursor = this.editor.getSearchCursor(q, this.editor.getCursor('to'), { caseFold: true });
+                if (!cursor.findNext()) {
+                  cursor = this.editor.getSearchCursor(q, { line: 0, ch: 0 }, { caseFold: true });
+                  if (!cursor.findNext()) return;
+                }
+                this.editor.setSelection(cursor.from(), cursor.to());
+                this.editor.scrollIntoView({ from: cursor.from(), to: cursor.to() }, 30);
+                this.updateFindMatches();
+              }
+
+              findPrev() {
+                const q = document.getElementById('hdm-find-input')?.value;
+                if (!q || !this.editor) return;
+                let cursor = this.editor.getSearchCursor(q, this.editor.getCursor('from'), { caseFold: true });
+                if (!cursor.findPrevious()) {
+                  const lastLine = this.editor.lineCount() - 1;
+                  cursor = this.editor.getSearchCursor(q, { line: lastLine, ch: this.editor.getLine(lastLine).length }, { caseFold: true });
+                  if (!cursor.findPrevious()) return;
+                }
+                this.editor.setSelection(cursor.from(), cursor.to());
+                this.editor.scrollIntoView({ from: cursor.from(), to: cursor.to() }, 30);
+                this.updateFindMatches();
+              }
+
+              replaceOne() {
+                const q = document.getElementById('hdm-find-input')?.value;
+                const rep = document.getElementById('hdm-replace-input')?.value || '';
+                if (!q || !this.editor) return;
+                const sel = this.editor.getSelection();
+                if (sel.toLowerCase() === q.toLowerCase()) {
+                  this.editor.replaceSelection(rep, 'around');
+                }
+                this.findNext();
+              }
+
+              replaceAll() {
+                const q = document.getElementById('hdm-find-input')?.value;
+                const rep = document.getElementById('hdm-replace-input')?.value || '';
+                if (!q || !this.editor) return;
+                let cursor = this.editor.getSearchCursor(q, { line: 0, ch: 0 }, { caseFold: true });
+                this.editor.operation(() => {
+                  while (cursor.findNext()) {
+                    cursor.replace(rep);
+                  }
+                });
+                this.updateFindMatches();
+              }
+
+              openPresentation() {
+                const raw = this.editor.getValue();
+                this.slides = raw.split(/^_{3,}\s*$|^\*{3,}\s*$|^-{3,}\s*$/gm).filter(s => s.trim());
+                if (!this.slides.length) this.slides = [raw || '# Empty Slide'];
+                this.slideIdx = 0;
+                document.getElementById('presentation-overlay').classList.add('active');
+                this.renderSlide();
+              }
+
+              renderSlide() {
+                const text = this.slides[this.slideIdx];
+                const box = document.getElementById('presentation-slide-box');
+                box.innerHTML = DOMPurify.sanitize(marked.parse(text));
+                document.getElementById('presentation-indicator').innerText = `${this.slideIdx + 1} / ${this.slides.length}`;
+              }
+
+              nextSlide() {
+                if (this.slideIdx < this.slides.length - 1) { this.slideIdx++; this.renderSlide(); }
+              }
+
+              prevSlide() {
+                if (this.slideIdx > 0) { this.slideIdx--; this.renderSlide(); }
+              }
+
+              closePresentation() {
+                document.getElementById('presentation-overlay').classList.remove('active');
               }
             }
 
-            const driveApp = new DriveFileManager();
+            window.hdmEngine = new HDMarkDownEngine();
+            window.opfsCache = new OPFSCacheManager();
+            window.uploadManager = new UploadManager();
+            window.mangaViewer = new MangaViewer();
+            window.lightbox = new LightboxViewer();
+            window.app = new GalleryApp();
+        
+            document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => window.app.closeModals()));
           </script>
+
         <?php else: ?>
           <!-- Standard User Management UI -->
           <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
