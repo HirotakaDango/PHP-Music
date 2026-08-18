@@ -452,7 +452,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '9.2');
+define('APP_VERSION', '9.3');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1897,7 +1897,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         ]);
       }
 
-      if ($driveAction === 'save_text') {
+      if ($driveAction === 'save_text' || $driveAction === 'write') {
         $file = $_POST['f'] ?? ($_POST['file'] ?? '');
         $content = $_POST['content'] ?? '';
         $fullPath = driveFindRealFile($driveConfig['root_dir'], $file);
@@ -1913,6 +1913,52 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           driveLogActivity($driveConfig['meta_file'], 'modified', $file, 'File edited and saved');
         }
         driveJsonResponse(['success' => $saved]);
+      }
+
+      // IDE Version History Sync Alias
+      if ($driveAction === 'get_versions') {
+        $file = $_POST['file'] ?? ($_GET['file'] ?? ($_GET['f'] ?? ''));
+        $full = driveSafePath($driveConfig['root_dir'], $file);
+        if (!$full || !is_file($full)) driveJsonResponse(['versions' => []]);
+
+        $rel = ltrim(str_replace(['\\', '//'], '/', substr(realpath($full), strlen(realpath($driveConfig['root_dir'])))), '/');
+        $hashDir = $driveConfig['version_dir'] . DIRECTORY_SEPARATOR . md5($rel);
+        $versions = [];
+
+        if (is_dir($hashDir)) {
+          foreach (scandir($hashDir) as $v) {
+            if ($v === '.' || $v === '..') continue;
+            $vp = $hashDir . DIRECTORY_SEPARATOR . $v;
+            $versions[] = [
+              'name'     => $v,
+              'filename' => $v,
+              'mtime'    => filemtime($vp),
+              'size'     => driveFormatBytes(filesize($vp)),
+              'date'     => date('Y-m-d H:i:s', filemtime($vp))
+            ];
+          }
+          usort($versions, fn($a, $b) => $b['mtime'] - $a['mtime']);
+        }
+        driveJsonResponse(['success' => true, 'versions' => $versions]);
+      }
+
+      // IDE Rollback Version Sync Alias
+      if ($driveAction === 'restore_version') {
+        $file = $_POST['file'] ?? ($_POST['f'] ?? '');
+        $versionName = $_POST['version_name'] ?? ($_POST['version'] ?? '');
+        $full = driveSafePath($driveConfig['root_dir'], $file);
+        if (!$full || !is_file($full)) driveJsonResponse(['error' => 'Target file not found'], 404);
+
+        $rel = ltrim(str_replace(['\\', '//'], '/', substr(realpath($full), strlen(realpath($driveConfig['root_dir'])))), '/');
+        $vFile = $driveConfig['version_dir'] . DIRECTORY_SEPARATOR . md5($rel) . DIRECTORY_SEPARATOR . basename($versionName);
+        if (!file_exists($vFile)) driveJsonResponse(['error' => 'Version file not found'], 404);
+
+        driveBackupVersion($full, $driveConfig);
+        $restored = @copy($vFile, $full);
+        if ($restored) {
+          driveLogActivity($driveConfig['meta_file'], 'restored', $file, 'Restored version ' . basename($versionName));
+        }
+        driveJsonResponse(['success' => $restored]);
       }
 
       if ($driveAction === 'trash') {
@@ -10257,20 +10303,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const diffBody = document.getElementById('ide-diff-body');
                 const diffTitle = document.getElementById('ide-diff-title');
                 if (!diffModalEl || !diffBody) return;
-  
+
                 const fileName = path.split('/').pop();
                 if (diffTitle) diffTitle.textContent = `Diff: ${fileName} (Old vs Current)`;
                 diffBody.innerHTML = '<div class="text-center py-5"><div class="spinner-border text-info" role="status"></div><div class="text-secondary mt-2 small font-monospace">Computing diff changes...</div></div>';
-  
+
                 const modal = bootstrap.Modal.getOrCreateInstance(diffModalEl);
                 modal.show();
-  
+
                 try {
-                  const currentRes = await fetch(`?access=admin&page=drive&api=true&action=read&file=${encodeURIComponent(path)}&t=${Date.now()}`);
-                  const currentData = await currentRes.json();
-  
-                  const oldRes = await fetch(`?access=admin&page=drive&api=true&action=read&file=${encodeURIComponent('.file_version/' + fileName + '/' + versionName)}&t=${Date.now()}`);
-                  const oldData = await oldRes.json();
+                  const res = await fetch(`?access=admin&page=drive&action=version_read&f=${encodeURIComponent(path)}&version=${encodeURIComponent(versionName)}&t=${Date.now()}`);
+                  const data = await res.json();
+
+                  if (data && data.success) {
+                    const currentData = { content: data.current || '' };
+                    const oldData = { content: data.version || '' };
   
                   if (currentData && currentData.success && oldData && oldData.success) {
                     if (typeof diff_match_patch !== 'undefined') {
@@ -13064,12 +13111,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
           <style>
             #phpfiles-app-root {
-              --md-sys-color-surface: #0a0a0a;
-              --md-sys-color-surface-container-lowest: #030303;
-              --md-sys-color-surface-container-low: #121212;
-              --md-sys-color-surface-container: #181818;
-              --md-sys-color-surface-container-high: #222222;
-              --md-sys-color-surface-container-highest: #2c2c2c;
+              --md-sys-color-surface: #050505;
+              --md-sys-color-surface-container-lowest: #000000;
+              --md-sys-color-surface-container-low: #090909;
+              --md-sys-color-surface-container: #101010;
+              --md-sys-color-surface-container-high: #181818;
+              --md-sys-color-surface-container-highest: #222222;
               --md-sys-color-on-surface: #f1f1f1;
               --md-sys-color-on-surface-variant: #aaaaaa;
               --md-sys-color-outline: #555555;
@@ -13306,8 +13353,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               display: flex;
               align-items: center;
               gap: 0.4rem;
-              background: var(--md-sys-color-primary);
-              color: #ffffff;
+              background-color: var(--md-sys-color-primary) !important;
+              color: #ffffff !important;
               padding: 0.45rem 1rem;
               height: 40px;
               border-radius: 20px;
@@ -13315,11 +13362,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               font-weight: 600;
               white-space: nowrap;
               box-shadow: var(--md-elevation-1);
+              border: none !important;
             }
 
             .btn-primary:hover {
-              background: #dc2626;
-              color: #ffffff;
+              background-color: #dc2626 !important;
+              color: #ffffff !important;
             }
 
             .app-body {
@@ -13333,26 +13381,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .sidebar-backdrop {
               position: fixed;
               inset: 0;
-              background: rgba(0, 0, 0, 0.7);
-              backdrop-filter: blur(2px);
-              z-index: 140;
+              background: rgba(0, 0, 0, 0.75);
+              backdrop-filter: blur(4px);
+              z-index: 1990;
               display: none;
             }
-
-            .sidebar-backdrop.active {
-              display: block;
-            }
+            .sidebar-backdrop.active { display: block; }
 
             .sidebar {
               width: 280px;
-              background: var(--md-sys-color-surface-container-low);
+              background: #080808 !important;
               display: flex;
               flex-direction: column;
               flex-shrink: 0;
               overflow-y: auto;
               transition: margin-left 0.25s cubic-bezier(0.2, 0, 0, 1), transform 0.25s cubic-bezier(0.2, 0, 0, 1);
-              z-index: 150;
-              border-right: 1px solid var(--md-sys-color-outline-variant);
+              z-index: 2000;
+              border-right: 1px solid #1a1a1a;
             }
 
             .sidebar.collapsed {
@@ -13506,7 +13551,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               flex-direction: column;
               overflow-y: auto;
               position: relative;
-              padding: 1rem 1.2rem 0 1.2rem;
+              padding: 1rem 1.2rem calc(8rem + env(safe-area-inset-bottom, 0px)) 1.2rem;
               -webkit-overflow-scrolling: touch;
               min-height: 0;
               min-width: 0;
@@ -13999,13 +14044,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             .layout-list .file-star-btn {
               position: static;
-              width: 32px;
-              height: 32px;
+              width: 44px;
+              height: 44px;
               background: transparent;
               display: flex;
               align-items: center;
               justify-content: center;
               flex-shrink: 0;
+              margin-left: auto;
+            }
+
+            .layout-list .file-star-btn svg {
+              width: 24px;
+              height: 24px;
             }
 
             .layout-list .file-star-btn:not(.active) {
@@ -14159,7 +14210,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               height: 100dvh;
               min-height: 100dvh;
               background: #030303;
-              z-index: 2000;
+              z-index: 3000;
               display: none;
               flex-direction: column;
               overflow-y: auto;
@@ -14185,7 +14236,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               align-items: center;
               justify-content: space-between;
               padding: 0 1rem;
-              z-index: 2050;
+              z-index: 3050;
               color: #ffffff;
               transition: transform 0.25s ease;
             }
@@ -14299,7 +14350,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               background: rgba(5, 5, 5, 0.92);
               backdrop-filter: blur(24px);
               -webkit-backdrop-filter: blur(24px);
-              z-index: 1500;
+              z-index: 3500;
               display: none;
               flex-direction: column;
               touch-action: pan-y;
@@ -14324,7 +14375,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               top: 0;
               left: 0;
               right: 0;
-              z-index: 1550;
+              z-index: 3550;
+              opacity: 0;
+              transform: translateY(-100%);
+              transition: all 0.3s cubic-bezier(0.2, 0, 0, 1);
+            }
+
+            .lightbox-header.active {
+              opacity: 1;
+              transform: translateY(0);
             }
 
             .lightbox-title {
@@ -14376,7 +14435,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               width: 88%;
               box-shadow: 0 24px 60px rgba(0, 0, 0, 0.8);
               position: relative;
-              z-index: 1515;
+              z-index: 3515;
             }
 
             .lightbox-audio-badge {
@@ -14465,7 +14524,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               width: 48px;
               height: 48px;
               display: none;
-              z-index: 1510;
+              z-index: 3510;
               pointer-events: none;
             }
 
@@ -14489,7 +14548,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               justify-content: center;
               cursor: pointer;
               border-radius: 50%;
-              z-index: 1520;
+              z-index: 3520;
               box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
               transition: all 0.2s cubic-bezier(0.2, 0, 0, 1);
             }
@@ -15791,7 +15850,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             .bottom-pad {
-              height: calc(5.5rem + env(safe-area-inset-bottom, 0px));
+              height: calc(9.5rem + env(safe-area-inset-bottom, 0px));
               width: 100%;
               flex-shrink: 0;
             }
@@ -15804,7 +15863,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               display: none;
             }
 
-            @media (max-width: 768px) {
+                        @media (max-width: 768px) {
               .desktop-only {
                 display: none !important;
               }
@@ -15815,11 +15874,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               .sidebar {
                 position: fixed;
-                inset: 0 auto 0 0;
+                top: 0;
+                bottom: 0;
+                left: 0;
                 transform: translateX(-100%);
-                box-shadow: var(--md-elevation-2);
+                box-shadow: 4px 0 24px rgba(0, 0, 0, 0.9);
                 width: 280px;
                 height: 100dvh;
+                padding-top: calc(0.5rem + env(safe-area-inset-top, 0px));
               }
 
               .sidebar.open {
@@ -15831,7 +15893,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               .main-content-drive {
-                padding: 0.6rem 0.6rem 0 0.6rem;
+                padding: 0.6rem 0.6rem calc(5rem + env(safe-area-inset-bottom, 0px)) 0.6rem;
               }
 
               .modal-box.large {
@@ -16855,14 +16917,33 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.el = document.getElementById('lightbox');
                 this.title = document.getElementById('lb-title');
                 this.body = document.getElementById('lb-body');
+                this.header = document.querySelector('.lightbox-header');
                 this.currentIndex = 0;
                 this.mediaList = [];
                 this.touchStartX = 0;
                 this.touchStartY = 0;
+                this.uiTimer = null;
                 this.bindEvents();
               }
 
+              showUI() {
+                if (this.header) this.header.classList.add('active');
+                clearTimeout(this.uiTimer);
+                this.uiTimer = setTimeout(() => {
+                  if (this.header) this.header.classList.remove('active');
+                }, 3000);
+              }
+
               bindEvents() {
+                this.el.addEventListener('mousemove', () => this.showUI());
+                this.el.addEventListener('click', () => this.showUI());
+                this.el.addEventListener('touchstart', () => this.showUI(), { passive: true });
+                
+                if (this.header) {
+                  this.header.addEventListener('mouseenter', () => clearTimeout(this.uiTimer));
+                  this.header.addEventListener('mouseleave', () => this.showUI());
+                }
+
                 document.getElementById('btn-lb-close').addEventListener('click', () => this.close());
 
                 document.getElementById('btn-lb-download').addEventListener('click', () => {
@@ -16912,6 +16993,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.mediaList = mediaList || [];
                 this.currentIndex = startIndex || 0;
                 this.el.classList.add('active');
+                this.showUI();
                 this.loadCurrent();
               }
 
@@ -17581,7 +17663,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   if (pathParam && fileParam) {
                     const cleanP = pathParam.replace(/^\/+|\/+$/g, '');
                     const cleanF = fileParam.replace(/^\/+|\/+$/g, '');
-                    target = cleanP ? `${cleanP}/${cleanF}` : cleanF;
+                    // Prevent path duplication if fileParam already contains the folder path
+                    if (cleanP && cleanF.startsWith(cleanP + '/')) {
+                      target = cleanF;
+                    } else {
+                      target = cleanP ? `${cleanP}/${cleanF}` : cleanF;
+                    }
                   } else {
                     target = (pathParam || fileParam).replace(/^\/+|\/+$/g, '');
                   }
@@ -17881,11 +17968,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         
               applySort(items) {
                 return [...items].sort((a, b) => {
+                  const nameA = a.name || '';
+                  const nameB = b.name || '';
                   if (this.sortBy === 'name_asc') {
-                    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+                    return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
                   }
                   if (this.sortBy === 'name_desc') {
-                    return b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' });
+                    return nameB.localeCompare(nameA, undefined, { numeric: true, sensitivity: 'base' });
                   }
                   if (this.sortBy === 'date_desc') {
                     return (b.mtime || 0) - (a.mtime || 0);
@@ -18049,7 +18138,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                     card.innerHTML = `
                       <div class="file-checkbox"><svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
-                      <div class="file-star-btn ${isStarred ? 'active' : ''}" title="${isStarred ? 'Unstar' : 'Star'}">${starSvg}</div>
                       <div class="file-thumb" ${folderRatio}>${folderThumbHtml}</div>
                       <div class="file-info-overlay">
                         <div class="file-name"></div>
@@ -18058,6 +18146,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                           <span>FOLDER</span>
                         </div>
                       </div>
+                      <div class="file-star-btn ${isStarred ? 'active' : ''}" title="${isStarred ? 'Unstar' : 'Star'}">${starSvg}</div>
                     `;
                   } else {
                     let thumbHtml = '';
@@ -18084,7 +18173,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     card.oncontextmenu = (e) => app.showContextMenu(e, 'file', item.path, item.name, item.type);
                     card.innerHTML = `
                       <div class="file-checkbox"><svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
-                      <div class="file-star-btn ${isStarred ? 'active' : ''}" title="${isStarred ? 'Unstar' : 'Star'}">${starSvg}</div>
                       <div class="file-thumb" ${thumbRatio}>${thumbHtml}</div>
                       <div class="file-info-overlay">
                         <div class="file-name"></div>
@@ -18093,6 +18181,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                           <span>${this.layout === 'list' ? ext.toUpperCase() : (item.width ? `${item.width}×${item.height}` : ext.toUpperCase())}</span>
                         </div>
                       </div>
+                      <div class="file-star-btn ${isStarred ? 'active' : ''}" title="${isStarred ? 'Unstar' : 'Star'}">${starSvg}</div>
                     `;
                   }
 
@@ -18281,12 +18370,24 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         
               batchDelete() {
                 const items = Array.from(this.selectedItems);
-                if (confirm(`Delete ${items.length} selected item(s)?`)) {
-                  this.api('delete', { items }, () => {
-                    this.toast('Items deleted');
-                    this.clearSelection();
-                    this.refresh();
-                  });
+                if (!items.length) return;
+
+                if (this.currentSection === 'trash') {
+                  if (confirm(`Permanently delete ${items.length} selected item(s)? This cannot be undone.`)) {
+                    this.api('delete', { items }, () => {
+                      this.toast('Items permanently deleted');
+                      this.clearSelection();
+                      this.refresh();
+                    });
+                  }
+                } else {
+                  if (confirm(`Move ${items.length} selected item(s) to Trash?`)) {
+                    this.api('trash', { items }, () => {
+                      this.toast('Items moved to Trash');
+                      this.clearSelection();
+                      this.refresh();
+                    });
+                  }
                 }
               }
         
@@ -18544,11 +18645,45 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     if (loader) loader.style.display = 'none';
                     window.hdmEngine.open(path, name, res.content || '');
 
-                    document.getElementById('editor-save-btn').onclick = () => {
+                    const saveBtn = document.getElementById('editor-save-btn');
+                    const origSaveIcon = '<svg viewBox="0 0 24 24"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg>';
+                    const savedCheckIcon = '<svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
+
+                    saveBtn.onclick = () => {
                       const val = window.hdmEngine.editor.getValue();
+                      saveBtn.disabled = true;
+                      saveBtn.style.color = '#eab308'; // Amber saving state
+                      saveBtn.innerHTML = '<svg class="m3-spinner" style="width:20px;height:20px;margin:0;" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4" stroke="#eab308"></circle></svg>';
+
                       this.api('save_text', { f: path, content: val }, () => {
                         this.toast('Document saved');
-                        window.hdmEngine.updateMetrics();
+                  
+                        // Trigger Green Checkmark Saved Indicator
+                        saveBtn.style.color = '#22c55e';
+                        saveBtn.innerHTML = savedCheckIcon;
+                        saveBtn.title = 'Saved successfully!';
+
+                        // Update metrics bar with saved confirmation badge
+                        window.hdmEngine.updateMetrics(true);
+                        
+                        // Centered floating indicator
+                        const editorPane = document.getElementById('hdm-editor-pane');
+                        if (editorPane) {
+                          const indicator = document.createElement('div');
+                          indicator.innerHTML = '<svg viewBox="0 0 24 24" style="width:48px;height:48px;fill:#22c55e;margin-bottom:10px;"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg><div style="font-weight:bold;font-size:1.1rem;">Saved Successfully</div>';
+                          indicator.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%, -50%);background:rgba(0,0,0,0.8);color:#fff;padding:20px 30px;border-radius:16px;z-index:9999;display:flex;flex-direction:column;align-items:center;pointer-events:none;transition:opacity 0.3s;';
+                          editorPane.appendChild(indicator);
+                          setTimeout(() => { indicator.style.opacity = '0'; }, 1200);
+                          setTimeout(() => { indicator.remove(); }, 1500);
+                        }
+
+                        setTimeout(() => {
+                          saveBtn.disabled = false;
+                          saveBtn.style.color = '#ff0000';
+                          saveBtn.innerHTML = origSaveIcon;
+                          saveBtn.title = 'Save Document';
+                          window.hdmEngine.updateMetrics(false);
+                        }, 1800);
                       });
                     };
                   })
@@ -18564,23 +18699,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const res = await fetch('?access=admin&page=drive&action=starred_list');
                   const data = await res.json();
                   this.starredSet = new Set(data.starred_paths || []);
-                } catch(e) {}
+                } catch (e) {}
               }
 
               switchDriveSection(section, updateHash = true) {
+                this.currentSection = section;
+                this.sidebar.classList.remove('open');
+                this.sidebarBackdrop.classList.remove('active');
+                this.selectedItems.clear();
+                this.updateBatchBar();
+
+                document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash').forEach(el => el.classList.remove('active'));
+                document.getElementById(`nav-${section}`)?.classList.add('active');
+
                 if (updateHash) {
                   const targetHash = section === 'home' ? '#/' : `#/${section}`;
                   if (window.location.hash !== targetHash) {
                     window.location.hash = targetHash;
-                    return;
                   }
                 }
-
-                this.currentSection = section;
-                this.sidebar.classList.remove('open');
-                this.sidebarBackdrop.classList.remove('active');
-                document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash').forEach(el => el.classList.remove('active'));
-                document.getElementById(`nav-${section}`)?.classList.add('active');
 
                 this.filter = 'all';
                 document.querySelectorAll('.filter-item[data-filter]').forEach(p => {
@@ -18606,7 +18743,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.currentSection = 'activity';
                 this.updateControlsVisibility();
                 this.currentPath = '';
-                this.clearSelection();
+                this.selectedItems.clear();
+                this.updateBatchBar();
                 this.isSearching = false;
                 this.dirTitle.innerText = 'File Activity';
                 this.dirStats.innerText = 'Tracking modified, edited, created, and uploaded files';
@@ -18615,6 +18753,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 const toolbar = document.querySelector('.toolbar-actions');
                 if (toolbar) toolbar.style.display = 'none';
+
+                this.container.className = 'gallery-container layout-list';
+                this.container.removeAttribute('data-cols');
 
                 this.container.innerHTML = `
                   <div class="center-state">
@@ -18635,11 +18776,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     if (p && !seenPaths.has(p)) {
                       seenPaths.add(p);
                       const ext = (p.split('.').pop() || '').toLowerCase();
-                      activityFiles.push({ path: p, name: act.name, type: this.getFileTypeByExt(ext) });
+                      activityFiles.push({
+                        path: p,
+                        name: act.name,
+                        type: this.getFileTypeByExt(ext)
+                      });
                     }
                   });
 
-                  this.data = { folders: [], files: activityFiles, stats: {} };
+                  this.data = {
+                    folders: [],
+                    files: activityFiles,
+                    stats: {}
+                  };
                   this.updateBadges();
 
                   this.renderActivityView();
@@ -18649,6 +18798,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               renderActivityView() {
+                this.container.className = 'gallery-container layout-list';
+                this.container.removeAttribute('data-cols');
                 const stats = this.activityStats || {};
                 let activities = this.rawActivities || [];
 
@@ -18717,7 +18868,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.currentSection = 'recents';
                 this.updateControlsVisibility();
                 this.currentPath = '';
-                this.clearSelection();
+                this.selectedItems.clear();
+                this.updateBatchBar();
                 this.renderLimit = 25;
                 this.isSearching = false;
                 this.dirTitle.innerText = 'Recents';
@@ -18760,7 +18912,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.currentSection = 'starred';
                 this.updateControlsVisibility();
                 this.currentPath = '';
-                this.clearSelection();
+                this.selectedItems.clear();
+                this.updateBatchBar();
                 this.renderLimit = 25;
                 this.isSearching = false;
                 this.dirTitle.innerText = 'Starred Items';
@@ -18831,7 +18984,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.currentSection = 'trash';
                 this.updateControlsVisibility();
                 this.currentPath = '';
-                this.clearSelection();
+                this.selectedItems.clear();
+                this.updateBatchBar();
                 this.isSearching = false;
                 this.dirTitle.innerText = 'Trash Bin';
                 this.dirStats.innerText = 'Items are permanently deleted after 30 days';
@@ -18841,7 +18995,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const toolbar = document.querySelector('.toolbar-actions');
                 if (toolbar) toolbar.style.display = 'none';
 
-                this.container.className = 'gallery-container layout-grid';
+                // Clean list presentation for trash
+                this.container.className = 'gallery-container';
                 this.container.removeAttribute('data-cols');
                 this.container.innerHTML = `
                   <div class="center-state">
@@ -19244,6 +19399,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 const isEnc = (name || '').endsWith('.enc');
                 const isStarred = this.starredSet.has(path);
+                const isMulti = this.selectedItems.size > 1;
 
                 const addItem = (iconSvg, text, action, isDanger = false) => {
                   const div = document.createElement('div');
@@ -19260,6 +19416,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const starSvg = isStarred
                   ? '<svg viewBox="0 0 24 24" style="color:#f59e0b;"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>'
                   : '<svg viewBox="0 0 24 24"><path d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>';
+
+                const addDeleteAction = () => {
+                  addItem(
+                    '<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>',
+                    this.currentSection === 'trash' ? (isMulti ? 'Delete Selected Forever' : 'Delete Forever') : (isMulti ? 'Move Selected to Trash' : 'Move to Trash'),
+                    () => {
+                      if (isMulti) {
+                        this.batchDelete();
+                      } else {
+                        if (this.currentSection === 'trash') {
+                          this.deleteItem(path);
+                        } else {
+                          this.api('trash', { items: [path] }, () => {
+                            this.toast('Moved to Trash');
+                            this.refresh();
+                          });
+                        }
+                      }
+                    },
+                    true
+                  );
+                };
 
                 if (type === 'folder') {
                   addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Preview / Open', () => this.navigate(path));
@@ -19279,7 +19457,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   addItem('<svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>', 'Info', () => this.showDetails(path));
                   addItem('<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>', 'Copy', () => this.setClipboardSingle('copy', path));
                   addItem('<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm0 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3h-3z"/></svg>', 'Cut (Move)', () => this.setClipboardSingle('cut', path));
-                  addItem('<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>', 'Move to Trash', () => this.api('trash', { items: [path] }, () => { this.toast('Moved to Trash'); this.refresh(); }), true);
+                  addDeleteAction();
                 } else {
                   if (fileType === 'archive' || ['zip', 'rar', 'tar', 'gz', 'tgz', '7z'].includes((name.split('.').pop() || '').toLowerCase())) {
                     addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Inspect Archive', () => this.previewArchive(path, name));
@@ -19309,7 +19487,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   addItem('<svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>', 'Info', () => this.showDetails(path));
                   addItem('<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>', 'Copy', () => this.setClipboardSingle('copy', path));
                   addItem('<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm0 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3h-3z"/></svg>', 'Cut (Move)', () => this.setClipboardSingle('cut', path));
-                  addItem('<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>', 'Move to Trash', () => this.api('trash', { items: [path] }, () => { this.toast('Moved to Trash'); this.refresh(); }), true);
+                  addDeleteAction();
                 }
 
                 this.contextMenu.style.left = '-9999px';
@@ -20001,12 +20179,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 };
               }
 
-              updateMetrics() {
+              updateMetrics(isSavedState = false) {
                 const val = this.editor.getValue();
                 const words = val.trim() ? val.trim().split(/\s+/).length : 0;
                 const el = document.getElementById('editor-metrics');
                 if (el) {
-                  el.innerText = `${val.length.toLocaleString()} chars • ${words.toLocaleString()} words`;
+                  if (isSavedState) {
+                    el.innerHTML = `<span style="color:#22c55e; font-weight:700; display:inline-flex; align-items:center; gap:3px;"><svg viewBox="0 0 24 24" style="width:12px;height:12px;fill:#22c55e;"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg> Saved</span> • ${val.length.toLocaleString()} chars • ${words.toLocaleString()} words`;
+                  } else {
+                    el.innerText = `${val.length.toLocaleString()} chars • ${words.toLocaleString()} words`;
+                  }
                 }
               }
 
