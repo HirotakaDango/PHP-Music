@@ -452,7 +452,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '9.4');
+define('APP_VERSION', '9.5');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -677,7 +677,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   }
 
   // ==========================================
-  // PHP DRIVE (PHPFILES) BACKEND CONTROLLER
+  // PHPMusic Drive (PHPFILES) BACKEND CONTROLLER
   // ==========================================
   if (isset($_GET['page']) && $_GET['page'] === 'drive' || isset($_GET['share'])) {
     if (!$is_admin_logged_in && !isset($_GET['share'])) {
@@ -1552,6 +1552,59 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           'files'   => $foundFiles,
           'query'   => $query,
           'count'   => $count
+        ]);
+      }
+
+      if ($driveAction === 'gallery_list') {
+        $maxResults = 2000;
+        $foundFiles = [];
+        $rootLen = strlen(realpath($driveConfig['root_dir']));
+        $cacheReal = realpath($driveConfig['cache_dir']);
+        $trashReal = realpath($driveConfig['trash_dir']);
+
+        $flags = FilesystemIterator::SKIP_DOTS | FilesystemIterator::FOLLOW_SYMLINKS;
+        $dirIterator = new RecursiveDirectoryIterator($driveConfig['root_dir'], $flags);
+        $filterIterator = new RecursiveCallbackFilterIterator($dirIterator, function ($current) use ($cacheReal, $trashReal) {
+          $path = $current->getPathname();
+          $filename = $current->getFilename();
+          if ($filename[0] === '.' || ($cacheReal && strpos($path, $cacheReal) === 0) || ($trashReal && strpos($path, $trashReal) === 0)) {
+            return false;
+          }
+          return true;
+        });
+
+        $iterator = new RecursiveIteratorIterator($filterIterator, RecursiveIteratorIterator::SELF_FIRST);
+        $iterator->setMaxDepth(10);
+
+        $count = 0;
+        foreach ($iterator as $item) {
+          if ($item->isDir()) continue;
+          $ext = strtolower($item->getExtension());
+          if (in_array($ext, $driveConfig['image_extensions'])) {
+            if ($count >= $maxResults) break;
+            $size = $item->getSize();
+            $rel = ltrim(str_replace(['\\', '//'], '/', substr($item->getRealPath(), $rootLen)), '/');
+            $foundFiles[] = [
+              'name'     => $item->getFilename(),
+              'path'     => $rel,
+              'size'     => $size,
+              'size_fmt' => driveFormatBytes($size),
+              'mtime'    => $item->getMTime(),
+              'ext'      => $ext,
+              'type'     => 'image',
+              'width'    => 0,
+              'height'   => 0
+            ];
+            $count++;
+          }
+        }
+
+        usort($foundFiles, fn($a, $b) => $b['mtime'] - $a['mtime']);
+
+        driveJsonResponse([
+          'folders' => [],
+          'files'   => $foundFiles,
+          'stats'   => ['files' => count($foundFiles), 'folders' => 0, 'total_size' => '']
         ]);
       }
 
@@ -2622,18 +2675,29 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           driveJsonResponse(['error' => 'Cannot create zip archive'], 500);
         }
 
+        $parentBase = rtrim(str_replace(['\\', '//'], '/', realpath($parent)), '/');
+        $filesAdded = 0;
+
         foreach ($items as $rel) {
           $full = driveSafePath($driveConfig['root_dir'], $rel);
           if ($full && file_exists($full)) {
             if (is_dir($full)) {
-              $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, RecursiveDirectoryIterator::SKIP_DOTS));
+              $dirIter = new RecursiveDirectoryIterator($full, RecursiveDirectoryIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS);
+              $files = new RecursiveIteratorIterator($dirIter);
               foreach ($files as $f) {
-                $zip->addFile($f->getPathname(), substr($f->getPathname(), strlen($parent) + 1));
+                if (!$f->isFile()) continue;
+                $filePath = str_replace(['\\', '//'], '/', $f->getRealPath());
+                $localName = ltrim(str_replace($parentBase, '', $filePath), '/');
+                if ($zip->addFile($f->getRealPath(), $localName)) $filesAdded++;
               }
             } else {
-              $zip->addFile($full, basename($full));
+              if ($zip->addFile($full, basename($full))) $filesAdded++;
             }
           }
+        }
+
+        if ($filesAdded === 0) {
+          $zip->addFromString('empty.txt', 'No files could be read or selected.');
         }
         $zip->close();
         driveLogActivity($driveConfig['meta_file'], 'uploaded', $destPath, 'Created ZIP archive');
@@ -2843,31 +2907,51 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         if (!$dir || !is_dir($dir) || !class_exists('ZipArchive')) driveJsonResponse(['error' => 'Invalid directory'], 400);
 
         $zipName = (basename($dir) ?: 'drive_backup') . '.zip';
-        $tempZip = tempnam(sys_get_temp_dir(), 'zip_');
+        $tempZip = $driveConfig['cache_dir'] . DIRECTORY_SEPARATOR . uniqid('dl_') . '.zip';
         $zip = new ZipArchive();
-        $zip->open($tempZip, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+        if ($zip->open($tempZip, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+          driveJsonResponse(['error' => 'Cannot create temp zip file'], 500);
+        }
+
+        $dirBase = rtrim(str_replace(['\\', '//'], '/', realpath($dir)), '/');
+        $cacheBase = realpath($driveConfig['cache_dir']);
+        if ($cacheBase) $cacheBase = rtrim(str_replace(['\\', '//'], '/', $cacheBase), '/');
+
+        $filesAdded = 0;
 
         if ($items && is_array($items)) {
           foreach ($items as $rel) {
             $full = driveSafePath($driveConfig['root_dir'], $rel);
             if ($full && file_exists($full)) {
               if (is_dir($full)) {
-                $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($full, RecursiveDirectoryIterator::SKIP_DOTS));
+                $dirIter = new RecursiveDirectoryIterator($full, RecursiveDirectoryIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS);
+                $files = new RecursiveIteratorIterator($dirIter);
                 foreach ($files as $f) {
-                  if (strpos($f->getPathname(), realpath($driveConfig['cache_dir'])) === 0) continue;
-                  $zip->addFile($f->getPathname(), substr($f->getPathname(), strlen($dir) + 1));
+                  if (!$f->isFile()) continue;
+                  $filePath = str_replace(['\\', '//'], '/', $f->getRealPath());
+                  if ($cacheBase && strpos($filePath, $cacheBase) === 0) continue;
+                  $localName = ltrim(str_replace($dirBase, '', $filePath), '/');
+                  if ($zip->addFile($f->getRealPath(), $localName)) $filesAdded++;
                 }
               } else {
-                $zip->addFile($full, basename($full));
+                if ($zip->addFile($full, basename($full))) $filesAdded++;
               }
             }
           }
         } else {
-          $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, RecursiveDirectoryIterator::SKIP_DOTS));
+          $dirIter = new RecursiveDirectoryIterator($dir, RecursiveDirectoryIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS);
+          $files = new RecursiveIteratorIterator($dirIter);
           foreach ($files as $f) {
-            if (strpos($f->getPathname(), realpath($driveConfig['cache_dir'])) === 0) continue;
-            $zip->addFile($f->getPathname(), substr($f->getPathname(), strlen($dir) + 1));
+            if (!$f->isFile()) continue;
+            $filePath = str_replace(['\\', '//'], '/', $f->getRealPath());
+            if ($cacheBase && strpos($filePath, $cacheBase) === 0) continue;
+            $localName = ltrim(str_replace($dirBase, '', $filePath), '/');
+            if ($zip->addFile($f->getRealPath(), $localName)) $filesAdded++;
           }
+        }
+
+        if ($filesAdded === 0) {
+          $zip->addFromString('empty.txt', 'No files could be read or selected.');
         }
         $zip->close();
 
@@ -3798,117 +3882,284 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         margin-bottom: 0;
       }
 
+      /* Unified Drive UI Design System */
+      :root {
+        --drive-bg: #050505;
+        --drive-card: #101010;
+        --drive-card-subtle: #090909;
+        --drive-card-elevated: #181818;
+        --drive-border: #222222;
+        --drive-border-subtle: #1a1a1a;
+        --drive-primary: #ff0000;
+        --drive-text-main: #f1f1f1;
+        --drive-text-muted: #aaaaaa;
+      }
+
+      .admin-toolbar-wrap {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        margin-bottom: 1.25rem;
+      }
+
+      .admin-pill-input {
+        background: var(--drive-card-elevated) !important;
+        border: 1px solid var(--drive-border) !important;
+        color: #ffffff !important;
+        border-radius: 28px !important;
+        height: 40px !important;
+        padding: 0 1rem !important;
+        font-size: 0.88rem !important;
+        transition: all 0.2s ease;
+      }
+
+      .admin-pill-input:focus {
+        border-color: var(--drive-primary) !important;
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--drive-primary) 30%, transparent) !important;
+      }
+
+      .admin-pill-select {
+        background-color: var(--drive-card-elevated) !important;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23aaaaaa'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E") !important;
+        background-repeat: no-repeat !important;
+        background-position: right 0.9rem center !important;
+        background-size: 18px 18px !important;
+        border: 1px solid var(--drive-border) !important;
+        color: #ffffff !important;
+        border-radius: 28px !important;
+        height: 40px !important;
+        padding: 0 2.6rem 0 1.1rem !important;
+        font-size: 0.85rem !important;
+        font-weight: 500;
+        cursor: pointer;
+        -webkit-appearance: none;
+        appearance: none;
+      }
+
+      .admin-btn-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        height: 38px;
+        padding: 0 1rem;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        border: 1px solid var(--drive-border);
+        background: var(--drive-card-elevated);
+        color: #ffffff;
+        transition: all 0.15s ease;
+        text-decoration: none;
+      }
+
+      .admin-btn-pill:hover {
+        background: color-mix(in srgb, var(--drive-primary) 20%, transparent);
+        border-color: var(--drive-primary);
+        color: #ffffff;
+      }
+
+      .admin-btn-primary {
+        background: var(--drive-primary) !important;
+        border-color: var(--drive-primary) !important;
+        color: #ffffff !important;
+      }
+
+      .admin-btn-primary:hover {
+        background: color-mix(in srgb, var(--drive-primary) 85%, transparent) !important;
+        box-shadow: 0 4px 12px color-mix(in srgb, var(--drive-primary) 40%, transparent);
+      }
+
+      .admin-card {
+        background: var(--drive-card);
+        border: 1px solid var(--drive-border);
+        border-radius: 16px;
+        overflow: hidden;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+      }
+
+      .admin-table {
+        width: 100%;
+        margin-bottom: 0;
+        border-collapse: collapse;
+      }
+
+      .admin-table thead th {
+        background: #141414;
+        color: var(--drive-text-muted);
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        padding: 0.85rem 1.1rem;
+        border-bottom: 1px solid var(--drive-border);
+        border-top: none;
+      }
+
+      .admin-table tbody td {
+        padding: 0.85rem 1.1rem;
+        border-bottom: 1px solid var(--drive-border-subtle);
+        font-size: 0.88rem;
+        color: var(--drive-text-main);
+        vertical-align: middle;
+      }
+
+      .admin-table tbody tr:hover td {
+        background: color-mix(in srgb, var(--drive-primary) 5%, #101010);
+      }
+
+      .admin-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 0.72rem;
+        font-weight: 700;
+        padding: 0.25rem 0.65rem;
+        border-radius: 12px;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+      }
+
+      .admin-badge-success {
+        background: color-mix(in srgb, #22c55e 18%, transparent);
+        color: #4ade80;
+        border: 1px solid color-mix(in srgb, #22c55e 35%, transparent);
+      }
+
+      .admin-badge-danger {
+        background: color-mix(in srgb, #ef4444 18%, transparent);
+        color: #f87171;
+        border: 1px solid color-mix(in srgb, #ef4444 35%, transparent);
+      }
+
+      .admin-badge-warning {
+        background: color-mix(in srgb, #f59e0b 18%, transparent);
+        color: #fbbf24;
+        border: 1px solid color-mix(in srgb, #f59e0b 35%, transparent);
+      }
+
+      .admin-badge-info {
+        background: color-mix(in srgb, #06b6d4 18%, transparent);
+        color: #38bdf8;
+        border: 1px solid color-mix(in srgb, #06b6d4 35%, transparent);
+      }
+
+      .admin-badge-primary {
+        background: color-mix(in srgb, var(--drive-primary) 20%, transparent);
+        color: #ff4d4d;
+        border: 1px solid color-mix(in srgb, var(--drive-primary) 40%, transparent);
+      }
+
+      .admin-badge-secondary {
+        background: #1e1e1e;
+        color: #888888;
+        border: 1px solid #333333;
+      }
+
       .user-list {
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 0.6rem;
       }
 
       .user-list-header {
         display: grid;
-        grid-template-columns: 40px 50px 40px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 80px 60px;
+        grid-template-columns: 40px 50px 45px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 70px 60px;
         align-items: center;
         gap: 1rem;
-        padding: 0 1rem 0.5rem 1rem;
+        padding: 0 1.25rem 0.5rem 1.25rem;
         font-weight: 700;
-        color: var(--ytm-secondary-text);
-        font-size: 0.85rem;
+        color: var(--drive-text-muted);
+        font-size: 0.75rem;
         text-transform: uppercase;
-        letter-spacing: 1px;
-        border-bottom: 2px solid var(--ytm-surface-2);
+        letter-spacing: 0.6px;
       }
 
       .user-item {
         display: grid;
-        grid-template-columns: 40px 50px 40px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 80px 60px;
+        grid-template-columns: 40px 50px 45px minmax(0, 2fr) minmax(0, 2fr) 180px 100px 70px 60px;
         align-items: center;
         gap: 1rem;
-        padding: 0.85rem 1rem;
-        background-color: var(--ytm-surface);
-        border: 1px solid var(--ytm-surface-2);
-        border-radius: 12px;
-        transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
-        color: var(--ytm-primary-text);
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        padding: 0.75rem 1.25rem;
+        background-color: var(--drive-card);
+        border: 1px solid var(--drive-border);
+        border-radius: 14px;
+        transition: all 0.15s ease;
+        color: var(--drive-text-main);
       }
       
       .user-item:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 15px rgba(0,0,0,0.3);
-        border-color: #555;
-      }
-
-      .user-item .badge {
-        font-size: 0.75rem;
-        padding: 0.4em 0.6em;
-        letter-spacing: 0.5px;
+        background-color: color-mix(in srgb, var(--drive-primary) 5%, #101010);
+        border-color: color-mix(in srgb, var(--drive-primary) 30%, transparent);
       }
 
       .user-item .dropdown-menu {
         font-size: 0.85rem;
-        border: 1px solid #555;
-        border-radius: 10px;
-        z-index: 1060;
+        border: 1px solid var(--drive-border);
+        border-radius: 14px;
+        background: #181818;
+        padding: 0.4rem;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8);
       }
 
       .user-item .dropdown-item {
-        padding: 0.5rem 1rem;
-        transition: background 0.2s;
+        padding: 0.55rem 0.85rem;
+        border-radius: 8px;
+        transition: all 0.15s ease;
+        font-weight: 500;
       }
 
       .user-item .dropdown-item:hover {
-        background-color: var(--ytm-surface-2);
+        background: color-mix(in srgb, var(--drive-primary) 20%, transparent);
+        color: #ffffff;
       }
 
-      .login-container {
+      .admin-pagination {
         display: flex;
         align-items: center;
         justify-content: center;
-        min-height: 100vh;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+        margin-top: 1.5rem;
       }
 
-      .login-card {
-        background-color: var(--ytm-surface);
-        width: 100%;
-        max-width: 400px;
-        padding: 2rem;
-        border-radius: 8px;
+      .admin-page-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 36px;
+        height: 36px;
+        padding: 0 8px;
+        background: var(--drive-card);
+        border: 1px solid var(--drive-border);
+        border-radius: 10px;
+        color: var(--drive-text-muted);
+        font-size: 0.85rem;
+        cursor: pointer;
+        text-decoration: none;
+        transition: all 0.15s ease;
+        font-weight: 700;
       }
 
-      .form-control {
-        background-color: var(--ytm-surface-2);
-        border: 1px solid #404040;
-        color: var(--ytm-primary-text);
+      .admin-page-btn:hover {
+        background: color-mix(in srgb, var(--drive-primary) 20%, transparent);
+        border-color: var(--drive-primary);
+        color: #ffffff;
+        text-decoration: none;
       }
 
-      .form-control:focus {
-        background-color: var(--ytm-surface-2);
-        border-color: #666;
-        color: var(--ytm-primary-text);
-        box-shadow: none;
+      .admin-page-btn.active {
+        background: var(--drive-primary);
+        border-color: var(--drive-primary);
+        color: #ffffff;
+        box-shadow: 0 0 10px rgba(255, 0, 0, 0.5);
       }
 
-      .pagination .page-link {
-        background-color: var(--ytm-surface-2);
-        border-color: #404040;
-        color: var(--ytm-primary-text);
+      .admin-page-btn.disabled {
+        opacity: 0.35;
+        pointer-events: none;
       }
-
-      .pagination .page-item.active .page-link {
-        background-color: var(--ytm-accent);
-        border-color: var(--ytm-accent);
-      }
-
-      .pagination .page-item.disabled .page-link {
-        background-color: var(--ytm-surface);
-        border-color: #404040;
-        color: var(--ytm-secondary-text);
-      }
-      .admin-pagination { display: flex; align-items: center; justify-content: center; gap: 0.35rem; flex-wrap: wrap; margin-top: 1rem; }
-      .admin-page-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 32px; padding: 0 8px; background: var(--ytm-surface-2); border: 1px solid #404040; border-radius: 6px; color: var(--ytm-secondary-text); font-size: 0.85rem; cursor: pointer; text-decoration: none; transition: 0.2s; font-weight: bold; }
-      .admin-page-btn:hover { background: #404040; color: #fff; text-decoration: none; }
-      .admin-page-btn.active { background: var(--ytm-accent); border-color: var(--ytm-accent); color: #fff; }
-      .admin-page-btn.disabled { opacity: 0.4; pointer-events: none; }
 
       @media (min-width: 992px) {
         .app-container {
@@ -4500,177 +4751,296 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php endif; ?>
 
         <?php if (($_GET['page'] ?? '') === 'reports'): ?>
-          <div class="page-header"><h1 class="content-title m-0">Pending Profile Reports</h1></div>
+          <?php 
+            $rep_search = trim($_GET['search'] ?? '');
+            $rep_sort = $_GET['sort'] ?? 'newest';
+          ?>
+          <div class="page-header admin-toolbar-wrap">
+            <div>
+              <h1 class="content-title m-0 fw-bold">Pending Profile Reports</h1>
+              <div class="small text-secondary mt-1">Review reported infractions and accounts</div>
+            </div>
+            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
+              <input type="hidden" name="access" value="admin">
+              <input type="hidden" name="page" value="reports">
+              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                <option value="newest" <?php echo $rep_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                <option value="oldest" <?php echo $rep_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                <option value="reported" <?php echo $rep_sort === 'reported' ? 'selected' : ''; ?>>Reported Name (A-Z)</option>
+                <option value="reporter" <?php echo $rep_sort === 'reporter' ? 'selected' : ''; ?>>Reporter Name (A-Z)</option>
+              </select>
+              <div class="position-relative flex-grow-1">
+                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search accounts, emails, reason..." value="<?php echo htmlspecialchars($rep_search); ?>">
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+              </div>
+            </form>
+          </div>
           <div class="content-area-wrapper">
-            <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
-              <table class="table table-dark table-striped m-0 align-middle">
-                <thead class="border-bottom border-secondary">
-                  <tr><th class="py-3 px-4">Time</th><th class="py-3 px-4">Reporter</th><th class="py-3 px-4">Reported Account</th><th class="py-3 px-4">Reason for Infraction</th><th class="py-3 px-4 text-end">Actions</th></tr>
-                </thead>
-                <tbody>
-                  <?php
-                    $rep_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                    $rep_limit = 25;
-                    $rep_offset = ($rep_page - 1) * $rep_limit;
-                    $db = get_db();
-                    
-                    $total_reps = $db->query("SELECT COUNT(id) FROM user_reports WHERE status = 'pending'")->fetchColumn();
-                    $total_rep_pages = ceil($total_reps / $rep_limit);
-                    
-                    $stmt_reps = $db->prepare("
-                      SELECT r.*, u1.artist as reporter_name, u1.email as reporter_email, u2.artist as reported_name, u2.email as reported_email, u2.banned as is_banned 
-                      FROM user_reports r
-                      JOIN users u1 ON r.reporter_id = u1.id
-                      JOIN users u2 ON r.reported_id = u2.id
-                      WHERE r.status = 'pending'
-                      ORDER BY r.created_at DESC LIMIT ? OFFSET ?
-                    ");
-                    $stmt_reps->bindValue(1, (int)$rep_limit, PDO::PARAM_INT);
-                    $stmt_reps->bindValue(2, (int)$rep_offset, PDO::PARAM_INT);
-                    $stmt_reps->execute();
-                    $reps = $stmt_reps->fetchAll();
-                    
-                    if (empty($reps)): ?>
-                      <tr><td colspan="5" class="text-center py-4 text-secondary">No pending user reports found. All clean!</td></tr>
-                  <?php else: foreach ($reps as $r): ?>
-                  <tr>
-                    <td class="py-3 px-4 text-secondary small"><?php echo $r['created_at']; ?></td>
-                    <td class="py-3 px-4">
-                      <span class="fw-bold"><?php echo htmlspecialchars($r['reporter_name']); ?></span><br>
-                      <small class="text-secondary"><?php echo htmlspecialchars($r['reporter_email']); ?></small>
-                    </td>
-                    <td class="py-3 px-4">
-                      <span class="fw-bold text-info"><?php echo htmlspecialchars($r['reported_name']); ?></span>
-                      <?php if ($r['is_banned']): ?><span class="badge bg-danger ms-1">Banned</span><?php endif; ?><br>
-                      <small class="text-secondary">ID: <?php echo $r['reported_id']; ?> | <?php echo htmlspecialchars($r['reported_email']); ?></small>
-                    </td>
-                    <td class="py-3 px-4 text-warning" style="white-space: pre-wrap;"><?php echo htmlspecialchars($r['reason']); ?></td>
-                    <td class="py-3 px-4 text-end">
-                      <form method="POST" action="" class="m-0 d-flex gap-2 justify-content-end">
-                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                        <input type="hidden" name="report_id" value="<?php echo $r['id']; ?>">
-                        <input type="hidden" name="user_id" value="<?php echo $r['reported_id']; ?>">
-                        
-                        <?php if (!$r['is_banned']): ?>
-                          <button type="submit" name="toggle_ban" class="btn btn-sm btn-danger">Ban</button>
-                        <?php endif; ?>
-                        <button type="submit" name="resolve_report" class="btn btn-sm btn-success">Dismiss</button>
-                      </form>
-                    </td>
-                  </tr>
-                  <?php endforeach; endif; ?>
-                </tbody>
-              </table>
+            <div class="admin-card mb-4">
+              <div class="table-responsive">
+                <table class="admin-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 160px;">Time</th>
+                      <th>Reporter</th>
+                      <th>Reported Account</th>
+                      <th>Reason</th>
+                      <th class="text-end" style="width: 180px;">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php
+                      $rep_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                      $rep_limit = 25;
+                      $rep_offset = ($rep_page - 1) * $rep_limit;
+                      $db = get_db();
+
+                      $where_sql = "WHERE r.status = 'pending'";
+                      $params = [];
+                      if ($rep_search !== '') {
+                        $where_sql .= " AND (u1.artist LIKE ? OR u1.email LIKE ? OR u2.artist LIKE ? OR u2.email LIKE ? OR r.reason LIKE ?)";
+                        $params = ["%$rep_search%", "%$rep_search%", "%$rep_search%", "%$rep_search%", "%$rep_search%"];
+                      }
+
+                      $sort_map = [
+                        'newest' => 'r.created_at DESC',
+                        'oldest' => 'r.created_at ASC',
+                        'reported' => 'u2.artist COLLATE NOCASE ASC',
+                        'reporter' => 'u1.artist COLLATE NOCASE ASC'
+                      ];
+                      $order_sql = $sort_map[$rep_sort] ?? 'r.created_at DESC';
+
+                      $stmt_count = $db->prepare("
+                        SELECT COUNT(r.id) 
+                        FROM user_reports r
+                        JOIN users u1 ON r.reporter_id = u1.id
+                        JOIN users u2 ON r.reported_id = u2.id
+                        $where_sql
+                      ");
+                      $stmt_count->execute($params);
+                      $total_reps = $stmt_count->fetchColumn();
+                      $total_rep_pages = ceil($total_reps / $rep_limit);
+
+                      $stmt_reps = $db->prepare("
+                        SELECT r.*, u1.artist as reporter_name, u1.email as reporter_email, u2.artist as reported_name, u2.email as reported_email, u2.banned as is_banned 
+                        FROM user_reports r
+                        JOIN users u1 ON r.reporter_id = u1.id
+                        JOIN users u2 ON r.reported_id = u2.id
+                        $where_sql
+                        ORDER BY $order_sql LIMIT ? OFFSET ?
+                      ");
+                      $p_idx = 1;
+                      foreach ($params as $pv) {
+                        $stmt_reps->bindValue($p_idx++, $pv, PDO::PARAM_STR);
+                      }
+                      $stmt_reps->bindValue($p_idx++, (int)$rep_limit, PDO::PARAM_INT);
+                      $stmt_reps->bindValue($p_idx++, (int)$rep_offset, PDO::PARAM_INT);
+                      $stmt_reps->execute();
+                      $reps = $stmt_reps->fetchAll();
+                      
+                      if (empty($reps)): ?>
+                        <tr><td colspan="5" class="text-center py-5 text-secondary"><i class="bi bi-shield-check fs-2 d-block mb-2 text-success opacity-50"></i>No matching profile reports found.</td></tr>
+                    <?php else: foreach ($reps as $r): ?>
+                    <tr>
+                      <td class="text-secondary small font-monospace"><?php echo htmlspecialchars($r['created_at']); ?></td>
+                      <td>
+                        <span class="fw-bold text-white"><?php echo htmlspecialchars($r['reporter_name']); ?></span><br>
+                        <small class="text-secondary"><?php echo htmlspecialchars($r['reporter_email']); ?></small>
+                      </td>
+                      <td>
+                        <div class="d-flex align-items-center gap-2">
+                          <span class="fw-bold text-info"><?php echo htmlspecialchars($r['reported_name']); ?></span>
+                          <?php if ($r['is_banned']): ?><span class="admin-badge admin-badge-danger">Banned</span><?php endif; ?>
+                        </div>
+                        <small class="text-secondary">ID: <?php echo $r['reported_id']; ?> • <?php echo htmlspecialchars($r['reported_email']); ?></small>
+                      </td>
+                      <td class="text-warning" style="white-space: pre-wrap; font-size: 0.85rem;"><?php echo htmlspecialchars($r['reason']); ?></td>
+                      <td class="text-end">
+                        <form method="POST" action="" class="m-0 d-flex gap-2 justify-content-end">
+                          <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                          <input type="hidden" name="report_id" value="<?php echo $r['id']; ?>">
+                          <input type="hidden" name="user_id" value="<?php echo $r['reported_id']; ?>">
+                          
+                          <?php if (!$r['is_banned']): ?>
+                            <button type="submit" name="toggle_ban" class="admin-btn-pill admin-btn-primary" style="height: 32px; padding: 0 0.75rem;">Ban</button>
+                          <?php endif; ?>
+                          <button type="submit" name="resolve_report" class="admin-btn-pill" style="height: 32px; padding: 0 0.75rem; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);">Dismiss</button>
+                        </form>
+                      </td>
+                    </tr>
+                    <?php endforeach; endif; ?>
+                  </tbody>
+                </table>
+              </div>
             </div>
             <?php if ($total_rep_pages > 1): ?>
             <div class="admin-pagination">
-              <a class="admin-page-btn <?php echo ($rep_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&p=1">«</a>
-              <a class="admin-page-btn <?php echo ($rep_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&p=<?php echo $rep_page - 1; ?>">‹</a>
+              <a class="admin-page-btn <?php echo ($rep_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&search=<?php echo urlencode($rep_search); ?>&sort=<?php echo urlencode($rep_sort); ?>&p=1">«</a>
+              <a class="admin-page-btn <?php echo ($rep_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&search=<?php echo urlencode($rep_search); ?>&sort=<?php echo urlencode($rep_sort); ?>&p=<?php echo $rep_page - 1; ?>">‹</a>
               <?php
                 $start_p = max(1, $rep_page - 2);
                 $end_p = min($total_rep_pages, $start_p + 4);
                 if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
               ?>
               <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
-                <a class="admin-page-btn <?php echo ($rep_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=reports&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                <a class="admin-page-btn <?php echo ($rep_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=reports&search=<?php echo urlencode($rep_search); ?>&sort=<?php echo urlencode($rep_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
               <?php endfor; ?>
-              <a class="admin-page-btn <?php echo ($rep_page >= $total_rep_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&p=<?php echo $rep_page + 1; ?>">›</a>
-              <a class="admin-page-btn <?php echo ($rep_page >= $total_rep_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&p=<?php echo $total_rep_pages; ?>">»</a>
+              <a class="admin-page-btn <?php echo ($rep_page >= $total_rep_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&search=<?php echo urlencode($rep_search); ?>&sort=<?php echo urlencode($rep_sort); ?>&p=<?php echo $rep_page + 1; ?>">›</a>
+              <a class="admin-page-btn <?php echo ($rep_page >= $total_rep_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=reports&search=<?php echo urlencode($rep_search); ?>&sort=<?php echo urlencode($rep_sort); ?>&p=<?php echo $total_rep_pages; ?>">»</a>
             </div>
             <?php endif; ?>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'appeals'): ?>
-          <div class="page-header"><h1 class="content-title m-0">Pending Ban Appeals</h1></div>
+          <?php 
+            $app_search = trim($_GET['search'] ?? '');
+            $app_sort = $_GET['sort'] ?? 'newest';
+          ?>
+          <div class="page-header admin-toolbar-wrap">
+            <div>
+              <h1 class="content-title m-0 fw-bold">Pending Ban Appeals</h1>
+              <div class="small text-secondary mt-1">Review requests for unban submissions</div>
+            </div>
+            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
+              <input type="hidden" name="access" value="admin">
+              <input type="hidden" name="page" value="appeals">
+              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                <option value="newest" <?php echo $app_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                <option value="oldest" <?php echo $app_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                <option value="user_name" <?php echo $app_sort === 'user_name' ? 'selected' : ''; ?>>User Name (A-Z)</option>
+              </select>
+              <div class="position-relative flex-grow-1">
+                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search user, email, appeal..." value="<?php echo htmlspecialchars($app_search); ?>">
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+              </div>
+            </form>
+          </div>
           <div class="content-area-wrapper">
-            <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
-              <table class="table table-dark table-striped m-0 align-middle">
-                <thead class="border-bottom border-secondary">
-                  <tr><th class="py-3 px-4">Time</th><th class="py-3 px-4">User Details</th><th class="py-3 px-4">Appeal Text</th><th class="py-3 px-4 text-end">Actions</th></tr>
-                </thead>
-                <tbody>
-                  <?php
-                    $app_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                    $app_limit = 25;
-                    $app_offset = ($app_page - 1) * $app_limit;
-                    $db = get_db();
-                    
-                    $total_apps = $db->query("SELECT COUNT(id) FROM ban_appeals WHERE status = 'pending'")->fetchColumn();
-                    $total_app_pages = ceil($total_apps / $app_limit);
-                    
-                    $stmt_apps = $db->prepare("
-                      SELECT a.*, u.artist, u.email, u.banned 
-                      FROM ban_appeals a
-                      JOIN users u ON a.user_id = u.id
-                      WHERE a.status = 'pending'
-                      ORDER BY a.created_at DESC LIMIT ? OFFSET ?
-                    ");
-                    $stmt_apps->bindValue(1, (int)$app_limit, PDO::PARAM_INT);
-                    $stmt_apps->bindValue(2, (int)$app_offset, PDO::PARAM_INT);
-                    $stmt_apps->execute();
-                    $appeals = $stmt_apps->fetchAll();
-                    
-                    if (empty($appeals)): ?>
-                      <tr><td colspan="4" class="text-center py-4 text-secondary">No pending ban appeals.</td></tr>
-                  <?php else: foreach ($appeals as $a): ?>
-                  <tr>
-                    <td class="py-3 px-4 text-secondary small"><?php echo $a['created_at']; ?></td>
-                    <td class="py-3 px-4">
-                      <span class="fw-bold text-info"><?php echo htmlspecialchars($a['artist']); ?></span>
-                      <?php if ($a['banned']): ?><span class="badge bg-danger ms-1">Banned</span><?php endif; ?><br>
-                      <small class="text-secondary">ID: <?php echo $a['user_id']; ?> | <?php echo htmlspecialchars($a['email']); ?></small>
-                    </td>
-                    <td class="py-3 px-4 text-warning" style="white-space: pre-wrap;"><?php echo htmlspecialchars($a['appeal_text']); ?></td>
-                    <td class="py-3 px-4 text-end">
-                      <form method="POST" action="" class="m-0 d-flex gap-2 justify-content-end">
-                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                        <input type="hidden" name="appeal_id" value="<?php echo $a['id']; ?>">
-                        <input type="hidden" name="user_id" value="<?php echo $a['user_id']; ?>">
-                        
-                        <button type="submit" name="approve_appeal" class="btn btn-sm btn-success" onclick="return confirm('Are you sure you want to lift the ban for this user?');">Unban & Approve</button>
-                        <button type="submit" name="reject_appeal" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to reject this appeal?');">Reject</button>
-                      </form>
-                    </td>
-                  </tr>
-                  <?php endforeach; endif; ?>
-                </tbody>
-              </table>
+            <div class="admin-card mb-4">
+              <div class="table-responsive">
+                <table class="admin-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 160px;">Time</th>
+                      <th>User Details</th>
+                      <th>Appeal Statement</th>
+                      <th class="text-end" style="width: 220px;">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php
+                      $app_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                      $app_limit = 25;
+                      $app_offset = ($app_page - 1) * $app_limit;
+                      $db = get_db();
+
+                      $where_sql = "WHERE a.status = 'pending'";
+                      $params = [];
+                      if ($app_search !== '') {
+                        $where_sql .= " AND (u.artist LIKE ? OR u.email LIKE ? OR a.appeal_text LIKE ?)";
+                        $params = ["%$app_search%", "%$app_search%", "%$app_search%"];
+                      }
+
+                      $sort_map = [
+                        'newest' => 'a.created_at DESC',
+                        'oldest' => 'a.created_at ASC',
+                        'user_name' => 'u.artist COLLATE NOCASE ASC'
+                      ];
+                      $order_sql = $sort_map[$app_sort] ?? 'a.created_at DESC';
+
+                      $stmt_count = $db->prepare("
+                        SELECT COUNT(a.id) 
+                        FROM ban_appeals a
+                        JOIN users u ON a.user_id = u.id
+                        $where_sql
+                      ");
+                      $stmt_count->execute($params);
+                      $total_apps = $stmt_count->fetchColumn();
+                      $total_app_pages = ceil($total_apps / $app_limit);
+
+                      $stmt_apps = $db->prepare("
+                        SELECT a.*, u.artist, u.email, u.banned 
+                        FROM ban_appeals a
+                        JOIN users u ON a.user_id = u.id
+                        $where_sql
+                        ORDER BY $order_sql LIMIT ? OFFSET ?
+                      ");
+                      $p_idx = 1;
+                      foreach ($params as $pv) {
+                        $stmt_apps->bindValue($p_idx++, $pv, PDO::PARAM_STR);
+                      }
+                      $stmt_apps->bindValue($p_idx++, (int)$app_limit, PDO::PARAM_INT);
+                      $stmt_apps->bindValue($p_idx++, (int)$app_offset, PDO::PARAM_INT);
+                      $stmt_apps->execute();
+                      $appeals = $stmt_apps->fetchAll();
+                      
+                      if (empty($appeals)): ?>
+                        <tr><td colspan="4" class="text-center py-5 text-secondary"><i class="bi bi-inbox fs-2 d-block mb-2 text-secondary opacity-50"></i>No matching ban appeals found.</td></tr>
+                    <?php else: foreach ($appeals as $a): ?>
+                    <tr>
+                      <td class="text-secondary small font-monospace"><?php echo htmlspecialchars($a['created_at']); ?></td>
+                      <td>
+                        <div class="d-flex align-items-center gap-2">
+                          <span class="fw-bold text-info"><?php echo htmlspecialchars($a['artist']); ?></span>
+                          <?php if ($a['banned']): ?><span class="admin-badge admin-badge-danger">Banned</span><?php endif; ?>
+                        </div>
+                        <small class="text-secondary">ID: <?php echo $a['user_id']; ?> • <?php echo htmlspecialchars($a['email']); ?></small>
+                      </td>
+                      <td class="text-warning" style="white-space: pre-wrap; font-size: 0.85rem;"><?php echo htmlspecialchars($a['appeal_text']); ?></td>
+                      <td class="text-end">
+                        <form method="POST" action="" class="m-0 d-flex gap-2 justify-content-end">
+                          <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                          <input type="hidden" name="appeal_id" value="<?php echo $a['id']; ?>">
+                          <input type="hidden" name="user_id" value="<?php echo $a['user_id']; ?>">
+                          
+                          <button type="submit" name="approve_appeal" class="admin-btn-pill" style="height: 32px; padding: 0 0.75rem; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);" onclick="return confirm('Are you sure you want to lift the ban for this user?');">Approve</button>
+                          <button type="submit" name="reject_appeal" class="admin-btn-pill admin-btn-primary" style="height: 32px; padding: 0 0.75rem;" onclick="return confirm('Are you sure you want to reject this appeal?');">Reject</button>
+                        </form>
+                      </td>
+                    </tr>
+                    <?php endforeach; endif; ?>
+                  </tbody>
+                </table>
+              </div>
             </div>
             <?php if ($total_app_pages > 1): ?>
             <div class="admin-pagination">
-              <a class="admin-page-btn <?php echo ($app_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&p=1">«</a>
-              <a class="admin-page-btn <?php echo ($app_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&p=<?php echo $app_page - 1; ?>">‹</a>
+              <a class="admin-page-btn <?php echo ($app_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&search=<?php echo urlencode($app_search); ?>&sort=<?php echo urlencode($app_sort); ?>&p=1">«</a>
+              <a class="admin-page-btn <?php echo ($app_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&search=<?php echo urlencode($app_search); ?>&sort=<?php echo urlencode($app_sort); ?>&p=<?php echo $app_page - 1; ?>">‹</a>
               <?php
                 $start_p = max(1, $app_page - 2);
                 $end_p = min($total_app_pages, $start_p + 4);
                 if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
               ?>
               <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
-                <a class="admin-page-btn <?php echo ($app_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=appeals&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                <a class="admin-page-btn <?php echo ($app_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=appeals&search=<?php echo urlencode($app_search); ?>&sort=<?php echo urlencode($app_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
               <?php endfor; ?>
-              <a class="admin-page-btn <?php echo ($app_page >= $total_app_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&p=<?php echo $app_page + 1; ?>">›</a>
-              <a class="admin-page-btn <?php echo ($app_page >= $total_app_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&p=<?php echo $total_app_pages; ?>">»</a>
+              <a class="admin-page-btn <?php echo ($app_page >= $total_app_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&search=<?php echo urlencode($app_search); ?>&sort=<?php echo urlencode($app_sort); ?>&p=<?php echo $app_page + 1; ?>">›</a>
+              <a class="admin-page-btn <?php echo ($app_page >= $total_app_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=appeals&search=<?php echo urlencode($app_search); ?>&sort=<?php echo urlencode($app_sort); ?>&p=<?php echo $total_app_pages; ?>">»</a>
             </div>
             <?php endif; ?>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'songs'): ?>
-          <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
-            <h1 class="content-title m-0">Song Management</h1>
+          <div class="page-header admin-toolbar-wrap">
+            <div>
+              <h1 class="content-title m-0 fw-bold">Song Management</h1>
+              <div class="small text-secondary mt-1">Manage tracks, metadata, transfers, and moderation</div>
+            </div>
             <?php 
               $search_songs = $_GET['search'] ?? ''; 
               $sort_songs = $_GET['sort'] ?? 'newest';
             ?>
-            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 600px;">
+            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
               <input type="hidden" name="access" value="admin">
               <input type="hidden" name="page" value="songs">
-              <select name="sort" class="form-select bg-dark text-white border-secondary shadow-sm" style="width: auto;" onchange="this.form.submit()">
+              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
                 <option value="newest" <?php echo $sort_songs === 'newest' ? 'selected' : ''; ?>>Newest</option>
                 <option value="oldest" <?php echo $sort_songs === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
                 <option value="title_asc" <?php echo $sort_songs === 'title_asc' ? 'selected' : ''; ?>>Title (A-Z)</option>
                 <option value="artist_asc" <?php echo $sort_songs === 'artist_asc' ? 'selected' : ''; ?>>Artist (A-Z)</option>
               </select>
-              <div class="input-group shadow-sm">
-                <input type="text" name="search" class="form-control bg-dark text-white border-secondary" placeholder="Search by title, artist, album, user ID or email..." value="<?php echo htmlspecialchars($search_songs); ?>">
-                <button type="submit" class="btn btn-danger fw-bold px-3"><i class="bi bi-search"></i></button>
+              <div class="position-relative flex-grow-1">
+                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search title, artist, album, uploader..." value="<?php echo htmlspecialchars($search_songs); ?>">
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
               </div>
             </form>
           </div>
@@ -4678,100 +5048,102 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <form method="POST" action="" id="admin-songs-form">
               <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
               <div class="mb-3 d-flex flex-wrap gap-2">
-                <button type="button" class="btn btn-sm btn-outline-light fw-bold" onclick="document.querySelectorAll('.song-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Select All</button>
-                <button type="button" class="btn btn-sm btn-outline-info fw-bold" onclick="openAdminMultiEditModal()"><i class="bi bi-pencil-square"></i> Multi-Edit / Transfer</button>
+                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.song-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Select All</button>
+                <button type="button" class="admin-btn-pill" style="color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openAdminMultiEditModal()"><i class="bi bi-pencil-square"></i> Multi-Edit / Transfer</button>
                 
                 <div class="dropdown">
-                  <button class="btn btn-sm btn-outline-warning fw-bold dropdown-toggle" type="button" data-bs-toggle="dropdown">
-                    <i class="bi bi-shield-slash"></i> Ban Control
+                  <button class="admin-btn-pill dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                    <i class="bi bi-shield-slash text-warning"></i> Ban Control
                   </button>
-                  <ul class="dropdown-menu dropdown-menu-dark">
-                    <li><button type="submit" name="admin_song_action" value="ban" class="dropdown-item text-warning fw-bold"><i class="bi bi-ban"></i> Ban Selected</button></li>
-                    <li><button type="submit" name="admin_song_action" value="unban" class="dropdown-item text-success fw-bold"><i class="bi bi-check-circle"></i> Unban Selected</button></li>
+                  <ul class="dropdown-menu dropdown-menu-dark border-secondary">
+                    <li><button type="submit" name="admin_song_action" value="ban" class="dropdown-item text-warning fw-bold"><i class="bi bi-ban me-2"></i> Ban Selected</button></li>
+                    <li><button type="submit" name="admin_song_action" value="unban" class="dropdown-item text-success fw-bold"><i class="bi bi-check-circle me-2"></i> Unban Selected</button></li>
                   </ul>
                 </div>
 
                 <div class="dropdown">
-                  <button class="btn btn-sm btn-danger fw-bold dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                  <button class="admin-btn-pill admin-btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown">
                     <i class="bi bi-trash2"></i> Delete
                   </button>
-                  <ul class="dropdown-menu dropdown-menu-dark">
-                    <li><button type="submit" name="admin_song_action" value="soft_delete" class="dropdown-item text-warning fw-bold" onclick="return confirm('Delete from database but keep physical files intact?');"><i class="bi bi-eraser"></i> Soft Delete (DB Only)</button></li>
-                    <li><button type="submit" name="admin_song_action" value="perm_delete" class="dropdown-item text-danger fw-bold" onclick="return confirm('Permanently delete database records AND physically delete files from disk? This cannot be undone.');"><i class="bi bi-trash2-fill"></i> Permanent Delete</button></li>
+                  <ul class="dropdown-menu dropdown-menu-dark border-secondary">
+                    <li><button type="submit" name="admin_song_action" value="soft_delete" class="dropdown-item text-warning fw-bold" onclick="return confirm('Delete from database but keep physical files intact?');"><i class="bi bi-eraser me-2"></i> Soft Delete (DB Only)</button></li>
+                    <li><button type="submit" name="admin_song_action" value="perm_delete" class="dropdown-item text-danger fw-bold" onclick="return confirm('Permanently delete database records AND physically delete files from disk? This cannot be undone.');"><i class="bi bi-trash2-fill me-2"></i> Permanent Delete</button></li>
                   </ul>
                 </div>
               </div>
-              <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
-                <table class="table table-dark table-striped m-0 align-middle text-nowrap">
-                  <thead class="border-bottom border-secondary">
-                    <tr>
-                      <th class="py-3 px-3" style="width: 40px;"></th>
-                      <th class="py-3 px-3" style="width: 60px;">Action</th>
-                      <th class="py-3 px-3" style="width: 70px;">ID</th>
-                      <th class="py-3 px-3">Title</th>
-                      <th class="py-3 px-3">Artist</th>
-                      <th class="py-3 px-3">Album</th>
-                      <th class="py-3 px-3">Uploader</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <?php
-                      $s_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                      $s_limit = ADMIN_PAGE_SIZE;
-                      $s_offset = ($s_page - 1) * $s_limit;
-                      
-                      $where_clauses = [];
-                      $params = [];
-                      if ($search_songs !== '') {
-                        $where_clauses[] = "(m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ? OR u.email LIKE ? OR m.user_id = ?)";
-                        $params = ["%$search_songs%", "%$search_songs%", "%$search_songs%", "%$search_songs%", $search_songs];
-                      }
-                      
-                      $where = '';
-                      if (!empty($where_clauses)) {
-                        $where = "WHERE " . implode(' AND ', $where_clauses);
-                      }
-                      
-                      $sort_map = [
-                        'newest' => 'ORDER BY m.id DESC',
-                        'oldest' => 'ORDER BY m.id ASC',
-                        'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
-                        'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC'
-                      ];
-                      $order_by = $sort_map[$sort_songs] ?? 'ORDER BY m.id DESC';
-
-                      $db = get_db();
-                      $t_stmt = $db->prepare("SELECT COUNT(m.id) FROM music m LEFT JOIN users u ON m.user_id = u.id $where");
-                      $t_stmt->execute($params);
-                      $t_songs = $t_stmt->fetchColumn();
-                      $t_pages = ceil($t_songs / $s_limit);
-                      
-                      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.user_id, u.email FROM music m LEFT JOIN users u ON m.user_id = u.id $where $order_by LIMIT ? OFFSET ?");
-                      $stmt->execute(array_merge($params, [$s_limit, $s_offset]));
-                      $songs = $stmt->fetchAll();
-                      
-                      if (empty($songs)): ?>
-                        <tr><td colspan="7" class="text-center py-4 text-secondary">No songs found.</td></tr>
-                    <?php else: foreach ($songs as $s): ?>
-                      <tr data-song="<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>">
-                        <td class="py-3 px-3 text-center"><input type="checkbox" name="song_ids[]" value="<?php echo $s['id']; ?>" class="form-check-input song-cb" style="cursor:pointer; transform: scale(1.2);"></td>
-                        <td class="py-3 px-3">
-                          <button type="button" class="btn btn-sm btn-info text-dark fw-bold rounded-pill shadow-sm" title="Edit Song" onclick="openAdminSingleSongEdit(<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>)">
-                            <i class="bi bi-pencil-fill"></i> Edit
-                          </button>
-                        </td>
-                        <td class="py-3 px-3 text-secondary">#<?php echo $s['id']; ?></td>
-                        <td class="py-3 px-3 fw-bold text-white"><?php echo htmlspecialchars($s['title']); ?></td>
-                        <td class="py-3 px-3 text-info"><?php echo htmlspecialchars($s['artist']); ?></td>
-                        <td class="py-3 px-3 text-secondary"><?php echo htmlspecialchars($s['album']); ?></td>
-                        <td class="py-3 px-3 text-secondary">
-                          <div class="small fw-bold">ID: <?php echo $s['user_id']; ?></div>
-                          <div class="small" style="font-size: 0.75rem;"><?php echo htmlspecialchars($s['email'] ?? 'Anonymous'); ?></div>
-                        </td>
+              <div class="admin-card mb-4">
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead class="border-bottom border-secondary">
+                      <tr>
+                        <th class="py-3 px-3" style="width: 40px;"></th>
+                        <th class="py-3 px-3" style="width: 60px;">Action</th>
+                        <th class="py-3 px-3" style="width: 70px;">ID</th>
+                        <th class="py-3 px-3">Title</th>
+                        <th class="py-3 px-3">Artist</th>
+                        <th class="py-3 px-3">Album</th>
+                        <th class="py-3 px-3">Uploader</th>
                       </tr>
-                    <?php endforeach; endif; ?>
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      <?php
+                        $s_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                        $s_limit = ADMIN_PAGE_SIZE;
+                        $s_offset = ($s_page - 1) * $s_limit;
+                        
+                        $where_clauses = [];
+                        $params = [];
+                        if ($search_songs !== '') {
+                          $where_clauses[] = "(m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ? OR u.email LIKE ? OR m.user_id = ?)";
+                          $params = ["%$search_songs%", "%$search_songs%", "%$search_songs%", "%$search_songs%", $search_songs];
+                        }
+                        
+                        $where = '';
+                        if (!empty($where_clauses)) {
+                          $where = "WHERE " . implode(' AND ', $where_clauses);
+                        }
+                        
+                        $sort_map = [
+                          'newest' => 'ORDER BY m.id DESC',
+                          'oldest' => 'ORDER BY m.id ASC',
+                          'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
+                          'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC'
+                        ];
+                        $order_by = $sort_map[$sort_songs] ?? 'ORDER BY m.id DESC';
+  
+                        $db = get_db();
+                        $t_stmt = $db->prepare("SELECT COUNT(m.id) FROM music m LEFT JOIN users u ON m.user_id = u.id $where");
+                        $t_stmt->execute($params);
+                        $t_songs = $t_stmt->fetchColumn();
+                        $t_pages = ceil($t_songs / $s_limit);
+                        
+                        $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.user_id, u.email FROM music m LEFT JOIN users u ON m.user_id = u.id $where $order_by LIMIT ? OFFSET ?");
+                        $stmt->execute(array_merge($params, [$s_limit, $s_offset]));
+                        $songs = $stmt->fetchAll();
+                        
+                        if (empty($songs)): ?>
+                          <tr><td colspan="7" class="text-center py-4 text-secondary">No songs found.</td></tr>
+                      <?php else: foreach ($songs as $s): ?>
+                        <tr data-song="<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>">
+                          <td class="py-3 px-3 text-center"><input type="checkbox" name="song_ids[]" value="<?php echo $s['id']; ?>" class="form-check-input song-cb" style="cursor:pointer; transform: scale(1.2);"></td>
+                          <td class="py-3 px-3">
+                            <button type="button" class="btn btn-sm btn-info text-dark fw-bold rounded-pill shadow-sm" title="Edit Song" onclick="openAdminSingleSongEdit(<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>)">
+                              <i class="bi bi-pencil-fill"></i> Edit
+                            </button>
+                          </td>
+                          <td class="py-3 px-3 text-secondary">#<?php echo $s['id']; ?></td>
+                          <td class="py-3 px-3 fw-bold text-white"><?php echo htmlspecialchars($s['title']); ?></td>
+                          <td class="py-3 px-3 text-info"><?php echo htmlspecialchars($s['artist']); ?></td>
+                          <td class="py-3 px-3 text-secondary"><?php echo htmlspecialchars($s['album']); ?></td>
+                          <td class="py-3 px-3 text-secondary">
+                            <div class="small fw-bold">ID: <?php echo $s['user_id']; ?></div>
+                            <div class="small" style="font-size: 0.75rem;"><?php echo htmlspecialchars($s['email'] ?? 'Anonymous'); ?></div>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
               </div>
               <?php if ($t_pages > 1): ?>
               <div class="admin-pagination">
@@ -4938,24 +5310,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'artworks'): ?>
-          <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
-            <h1 class="content-title m-0">Artwork Management</h1>
+          <div class="page-header admin-toolbar-wrap">
+            <div>
+              <h1 class="content-title m-0 fw-bold">Artwork Management</h1>
+              <div class="small text-secondary mt-1">Manage galleries, manga, parodies, and series tags</div>
+            </div>
             <?php
               $search_artworks = $_GET['search'] ?? '';
               $sort_artworks = $_GET['sort'] ?? 'newest';
             ?>
-            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 600px;">
+            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
               <input type="hidden" name="access" value="admin">
               <input type="hidden" name="page" value="artworks">
-              <select name="sort" class="form-select bg-dark text-white border-secondary shadow-sm" style="width: auto;" onchange="this.form.submit()">
+              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
                 <option value="newest" <?php echo $sort_artworks === 'newest' ? 'selected' : ''; ?>>Newest</option>
                 <option value="oldest" <?php echo $sort_artworks === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
                 <option value="title_asc" <?php echo $sort_artworks === 'title_asc' ? 'selected' : ''; ?>>Title (A-Z)</option>
                 <option value="views_desc" <?php echo $sort_artworks === 'views_desc' ? 'selected' : ''; ?>>Most Viewed</option>
               </select>
-              <div class="input-group shadow-sm">
-                <input type="text" name="search" class="form-control bg-dark text-white border-secondary" placeholder="Search by title, tags, user ID or email..." value="<?php echo htmlspecialchars($search_artworks); ?>">
-                <button type="submit" class="btn btn-danger fw-bold px-3"><i class="bi bi-search"></i></button>
+              <div class="position-relative flex-grow-1">
+                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search title, tags, uploader..." value="<?php echo htmlspecialchars($search_artworks); ?>">
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
               </div>
             </form>
           </div>
@@ -4963,98 +5338,100 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <form method="POST" action="" id="admin-artworks-form">
               <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
               <div class="mb-3 d-flex flex-wrap gap-2">
-                <button type="button" class="btn btn-sm btn-outline-light fw-bold" onclick="document.querySelectorAll('.artwork-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Select All</button>
-                <button type="button" class="btn btn-sm btn-outline-info fw-bold" onclick="openAdminMultiEditArtworkModal()"><i class="bi bi-pencil-square"></i> Multi-Edit / Transfer</button>
+                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.artwork-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Select All</button>
+                <button type="button" class="admin-btn-pill" style="color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openAdminMultiEditArtworkModal()"><i class="bi bi-pencil-square"></i> Multi-Edit / Transfer</button>
 
                 <div class="dropdown">
-                  <button class="btn btn-sm btn-danger fw-bold dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                  <button class="admin-btn-pill admin-btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown">
                     <i class="bi bi-trash2"></i> Delete
                   </button>
-                  <ul class="dropdown-menu dropdown-menu-dark">
-                    <li><button type="submit" name="admin_artwork_action" value="soft_delete" class="dropdown-item text-warning fw-bold" onclick="return confirm('Delete from database but keep physical files intact?');"><i class="bi bi-eraser"></i> Soft Delete (DB Only)</button></li>
-                    <li><button type="submit" name="admin_artwork_action" value="perm_delete" class="dropdown-item text-danger fw-bold" onclick="return confirm('Permanently delete database records AND physically delete files from disk? This cannot be undone.');"><i class="bi bi-trash2-fill"></i> Permanent Delete</button></li>
+                  <ul class="dropdown-menu dropdown-menu-dark border-secondary">
+                    <li><button type="submit" name="admin_artwork_action" value="soft_delete" class="dropdown-item text-warning fw-bold" onclick="return confirm('Delete from database but keep physical files intact?');"><i class="bi bi-eraser me-2"></i> Soft Delete (DB Only)</button></li>
+                    <li><button type="submit" name="admin_artwork_action" value="perm_delete" class="dropdown-item text-danger fw-bold" onclick="return confirm('Permanently delete database records AND physically delete files from disk? This cannot be undone.');"><i class="bi bi-trash2-fill me-2"></i> Permanent Delete</button></li>
                   </ul>
                 </div>
               </div>
-              <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
-                <table class="table table-dark table-striped m-0 align-middle text-nowrap">
-                  <thead class="border-bottom border-secondary">
-                    <tr>
-                      <th class="py-3 px-3" style="width: 40px;"></th>
-                      <th class="py-3 px-3" style="width: 60px;">Action</th>
-                      <th class="py-3 px-3" style="width: 70px;">ID</th>
-                      <th class="py-3 px-3">Title</th>
-                      <th class="py-3 px-3">Type</th>
-                      <th class="py-3 px-3">Tags</th>
-                      <th class="py-3 px-3">Uploader</th>
-                      <th class="py-3 px-3" style="width: 80px;">Views</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <?php
-                      $a_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                      $a_limit = ADMIN_PAGE_SIZE;
-                      $a_offset = ($a_page - 1) * $a_limit;
-
-                      $where_clauses = [];
-                      $params = [];
-                      if ($search_artworks !== '') {
-                        $where_clauses[] = "(a.title LIKE ? OR a.tags LIKE ? OR a.parodies LIKE ? OR a.characters LIKE ? OR u.email LIKE ? OR a.user_id = ?)";
-                        $params = ["%$search_artworks%", "%$search_artworks%", "%$search_artworks%", "%$search_artworks%", "%$search_artworks%", $search_artworks];
-                      }
-
-                      $where = '';
-                      if (!empty($where_clauses)) {
-                        $where = "WHERE " . implode(' AND ', $where_clauses);
-                      }
-
-                      $sort_map = [
-                        'newest' => 'ORDER BY a.id DESC',
-                        'oldest' => 'ORDER BY a.id ASC',
-                        'title_asc' => 'ORDER BY a.title COLLATE NOCASE ASC',
-                        'views_desc' => 'ORDER BY a.views DESC'
-                      ];
-                      $order_by = $sort_map[$sort_artworks] ?? 'ORDER BY a.id DESC';
-
-                      $db = get_db();
-                      $t_stmt = $db->prepare("SELECT COUNT(a.id) FROM arts a LEFT JOIN users u ON a.user_id = u.id $where");
-                      $t_stmt->execute($params);
-                      $t_artworks = $t_stmt->fetchColumn();
-                      $t_pages = ceil($t_artworks / $a_limit);
-
-                      $stmt = $db->prepare("SELECT a.id, a.title, a.type, a.tags, a.nsfw, a.views, a.user_id, u.email, a.description, a.parodies, a.characters, a.groups_name, a.series_id, s.title as series_title FROM arts a LEFT JOIN users u ON a.user_id = u.id LEFT JOIN art_series s ON a.series_id = s.id $where $order_by LIMIT ? OFFSET ?");
-                      $stmt->execute(array_merge($params, [$a_limit, $a_offset]));
-                      $artworks = $stmt->fetchAll();
-
-                      $allSeries = $db->query("SELECT id, title FROM art_series ORDER BY title COLLATE NOCASE ASC")->fetchAll(PDO::FETCH_KEY_PAIR);
-                      if (empty($artworks)): ?>
-                        <tr><td colspan="8" class="text-center py-4 text-secondary">No artworks found.</td></tr>
-                    <?php else: foreach ($artworks as $a): ?>
-                      <tr data-artwork="<?php echo htmlspecialchars(json_encode(array_merge($a, ['series_title' => $a['series_title'] ?? null])), ENT_QUOTES, 'UTF-8'); ?>">
-                        <td class="py-3 px-3 text-center"><input type="checkbox" name="artwork_ids[]" value="<?php echo $a['id']; ?>" class="form-check-input artwork-cb" style="cursor:pointer; transform: scale(1.2);"></td>
-                        <td class="py-3 px-3">
-                          <button type="button" class="btn btn-sm btn-info text-dark fw-bold rounded-pill shadow-sm" title="Edit Artwork" onclick="openAdminSingleArtworkEdit(<?php echo htmlspecialchars(json_encode($a), ENT_QUOTES, 'UTF-8'); ?>)">
-                            <i class="bi bi-pencil-fill"></i> Edit
-                          </button>
-                        </td>
-                        <td class="py-3 px-3 text-secondary">#<?php echo $a['id']; ?></td>
-                        <td class="py-3 px-3 fw-bold text-white">
-                          <?php echo htmlspecialchars($a['title']); ?>
-                          <?php if ($a['nsfw']): ?><span class="badge bg-danger ms-1">NSFW</span><?php endif; ?>
-                        </td>
-                        <td class="py-3 px-3">
-                          <span class="badge bg-<?php echo $a['type'] === 'manga' ? 'warning text-dark' : 'info'; ?>"><?php echo htmlspecialchars($a['type']); ?></span>
-                        </td>
-                        <td class="py-3 px-3 text-secondary" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;"><?php echo htmlspecialchars($a['tags'] ?? ''); ?></td>
-                        <td class="py-3 px-3 text-secondary">
-                          <div class="small fw-bold">ID: <?php echo $a['user_id']; ?></div>
-                          <div class="small" style="font-size: 0.75rem;"><?php echo htmlspecialchars($a['email'] ?? 'Anonymous'); ?></div>
-                        </td>
-                        <td class="py-3 px-3 text-white fw-medium"><?php echo number_format($a['views']); ?></td>
+              <div class="admin-card mb-4">
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead class="border-bottom border-secondary">
+                      <tr>
+                        <th class="py-3 px-3" style="width: 40px;"></th>
+                        <th class="py-3 px-3" style="width: 60px;">Action</th>
+                        <th class="py-3 px-3" style="width: 70px;">ID</th>
+                        <th class="py-3 px-3">Title</th>
+                        <th class="py-3 px-3">Type</th>
+                        <th class="py-3 px-3">Tags</th>
+                        <th class="py-3 px-3">Uploader</th>
+                        <th class="py-3 px-3" style="width: 80px;">Views</th>
                       </tr>
-                    <?php endforeach; endif; ?>
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      <?php
+                        $a_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                        $a_limit = ADMIN_PAGE_SIZE;
+                        $a_offset = ($a_page - 1) * $a_limit;
+  
+                        $where_clauses = [];
+                        $params = [];
+                        if ($search_artworks !== '') {
+                          $where_clauses[] = "(a.title LIKE ? OR a.tags LIKE ? OR a.parodies LIKE ? OR a.characters LIKE ? OR u.email LIKE ? OR a.user_id = ?)";
+                          $params = ["%$search_artworks%", "%$search_artworks%", "%$search_artworks%", "%$search_artworks%", "%$search_artworks%", $search_artworks];
+                        }
+  
+                        $where = '';
+                        if (!empty($where_clauses)) {
+                          $where = "WHERE " . implode(' AND ', $where_clauses);
+                        }
+  
+                        $sort_map = [
+                          'newest' => 'ORDER BY a.id DESC',
+                          'oldest' => 'ORDER BY a.id ASC',
+                          'title_asc' => 'ORDER BY a.title COLLATE NOCASE ASC',
+                          'views_desc' => 'ORDER BY a.views DESC'
+                        ];
+                        $order_by = $sort_map[$sort_artworks] ?? 'ORDER BY a.id DESC';
+  
+                        $db = get_db();
+                        $t_stmt = $db->prepare("SELECT COUNT(a.id) FROM arts a LEFT JOIN users u ON a.user_id = u.id $where");
+                        $t_stmt->execute($params);
+                        $t_artworks = $t_stmt->fetchColumn();
+                        $t_pages = ceil($t_artworks / $a_limit);
+  
+                        $stmt = $db->prepare("SELECT a.id, a.title, a.type, a.tags, a.nsfw, a.views, a.user_id, u.email, a.description, a.parodies, a.characters, a.groups_name, a.series_id, s.title as series_title FROM arts a LEFT JOIN users u ON a.user_id = u.id LEFT JOIN art_series s ON a.series_id = s.id $where $order_by LIMIT ? OFFSET ?");
+                        $stmt->execute(array_merge($params, [$a_limit, $a_offset]));
+                        $artworks = $stmt->fetchAll();
+  
+                        $allSeries = $db->query("SELECT id, title FROM art_series ORDER BY title COLLATE NOCASE ASC")->fetchAll(PDO::FETCH_KEY_PAIR);
+                        if (empty($artworks)): ?>
+                          <tr><td colspan="8" class="text-center py-4 text-secondary">No artworks found.</td></tr>
+                      <?php else: foreach ($artworks as $a): ?>
+                        <tr data-artwork="<?php echo htmlspecialchars(json_encode(array_merge($a, ['series_title' => $a['series_title'] ?? null])), ENT_QUOTES, 'UTF-8'); ?>">
+                          <td class="py-3 px-3 text-center"><input type="checkbox" name="artwork_ids[]" value="<?php echo $a['id']; ?>" class="form-check-input artwork-cb" style="cursor:pointer; transform: scale(1.2);"></td>
+                          <td class="py-3 px-3">
+                            <button type="button" class="btn btn-sm btn-info text-dark fw-bold rounded-pill shadow-sm" title="Edit Artwork" onclick="openAdminSingleArtworkEdit(<?php echo htmlspecialchars(json_encode($a), ENT_QUOTES, 'UTF-8'); ?>)">
+                              <i class="bi bi-pencil-fill"></i> Edit
+                            </button>
+                          </td>
+                          <td class="py-3 px-3 text-secondary">#<?php echo $a['id']; ?></td>
+                          <td class="py-3 px-3 fw-bold text-white">
+                            <?php echo htmlspecialchars($a['title']); ?>
+                            <?php if ($a['nsfw']): ?><span class="badge bg-danger ms-1">NSFW</span><?php endif; ?>
+                          </td>
+                          <td class="py-3 px-3">
+                            <span class="badge bg-<?php echo $a['type'] === 'manga' ? 'warning text-dark' : 'info'; ?>"><?php echo htmlspecialchars($a['type']); ?></span>
+                          </td>
+                          <td class="py-3 px-3 text-secondary" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;"><?php echo htmlspecialchars($a['tags'] ?? ''); ?></td>
+                          <td class="py-3 px-3 text-secondary">
+                            <div class="small fw-bold">ID: <?php echo $a['user_id']; ?></div>
+                            <div class="small" style="font-size: 0.75rem;"><?php echo htmlspecialchars($a['email'] ?? 'Anonymous'); ?></div>
+                          </td>
+                          <td class="py-3 px-3 text-white fw-medium"><?php echo number_format($a['views']); ?></td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
               </div>
               <?php if ($t_pages > 1): ?>
               <div class="admin-pagination">
@@ -5308,59 +5685,117 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'logs'): ?>
-          <div class="page-header"><h1 class="content-title m-0">Admin Activity Logs</h1></div>
+          <?php 
+            $log_search = trim($_GET['search'] ?? '');
+            $log_sort = $_GET['sort'] ?? 'newest';
+          ?>
+          <div class="page-header admin-toolbar-wrap">
+            <div>
+              <h1 class="content-title m-0 fw-bold">Admin Activity Logs</h1>
+              <div class="small text-secondary mt-1">Audit log of system actions and administrator changes</div>
+            </div>
+            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
+              <input type="hidden" name="access" value="admin">
+              <input type="hidden" name="page" value="logs">
+              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                <option value="newest" <?php echo $log_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                <option value="oldest" <?php echo $log_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                <option value="admin" <?php echo $log_sort === 'admin' ? 'selected' : ''; ?>>Admin (A-Z)</option>
+                <option value="action" <?php echo $log_sort === 'action' ? 'selected' : ''; ?>>Action (A-Z)</option>
+              </select>
+              <div class="position-relative flex-grow-1">
+                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search admin, action, target..." value="<?php echo htmlspecialchars($log_search); ?>">
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+              </div>
+            </form>
+          </div>
           <div class="content-area-wrapper">
-            <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
-              <table class="table table-dark table-striped m-0">
-                <thead class="border-bottom border-secondary">
-                  <tr><th class="py-3 px-4">Time</th><th class="py-3 px-4">Admin Email</th><th class="py-3 px-4">Action Performed</th><th class="py-3 px-4">Target User</th></tr>
-                </thead>
-                <tbody>
-                  <?php
-                    $log_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                    $log_limit = 25;
-                    $log_offset = ($log_page - 1) * $log_limit;
-                    
-                    $total_logs = get_db()->query("SELECT COUNT(id) FROM admin_logs")->fetchColumn();
-                    $total_log_pages = ceil($total_logs / $log_limit);
-                    
-                    $stmt_logs = get_db()->prepare("SELECT * FROM admin_logs ORDER BY created_at DESC LIMIT ? OFFSET ?");
-                    $stmt_logs->bindValue(1, (int)$log_limit, PDO::PARAM_INT);
-                    $stmt_logs->bindValue(2, (int)$log_offset, PDO::PARAM_INT);
-                    $stmt_logs->execute();
-                    $logs = $stmt_logs->fetchAll();
-                    if (empty($logs)): ?>
-                      <tr><td colspan="4" class="text-center py-4 text-secondary">No recent admin activity found.</td></tr>
-                  <?php else: foreach ($logs as $log): ?>
-                  <tr>
-                    <td class="py-3 px-4 text-secondary small"><?php echo $log['created_at']; ?></td>
-                    <td class="py-3 px-4 fw-medium text-info"><?php echo htmlspecialchars($log['admin_email']); ?></td>
-                    <td class="py-3 px-4"><?php echo htmlspecialchars($log['action']); ?></td>
-                    <td class="py-3 px-4 text-secondary"><?php echo htmlspecialchars($log['target_email']); ?> (ID: <?php echo $log['target_user_id']; ?>)</td>
-                  </tr>
-                  <?php endforeach; endif; ?>
-                </tbody>
-              </table>
+            <div class="admin-card mb-4">
+              <div class="table-responsive">
+                <table class="admin-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 170px;">Timestamp</th>
+                      <th>Admin Email</th>
+                      <th>Action Performed</th>
+                      <th>Target Identity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php
+                      $log_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                      $log_limit = 25;
+                      $log_offset = ($log_page - 1) * $log_limit;
+                      $db = get_db();
+
+                      $where_sql = "";
+                      $params = [];
+                      if ($log_search !== '') {
+                        $where_sql = "WHERE (admin_email LIKE ? OR action LIKE ? OR target_email LIKE ? OR target_user_id = ?)";
+                        $params = ["%$log_search%", "%$log_search%", "%$log_search%", $log_search];
+                      }
+
+                      $sort_map = [
+                        'newest' => 'created_at DESC',
+                        'oldest' => 'created_at ASC',
+                        'admin' => 'admin_email COLLATE NOCASE ASC',
+                        'action' => 'action COLLATE NOCASE ASC'
+                      ];
+                      $order_sql = $sort_map[$log_sort] ?? 'created_at DESC';
+                      
+                      $stmt_count = $db->prepare("SELECT COUNT(id) FROM admin_logs $where_sql");
+                      $stmt_count->execute($params);
+                      $total_logs = $stmt_count->fetchColumn();
+                      $total_log_pages = ceil($total_logs / $log_limit);
+                      
+                      $stmt_logs = $db->prepare("SELECT * FROM admin_logs $where_sql ORDER BY $order_sql LIMIT ? OFFSET ?");
+                      $p_idx = 1;
+                      foreach ($params as $pv) {
+                        $stmt_logs->bindValue($p_idx++, $pv, PDO::PARAM_STR);
+                      }
+                      $stmt_logs->bindValue($p_idx++, (int)$log_limit, PDO::PARAM_INT);
+                      $stmt_logs->bindValue($p_idx++, (int)$log_offset, PDO::PARAM_INT);
+                      $stmt_logs->execute();
+                      $logs = $stmt_logs->fetchAll();
+
+                      if (empty($logs)): ?>
+                        <tr><td colspan="4" class="text-center py-5 text-secondary"><i class="bi bi-clock-history fs-2 d-block mb-2 text-secondary opacity-50"></i>No matching activity logs found.</td></tr>
+                    <?php else: foreach ($logs as $log): ?>
+                    <tr>
+                      <td class="text-secondary small font-monospace"><?php echo htmlspecialchars($log['created_at']); ?></td>
+                      <td><span class="admin-badge admin-badge-info"><?php echo htmlspecialchars($log['admin_email']); ?></span></td>
+                      <td class="fw-medium text-white"><?php echo htmlspecialchars($log['action']); ?></td>
+                      <td class="text-secondary small"><?php echo htmlspecialchars($log['target_email']); ?> (ID: <?php echo $log['target_user_id']; ?>)</td>
+                    </tr>
+                    <?php endforeach; endif; ?>
+                  </tbody>
+                </table>
+              </div>
             </div>
             <?php if ($total_log_pages > 1): ?>
             <div class="admin-pagination">
-              <a class="admin-page-btn <?php echo ($log_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&p=1">«</a>
-              <a class="admin-page-btn <?php echo ($log_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&p=<?php echo $log_page - 1; ?>">‹</a>
+              <a class="admin-page-btn <?php echo ($log_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&search=<?php echo urlencode($log_search); ?>&sort=<?php echo urlencode($log_sort); ?>&p=1">«</a>
+              <a class="admin-page-btn <?php echo ($log_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&search=<?php echo urlencode($log_search); ?>&sort=<?php echo urlencode($log_sort); ?>&p=<?php echo $log_page - 1; ?>">‹</a>
               <?php
                 $start_p = max(1, $log_page - 2);
                 $end_p = min($total_log_pages, $start_p + 4);
                 if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
               ?>
               <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
-                <a class="admin-page-btn <?php echo ($log_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=logs&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                <a class="admin-page-btn <?php echo ($log_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=logs&search=<?php echo urlencode($log_search); ?>&sort=<?php echo urlencode($log_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
               <?php endfor; ?>
-              <a class="admin-page-btn <?php echo ($log_page >= $total_log_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&p=<?php echo $log_page + 1; ?>">›</a>
-              <a class="admin-page-btn <?php echo ($log_page >= $total_log_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&p=<?php echo $total_log_pages; ?>">»</a>
+              <a class="admin-page-btn <?php echo ($log_page >= $total_log_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&search=<?php echo urlencode($log_search); ?>&sort=<?php echo urlencode($log_sort); ?>&p=<?php echo $log_page + 1; ?>">›</a>
+              <a class="admin-page-btn <?php echo ($log_page >= $total_log_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=logs&search=<?php echo urlencode($log_search); ?>&sort=<?php echo urlencode($log_sort); ?>&p=<?php echo $total_log_pages; ?>">»</a>
             </div>
             <?php endif; ?>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'storage'): ?>
-          <div class="page-header"><h1 class="content-title m-0">System Storage & Assets</h1></div>
+          <div class="page-header d-flex align-items-center justify-content-between">
+            <div>
+              <h1 class="content-title m-0 fw-bold">System Storage & Assets</h1>
+              <div class="small text-secondary mt-1">Real-time disk breakdown, assets footprint, and user storage consumption</div>
+            </div>
+          </div>
           <div class="content-area-wrapper">
             <?php
               $disk_total = @disk_total_space(__DIR__) ?: 0;
@@ -5579,48 +6014,35 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </div>
               </div>
             </div>
-            <!-- Artist Breakdown Table -->
-            <div class="card bg-dark border-secondary shadow-sm">
-              <div class="card-header border-bottom border-secondary bg-transparent py-3">
-                <h5 class="m-0 text-white fw-bold">
-                  <i class="bi bi-people-fill text-warning me-2"></i> User Storage Footprint
-                </h5>
+            <!-- User Breakdown Table -->
+            <div class="admin-card">
+              <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex align-items-center gap-2">
+                <i class="bi bi-people-fill text-danger"></i>
+                <h5 class="m-0 text-white fw-bold fs-6">User Storage Footprint</h5>
               </div>
               <div class="table-responsive">
-                <table class="table table-dark table-striped m-0 align-middle">
-                  <thead class="border-bottom border-secondary">
+                <table class="admin-table">
+                  <thead>
                     <tr>
-                      <th class="py-3 px-4" style="width: 60px;">#</th>
-                      <th class="py-3 px-4">Artist / User</th>
-                      <th class="py-3 px-4">Email</th>
-                      <th class="py-3 px-4 text-center">Audio Files</th>
-                      <th class="py-3 px-4 text-end">Total Size</th>
+                      <th style="width: 60px;">#</th>
+                      <th>Artist / User</th>
+                      <th>Email</th>
+                      <th class="text-center">Audio Files</th>
+                      <th class="text-end">Total Size</th>
                     </tr>
                   </thead>
                   <tbody>
                     <?php $rank = $storage_offset + 1; foreach ($paged_artist_stats as $stat): ?>
                     <tr>
-                      <td class="py-3 px-4 text-secondary fw-bold">
-                        <?php echo $rank++; ?>
-                      </td>
-                      <td class="py-3 px-4 fw-bold text-info">
-                        <?php echo htmlspecialchars($stat['name']); ?>
-                      </td>
-                      <td class="py-3 px-4 text-secondary small">
-                        <?php echo htmlspecialchars($stat['email']); ?>
-                      </td>
-                      <td class="py-3 px-4 text-center text-white fw-medium">
-                        <?php echo number_format($stat['count']); ?>
-                      </td>
-                      <td class="py-3 px-4 text-end text-warning fw-bold font-monospace">
-                        <?php echo format_storage_bytes($stat['size']); ?>
-                      </td>
+                      <td class="text-secondary fw-bold font-monospace"><?php echo $rank++; ?></td>
+                      <td class="fw-bold text-info"><?php echo htmlspecialchars($stat['name']); ?></td>
+                      <td class="text-secondary small"><?php echo htmlspecialchars($stat['email']); ?></td>
+                      <td class="text-center text-white fw-bold font-monospace"><?php echo number_format($stat['count']); ?></td>
+                      <td class="text-end text-warning fw-bold font-monospace"><?php echo format_storage_bytes($stat['size']); ?></td>
                     </tr>
                     <?php endforeach; ?>
                     <?php if(empty($paged_artist_stats)): ?>
-                    <tr>
-                      <td colspan="5" class="text-center py-4 text-secondary">No users found.</td>
-                    </tr>
+                    <tr><td colspan="5" class="text-center py-5 text-secondary">No users found.</td></tr>
                     <?php endif; ?>
                   </tbody>
                 </table>
@@ -5746,8 +6168,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </script>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'api'): ?>
-          <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
-            <h1 class="content-title m-0">API Key Management</h1>
+          <div class="page-header admin-toolbar-wrap">
+            <div>
+              <h1 class="content-title m-0 fw-bold">API Key Management</h1>
+              <div class="small text-secondary mt-1">Generate, moderate, and track access for developer applications</div>
+            </div>
             <?php 
               $api_sort = $_GET['sort'] ?? 'newest'; 
               $api_search = $_GET['search'] ?? '';
@@ -5755,133 +6180,136 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 500px;">
               <input type="hidden" name="access" value="admin">
               <input type="hidden" name="page" value="api">
-              <select name="sort" class="form-select bg-dark text-white border-secondary shadow-sm" style="width: auto;" onchange="this.form.submit()">
+              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
                 <option value="newest" <?php echo $api_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
                 <option value="oldest" <?php echo $api_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
                 <option value="modified" <?php echo $api_sort === 'modified' ? 'selected' : ''; ?>>Recently Modified</option>
               </select>
-              <div class="input-group shadow-sm">
-                <input type="text" name="search" class="form-control bg-dark text-white border-secondary" placeholder="Search APIs..." value="<?php echo htmlspecialchars($api_search); ?>">
-                <button type="submit" class="btn btn-danger fw-bold px-3"><i class="bi bi-search"></i></button>
+              <div class="position-relative flex-grow-1">
+                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search API tokens, apps..." value="<?php echo htmlspecialchars($api_search); ?>">
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
               </div>
             </form>
           </div>
           <div class="content-area-wrapper">
-            <div class="card bg-dark border-secondary mb-4">
-              <div class="card-body">
-                <h5 class="text-white"><i class="bi bi-plus-circle-fill text-success me-2"></i> Generate New Key</h5>
-                <p class="text-secondary small">Custom API keys allow 1,000 monthly requests to the developer endpoints.</p>
-                <form method="POST" action="?access=admin&page=api" class="d-flex gap-2">
-                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                  <input type="text" name="key_name" class="form-control bg-black text-white border-secondary" placeholder="Application Name (e.g. Discord Bot)" required>
-                  <button type="submit" name="generate_api_key" class="btn btn-success fw-bold text-nowrap">Generate Key</button>
-                </form>
+            <div class="admin-card p-4 mb-4">
+              <div class="d-flex align-items-center gap-2 mb-1">
+                <i class="bi bi-plus-circle-fill text-danger fs-5"></i>
+                <h5 class="text-white fw-bold fs-6 m-0">Generate Custom API Key</h5>
               </div>
+              <p class="text-secondary small mb-3">Custom API keys allow 1,000 monthly requests to developer and streaming endpoints.</p>
+              <form method="POST" action="?access=admin&page=api" class="d-flex gap-2">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <input type="text" name="key_name" class="admin-pill-input flex-grow-1" placeholder="Application Name (e.g. Discord Bot, Native App)" required>
+                <button type="submit" name="generate_api_key" class="admin-btn-pill admin-btn-primary text-nowrap">Generate Key</button>
+              </form>
             </div>
             
-            <div class="table-responsive bg-dark rounded border border-secondary shadow-sm mb-4">
-              <table class="table table-dark table-striped m-0 align-middle">
-                <thead class="border-bottom border-secondary">
-                  <tr><th class="py-3 px-4">App Name</th><th class="py-3 px-4">Owner/Status</th><th class="py-3 px-4">Token Key</th><th class="py-3 px-4">Uses/Expires</th><th class="py-3 px-4 text-end">Actions</th></tr>
-                </thead>
-                <tbody>
-                  <?php
-                    $api_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                    $api_limit = 25;
-                    $api_offset = ($api_page - 1) * $api_limit;
-                    $db = get_db();
-                    
-                    try {
-                      $db->exec("CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, token TEXT UNIQUE, name TEXT, status TEXT DEFAULT 'active', uses INTEGER DEFAULT 0, reset_month TEXT, expires_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);");
-                      $api_cols_admin = $db->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
-                      if (!in_array('updated_at', $api_cols_admin)) { 
-                        $db->exec("ALTER TABLE api_keys ADD COLUMN updated_at DATETIME;"); 
-                        $db->exec("UPDATE api_keys SET updated_at = created_at WHERE updated_at IS NULL;");
+            <div class="admin-card mb-4">
+              <div class="table-responsive">
+                <table class="admin-table align-middle">
+                  <thead class="border-bottom border-secondary">
+                    <tr><th class="py-3 px-4">App Name</th><th class="py-3 px-4">Owner/Status</th><th class="py-3 px-4">Token Key</th><th class="py-3 px-4">Uses/Expires</th><th class="py-3 px-4 text-end">Actions</th></tr>
+                  </thead>
+                  <tbody>
+                    <?php
+                      $api_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
+                      $api_limit = 25;
+                      $api_offset = ($api_page - 1) * $api_limit;
+                      $db = get_db();
+                      
+                      try {
+                        $db->exec("CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, token TEXT UNIQUE, name TEXT, status TEXT DEFAULT 'active', uses INTEGER DEFAULT 0, reset_month TEXT, expires_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);");
+                        $api_cols_admin = $db->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
+                        if (!in_array('updated_at', $api_cols_admin)) { 
+                          $db->exec("ALTER TABLE api_keys ADD COLUMN updated_at DATETIME;"); 
+                          $db->exec("UPDATE api_keys SET updated_at = created_at WHERE updated_at IS NULL;");
+                        }
+                      } catch(Exception $e) {}
+  
+                      $api_search = $_GET['search'] ?? '';
+                      $where_sql = "";
+                      $params = [];
+                      if ($api_search !== '') {
+                        $where_sql = "WHERE a.name LIKE ? OR a.token LIKE ? OR u.email LIKE ? OR u.artist LIKE ?";
+                        $params = ["%$api_search%", "%$api_search%", "%$api_search%", "%$api_search%"];
                       }
-                    } catch(Exception $e) {}
-
-                    $api_search = $_GET['search'] ?? '';
-                    $where_sql = "";
-                    $params = [];
-                    if ($api_search !== '') {
-                      $where_sql = "WHERE a.name LIKE ? OR a.token LIKE ? OR u.email LIKE ? OR u.artist LIKE ?";
-                      $params = ["%$api_search%", "%$api_search%", "%$api_search%", "%$api_search%"];
-                    }
-
-                    $stmt_count = $db->prepare("SELECT COUNT(a.id) FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql");
-                    $stmt_count->execute($params);
-                    $total_apis = $stmt_count->fetchColumn();
-                    $total_api_pages = ceil($total_apis / $api_limit);
-
-                    $api_sort = $_GET['sort'] ?? 'newest';
-                    $order_sql = "a.created_at DESC";
-                    if ($api_sort === 'oldest') $order_sql = "a.created_at ASC";
-                    elseif ($api_sort === 'modified') $order_sql = "a.updated_at DESC";
-
-                    $stmt_keys = $db->prepare("SELECT a.*, u.email as user_email FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql ORDER BY CASE WHEN a.status = 'pending' THEN 0 ELSE 1 END, $order_sql LIMIT ? OFFSET ?");
-                    $param_idx = 1;
-                    foreach ($params as $pval) {
-                      $stmt_keys->bindValue($param_idx++, $pval, PDO::PARAM_STR);
-                    }
-                    $stmt_keys->bindValue($param_idx++, (int)$api_limit, PDO::PARAM_INT);
-                    $stmt_keys->bindValue($param_idx++, (int)$api_offset, PDO::PARAM_INT);
-                    $stmt_keys->execute();
-                    $keys = $stmt_keys->fetchAll();
-                    
-                    if (empty($keys)): ?>
-                      <tr><td colspan="5" class="text-center py-4 text-secondary">No API keys found.</td></tr>
-                  <?php else: foreach ($keys as $k): ?>
-                  <tr>
-                    <td class="py-3 px-4 fw-medium text-white"><?php echo htmlspecialchars($k['name']); ?></td>
-                    <td class="py-3 px-4">
-                      <div class="small text-secondary mb-1"><?php echo $k['user_id'] == 0 ? 'System Admin' : htmlspecialchars($k['user_email'] ?? 'User ID: '.$k['user_id']); ?></div>
-                      <?php if ($k['status'] === 'pending'): ?>
-                        <span class="badge bg-info text-dark">Pending</span>
-                      <?php elseif ($k['status'] === 'banned'): ?>
-                        <span class="badge bg-danger">Banned</span>
-                      <?php else: ?>
-                        <span class="badge bg-success">Active</span>
-                      <?php endif; ?>
-                    </td>
-                    <td class="py-3 px-4 font-monospace text-info">
-                      <?php if ($k['status'] === 'pending'): ?>
-                        <i class="text-secondary">Hidden until verified</i>
-                      <?php else: ?>
-                        <div class="d-flex align-items-center gap-2">
-                          <span><?php echo htmlspecialchars($k['token']); ?></span>
-                          <button type="button" class="btn btn-sm btn-outline-info py-0 px-2" onclick="navigator.clipboard.writeText('<?php echo htmlspecialchars($k['token']); ?>').then(()=>{this.innerHTML='<i class=\'bi bi-check-lg text-success\'></i>'; setTimeout(()=>this.innerHTML='<i class=\'bi bi-clipboard\'></i>', 2000);})" title="Copy Key"><i class="bi bi-clipboard"></i></button>
-                        </div>
-                      <?php endif; ?>
-                    </td>
-                    <td class="py-3 px-4 text-secondary small">
-                      <div class="mb-1">
-                        <div class="progress" style="height: 6px; width: 80px; display: inline-flex; background: #000; margin-right: 6px;">
-                          <div class="progress-bar bg-warning" role="progressbar" style="width: <?php echo ($k['uses']/1000)*100; ?>%;"></div>
-                        </div>
-                        <?php echo $k['uses']; ?> / 1000
-                      </div>
-                      <div>Exp: <?php echo $k['expires_at'] ? date('Y-m-d', strtotime($k['expires_at'])) : 'Never'; ?></div>
-                    </td>
-                    <td class="py-3 px-4 text-end">
-                      <form method="POST" action="?access=admin&page=api" class="m-0 d-flex gap-2 justify-content-end">
-                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                        <input type="hidden" name="key_id" value="<?php echo $k['id']; ?>">
-                        
+  
+                      $stmt_count = $db->prepare("SELECT COUNT(a.id) FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql");
+                      $stmt_count->execute($params);
+                      $total_apis = $stmt_count->fetchColumn();
+                      $total_api_pages = ceil($total_apis / $api_limit);
+  
+                      $api_sort = $_GET['sort'] ?? 'newest';
+                      $order_sql = "a.created_at DESC";
+                      if ($api_sort === 'oldest') $order_sql = "a.created_at ASC";
+                      elseif ($api_sort === 'modified') $order_sql = "a.updated_at DESC";
+  
+                      $stmt_keys = $db->prepare("SELECT a.*, u.email as user_email FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql ORDER BY CASE WHEN a.status = 'pending' THEN 0 ELSE 1 END, $order_sql LIMIT ? OFFSET ?");
+                      $param_idx = 1;
+                      foreach ($params as $pval) {
+                        $stmt_keys->bindValue($param_idx++, $pval, PDO::PARAM_STR);
+                      }
+                      $stmt_keys->bindValue($param_idx++, (int)$api_limit, PDO::PARAM_INT);
+                      $stmt_keys->bindValue($param_idx++, (int)$api_offset, PDO::PARAM_INT);
+                      $stmt_keys->execute();
+                      $keys = $stmt_keys->fetchAll();
+                      
+                      if (empty($keys)): ?>
+                        <tr><td colspan="5" class="text-center py-4 text-secondary">No API keys found.</td></tr>
+                    <?php else: foreach ($keys as $k): ?>
+                    <tr>
+                      <td class="py-3 px-4 fw-medium text-white"><?php echo htmlspecialchars($k['name']); ?></td>
+                      <td class="py-3 px-4">
+                        <div class="small text-secondary mb-1"><?php echo $k['user_id'] == 0 ? 'System Admin' : htmlspecialchars($k['user_email'] ?? 'User ID: '.$k['user_id']); ?></div>
                         <?php if ($k['status'] === 'pending'): ?>
-                          <button type="submit" name="verify_api_key" class="btn btn-sm btn-success">Verify</button>
-                        <?php elseif ($k['status'] === 'active'): ?>
-                          <button type="submit" name="ban_api_key" class="btn btn-sm btn-warning text-dark">Ban</button>
+                          <span class="badge bg-info text-dark">Pending</span>
                         <?php elseif ($k['status'] === 'banned'): ?>
-                          <button type="submit" name="unban_api_key" class="btn btn-sm btn-info text-dark">Unban</button>
+                          <span class="badge bg-danger">Banned</span>
+                        <?php else: ?>
+                          <span class="badge bg-success">Active</span>
                         <?php endif; ?>
-                        
-                        <button type="submit" name="delete_api_key" class="btn btn-sm btn-outline-danger" onclick="return confirm('Revoke this key immediately?');">Remove</button>
-                      </form>
-                    </td>
-                  </tr>
-                  <?php endforeach; endif; ?>
-                </tbody>
-              </table>
+                      </td>
+                      <td class="py-3 px-4 font-monospace text-info">
+                        <?php if ($k['status'] === 'pending'): ?>
+                          <i class="text-secondary">Hidden until verified</i>
+                        <?php else: ?>
+                          <div class="d-flex align-items-center gap-2">
+                            <span><?php echo htmlspecialchars($k['token']); ?></span>
+                            <button type="button" class="btn btn-sm btn-outline-info py-0 px-2" onclick="navigator.clipboard.writeText('<?php echo htmlspecialchars($k['token']); ?>').then(()=>{this.innerHTML='<i class=\'bi bi-check-lg text-success\'></i>'; setTimeout(()=>this.innerHTML='<i class=\'bi bi-clipboard\'></i>', 2000);})" title="Copy Key"><i class="bi bi-clipboard"></i></button>
+                          </div>
+                        <?php endif; ?>
+                      </td>
+                      <td class="py-3 px-4 text-secondary small">
+                        <div class="mb-1">
+                          <div class="progress" style="height: 6px; width: 80px; display: inline-flex; background: #000; margin-right: 6px;">
+                            <div class="progress-bar bg-warning" role="progressbar" style="width: <?php echo ($k['uses']/1000)*100; ?>%;"></div>
+                          </div>
+                          <?php echo $k['uses']; ?> / 1000
+                        </div>
+                        <div>Exp: <?php echo $k['expires_at'] ? date('Y-m-d', strtotime($k['expires_at'])) : 'Never'; ?></div>
+                      </td>
+                      <td class="py-3 px-4 text-end">
+                        <form method="POST" action="?access=admin&page=api" class="m-0 d-flex gap-2 justify-content-end">
+                          <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                          <input type="hidden" name="key_id" value="<?php echo $k['id']; ?>">
+                          
+                          <?php if ($k['status'] === 'pending'): ?>
+                            <button type="submit" name="verify_api_key" class="btn btn-sm btn-success">Verify</button>
+                          <?php elseif ($k['status'] === 'active'): ?>
+                            <button type="submit" name="ban_api_key" class="btn btn-sm btn-warning text-dark">Ban</button>
+                          <?php elseif ($k['status'] === 'banned'): ?>
+                            <button type="submit" name="unban_api_key" class="btn btn-sm btn-info text-dark">Unban</button>
+                          <?php endif; ?>
+                          
+                          <button type="submit" name="delete_api_key" class="btn btn-sm btn-outline-danger" onclick="return confirm('Revoke this key immediately?');">Remove</button>
+                        </form>
+                      </td>
+                    </tr>
+                    <?php endforeach; endif; ?>
+                  </tbody>
+                </table>
+              </div>
             </div>
             <?php if ($total_api_pages > 1): ?>
             <div class="admin-pagination">
@@ -13345,8 +13773,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             .bc-item:hover {
-              background: var(--md-sys-color-surface-container-high);
-              color: var(--md-sys-color-on-surface);
+              background: color-mix(in srgb, var(--md-sys-color-primary) 16%, transparent);
+              color: var(--md-sys-color-on-primary);
             }
 
             .bc-item.active {
@@ -13404,8 +13832,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             .btn-icon:hover {
-              background: var(--md-sys-color-surface-container-high);
-              color: #ffffff;
+              background: color-mix(in srgb, var(--md-sys-color-primary) 20%, transparent);
+              color: var(--md-sys-color-on-primary);
+              box-shadow: 0 2px 8px color-mix(in srgb, var(--md-sys-color-primary) 25%, transparent);
             }
 
             .btn-icon.active,
@@ -13433,8 +13862,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             .btn-primary:hover {
-              background-color: #dc2626 !important;
-              color: #ffffff !important;
+              background-color: color-mix(in srgb, var(--md-sys-color-primary) 85%, transparent) !important;
+              color: var(--md-sys-color-on-primary) !important;
+              box-shadow: 0 4px 12px color-mix(in srgb, var(--md-sys-color-primary) 40%, transparent) !important;
             }
 
             .app-body {
@@ -13456,7 +13886,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .sidebar-backdrop.active { display: block; }
 
             .sidebar {
-              width: 280px;
+              width: var(--sidebar-width, 280px);
               background: #080808 !important;
               display: flex;
               flex-direction: column;
@@ -13465,10 +13895,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               transition: margin-left 0.25s cubic-bezier(0.2, 0, 0, 1), transform 0.25s cubic-bezier(0.2, 0, 0, 1);
               z-index: 2000;
               border-right: 1px solid #1a1a1a;
+              position: relative;
             }
 
             .sidebar.collapsed {
-              margin-left: -280px;
+              margin-left: calc(-1 * var(--sidebar-width, 280px));
             }
 
             .sidebar-section {
@@ -15957,7 +16388,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               display: none;
             }
 
-                        @media (max-width: 768px) {
+            @media (max-width: 768px) {
               .desktop-only {
                 display: none !important;
               }
@@ -15966,20 +16397,26 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 display: flex !important;
               }
 
+              .sidebar,
+              .sidebar.collapsed {
+                margin-left: 0 !important;
+              }
+
               .sidebar {
-                position: fixed;
-                top: 0;
-                bottom: 0;
-                left: 0;
-                transform: translateX(-100%);
+                position: fixed !important;
+                top: 0 !important;
+                bottom: 0 !important;
+                left: 0 !important;
+                transform: translateX(-100%) !important;
                 box-shadow: 4px 0 24px rgba(0, 0, 0, 0.9);
-                width: 280px;
-                height: 100dvh;
+                width: 280px !important;
+                height: 100dvh !important;
                 padding-top: calc(0.5rem + env(safe-area-inset-top, 0px));
               }
 
-              .sidebar.open {
-                transform: translateX(0);
+              .sidebar.open,
+              .sidebar.collapsed.open {
+                transform: translateX(0) !important;
               }
 
               .layout-columns {
@@ -16012,7 +16449,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </button>
                 <a href="#/" class="brand desktop-only">
                   <svg viewBox="0 0 16 16" style="width:20px;height:20px;"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
-                  PHP Drive
+                  PHPMusic Drive
                 </a>
               </div>
 
@@ -16063,13 +16500,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             <div class="app-body">
               <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
-              <aside class="sidebar" id="sidebar" style="position: relative;">
+              <aside class="sidebar" id="sidebar">
                 <div class="sidebar-resizer desktop-only" id="sidebar-resizer"></div>
                 <div class="sidebar-section">
                   <div class="sidebar-title">Drive Navigation</div>
                   <div class="filter-group">
                     <div class="filter-item active" id="nav-home" onclick="app.switchDriveSection('home')">
                       <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg> Home</span>
+                    </div>
+                    <div class="filter-item" id="nav-gallery" onclick="app.switchDriveSection('gallery')">
+                      <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M22 16V4c0-1.1-.9-2-2-2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2zm-11-4l2.03 2.71L16 11l4 5H8l3-4zM2 6v14c0 1.1.9 2 2 2h14v-2H4V6H2z"/></svg> Gallery</span>
                     </div>
                     <div class="filter-item" id="nav-recents" onclick="app.switchDriveSection('recents')">
                       <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg> Recents</span>
@@ -16105,12 +16545,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </aside>
 
               <main class="main-content-drive" id="main-content">
-                <div class="content-header">
-                  <div class="dir-info">
-                    <h1 id="dir-title">PHP Drive</h1>
-                    <div class="dir-stats" id="dir-stats">Loading...</div>
-                  </div>
-
+                <div class="content-header" style="justify-content: flex-end; margin-bottom: 0.5rem;">
                   <div class="toolbar-actions">
                     <button class="btn-icon active" data-layout="grid" title="Grid Layout">
                       <svg viewBox="0 0 24 24"><path d="M3 3h8v8H3zm0 10h8v8H3zM13 3h8v8h-8zm0 10h8v8h-8z"/></svg>
@@ -16138,6 +16573,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
                     </button>
                   </div>
+                </div>
+
+                <div class="dir-info" style="margin-bottom: 1rem; width: 100%;">
+                  <h1 id="dir-title">PHP Drive</h1>
+                  <div class="dir-stats" id="dir-stats">Loading...</div>
                 </div>
 
                 <div class="gallery-container layout-grid" id="gallery-container"></div>
@@ -17256,7 +17696,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         
             class GalleryApp {
               constructor() {
-                this.appTitle = 'PHP Drive';
+                this.appTitle = 'PHPMusic Drive';
                 this.currentPath = null;
                 this.data = { folders: [], files: [], stats: {} };
                 this.filter = 'all';
@@ -17310,11 +17750,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               bindEvents() {
                 document.getElementById('btn-sidebar').addEventListener('click', () => {
                   if (window.innerWidth <= 768) {
+                    this.sidebar.classList.remove('collapsed');
                     this.sidebar.classList.toggle('open');
                     this.sidebarBackdrop.classList.toggle('active');
                   } else {
+                    this.sidebar.classList.remove('open');
                     this.sidebar.classList.toggle('collapsed');
                     localStorage.setItem('pg_sidebar_collapsed', this.sidebar.classList.contains('collapsed') ? '1' : '0');
+                  }
+                });
+
+                window.addEventListener('resize', () => {
+                  if (window.innerWidth > 768) {
+                    this.sidebar.classList.remove('open');
+                    this.sidebarBackdrop.classList.remove('active');
+                    if (localStorage.getItem('pg_sidebar_collapsed') === '1') {
+                      this.sidebar.classList.add('collapsed');
+                    } else {
+                      this.sidebar.classList.remove('collapsed');
+                    }
+                  } else {
+                    this.sidebar.classList.remove('collapsed');
                   }
                 });
 
@@ -17480,7 +17936,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (driveSidebar && driveResizer) {
                   const savedDriveSidebarWidth = localStorage.getItem('pg_drive_sidebar_width');
                   if (savedDriveSidebarWidth && window.innerWidth > 768) {
-                    driveSidebar.style.width = savedDriveSidebarWidth + 'px';
+                    driveSidebar.style.setProperty('--sidebar-width', savedDriveSidebarWidth + 'px');
                   }
 
                   let isResizingDriveSidebar = false;
@@ -17494,7 +17950,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     if (!isResizingDriveSidebar) return;
                     const newW = e.clientX - driveSidebar.getBoundingClientRect().left;
                     if (newW >= 200 && newW <= 600) {
-                      driveSidebar.style.width = newW + 'px';
+                      driveSidebar.style.setProperty('--sidebar-width', newW + 'px');
                     }
                   });
                   document.addEventListener('mouseup', () => {
@@ -17502,7 +17958,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       isResizingDriveSidebar = false;
                       driveResizer.classList.remove('resizing');
                       document.body.style.cursor = 'default';
-                      localStorage.setItem('pg_drive_sidebar_width', parseInt(driveSidebar.style.width, 10));
+                      const currentW = getComputedStyle(driveSidebar).getPropertyValue('--sidebar-width').replace('px', '').trim();
+                      if (currentW) localStorage.setItem('pg_drive_sidebar_width', currentW);
                       this.applyGridSizing();
                     }
                   });
@@ -17753,8 +18210,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const isStarred = this.currentSection === 'starred';
                 const isTrash = this.currentSection === 'trash';
                 const isActivity = this.currentSection === 'activity';
-                const hideUpload = isStarred || isTrash || isActivity;
-                const hideNewItems = isStarred || isTrash || isActivity;
+                const isGallery = this.currentSection === 'gallery';
+                const hideUpload = isStarred || isTrash || isActivity || isGallery;
+                const hideNewItems = isStarred || isTrash || isActivity || isGallery;
           
                 const btnUploadDesk = document.getElementById('btn-upload-desk');
                 if (btnUploadDesk) btnUploadDesk.style.display = hideUpload ? 'none' : 'flex';
@@ -17910,7 +18368,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
                 decoded = decoded.replace(/^\/+|\/+$/g, '').replace(/\.part$/i, '');
 
-                const specialSections = ['recents', 'starred', 'activity', 'trash'];
+                const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
                 const lowerDecoded = decoded.toLowerCase();
 
                 if (specialSections.includes(lowerDecoded)) {
@@ -17948,7 +18406,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     return;
                   }
 
-                  const specialSections = ['recents', 'starred', 'activity', 'trash'];
+                  const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
                   if (this.currentSection && specialSections.includes(this.currentSection)) {
                     this.originSection = this.currentSection;
                     this.openFile(targetFile, false);
@@ -18002,7 +18460,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.updateControlsVisibility();
                 const toolbar = document.querySelector('.toolbar-actions');
                 if (toolbar) toolbar.style.display = 'flex';
-                document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash').forEach(el => el.classList.remove('active'));
+                document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash, #nav-gallery').forEach(el => el.classList.remove('active'));
                 document.getElementById('nav-home')?.classList.add('active');
                 this.currentPath = path;
                 this.selectedItems.clear();
@@ -18085,6 +18543,33 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
                 if (this.currentSection === 'trash') {
                   this.renderTrashView();
+                  return;
+                }
+
+                if (this.currentSection === 'gallery') {
+                  this.filteredList = (this.data.files || []).filter(f => f.name.toLowerCase().includes(query.toLowerCase()));
+                  this.filteredList = this.applySort(this.filteredList);
+                  this.dirTitle.innerText = `Gallery Search: "${query}"`;
+                  this.dirStats.innerText = `${this.filteredList.length} matching photo(s) found`;
+                  this.container.innerHTML = '';
+                  this.renderedCount = 0;
+                  this.renderLimit = 25;
+                  this.masonryCols = [];
+                  this.hasUpCard = false;
+                  if (this.layout === 'columns') {
+                    const numCols = this.getMasonryColCount();
+                    for (let i = 0; i < numCols; i++) {
+                      const col = document.createElement('div');
+                      col.className = 'masonry-col';
+                      this.container.appendChild(col);
+                      this.masonryCols.push(col);
+                    }
+                  }
+                  if (!this.filteredList.length) {
+                    this.container.innerHTML = `<div class="center-state"><p>No matching photos found</p></div>`;
+                    return;
+                  }
+                  this.appendBatch();
                   return;
                 }
 
@@ -18280,6 +18765,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   this.dirTitle.innerText = 'File Activity';
                 } else if (this.currentSection === 'trash') {
                   this.dirTitle.innerText = 'Trash Bin';
+                } else if (this.currentSection === 'gallery') {
+                  this.dirTitle.innerText = 'Gallery';
+                  this.dirStats.innerText = `${filteredFiles.length} Photos`;
                 } else {
                   this.dirTitle.innerText = this.data.path ? this.data.path.split('/').pop() : this.appTitle;
                   this.dirStats.innerText = `${filteredFolders.length} Folders, ${filteredFiles.length} Files (${this.data.stats?.total_size || '0 B'})`;
@@ -18651,6 +19139,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   html += `<span class="bc-sep">/</span><a href="#/activity" class="bc-item active">File Activity</a>`;
                 } else if (this.currentSection === 'trash') {
                   html += `<span class="bc-sep">/</span><a href="#/trash" class="bc-item active">Trash Bin</a>`;
+                } else if (this.currentSection === 'gallery') {
+                  html += `<span class="bc-sep">/</span><a href="#/gallery" class="bc-item active">Gallery</a>`;
                 } else if (this.currentPath) {
                   const parts = this.currentPath.split('/');
                   let accum = '';
@@ -18947,7 +19437,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.selectedItems.clear();
                 this.updateBatchBar();
 
-                document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash').forEach(el => el.classList.remove('active'));
+                document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash, #nav-gallery').forEach(el => el.classList.remove('active'));
                 document.getElementById(`nav-${section}`)?.classList.add('active');
 
                 if (updateHash) {
@@ -18974,6 +19464,39 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   this.loadActivity();
                 } else if (section === 'trash') {
                   this.loadTrash();
+                } else if (section === 'gallery') {
+                  this.loadGallery();
+                }
+              }
+
+              async loadGallery() {
+                this.currentSection = 'gallery';
+                this.updateControlsVisibility();
+                this.currentPath = '';
+                this.selectedItems.clear();
+                this.updateBatchBar();
+                this.renderLimit = 25;
+                this.isSearching = false;
+                this.dirTitle.innerText = 'Gallery';
+                this.dirStats.innerText = 'All photos across your drive';
+                if (this.container.querySelector('.file-card')) this.container.style.opacity = '0.6';
+                else this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg></div>';
+
+                try {
+                  const res = await fetch('?access=admin&page=drive&action=gallery_list');
+                  const data = await res.json();
+                  this.data = {
+                    folders: [],
+                    files: data.files || [],
+                    stats: { total_size: '', files: (data.files || []).length, folders: 0 },
+                    path: ''
+                  };
+                  this.renderGallery();
+                  this.updateBreadcrumbs();
+                  this.updateBadges();
+                  this.updateDocTitle('Gallery', this.data.files.length);
+                } catch (e) {
+                  this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
                 }
               }
 
@@ -20005,6 +20528,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   this.loadActivity();
                 } else if (this.currentSection === 'trash') {
                   this.loadTrash();
+                } else if (this.currentSection === 'gallery') {
+                  this.loadGallery();
                 } else {
                   this.loadDir(this.currentPath);
                 }
@@ -20085,7 +20610,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.activeModalPath = '';
                 if (window.hdmEngine) window.hdmEngine.activePath = '';
 
-                const specialSections = ['recents', 'starred', 'activity', 'trash'];
+                const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
                 const returnSection = (this.originSection && specialSections.includes(this.originSection))
                   ? this.originSection
                   : (this.currentSection && specialSections.includes(this.currentSection) ? this.currentSection : null);
@@ -20641,20 +21166,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </script>
 
         <?php else: ?>
-          <!-- Standard User Management UI -->
-          <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3">
-            <div class="d-flex align-items-center gap-3">
-              <h1 class="content-title m-0">User Management</h1>
-              <form method="POST" action="" class="m-0">
-                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                <button type="submit" name="reset_opcache" class="btn btn-sm btn-outline-warning" title="Clear PHP OPcache"><i class="bi bi-lightning-charge-fill"></i> Reset OPcache</button>
-              </form>
+          <!-- Drive-Themed User Management UI -->
+          <div class="page-header admin-toolbar-wrap">
+            <div>
+              <div class="d-flex align-items-center gap-3">
+                <h1 class="content-title m-0 fw-bold">User Management</h1>
+                <form method="POST" action="" class="m-0">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <button type="submit" name="reset_opcache" class="admin-btn-pill" style="height: 32px; font-size: 0.78rem; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);" title="Clear PHP OPcache"><i class="bi bi-lightning-charge-fill"></i> Reset OPcache</button>
+                </form>
+              </div>
+              <div class="small text-secondary mt-1">Manage accounts, upload privileges, permissions, and roles</div>
             </div>
             <?php $search = $_GET['search'] ?? ''; ?>
             <?php $sort_admin = $_GET['sort'] ?? 'newest'; ?>
-            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 550px;">
+            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
               <input type="hidden" name="access" value="admin">
-              <select name="sort" class="form-select bg-dark text-white border-secondary shadow-sm" style="width: auto;" onchange="this.form.submit()">
+              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
                 <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest</option>
                 <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
                 <option value="pending" <?php echo $sort_admin === 'pending' ? 'selected' : ''; ?>>Pending Uploads</option>
@@ -20664,9 +21192,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned</option>
                 <option value="not_banned" <?php echo $sort_admin === 'not_banned' ? 'selected' : ''; ?>>Not Banned</option>
               </select>
-              <div class="input-group shadow-sm">
-                <input type="text" name="search" class="form-control bg-dark text-white border-secondary" placeholder="Search user..." value="<?php echo htmlspecialchars($search); ?>">
-                <button type="submit" class="btn btn-danger fw-bold px-3"><i class="bi bi-search"></i></button>
+              <div class="position-relative flex-grow-1">
+                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search artist, email, ID..." value="<?php echo htmlspecialchars($search); ?>">
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
               </div>
             </form>
           </div>
