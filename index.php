@@ -452,7 +452,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '9.5');
+define('APP_VERSION', '9.6');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1201,6 +1201,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         if (session_status() === PHP_SESSION_ACTIVE) {
           session_write_close();
         }
+        @ini_set('zlib.output_compression', 'Off');
+        if (function_exists('apache_setenv')) {
+          @apache_setenv('no-gzip', '1');
+        }
         while (ob_get_level() > 0) {
           @ob_end_clean();
         }
@@ -1252,24 +1256,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         header('Accept-Ranges: bytes');
         header('Content-Length: ' . sprintf('%.0f', $length));
         header('Content-Disposition: inline; filename="' . basename($path) . '"');
-        header('Cache-Control: public, max-age=86400');
+        header('Cache-Control: public, max-age=604800, immutable');
+        header('Content-Transfer-Encoding: binary');
         header('X-Content-Type-Options: nosniff');
 
         $fp = @fopen($path, 'rb');
-        if (!$fp) exit;
-        if ($start > 0) {
-          fseek($fp, (int)$start, SEEK_SET);
+        if ($fp) {
+          @flock($fp, LOCK_SH);
+          if ($start > 0) {
+            @fseek($fp, (int)$start, SEEK_SET);
+          }
+          $bytesLeft = $length;
+          $bufferSize = 512 * 1024; // 512KB for smooth high-bitrate video/anime stream delivery
+          while (!feof($fp) && $bytesLeft > 0) {
+            if (connection_aborted()) break;
+            $read = (int)min($bufferSize, $bytesLeft);
+            $buff = fread($fp, $read);
+            if ($buff === false || $buff === '') break;
+            echo $buff;
+            @flush();
+            $bytesLeft -= strlen($buff);
+          }
+          @flock($fp, LOCK_UN);
+          fclose($fp);
         }
-
-        while (!feof($fp) && $length > 0 && connection_status() === CONNECTION_NORMAL) {
-          $read = (int)min(65536, $length);
-          $buff = fread($fp, $read);
-          if ($buff === false || $buff === '') break;
-          echo $buff;
-          $length -= strlen($buff);
-          @flush();
-        }
-        fclose($fp);
         exit;
       }
     }
@@ -1403,7 +1413,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
     if ($driveAction) {
       $postWriteActions = [
-        'upload_chunk', 'create', 'rename', 'delete', 'save_text',
+        'upload_chunk', 'create', 'rename', 'batch_rename', 'delete', 'save_text',
         'trash', 'trash_restore', 'trash_delete', 'trash_empty', 'version_restore',
         'star_toggle', 'clipboard_paste', 'fetch_url', 'encrypt_file',
         'decrypt_file', 'zip', 'unzip'
@@ -1483,23 +1493,34 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       if ($driveAction === 'search') {
         $dir = $_GET['dir'] ?? ($_GET['path'] ?? '');
         $query = trim($_GET['q'] ?? '');
+        $extFilter = strtolower(trim($_GET['ext'] ?? ''));
+        $typeFilter = strtolower(trim($_GET['type'] ?? ''));
+        $dateFrom = !empty($_GET['date_from']) ? strtotime($_GET['date_from'] . ' 00:00:00') : 0;
+        $dateTo = !empty($_GET['date_to']) ? strtotime($_GET['date_to'] . ' 23:59:59') : 0;
+        $sizeMin = (isset($_GET['size_min']) && $_GET['size_min'] !== '') ? floatval($_GET['size_min']) : -1;
+        $sizeMax = (isset($_GET['size_max']) && $_GET['size_max'] !== '') ? floatval($_GET['size_max']) : -1;
+
         $fullPath = driveSafePath($driveConfig['root_dir'], $dir);
-        if (!$fullPath || !is_dir($fullPath) || $query === '') {
+        $hasAdv = ($extFilter !== '' || $typeFilter !== '' || $dateFrom > 0 || $dateTo > 0 || $sizeMin >= 0 || $sizeMax >= 0);
+
+        if (!$fullPath || !is_dir($fullPath) || ($query === '' && !$hasAdv)) {
           driveJsonResponse(['folders' => [], 'files' => [], 'query' => $query, 'count' => 0]);
         }
 
-        $maxResults = 200;
+        $maxResults = 300;
         $foundFolders = [];
         $foundFiles = [];
         $rootLen = strlen(realpath($driveConfig['root_dir']));
         $cacheReal = realpath($driveConfig['cache_dir']);
+        $trashReal = realpath($driveConfig['trash_dir']);
+        $allowedExts = array_filter(array_map('trim', explode(',', str_replace('.', '', $extFilter))));
 
         $flags = FilesystemIterator::SKIP_DOTS | FilesystemIterator::FOLLOW_SYMLINKS;
         $dirIterator = new RecursiveDirectoryIterator($fullPath, $flags);
-        $filterIterator = new RecursiveCallbackFilterIterator($dirIterator, function ($current) use ($cacheReal) {
+        $filterIterator = new RecursiveCallbackFilterIterator($dirIterator, function ($current) use ($cacheReal, $trashReal) {
           $path = $current->getPathname();
           $filename = $current->getFilename();
-          if ($filename[0] === '.' || ($cacheReal && strpos($path, $cacheReal) === 0)) {
+          if ($filename[0] === '.' || ($cacheReal && strpos($path, $cacheReal) === 0) || ($trashReal && strpos($path, $trashReal) === 0)) {
             return false;
           }
           return true;
@@ -1512,34 +1533,50 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         foreach ($iterator as $item) {
           if ($count >= $maxResults) break;
           $name = $item->getFilename();
-          if (stripos($name, $query) !== false) {
-            $itemPath = $item->getPathname();
-            $rel = ltrim(str_replace(['\\', '//'], '/', substr($itemPath, $rootLen)), '/');
-            $mtime = $item->getMTime();
+          $isMatch = ($query === '' || stripos($name, $query) !== false);
+          if (!$isMatch) continue;
 
-            if ($item->isDir()) {
-              $foundFolders[] = [
-                'name'        => $name,
-                'path'        => $rel,
-                'mtime'       => $mtime,
-                'items_count' => 0
-              ];
-            } else {
-              $size = $item->getSize();
-              $ext = strtolower($item->getExtension());
-              $type = driveGetFileType($ext, $driveConfig);
-              $foundFiles[] = [
-                'name'     => $name,
-                'path'     => $rel,
-                'size'     => $size,
-                'size_fmt' => driveFormatBytes($size),
-                'mtime'    => $mtime,
-                'ext'      => $ext,
-                'type'     => $type,
-                'width'    => 0,
-                'height'   => 0
-              ];
+          $itemPath = $item->getPathname();
+          $rel = ltrim(str_replace(['\\', '//'], '/', substr($itemPath, $rootLen)), '/');
+          $mtime = $item->getMTime();
+
+          if ($item->isDir()) {
+            if (!empty($allowedExts) || $typeFilter !== '' || $sizeMin >= 0 || $sizeMax >= 0) {
+              continue;
             }
+            if ($dateFrom > 0 && $mtime < $dateFrom) continue;
+            if ($dateTo > 0 && $mtime > $dateTo) continue;
+
+            $foundFolders[] = [
+              'name'        => $name,
+              'path'        => $rel,
+              'mtime'       => $mtime,
+              'items_count' => 0
+            ];
+            $count++;
+          } else {
+            $size = (float)$item->getSize();
+            $ext = strtolower($item->getExtension());
+            $type = driveGetFileType($ext, $driveConfig);
+
+            if (!empty($allowedExts) && !in_array($ext, $allowedExts)) continue;
+            if ($typeFilter !== '' && $typeFilter !== 'all' && $type !== $typeFilter) continue;
+            if ($dateFrom > 0 && $mtime < $dateFrom) continue;
+            if ($dateTo > 0 && $mtime > $dateTo) continue;
+            if ($sizeMin >= 0 && $size < $sizeMin) continue;
+            if ($sizeMax >= 0 && $size > $sizeMax) continue;
+
+            $foundFiles[] = [
+              'name'     => $name,
+              'path'     => $rel,
+              'size'     => $size,
+              'size_fmt' => driveFormatBytes($size),
+              'mtime'    => $mtime,
+              'ext'      => $ext,
+              'type'     => $type,
+              'width'    => 0,
+              'height'   => 0
+            ];
             $count++;
           }
         }
@@ -1910,7 +1947,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         $newName = trim($_POST['new_name'] ?? '');
         if (!$item || !file_exists($item) || !$newName) driveJsonResponse(['error' => 'Invalid parameters'], 400);
 
-        $newName = preg_replace('/[^\w\s\d\.\-_~()[\]]/', '', $newName);
+        $newName = preg_replace('/[^\w\s\d\.\-_~()[\]]/u', '', $newName);
         $dest = dirname($item) . DIRECTORY_SEPARATOR . $newName;
         if (file_exists($dest)) driveJsonResponse(['error' => 'Destination already exists'], 400);
 
@@ -1919,6 +1956,50 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           driveLogActivity($driveConfig['meta_file'], 'renamed', $newName, 'Renamed from ' . basename($item));
         }
         driveJsonResponse(['success' => $renamed]);
+      }
+
+      if ($driveAction === 'batch_rename') {
+        $renames = json_decode($_POST['renames'] ?? '[]', true);
+        if (!is_array($renames) || empty($renames)) driveJsonResponse(['error' => 'No rename items provided'], 400);
+
+        $successCount = 0;
+        $errors = [];
+
+        foreach ($renames as $task) {
+          $oldPath = $task['path'] ?? '';
+          $newName = trim($task['new_name'] ?? '');
+          if (!$oldPath || !$newName) continue;
+
+          $fullSrc = driveSafePath($driveConfig['root_dir'], $oldPath);
+          if (!$fullSrc || !file_exists($fullSrc)) {
+            $errors[] = "Source not found: " . basename($oldPath);
+            continue;
+          }
+
+          $cleanName = preg_replace('/[^\w\s\d\.\-_~()[\]]/u', '', $newName);
+          if (empty($cleanName) || $cleanName === basename($fullSrc)) continue;
+
+          $destDir = dirname($fullSrc);
+          $targetPath = $destDir . DIRECTORY_SEPARATOR . $cleanName;
+
+          if (file_exists($targetPath)) {
+            $errors[] = "File already exists: {$cleanName}";
+            continue;
+          }
+
+          if (@rename($fullSrc, $targetPath)) {
+            $successCount++;
+            driveLogActivity($driveConfig['meta_file'], 'renamed', $cleanName, 'Renamed from ' . basename($fullSrc));
+          } else {
+            $errors[] = "Could not rename: " . basename($fullSrc);
+          }
+        }
+
+        driveJsonResponse([
+          'success' => true,
+          'renamed_count' => $successCount,
+          'errors' => $errors
+        ]);
       }
 
       if ($driveAction === 'delete') {
@@ -13814,12 +13895,169 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               outline: none;
               font-size: 0.88rem;
               color: var(--md-sys-color-on-surface);
+              background: transparent;
             }
 
             .search-box svg {
               color: var(--md-sys-color-on-surface-variant);
               width: 19px;
               height: 19px;
+            }
+
+            .search-adv-btn {
+              width: 28px;
+              height: 28px;
+              border-radius: 14px;
+              color: var(--md-sys-color-on-surface-variant);
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              cursor: pointer;
+              flex-shrink: 0;
+              transition: all 0.15s ease;
+              position: relative;
+            }
+            .search-adv-btn:hover, .search-adv-btn.active {
+              color: #ff0000;
+              background: var(--md-sys-color-surface-container-highest);
+            }
+            .search-adv-btn.active::after {
+              content: '';
+              position: absolute;
+              top: 4px;
+              right: 4px;
+              width: 6px;
+              height: 6px;
+              background: #ff0000;
+              border-radius: 50%;
+            }
+
+            .trash-view-wrapper {
+              grid-column: 1 / -1;
+              width: 100%;
+              display: flex;
+              flex-direction: column;
+              gap: 0.65rem;
+              margin-top: 0;
+            }
+
+            /* Batch Rename Modal UI Styles */
+            .br-grid {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 0.65rem;
+            }
+            @media (max-width: 540px) {
+              .br-grid {
+                grid-template-columns: 1fr;
+                gap: 0.5rem;
+              }
+            }
+
+            .br-options-container {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 0.6rem;
+              flex-wrap: wrap;
+              background: var(--md-sys-color-surface-container-low);
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 14px;
+              padding: 0.45rem 0.65rem;
+            }
+            .br-segmented-control {
+              display: flex;
+              background: var(--md-sys-color-surface-container-highest);
+              border-radius: 10px;
+              padding: 2px;
+              gap: 2px;
+            }
+            .br-chip-label {
+              display: flex;
+              align-items: center;
+              cursor: pointer;
+              user-select: none;
+            }
+            .br-chip-label input {
+              display: none;
+            }
+            .br-chip-label span {
+              padding: 0.3rem 0.65rem;
+              font-size: 0.76rem;
+              font-weight: 500;
+              color: var(--md-sys-color-on-surface-variant);
+              border-radius: 8px;
+              transition: all 0.15s ease;
+            }
+            .br-chip-label input:checked + span {
+              background: rgba(255, 0, 0, 0.22);
+              color: #ff5252;
+              border: 1px solid rgba(255, 0, 0, 0.4);
+              font-weight: 700;
+              box-shadow: none !important;
+            }
+            .br-checkbox-group {
+              display: flex;
+              align-items: center;
+              gap: 0.6rem;
+            }
+            .br-check-pill {
+              display: inline-flex;
+              align-items: center;
+              gap: 0.35rem;
+              font-size: 0.78rem;
+              font-weight: 500;
+              color: var(--md-sys-color-on-surface);
+              cursor: pointer;
+              user-select: none;
+            }
+            .br-check-pill input[type="checkbox"] {
+              accent-color: #ff0000;
+              width: 15px;
+              height: 15px;
+              cursor: pointer;
+            }
+
+            .br-preview-box {
+              max-height: 190px;
+              min-height: 75px;
+              overflow-y: auto;
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 12px;
+              background: var(--md-sys-color-surface-container-lowest);
+            }
+            .batch-rename-table {
+              width: 100%;
+              border-collapse: collapse;
+              font-size: 0.8rem;
+            }
+            .batch-rename-table th, .batch-rename-table td {
+              padding: 0.45rem 0.75rem;
+              border-bottom: 1px solid var(--md-sys-color-surface-container-high);
+              text-align: left;
+            }
+            .batch-rename-table th {
+              background: var(--md-sys-color-surface-container-high);
+              color: #ff0000;
+              font-weight: 700;
+              position: sticky;
+              top: 0;
+              z-index: 2;
+              padding-top: 0.4rem;
+              padding-bottom: 0.4rem;
+            }
+            .batch-rename-table tr:last-child td {
+              border-bottom: none;
+            }
+            .br-preview-new {
+              font-weight: 600;
+              color: var(--md-sys-color-on-surface);
+            }
+            .br-preview-new.modified {
+              color: #7ee787;
+            }
+            .br-preview-new.collision {
+              color: #ff7b72;
             }
 
             .btn-icon {
@@ -13832,24 +14070,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             .btn-icon:hover {
-              background: color-mix(in srgb, var(--md-sys-color-primary) 20%, transparent);
-              color: var(--md-sys-color-on-primary);
-              box-shadow: 0 2px 8px color-mix(in srgb, var(--md-sys-color-primary) 25%, transparent);
+              background: rgba(255, 0, 0, 0.18) !important;
+              color: #ff5252 !important;
+              box-shadow: none !important;
             }
 
             .btn-icon.active,
             .toolbar-actions .btn-icon.active,
             .toolbar-actions button[data-layout].active {
-              background-color: #ff0000 !important;
-              color: #ffffff !important;
-              box-shadow: 0 0 10px rgba(255, 0, 0, 0.6) !important;
+              background-color: rgba(255, 0, 0, 0.22) !important;
+              color: #ff5252 !important;
+              border: 1px solid rgba(255, 0, 0, 0.45) !important;
+              box-shadow: none !important;
             }
 
             .btn-primary {
               display: flex;
               align-items: center;
               gap: 0.4rem;
-              background-color: var(--md-sys-color-primary) !important;
+              background-color: #ff0000 !important;
               color: #ffffff !important;
               padding: 0.45rem 1rem;
               height: 40px;
@@ -13857,14 +14096,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               font-size: 0.85rem;
               font-weight: 600;
               white-space: nowrap;
-              box-shadow: var(--md-elevation-1);
               border: none !important;
+              box-shadow: none !important;
+              transition: all 0.15s ease;
             }
 
             .btn-primary:hover {
-              background-color: color-mix(in srgb, var(--md-sys-color-primary) 85%, transparent) !important;
-              color: var(--md-sys-color-on-primary) !important;
-              box-shadow: 0 4px 12px color-mix(in srgb, var(--md-sys-color-primary) 40%, transparent) !important;
+              background-color: rgba(255, 0, 0, 0.22) !important;
+              color: #ff5252 !important;
+              border: 1px solid rgba(255, 0, 0, 0.45) !important;
+              box-shadow: none !important;
             }
 
             .app-body {
@@ -14072,7 +14313,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               flex-direction: column;
               gap: 0.15rem;
               min-width: 0;
-              flex: 1;
+              flex-shrink: 0;
+              width: 100%;
             }
 
             .dir-info h1 {
@@ -14670,25 +14912,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               align-items: center;
               justify-content: center;
               width: 100%;
-              min-height: 45dvh;
+              min-height: 35dvh;
               grid-column: 1 / -1;
               color: var(--md-sys-color-on-surface-variant);
               text-align: center;
-              gap: 0.75rem;
+              gap: 0.9rem;
+              padding: 2.5rem 1rem;
             }
 
-            .m3-spinner {
-              width: 40px;
-              height: 40px;
-              animation: m3-rotate 2s linear infinite;
+            .m3-spinner,
+            #phpfiles-app-root svg.m3-spinner {
+              width: 52px !important;
+              height: 52px !important;
+              animation: m3-rotate 1.4s linear infinite;
               display: block;
-              margin: auto;
+              margin: 0 auto;
+              flex-shrink: 0;
             }
-
             .m3-spinner circle {
               stroke: #ff0000;
               stroke-linecap: round;
-              animation: m3-dash 1.5s ease-in-out infinite;
+              stroke-width: 4px;
+              animation: m3-dash 1.4s ease-in-out infinite;
             }
 
             @keyframes m3-rotate {
@@ -14857,9 +15102,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               inset: 0;
               height: 100dvh;
               min-height: 100dvh;
-              background: rgba(5, 5, 5, 0.92);
-              backdrop-filter: blur(24px);
-              -webkit-backdrop-filter: blur(24px);
+              background: #030303;
               z-index: 3500;
               display: none;
               flex-direction: column;
@@ -14876,9 +15119,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               align-items: center;
               justify-content: space-between;
               padding: 0 1.2rem;
-              background: rgba(18, 18, 18, 0.85);
-              backdrop-filter: blur(12px);
-              -webkit-backdrop-filter: blur(12px);
+              background: #101010;
               border-bottom: 1px solid var(--md-sys-color-outline-variant);
               color: #fff;
               position: absolute;
@@ -14888,7 +15129,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               z-index: 3550;
               opacity: 0;
               transform: translateY(-100%);
-              transition: all 0.3s cubic-bezier(0.2, 0, 0, 1);
+              transition: transform 0.2s ease, opacity 0.2s ease;
             }
 
             .lightbox-header.active {
@@ -15897,17 +16138,49 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .form-input {
               width: 100%;
               background: var(--md-sys-color-surface-container-high);
-              border: 1px solid var(--md-sys-color-outline-variant);
+              border: 1px solid rgba(255, 255, 255, 0.2) !important;
               border-radius: 12px;
               padding: 0.65rem 0.85rem;
               color: #ffffff;
               outline: none;
               font-size: 0.9rem;
+              box-sizing: border-box;
+              transition: border-color 0.15s ease, background-color 0.15s ease;
             }
 
             .form-input:focus {
-              border-color: #ff0000;
-              box-shadow: 0 0 0 2px rgba(255, 0, 0, 0.25);
+              border-color: #ff0000 !important;
+              box-shadow: none !important;
+              background-color: var(--md-sys-color-surface-container-highest);
+            }
+
+            select.form-input,
+            input[type="date"].form-input {
+              position: relative;
+              appearance: none;
+              -webkit-appearance: none;
+              -moz-appearance: none;
+              padding-right: 2.5rem;
+              background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='%23cac4d0'%3E%3Cpath d='M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z'/%3E%3C/svg%3E");
+              background-repeat: no-repeat;
+              background-position: right 14px center;
+              background-size: 18px 18px;
+              cursor: pointer;
+            }
+            input[type="date"].form-input::-webkit-calendar-picker-indicator {
+              position: absolute;
+              top: 0;
+              left: 0;
+              right: 0;
+              bottom: 0;
+              width: 100%;
+              height: 100%;
+              opacity: 0;
+              cursor: pointer;
+            }
+            input[type="date"].form-input::-webkit-inner-spin-button {
+              display: none;
+              -webkit-appearance: none;
             }
 
             .upload-dock {
@@ -16457,6 +16730,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="search-box">
                   <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
                   <input type="text" id="search-input" placeholder="Search files & subfolders...">
+                  <button class="search-adv-btn" id="btn-adv-search" title="Advanced Search & Filters">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+                  </button>
                 </div>
               </div>
 
@@ -16621,14 +16897,37 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <span>Name (Z to A)</span>
                 <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
               </div>
+              <div class="dm-sep"></div>
               <div class="dm-item" data-sort="date_desc">
                 <svg viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/></svg>
                 <span>Date (Newest first)</span>
                 <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
               </div>
               <div class="dm-item" data-sort="date_asc">
-                <svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+                <svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.59 8 8-3.59 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
                 <span>Date (Oldest first)</span>
+                <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </div>
+              <div class="dm-sep"></div>
+              <div class="dm-item" data-sort="size_desc">
+                <svg viewBox="0 0 24 24"><path d="M2 17h20v2H2v-2zm0-4h14v2H2v-2zm0-4h8v2H2V9zm0-4h4v2H2V5z"/></svg>
+                <span>Size (Largest first)</span>
+                <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </div>
+              <div class="dm-item" data-sort="size_asc">
+                <svg viewBox="0 0 24 24"><path d="M2 5h4v2H2V5zm0 4h8v2H2V9zm0 4h14v2H2v-2zm0 4h20v2H2v-2z"/></svg>
+                <span>Size (Smallest first)</span>
+                <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </div>
+              <div class="dm-sep"></div>
+              <div class="dm-item" data-sort="ext_asc">
+                <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+                <span>Extension (A to Z)</span>
+                <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </div>
+              <div class="dm-item" data-sort="ext_desc">
+                <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm-3 7V3.5L18.5 9H13zm5 9H8v-2h8v2zm0-4H8v-2h8v2z"/></svg>
+                <span>Extension (Z to A)</span>
                 <svg class="sort-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
               </div>
             </div>
@@ -16637,22 +16936,44 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <div class="batch-bar" id="batch-bar">
               <span class="batch-count" id="batch-count">0 selected</span>
               <div style="width:1px; height:20px; background:var(--md-sys-color-outline-variant); margin:0 0.15rem;"></div>
-              <button class="btn-icon" id="btn-batch-info" title="Information">
-                <svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>
-              </button>
               <button class="btn-icon" id="btn-batch-download" title="Download ZIP">
                 <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
               </button>
-              <button class="btn-icon" id="btn-batch-compress" title="Compress to ZIP (Server)">
-                <svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>
-              </button>
-              <button class="btn-icon" id="btn-batch-delete" title="Delete Items">
+              <button class="btn-icon" id="btn-batch-delete" title="Move to Trash / Delete">
                 <svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+              </button>
+              <button class="btn-icon" id="btn-batch-more" title="More Actions">
+                <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
               </button>
               <div style="width:1px; height:20px; background:var(--md-sys-color-outline-variant); margin:0 0.15rem;"></div>
               <button class="btn-icon" id="btn-batch-clear" title="Clear selection">
                 <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
               </button>
+            </div>
+
+            <!-- Dropdown Batch More Menu -->
+            <div class="dropdown-menu" id="dropdown-batch-more">
+              <div class="dm-item" id="dbm-rename">
+                <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                <span>Batch Rename</span>
+              </div>
+              <div class="dm-item" id="dbm-compress">
+                <svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>
+                <span>Compress to ZIP</span>
+              </div>
+              <div class="dm-item" id="dbm-info">
+                <svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>
+                <span>Item Information</span>
+              </div>
+              <div class="dm-sep"></div>
+              <div class="dm-item" id="dbm-copy">
+                <svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                <span>Copy Selected</span>
+              </div>
+              <div class="dm-item" id="dbm-cut">
+                <svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm0 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3h-3z"/></svg>
+                <span>Cut (Move) Selected</span>
+              </div>
             </div>
 
             <!-- Upload Progress Dock Widget -->
@@ -16716,6 +17037,125 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             <!-- Modal Backdrops -->
             <div class="modal-backdrop" id="modal-backdrop">
+              <!-- Advanced Batch Rename Modal -->
+              <div class="modal-box" id="modal-batch-rename" style="display:none; max-width:600px; max-height:90dvh;">
+                <div class="modal-header">
+                  <div style="display:flex; align-items:center; gap:0.5rem; overflow:hidden;">
+                    <svg viewBox="0 0 24 24" style="width:20px;height:20px;color:var(--md-sys-color-primary);"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                    <span id="br-title" style="font-weight:700; font-size:1rem;">Batch Rename Items</span>
+                  </div>
+                  <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-content" style="padding:1rem 1.25rem; display:flex; flex-direction:column; gap:0.65rem;">
+                  <div class="br-grid">
+                    <div class="form-group" style="margin-bottom:0;">
+                      <label class="form-label">Find Pattern</label>
+                      <input type="text" class="form-input" id="br-find" placeholder="e.g. IMG_ or _copy">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                      <label class="form-label">Replace With</label>
+                      <input type="text" class="form-input" id="br-replace" placeholder="Leave empty to remove">
+                    </div>
+                  </div>
+                  <div class="br-grid">
+                    <div class="form-group" style="margin-bottom:0;">
+                      <label class="form-label">Add Prefix</label>
+                      <input type="text" class="form-input" id="br-prefix" placeholder="e.g. 2026_">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                      <label class="form-label">Add Suffix</label>
+                      <input type="text" class="form-input" id="br-suffix" placeholder="e.g. _final">
+                    </div>
+                  </div>
+                  <div class="br-options-container">
+                    <div class="br-segmented-control">
+                      <label class="br-chip-label"><input type="radio" name="br-target" value="name" checked><span>Name</span></label>
+                      <label class="br-chip-label"><input type="radio" name="br-target" value="full"><span>Full</span></label>
+                      <label class="br-chip-label"><input type="radio" name="br-target" value="ext"><span>Ext</span></label>
+                    </div>
+                    <div class="br-checkbox-group">
+                      <label class="br-check-pill"><input type="checkbox" id="br-case"><span>Match Case</span></label>
+                      <label class="br-check-pill"><input type="checkbox" id="br-regex"><span>Regex</span></label>
+                    </div>
+                  </div>
+                  <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.2rem; font-size:0.78rem; color:var(--md-sys-color-on-surface-variant);">
+                    <span id="br-status-summary">0 item(s) will be modified</span>
+                    <span style="font-size:0.75rem; font-weight:600; text-transform:uppercase; letter-spacing:0.5px;">Live Preview</span>
+                  </div>
+                  <div class="br-preview-box">
+                    <table class="batch-rename-table">
+                      <thead>
+                        <tr>
+                          <th>Original Name</th>
+                          <th style="width:24px; text-align:center;">➔</th>
+                          <th>New Name</th>
+                        </tr>
+                      </thead>
+                      <tbody id="br-preview-body"></tbody>
+                    </table>
+                  </div>
+                </div>
+                <div class="modal-footer" style="display:flex; justify-content:space-between; align-items:center;">
+                  <button class="btn-primary modal-close" style="background:transparent !important; color:#ffffff; border:1px solid rgba(255, 255, 255, 0.2) !important; height:36px; padding:0 0.9rem; font-size:0.82rem; box-shadow:none !important;">Cancel</button>
+                  <button class="btn-primary" id="br-confirm-btn" style="gap:0.4rem; height:36px; padding:0 1rem; font-size:0.82rem; box-shadow:none !important;">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                    <span id="br-confirm-label">Apply Rename</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Advanced Search Modal -->
+              <div class="modal-box" id="modal-advanced-search" style="display:none; max-width:460px;">
+                <div class="modal-header">
+                  <span>Advanced Search & Filters</span>
+                  <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-content" style="padding:1rem 1.4rem;">
+                  <div class="form-group">
+                    <label class="form-label">Extension (e.g. php, webp, pdf, zip)</label>
+                    <input type="text" class="form-input" id="adv-ext" placeholder="Comma separated, e.g. webp, jpg">
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Category / Media Type</label>
+                    <select class="form-input" id="adv-type">
+                      <option value="">All Categories</option>
+                      <option value="image">Images</option>
+                      <option value="video">Videos</option>
+                      <option value="audio">Audio</option>
+                      <option value="text">Documents / Code</option>
+                      <option value="archive">Archives</option>
+                    </select>
+                  </div>
+                  <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6rem;">
+                    <div class="form-group">
+                      <label class="form-label">Date Modified From</label>
+                      <input type="date" class="form-input" id="adv-date-from">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label">Date Modified To</label>
+                      <input type="date" class="form-input" id="adv-date-to">
+                    </div>
+                  </div>
+                  <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6rem;">
+                    <div class="form-group">
+                      <label class="form-label">Min Size (MB)</label>
+                      <input type="number" class="form-input" id="adv-size-min" placeholder="0" min="0" step="any">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label">Max Size (MB)</label>
+                      <input type="number" class="form-input" id="adv-size-max" placeholder="e.g. 50" min="0" step="any">
+                    </div>
+                  </div>
+                </div>
+                <div class="modal-footer" style="display:flex; justify-content:space-between;">
+                  <button class="btn-primary" id="btn-adv-reset" style="background:var(--md-sys-color-surface-container-high); color:var(--md-sys-color-on-surface); border:1px solid var(--md-sys-color-outline-variant);">Reset</button>
+                  <div style="display:flex; gap:0.4rem;">
+                    <button class="btn-icon modal-close" style="width:auto; padding:0 0.8rem;">Cancel</button>
+                    <button class="btn-primary" id="btn-adv-apply">Apply Filter</button>
+                  </div>
+                </div>
+              </div>
+
               <div class="modal-box" id="modal-input" style="display:none;">
                 <div class="modal-header">
                   <span id="modal-input-title">Create Item</span>
@@ -17575,15 +18015,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 if (isVideo) {
                   this.body.innerHTML = `
-                    <video class="lightbox-media" src="${rawUrl}" controls autoplay playsinline preload="auto" style="max-height:82dvh; max-width:95%; background:#000;">
-                      Your browser does not support HTML5 video.
-                    </video>
+                    <div style="display:flex; flex-direction:column; align-items:center; width:100%; max-width:960px; padding:0.5rem;">
+                      <div style="width:100%; display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                        <span style="font-size:0.85rem; font-weight:600; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:65%;">${fileName}</span>
+                        <a href="${rawUrl}" target="_blank" class="btn-primary" style="height:28px; padding:0 0.75rem; font-size:0.75rem; text-decoration:none; display:inline-flex; align-items:center; gap:4px;">
+                          <svg viewBox="0 0 24 24" style="width:14px;height:14px;"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg> External / Native Tab
+                        </a>
+                      </div>
+                      <video class="lightbox-media" src="${rawUrl}" controls autoplay playsinline preload="metadata" style="max-height:78dvh; max-width:100%; width:100%; background:#000; border-radius:8px; box-shadow:none;">
+                        Your browser does not support HTML5 video.
+                      </video>
+                    </div>
                     ${navPrev}
                     ${navNext}
                   `;
                   const vid = this.body.querySelector('video');
                   if (vid) {
-                    vid.load();
                     vid.play().catch(() => { vid.controls = true; });
                   }
                 } else if (isAudio) {
@@ -17708,7 +18155,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.renderLimit = 25;
                 this.filteredList = [];
                 this.searchDebounceTimer = null;
+                this.searchSeq = 0;
+                this.navSeq = 0;
                 this.isSearching = false;
+                this.advFilters = { ext: '', type: '', date_from: '', date_to: '', size_min: '', size_max: '' };
                 this.starredSet = new Set();
                 this.currentSection = 'home';
                 this.expandedTreeNodes = new Set(JSON.parse(localStorage.getItem('pg_tree_expanded') || '[]'));
@@ -17908,17 +18358,83 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         
                 document.getElementById('search-input').addEventListener('input', (e) => {
                   const q = e.target.value.trim();
+                  this.searchQuery = q;
                   clearTimeout(this.searchDebounceTimer);
-                  this.searchDebounceTimer = setTimeout(() => {
-                    this.searchQuery = q;
-                    if (q.length > 0) {
-                      this.performSearch(q);
+
+                  if (q.length === 0 && !this.hasActiveAdvFilters()) {
+                    this.isSearching = false;
+                    this.searchSeq++;
+                    this.container.style.opacity = '1';
+                    this.renderLimit = 25;
+                    if (this.currentSection === 'activity') {
+                      this.renderActivityView();
+                    } else if (this.currentSection === 'trash') {
+                      this.renderTrashView();
+                    } else if (this.currentSection === 'starred') {
+                      this.loadStarred();
+                    } else if (this.currentSection === 'recents') {
+                      this.loadRecents();
+                    } else if (this.currentSection === 'gallery') {
+                      this.loadGallery();
                     } else {
-                      this.isSearching = false;
-                      this.renderLimit = 25;
                       this.renderGallery();
                     }
-                  }, 280);
+                    return;
+                  }
+
+                  this.searchDebounceTimer = setTimeout(() => {
+                    this.performSearch(q);
+                  }, 260);
+                });
+
+                // Modal backdrop click listener to safely dismiss modals
+                const mb = document.getElementById('modal-backdrop');
+                if (mb) {
+                  mb.addEventListener('click', (e) => {
+                    if (e.target.id === 'modal-backdrop') {
+                      this.closeModals();
+                    }
+                  });
+                }
+
+                // Advanced Search Button & Dialog Listeners
+                const btnAdv = document.getElementById('btn-adv-search');
+                if (btnAdv) {
+                  btnAdv.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    document.getElementById('adv-ext').value = this.advFilters.ext || '';
+                    document.getElementById('adv-type').value = this.advFilters.type || '';
+                    document.getElementById('adv-date-from').value = this.advFilters.date_from || '';
+                    document.getElementById('adv-date-to').value = this.advFilters.date_to || '';
+                    document.getElementById('adv-size-min').value = this.advFilters.size_min || '';
+                    document.getElementById('adv-size-max').value = this.advFilters.size_max || '';
+                    this.showModal('modal-advanced-search');
+                  });
+                }
+
+                document.getElementById('btn-adv-reset')?.addEventListener('click', () => {
+                  this.advFilters = { ext: '', type: '', date_from: '', date_to: '', size_min: '', size_max: '' };
+                  document.getElementById('adv-ext').value = '';
+                  document.getElementById('adv-type').value = '';
+                  document.getElementById('adv-date-from').value = '';
+                  document.getElementById('adv-date-to').value = '';
+                  document.getElementById('adv-size-min').value = '';
+                  document.getElementById('adv-size-max').value = '';
+                  this.updateAdvBtnState();
+                  this.closeModals();
+                  this.performSearch(this.searchQuery);
+                });
+
+                document.getElementById('btn-adv-apply')?.addEventListener('click', () => {
+                  this.advFilters.ext = document.getElementById('adv-ext').value.trim();
+                  this.advFilters.type = document.getElementById('adv-type').value.trim();
+                  this.advFilters.date_from = document.getElementById('adv-date-from').value.trim();
+                  this.advFilters.date_to = document.getElementById('adv-date-to').value.trim();
+                  this.advFilters.size_min = document.getElementById('adv-size-min').value.trim();
+                  this.advFilters.size_max = document.getElementById('adv-size-max').value.trim();
+                  this.updateAdvBtnState();
+                  this.closeModals();
+                  this.performSearch(this.searchQuery);
                 });
         
                 const openManga = () => mangaViewer.open();
@@ -18078,8 +18594,51 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 document.getElementById('btn-batch-clear').addEventListener('click', () => this.clearSelection());
                 document.getElementById('btn-batch-download').addEventListener('click', () => this.batchDownload());
                 document.getElementById('btn-batch-delete').addEventListener('click', () => this.batchDelete());
-                document.getElementById('btn-batch-compress')?.addEventListener('click', () => this.batchCompress());
-                document.getElementById('btn-batch-info').addEventListener('click', () => this.showBatchDetails());
+
+                // Batch Bar 3-Dots Menu Toggle
+                const btnBatchMore = document.getElementById('btn-batch-more');
+                const dropdownBatchMore = document.getElementById('dropdown-batch-more');
+                if (btnBatchMore && dropdownBatchMore) {
+                  btnBatchMore.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const rect = btnBatchMore.getBoundingClientRect();
+                    dropdownBatchMore.style.bottom = `${window.innerHeight - rect.top + 10}px`;
+                    dropdownBatchMore.style.top = 'auto';
+                    dropdownBatchMore.style.left = `${Math.max(10, Math.min(rect.left - 90, window.innerWidth - 230))}px`;
+                    dropdownBatchMore.classList.toggle('active');
+                  });
+                }
+
+                document.getElementById('dbm-rename')?.addEventListener('click', () => {
+                  dropdownBatchMore?.classList.remove('active');
+                  this.openBatchRename();
+                });
+                document.getElementById('dbm-compress')?.addEventListener('click', () => {
+                  dropdownBatchMore?.classList.remove('active');
+                  this.batchCompress();
+                });
+                document.getElementById('dbm-info')?.addEventListener('click', () => {
+                  dropdownBatchMore?.classList.remove('active');
+                  this.showBatchDetails();
+                });
+                document.getElementById('dbm-copy')?.addEventListener('click', () => {
+                  dropdownBatchMore?.classList.remove('active');
+                  this.setClipboard('copy');
+                });
+                document.getElementById('dbm-cut')?.addEventListener('click', () => {
+                  dropdownBatchMore?.classList.remove('active');
+                  this.setClipboard('cut');
+                });
+
+                // Batch Rename Inputs Live Listener
+                ['br-find', 'br-replace', 'br-prefix', 'br-suffix', 'br-case', 'br-regex'].forEach(id => {
+                  document.getElementById(id)?.addEventListener('input', () => this.updateBatchRenamePreview());
+                  document.getElementById(id)?.addEventListener('change', () => this.updateBatchRenamePreview());
+                });
+                document.querySelectorAll('input[name="br-target"]').forEach(r => {
+                  r.addEventListener('change', () => this.updateBatchRenamePreview());
+                });
+                document.getElementById('br-confirm-btn')?.addEventListener('click', () => this.executeBatchRename());
         
                 window.addEventListener('hashchange', () => this.handleHashChange());
         
@@ -18113,6 +18672,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   if (this.dropdownSort) this.dropdownSort.classList.remove('active');
                   const du = document.getElementById('dropdown-upload');
                   if (du) du.classList.remove('active');
+                  const dbm = document.getElementById('dropdown-batch-more');
+                  if (dbm) dbm.classList.remove('active');
                 });
                 this.dropdownMore.addEventListener('click', (e) => {
                   if (e.target.closest('.dm-item')) {
@@ -18211,8 +18772,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const isTrash = this.currentSection === 'trash';
                 const isActivity = this.currentSection === 'activity';
                 const isGallery = this.currentSection === 'gallery';
+                const isRecents = this.currentSection === 'recents';
                 const hideUpload = isStarred || isTrash || isActivity || isGallery;
                 const hideNewItems = isStarred || isTrash || isActivity || isGallery;
+                const hideManga = isTrash || isActivity || isStarred || isRecents;
+
+                // Centralize Content Header & Toolbar Visibility across all views
+                const contentHeader = document.querySelector('.content-header');
+                if (contentHeader) {
+                  contentHeader.style.display = (isTrash || isActivity) ? 'none' : 'flex';
+                }
+
+                const toolbar = document.querySelector('.toolbar-actions');
+                if (toolbar) {
+                  toolbar.style.display = (isTrash || isActivity) ? 'none' : 'flex';
+                }
+
+                // Hide Manga Mode in Trash & Activity
+                const btnMangaDesk = document.getElementById('btn-manga-desk');
+                const dmManga = document.getElementById('dm-manga');
+                if (btnMangaDesk) btnMangaDesk.style.display = hideManga ? 'none' : 'flex';
+                if (dmManga) dmManga.style.display = hideManga ? 'none' : 'flex';
           
                 const btnUploadDesk = document.getElementById('btn-upload-desk');
                 if (btnUploadDesk) btnUploadDesk.style.display = hideUpload ? 'none' : 'flex';
@@ -18455,57 +19035,40 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
               }
         
-              async loadDir(path) {
+              async loadDir(path, clearSearch = true) {
+                const seq = ++this.navSeq;
                 this.currentSection = 'home';
                 this.updateControlsVisibility();
-                const toolbar = document.querySelector('.toolbar-actions');
-                if (toolbar) toolbar.style.display = 'flex';
                 document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash, #nav-gallery').forEach(el => el.classList.remove('active'));
                 document.getElementById('nav-home')?.classList.add('active');
                 this.currentPath = path;
                 this.selectedItems.clear();
                 this.updateBatchBar();
                 this.renderLimit = 25;
-                this.isSearching = false;
-                const searchInput = document.getElementById('search-input');
-                if (searchInput) searchInput.value = '';
-                this.searchQuery = '';
+
+                if (clearSearch) {
+                  this.isSearching = false;
+                  const searchInput = document.getElementById('search-input');
+                  if (searchInput) searchInput.value = '';
+                  this.searchQuery = '';
+                }
+
                 this.sidebar.classList.remove('open');
                 this.sidebarBackdrop.classList.remove('active');
                 this.updateTreeActive();
 
-                const cacheKey = 'dir_list_' + path;
-                let hasValidCache = false;
-
-                if (window.opfsCache) {
-                  try {
-                    const cachedData = await window.opfsCache.getJSON(cacheKey);
-                    if (cachedData && ((cachedData.folders && cachedData.folders.length > 0) || (cachedData.files && cachedData.files.length > 0))) {
-                      this.data = cachedData;
-                      this.renderGallery();
-                      this.updateBreadcrumbs();
-                      this.updateBadges();
-                      hasValidCache = true;
-                    }
-                  } catch (e) {}
-                }
-
-                if (!hasValidCache) {
-                  if (this.container.children.length > 0) {
-                    this.container.style.opacity = '0.5';
-                    this.container.style.pointerEvents = 'none';
-                  } else {
-                    this.container.innerHTML = `
-                      <div class="center-state">
-                        <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
-                        <div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading files...</div>
-                      </div>
-                    `;
-                  }
-                }
+                // Always display loading state first to avoid page merge or state conflict
+                this.container.style.opacity = '1';
+                this.container.innerHTML = `
+                  <div class="center-state">
+                    <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                    <div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading files...</div>
+                  </div>
+                `;
 
                 try {
                   const res = await fetch(`?access=admin&page=drive&action=list&dir=${encodeURIComponent(path || '')}`);
+                  if (seq !== this.navSeq) return; // Discard out-of-order responses
                   if (!res.ok) {
                     if (path && path !== '') {
                       this.toast(`Folder "${path}" not found. Redirecting to Home...`);
@@ -18515,45 +19078,66 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     throw new Error('Failed to load directory');
                   }
                   const freshData = await res.json();
+                  if (seq !== this.navSeq) return;
                   this.data = freshData;
-                  if (window.opfsCache) window.opfsCache.setJSON(cacheKey, freshData);
                   this.renderGallery();
                   this.updateBreadcrumbs();
                   this.updateBadges();
                   const totalItems = (freshData.folders ? freshData.folders.length : 0) + (freshData.files ? freshData.files.length : 0);
                   this.updateDocTitle(this.data.path ? this.data.path.split('/').pop() : '', totalItems);
                 } catch (e) {
-                  if (!hasValidCache) {
-                    this.container.innerHTML = `
-                      <div class="center-state" style="color:var(--md-sys-color-error);">
-                        <p>${e.message}</p>
-                        <button class="btn-primary" style="margin-top:0.6rem;" onclick="app.navigate('')">Back to Home</button>
-                      </div>
-                    `;
-                  }
+                  if (seq !== this.navSeq) return;
+                  this.container.innerHTML = `
+                    <div class="center-state" style="color:var(--md-sys-color-error);">
+                      <p>${e.message}</p>
+                      <button class="btn-primary" style="margin-top:0.6rem;" onclick="app.navigate('')">Back to Home</button>
+                    </div>
+                  `;
                 }
               }
         
-              async performSearch(query) {
+              async performSearch(query = '') {
                 this.isSearching = true;
                 this.renderLimit = 25;
+                const queryText = query !== undefined ? query : this.searchQuery;
+                const seq = ++this.searchSeq;
+
+                if (!queryText && !this.hasActiveAdvFilters()) {
+                  this.isSearching = false;
+                  this.container.style.opacity = '1';
+                  this.renderLimit = 25;
+                  if (this.currentSection === 'activity') this.renderActivityView();
+                  else if (this.currentSection === 'trash') this.renderTrashView();
+                  else if (this.currentSection === 'starred') this.loadStarred();
+                  else if (this.currentSection === 'recents') this.loadRecents();
+                  else if (this.currentSection === 'gallery') this.loadGallery();
+                  else this.renderGallery();
+                  return;
+                }
+
                 if (this.currentSection === 'activity') {
+                  this.container.style.opacity = '1';
                   this.renderActivityView();
                   return;
                 }
                 if (this.currentSection === 'trash') {
+                  this.container.style.opacity = '1';
                   this.renderTrashView();
                   return;
                 }
 
                 if (this.currentSection === 'gallery') {
-                  this.filteredList = (this.data.files || []).filter(f => f.name.toLowerCase().includes(query.toLowerCase()));
-                  this.filteredList = this.applySort(this.filteredList);
-                  this.dirTitle.innerText = `Gallery Search: "${query}"`;
+                  this.container.style.opacity = '1';
+                  let list = (this.data.files || []).filter(f => f.name.toLowerCase().includes(queryText.toLowerCase()));
+                  if (this.advFilters.ext) {
+                    const exts = this.advFilters.ext.toLowerCase().split(',').map(s => s.trim().replace('.', ''));
+                    list = list.filter(f => exts.includes((f.ext || '').toLowerCase()));
+                  }
+                  this.filteredList = this.applySort(list);
+                  this.dirTitle.innerText = `Gallery Search: "${queryText || 'Filtered'}"`;
                   this.dirStats.innerText = `${this.filteredList.length} matching photo(s) found`;
                   this.container.innerHTML = '';
                   this.renderedCount = 0;
-                  this.renderLimit = 25;
                   this.masonryCols = [];
                   this.hasUpCard = false;
                   if (this.layout === 'columns') {
@@ -18573,38 +19157,69 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   return;
                 }
 
-                this.dirStats.innerText = `Searching for "${query}" in subfolders...`;
+                this.dirStats.innerText = `Searching in files & subfolders...`;
                 this.container.style.opacity = '0.6';
-        
+
+                const params = new URLSearchParams();
+                params.append('access', 'admin');
+                params.append('page', 'drive');
+                params.append('action', 'search');
+                params.append('dir', this.currentPath || '');
+                params.append('q', queryText);
+                if (this.advFilters.ext) params.append('ext', this.advFilters.ext);
+                if (this.advFilters.type) params.append('type', this.advFilters.type);
+                if (this.advFilters.date_from) params.append('date_from', this.advFilters.date_from);
+                if (this.advFilters.date_to) params.append('date_to', this.advFilters.date_to);
+                if (this.advFilters.size_min) params.append('size_min', parseFloat(this.advFilters.size_min) * 1024 * 1024);
+                if (this.advFilters.size_max) params.append('size_max', parseFloat(this.advFilters.size_max) * 1024 * 1024);
+
                 try {
-                  const res = await fetch(`?access=admin&page=drive&action=search&dir=${encodeURIComponent(this.currentPath || '')}&q=${encodeURIComponent(query)}`);
+                  const res = await fetch(`?${params.toString()}`);
+                  if (seq !== this.searchSeq) return;
                   if (!res.ok) throw new Error('Search failed');
                   const results = await res.json();
-        
-                  let filteredFiles = results.files.filter(f => this.filter === 'all' || f.type === this.filter);
-                  let filteredFolders = results.folders;
-        
+                  if (seq !== this.searchSeq) return;
+
+                  let filteredFiles = (results.files || []).filter(f => this.filter === 'all' || f.type === this.filter);
+                  let filteredFolders = this.filter === 'all' ? (results.folders || []) : [];
+
+                  filteredFolders = this.applySort(filteredFolders);
+                  filteredFiles = this.applySort(filteredFiles);
+
                   this.filteredList = [
                     ...filteredFolders.map(f => ({ ...f, isDir: true })),
                     ...filteredFiles.map(f => ({ ...f, isDir: false }))
                   ];
-        
-                  this.dirTitle.innerText = `Search: "${query}"`;
-                  this.dirStats.innerText = `${results.count} matching item(s) found`;
-          
+
+                  this.dirTitle.innerText = queryText ? `Search: "${queryText}"` : 'Advanced Search Results';
+                  this.dirStats.innerText = `${this.filteredList.length} matching item(s) found`;
+
                   this.container.style.opacity = '1';
                   this.container.innerHTML = '';
                   this.renderedCount = 0;
                   this.renderLimit = 25;
-        
+                  this.masonryCols = [];
+                  this.hasUpCard = false;
+
+                  if (this.layout === 'columns') {
+                    const numCols = this.getMasonryColCount();
+                    for (let i = 0; i < numCols; i++) {
+                      const col = document.createElement('div');
+                      col.className = 'masonry-col';
+                      this.container.appendChild(col);
+                      this.masonryCols.push(col);
+                    }
+                  }
+
                   if (!this.filteredList.length) {
                     this.container.innerHTML = `<div class="center-state"><svg viewBox="0 0 24 24" style="width:48px; height:48px; opacity:0.4;"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg><p>No matches found</p></div>`;
                     return;
                   }
-        
+
                   this.appendBatch();
                   this.updateBatchBar();
                 } catch (e) {
+                  this.container.style.opacity = '1';
                   this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
                 }
               }
@@ -18683,6 +19298,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 } catch (e) {}
               }
         
+              hasActiveAdvFilters() {
+                const f = this.advFilters;
+                return !!(f.ext || f.type || f.date_from || f.date_to || f.size_min || f.size_max);
+              }
+
+              updateAdvBtnState() {
+                const btn = document.getElementById('btn-adv-search');
+                if (btn) {
+                  if (this.hasActiveAdvFilters()) {
+                    btn.classList.add('active');
+                  } else {
+                    btn.classList.remove('active');
+                  }
+                }
+              }
+
               applySort(items) {
                 return [...items].sort((a, b) => {
                   const nameA = a.name || '';
@@ -18699,6 +19330,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   if (this.sortBy === 'date_asc') {
                     return (a.mtime || 0) - (b.mtime || 0);
                   }
+                  if (this.sortBy === 'size_desc') {
+                    return (b.size || 0) - (a.size || 0);
+                  }
+                  if (this.sortBy === 'size_asc') {
+                    return (a.size || 0) - (b.size || 0);
+                  }
+                  if (this.sortBy === 'ext_asc') {
+                    const extA = (a.ext || (a.name ? a.name.split('.').pop() : '')).toLowerCase();
+                    const extB = (b.ext || (b.name ? b.name.split('.').pop() : '')).toLowerCase();
+                    return extA.localeCompare(extB, undefined, { numeric: true, sensitivity: 'base' });
+                  }
+                  if (this.sortBy === 'ext_desc') {
+                    const extA = (a.ext || (a.name ? a.name.split('.').pop() : '')).toLowerCase();
+                    const extB = (b.ext || (b.name ? b.name.split('.').pop() : '')).toLowerCase();
+                    return extB.localeCompare(extA, undefined, { numeric: true, sensitivity: 'base' });
+                  }
                   return 0;
                 });
               }
@@ -18708,7 +19355,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   name_asc: 'Name (A-Z)',
                   name_desc: 'Name (Z-A)',
                   date_desc: 'Date (Newest)',
-                  date_asc: 'Date (Oldest)'
+                  date_asc: 'Date (Oldest)',
+                  size_desc: 'Size (Largest)',
+                  size_asc: 'Size (Smallest)',
+                  ext_asc: 'Extension (A-Z)',
+                  ext_desc: 'Extension (Z-A)'
                 };
                 if (this.btnSort) {
                   this.btnSort.title = `Sort: ${labels[this.sortBy] || 'Sort Items'}`;
@@ -18973,6 +19624,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const scrollEl = document.getElementById('main-content');
                 const st = scrollEl ? scrollEl.scrollTop : 0;
                 this.selectedItems.clear();
+                const dbm = document.getElementById('dropdown-batch-more');
+                if (dbm) dbm.classList.remove('active');
                 this.updateBatchBar();
                 if (this.isSearching) {
                   this.appendBatch();
@@ -19074,6 +19727,195 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 fd.append('dir', this.currentPath || '');
                 items.forEach(i => fd.append('items[]', i));
                 this.downloadZipWithProgress('?access=admin&page=drive&action=download_zip', fd, 'selected_items.zip');
+              }
+        
+              openBatchRename() {
+                const items = Array.from(this.selectedItems);
+                if (!items.length) return;
+
+                this.batchRenameTasks = items.map(path => {
+                  const fileName = path.split('/').pop();
+                  const dotIdx = fileName.lastIndexOf('.');
+                  const isDir = (this.filteredList.find(f => f.path === path) || {}).isDir || false;
+                  return {
+                    path: path,
+                    isDir: isDir,
+                    originalName: fileName,
+                    baseName: (!isDir && dotIdx > 0) ? fileName.substring(0, dotIdx) : fileName,
+                    ext: (!isDir && dotIdx > 0) ? fileName.substring(dotIdx + 1) : '',
+                    newName: fileName
+                  };
+                });
+
+                document.getElementById('br-title').innerText = `Batch Rename (${items.length} items)`;
+                document.getElementById('br-find').value = '';
+                document.getElementById('br-replace').value = '';
+                document.getElementById('br-prefix').value = '';
+                document.getElementById('br-suffix').value = '';
+                document.getElementById('br-case').checked = false;
+                document.getElementById('br-regex').checked = false;
+
+                const nameRadio = document.querySelector('input[name="br-target"][value="name"]');
+                if (nameRadio) nameRadio.checked = true;
+
+                this.updateBatchRenamePreview();
+                this.showModal('modal-batch-rename');
+              }
+
+              updateBatchRenamePreview() {
+                if (!this.batchRenameTasks || !this.batchRenameTasks.length) return;
+
+                const findVal = document.getElementById('br-find')?.value || '';
+                const replaceVal = document.getElementById('br-replace')?.value || '';
+                const prefix = document.getElementById('br-prefix')?.value || '';
+                const suffix = document.getElementById('br-suffix')?.value || '';
+                const isCase = document.getElementById('br-case')?.checked || false;
+                const isRegex = document.getElementById('br-regex')?.checked || false;
+                const target = document.querySelector('input[name="br-target"]:checked')?.value || 'name';
+
+                let regex = null;
+                let regexError = false;
+
+                if (findVal) {
+                  try {
+                    regex = isRegex ? new RegExp(findVal, isCase ? 'g' : 'gi') : null;
+                  } catch (e) {
+                    regexError = true;
+                  }
+                }
+
+                const seenNames = new Set();
+                let modifiedCount = 0;
+                let hasCollisions = false;
+
+                this.batchRenameTasks.forEach(task => {
+                  let curBase = task.baseName;
+                  let curExt = task.ext;
+                  let curFull = task.originalName;
+
+                  if (findVal && !regexError) {
+                    if (target === 'name') {
+                      if (regex) {
+                        curBase = curBase.replace(regex, replaceVal);
+                      } else {
+                        const flags = isCase ? 'g' : 'gi';
+                        const esc = findVal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        curBase = curBase.replace(new RegExp(esc, flags), replaceVal);
+                      }
+                    } else if (target === 'ext' && !task.isDir && curExt) {
+                      if (regex) {
+                        curExt = curExt.replace(regex, replaceVal);
+                      } else {
+                        const flags = isCase ? 'g' : 'gi';
+                        const esc = findVal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        curExt = curExt.replace(new RegExp(esc, flags), replaceVal);
+                      }
+                    } else if (target === 'full') {
+                      if (regex) {
+                        curFull = curFull.replace(regex, replaceVal);
+                      } else {
+                        const flags = isCase ? 'g' : 'gi';
+                        const esc = findVal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        curFull = curFull.replace(new RegExp(esc, flags), replaceVal);
+                      }
+                      const dIdx = curFull.lastIndexOf('.');
+                      if (!task.isDir && dIdx > 0) {
+                        curBase = curFull.substring(0, dIdx);
+                        curExt = curFull.substring(dIdx + 1);
+                      } else {
+                        curBase = curFull;
+                        curExt = '';
+                      }
+                    }
+                  }
+
+                  if (prefix) curBase = prefix + curBase;
+                  if (suffix) curBase = curBase + suffix;
+
+                  let finalName = (!task.isDir && curExt) ? `${curBase}.${curExt}` : curBase;
+                  finalName = finalName.replace(/[^\w\s\d\.\-_~()[\]]/u, '');
+                  task.newName = finalName || task.originalName;
+
+                  if (task.newName !== task.originalName) modifiedCount++;
+                  if (seenNames.has(task.newName.toLowerCase())) {
+                    hasCollisions = true;
+                    task.collision = true;
+                  } else {
+                    task.collision = false;
+                    seenNames.add(task.newName.toLowerCase());
+                  }
+                });
+
+                const tbody = document.getElementById('br-preview-body');
+                if (tbody) {
+                  tbody.innerHTML = this.batchRenameTasks.map(task => {
+                    const isMod = task.newName !== task.originalName;
+                    const statusClass = task.collision ? 'collision' : (isMod ? 'modified' : '');
+                    return `
+                      <tr>
+                        <td style="font-family:'JetBrains Mono', monospace; color:var(--md-sys-color-on-surface-variant); max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${this.escapeHtml(task.originalName)}</td>
+                        <td style="color:var(--md-sys-color-outline); width:20px;">➔</td>
+                        <td class="br-preview-new ${statusClass}" style="font-family:'JetBrains Mono', monospace; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${this.escapeHtml(task.newName)}${task.collision ? ' (duplicate)' : ''}</td>
+                      </tr>
+                    `;
+                  }).join('');
+                }
+
+                const summary = document.getElementById('br-status-summary');
+                const confirmBtn = document.getElementById('br-confirm-btn');
+
+                if (regexError) {
+                  if (summary) summary.innerHTML = `<span style="color:#ff7b72;">Invalid Regular Expression syntax</span>`;
+                  if (confirmBtn) confirmBtn.disabled = true;
+                } else if (hasCollisions) {
+                  if (summary) summary.innerHTML = `<span style="color:#ff7b72;">Conflict detected: duplicate destination filename(s)</span>`;
+                  if (confirmBtn) confirmBtn.disabled = true;
+                } else {
+                  if (summary) summary.innerHTML = `<span>${modifiedCount} of ${this.batchRenameTasks.length} item(s) will change</span>`;
+                  if (confirmBtn) confirmBtn.disabled = modifiedCount === 0;
+                }
+              }
+
+              async executeBatchRename() {
+                const tasks = (this.batchRenameTasks || []).filter(t => t.newName && t.newName !== t.originalName);
+                if (!tasks.length) return;
+
+                const renamesPayload = tasks.map(t => ({
+                  path: t.path,
+                  new_name: t.newName
+                }));
+
+                const confirmBtn = document.getElementById('br-confirm-btn');
+                if (confirmBtn) {
+                  confirmBtn.disabled = true;
+                  confirmBtn.innerHTML = '<svg class="m3-spinner" style="width:16px;height:16px;margin:0;" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg> Renaming...';
+                }
+
+                try {
+                  const fd = new FormData();
+                  fd.append('action', 'batch_rename');
+                  fd.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>');
+                  fd.append('renames', JSON.stringify(renamesPayload));
+
+                  const res = await fetch('?access=admin&page=drive', { method: 'POST', body: fd });
+                  const data = await res.json();
+
+                  if (data.success) {
+                    this.toast(`Renamed ${data.renamed_count} item(s) successfully`);
+                    this.closeModals();
+                    this.clearSelection();
+                    this.refresh();
+                  } else {
+                    throw new Error(data.error || 'Batch rename failed');
+                  }
+                } catch (e) {
+                  this.toast(e.message || 'Batch rename failed');
+                } finally {
+                  if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg> Apply Rename';
+                  }
+                }
               }
         
               batchCompress() {
@@ -19470,6 +20312,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               async loadGallery() {
+                const seq = ++this.navSeq;
                 this.currentSection = 'gallery';
                 this.updateControlsVisibility();
                 this.currentPath = '';
@@ -19479,12 +20322,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.isSearching = false;
                 this.dirTitle.innerText = 'Gallery';
                 this.dirStats.innerText = 'All photos across your drive';
-                if (this.container.querySelector('.file-card')) this.container.style.opacity = '0.6';
-                else this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg></div>';
+                this.container.style.opacity = '1';
+                this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg><div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading gallery...</div></div>';
 
                 try {
                   const res = await fetch('?access=admin&page=drive&action=gallery_list');
+                  if (seq !== this.navSeq) return;
                   const data = await res.json();
+                  if (seq !== this.navSeq) return;
                   this.data = {
                     folders: [],
                     files: data.files || [],
@@ -19496,11 +20341,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   this.updateBadges();
                   this.updateDocTitle('Gallery', this.data.files.length);
                 } catch (e) {
+                  if (seq !== this.navSeq) return;
                   this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
                 }
               }
 
               async loadActivity() {
+                const seq = ++this.navSeq;
                 this.currentSection = 'activity';
                 this.updateControlsVisibility();
                 this.currentPath = '';
@@ -19512,25 +20359,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.updateBreadcrumbs();
                 this.updateDocTitle('File Activity');
 
-                const toolbar = document.querySelector('.toolbar-actions');
-                if (toolbar) toolbar.style.display = 'none';
-
-                this.container.className = 'gallery-container layout-list';
+                this.container.className = 'gallery-container';
                 this.container.removeAttribute('data-cols');
-
-                if (this.container.querySelector('.activity-row')) {
-                  this.container.style.opacity = '0.6';
-                } else {
-                  this.container.innerHTML = `
-                    <div class="center-state">
-                      <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
-                    </div>
-                  `;
-                }
+                this.container.style.opacity = '1';
+                this.container.innerHTML = `
+                  <div class="center-state">
+                    <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                    <div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading activity...</div>
+                  </div>
+                `;
 
                 try {
                   const res = await fetch('?access=admin&page=drive&action=activity_list');
+                  if (seq !== this.navSeq) return;
                   const data = await res.json();
+                  if (seq !== this.navSeq) return;
                   this.activityStats = data.stats || {};
                   this.rawActivities = data.activities || [];
 
@@ -19638,6 +20481,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               async loadRecents() {
+                const seq = ++this.navSeq;
                 this.currentSection = 'recents';
                 this.updateControlsVisibility();
                 this.currentPath = '';
@@ -19647,12 +20491,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.isSearching = false;
                 this.dirTitle.innerText = 'Recents';
                 this.dirStats.innerText = 'Chronologically sorted from newest to oldest';
-                if (this.container.querySelector('.file-card')) this.container.style.opacity = '0.6';
-                else this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg></div>';
+                this.container.style.opacity = '1';
+                this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg><div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading recents...</div></div>';
 
                 try {
                   const res = await fetch('?access=admin&page=drive&action=recents_list');
+                  if (seq !== this.navSeq) return;
                   const data = await res.json();
+                  if (seq !== this.navSeq) return;
 
                   const dedupe = (list) => {
                     const seen = new Set();
@@ -19683,6 +20529,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               async loadStarred() {
+                const seq = ++this.navSeq;
                 this.currentSection = 'starred';
                 this.updateControlsVisibility();
                 this.currentPath = '';
@@ -19692,12 +20539,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.isSearching = false;
                 this.dirTitle.innerText = 'Starred Items';
                 this.dirStats.innerText = 'Quick access to your favorite files and folders';
-                if (this.container.querySelector('.file-card')) this.container.style.opacity = '0.6';
-                else this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg></div>';
+                this.container.style.opacity = '1';
+                this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg><div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading starred items...</div></div>';
 
                 try {
                   const res = await fetch('?access=admin&page=drive&action=starred_list');
+                  if (seq !== this.navSeq) return;
                   const data = await res.json();
+                  if (seq !== this.navSeq) return;
                   this.starredSet = new Set(data.starred_paths || []);
                   this.data = {
                     folders: data.folders || [],
@@ -19756,6 +20605,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               async loadTrash() {
+                const seq = ++this.navSeq;
                 this.currentSection = 'trash';
                 this.updateControlsVisibility();
                 this.currentPath = '';
@@ -19767,25 +20617,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.updateBreadcrumbs();
                 this.updateDocTitle('Trash Bin');
 
-                const toolbar = document.querySelector('.toolbar-actions');
-                if (toolbar) toolbar.style.display = 'none';
-
                 this.container.className = 'gallery-container';
                 this.container.removeAttribute('data-cols');
-
-                if (this.container.querySelector('.center-state')) {
-                  this.container.innerHTML = `
-                    <div class="center-state">
-                      <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
-                    </div>
-                  `;
-                } else {
-                  this.container.style.opacity = '0.6';
-                }
+                this.container.style.opacity = '1';
+                this.container.innerHTML = `
+                  <div class="center-state">
+                    <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                    <div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading trash...</div>
+                  </div>
+                `;
 
                 try {
                   const res = await fetch('?access=admin&page=drive&action=trash_list');
+                  if (seq !== this.navSeq) return;
                   const data = await res.json();
+                  if (seq !== this.navSeq) return;
                   this.rawTrash = data.trash || [];
 
                   const trashFiles = this.rawTrash.filter(i => !i.is_dir).map(i => {
@@ -19820,27 +20666,38 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
 
                 if (!items.length) {
-                  this.container.innerHTML = `
-                    <div class="center-state" style="grid-column: 1 / -1; padding: 3.5rem 0;">
-                      <svg viewBox="0 0 24 24" style="width:64px; height:64px; opacity:0.3; color:var(--md-sys-color-outline); margin-bottom:0.6rem;"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-                      <div style="font-weight:700; font-size:1.1rem; color:var(--md-sys-color-on-surface);">Trash is Empty</div>
-                      <div style="font-size:0.82rem; color:var(--md-sys-color-on-surface-variant);">Deleted files and folders will appear here.</div>
-                    </div>
-                  `;
+                  if (this.searchQuery) {
+                    this.container.innerHTML = `
+                      <div class="center-state" style="grid-column: 1 / -1; padding: 3.5rem 0;">
+                        <svg viewBox="0 0 24 24" style="width:48px; height:48px; opacity:0.4; color:var(--md-sys-color-outline); margin-bottom:0.6rem;"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                        <div style="font-weight:700; font-size:1.1rem; color:var(--md-sys-color-on-surface);">No matching trash items</div>
+                        <div style="font-size:0.82rem; color:var(--md-sys-color-on-surface-variant);">No items matching "${this.escapeHtml(this.searchQuery)}" found in trash.</div>
+                      </div>
+                    `;
+                  } else {
+                    this.container.innerHTML = `
+                      <div class="center-state" style="grid-column: 1 / -1; padding: 3.5rem 0;">
+                        <svg viewBox="0 0 24 24" style="width:64px; height:64px; opacity:0.3; color:var(--md-sys-color-outline); margin-bottom:0.6rem;"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                        <div style="font-weight:700; font-size:1.1rem; color:var(--md-sys-color-on-surface);">Trash is Empty</div>
+                        <div style="font-size:0.82rem; color:var(--md-sys-color-on-surface-variant);">Deleted files and folders will appear here.</div>
+                      </div>
+                    `;
+                  }
                   return;
                 }
 
                 let html = `
-                  <div style="grid-column: 1 / -1; display:flex; justify-content:space-between; align-items:center; background:var(--md-sys-color-surface-container-low); border:1px solid var(--md-sys-color-outline-variant); border-radius:16px; padding:0.75rem 1.1rem; margin-bottom:0.6rem;">
-                    <div style="display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; color:var(--md-sys-color-on-surface-variant);">
-                      <span style="font-weight:700; color:#ffffff; font-size:0.95rem;">${items.length}</span> item(s) in trash
+                  <div class="trash-view-wrapper">
+                    <div style="display:flex; justify-content:space-between; align-items:center; background:var(--md-sys-color-surface-container-low); border:1px solid var(--md-sys-color-outline-variant); border-radius:16px; padding:0.75rem 1.1rem;">
+                      <div style="display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; color:var(--md-sys-color-on-surface-variant);">
+                        <span style="font-weight:700; color:#ffffff; font-size:0.95rem;">${items.length}</span> item(s) in trash
+                      </div>
+                      <button class="btn-primary" style="background:#dc2626; height:34px; padding:0 0.95rem; font-size:0.8rem; gap:0.4rem;" onclick="app.emptyTrash()">
+                        <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                        Empty Trash
+                      </button>
                     </div>
-                    <button class="btn-primary" style="background:#dc2626; height:34px; padding:0 0.95rem; font-size:0.8rem; gap:0.4rem;" onclick="app.emptyTrash()">
-                      <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-                      Empty Trash
-                    </button>
-                  </div>
-                  <div style="grid-column: 1 / -1; display:flex; flex-direction:column; gap:0.55rem; width:100%;">
+                    <div style="display:flex; flex-direction:column; gap:0.55rem; width:100%;">
                 `;
 
                 const toRender = items.slice(0, this.renderLimit);
@@ -19876,7 +20733,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   `;
                 });
 
-                html += `</div>`;
+                html += `</div></div>`;
                 this.container.innerHTML = html;
               }
 
@@ -20598,8 +21455,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
 
                 this.modalStack = [];
-                document.getElementById('modal-backdrop').classList.remove('active');
+                const mb = document.getElementById('modal-backdrop');
+                if (mb) mb.classList.remove('active');
                 document.querySelectorAll('.modal-box').forEach(m => m.style.display = 'none');
+                this.container.style.opacity = '1';
+
                 const docContainer = document.getElementById('doc-viewer-container');
                 if (docContainer) docContainer.innerHTML = '';
 
@@ -20609,6 +21469,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const activeTarget = this.activeModalPath || (window.hdmEngine ? window.hdmEngine.activePath : '');
                 this.activeModalPath = '';
                 if (window.hdmEngine) window.hdmEngine.activePath = '';
+
+                if (this.isSearching && (this.searchQuery || this.hasActiveAdvFilters())) {
+                  this.performSearch(this.searchQuery);
+                  return;
+                }
 
                 const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
                 const returnSection = (this.originSection && specialSections.includes(this.originSection))
@@ -20640,7 +21505,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (window.location.hash !== targetHash) {
                   window.location.hash = targetHash;
                 } else {
-                  this.loadDir(parentDir);
+                  this.loadDir(parentDir, false);
                 }
                 this.updateDocTitle(parentDir ? parentDir.split('/').pop() : '', (this.data.folders?.length || 0) + (this.data.files?.length || 0));
               }
@@ -67077,29 +67942,29 @@ SOFTWARE.</div>
             const styleInjection =
               parent === null
                 ? `
-                    <style>
-                      .rich-comment-box img, .rich-comment-box video, .rich-comment-box iframe { max-width: 100%; max-height: 400px; border-radius: 12px; margin: 10px 0; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); object-fit: contain; background: #000; transition: transform 0.3s ease; }
-                      .rich-comment-box img:hover { transform: scale(1.02); }
-                      .rich-comment-box a { color: #3ea6ff; text-decoration: none; font-weight: 500; padding: 2px 4px; border-radius: 4px; transition: all 0.2s ease; }
-                      .rich-comment-box a:hover { color: #fff; background: rgba(62,166,255,0.2); }
-                      .rich-comment-box blockquote { border-left: 4px solid #ff0055; padding: 12px 20px; margin: 16px 0; background: linear-gradient(90deg, rgba(255,0,85,0.1) 0%, transparent 100%); border-radius: 0 12px 12px 0; color: #ddd; font-style: italic; font-size: 1.05rem; }
-                      .rich-comment-box pre { background: #080808; padding: 16px; border-radius: 12px; border: 1px solid #222; overflow-x: auto; margin: 16px 0; box-shadow: inset 0 4px 10px rgba(0,0,0,0.5); }
-                      .rich-comment-box code { font-family: 'Consolas', 'Courier New', monospace; background: rgba(255,255,255,0.08); padding: 3px 6px; border-radius: 6px; font-size: 0.85em; color: #ff8888; }
-                      .rich-comment-box ul, .rich-comment-box ol { padding-left: 24px; margin-bottom: 12px; }
-                      .rich-comment-box li { margin-bottom: 6px; }
-                      .rich-comment-box p { margin-bottom: 12px; }
-                      .rich-comment-box p:last-child { margin-bottom: 0; }
-                      .rich-comment-box .mention-link { color: #ff4da6; background: rgba(255,77,166,0.15); padding: 2px 8px; border-radius: 12px; transition: 0.2s; border: 1px solid rgba(255,77,166,0.3); display: inline-block; font-weight: bold; }
-                      .rich-comment-box .mention-link:hover { background: rgba(255,77,166,0.3); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,77,166,0.3); }
-                      .phpmusic-comments-action-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 50px; padding: 6px 16px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255,255,255,0.05); color: #aaa; border: 1px solid rgba(255,255,255,0.02); cursor: pointer; backdrop-filter: blur(4px); }
-                      .phpmusic-comments-action-btn:hover { background: rgba(255,255,255,0.15); color: #fff; transform: scale(1.05); border-color: rgba(255,255,255,0.1); }
-                      .phpmusic-comments-action-btn:active { transform: scale(0.95); }
-                      .phpmusic-comments-action-btn.active-like { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
-                      .phpmusic-comments-action-btn.active-dislike { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
-                      @keyframes slideFadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-                    </style>
-                  `
-                : "";
+                <style>
+                  .rich-comment-box img, .rich-comment-box video, .rich-comment-box iframe { max-width: 100%; max-height: 400px; border-radius: 12px; margin: 10px 0; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); object-fit: contain; background: #000; transition: transform 0.3s ease; }
+                  .rich-comment-box img:hover { transform: scale(1.02); }
+                  .rich-comment-box a { color: #3ea6ff; text-decoration: none; font-weight: 500; padding: 2px 4px; border-radius: 4px; transition: all 0.2s ease; }
+                  .rich-comment-box a:hover { color: #fff; background: rgba(62,166,255,0.2); }
+                  .rich-comment-box blockquote { border-left: 4px solid #ff0055; padding: 12px 20px; margin: 16px 0; background: linear-gradient(90deg, rgba(255,0,85,0.1) 0%, transparent 100%); border-radius: 0 12px 12px 0; color: #ddd; font-style: italic; font-size: 1.05rem; }
+                  .rich-comment-box pre { background: #080808; padding: 16px; border-radius: 12px; border: 1px solid #222; overflow-x: auto; margin: 16px 0; box-shadow: inset 0 4px 10px rgba(0,0,0,0.5); }
+                  .rich-comment-box code { font-family: 'Consolas', 'Courier New', monospace; background: rgba(255,255,255,0.08); padding: 3px 6px; border-radius: 6px; font-size: 0.85em; color: #ff8888; }
+                  .rich-comment-box ul, .rich-comment-box ol { padding-left: 24px; margin-bottom: 12px; }
+                  .rich-comment-box li { margin-bottom: 6px; }
+                  .rich-comment-box p { margin-bottom: 12px; }
+                  .rich-comment-box p:last-child { margin-bottom: 0; }
+                  .rich-comment-box .mention-link { color: #ff4da6; background: rgba(255,77,166,0.15); padding: 2px 8px; border-radius: 12px; transition: 0.2s; border: 1px solid rgba(255,77,166,0.3); display: inline-block; font-weight: bold; }
+                  .rich-comment-box .mention-link:hover { background: rgba(255,77,166,0.3); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,77,166,0.3); }
+                  .phpmusic-comments-action-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 50px; padding: 6px 16px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255,255,255,0.05); color: #aaa; border: 1px solid rgba(255,255,255,0.02); cursor: pointer; backdrop-filter: blur(4px); }
+                  .phpmusic-comments-action-btn:hover { background: rgba(255,255,255,0.15); color: #fff; transform: scale(1.05); border-color: rgba(255,255,255,0.1); }
+                  .phpmusic-comments-action-btn:active { transform: scale(0.95); }
+                  .phpmusic-comments-action-btn.active-like { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
+                  .phpmusic-comments-action-btn.active-dislike { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
+                  @keyframes slideFadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+                </style>
+              `
+            : "";
     
             if (parent === null) {
               return (
@@ -67189,106 +68054,106 @@ SOFTWARE.</div>
                       </div>
                     `,
                   )
-                  .join("")
+                .join("")
               );
             } else {
               const repliesHtml = children
                 .map(
                   (c) => `
-                      <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-secondary rounded-4 p-2" style="animation: slideFadeIn 0.3s ease forwards;">
-                        <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
-                          <img src="?action=get_profile_picture&id=${c.u_id}"
-                               class="rounded-circle shadow-sm ${c.is_disabled ? "" : "user-profile-link"}"
-                               data-userid="${c.u_id}"
-                               data-artist="${encodeURIComponent(c.artist)}"
-                               style="width:36px; height:36px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
-                               onmouseover="this.style.transform='scale(1.15)'"
-                               onmouseout="this.style.transform='scale(1)'">
-                        </div>
-    
-                        <div class="flex-grow-1" style="min-width: 0;">
-                          <div class="d-flex justify-content-between align-items-start mb-1">
-                            <div class="d-flex align-items-center flex-wrap gap-2">
-                              <span class="fw-bold text-white ${c.is_disabled ? "" : "user-profile-link"}"
-                                    data-userid="${c.u_id}"
-                                    data-artist="${encodeURIComponent(c.artist)}"
-                                    style="font-size: 0.85rem; cursor:${c.is_disabled ? "default" : "pointer"}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
-                                    onmouseover="this.style.textDecoration='underline'"
-                                    onmouseout="this.style.textDecoration='none'">
-                                ${escapeHTML(c.artist)}
-                              </span>
-                              <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.7;">
-                                <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
-                              </span>
-                            </div>
-                            ${
-                              currentUser &&
-                              (currentUser.id == c.u_id ||
-                                currentUser.status === "super_admin" ||
-                                currentUser.is_admin == 1)
-                                ? `
-                              <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                                <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                  <li><button class="dropdown-item edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                  <li><button class="dropdown-item text-danger delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                                </ul>
-                              </div>
-                            `
-                                : ""
-                            }
-                          </div>
-    
-                          <div class="p-2 mb-2">
-                            ${renderContent(c.content)}
-                          </div>
-    
-                          ${
-                            currentUser
-                              ? `
-                          <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
-                            <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" style="padding: 4px 10px; font-size: 0.8rem;">
-                              <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"}"></i>
-                              <span>${c.like_count || 0}</span>
-                            </button>
-    
-                            <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" style="padding: 4px 10px; font-size: 0.8rem;">
-                              <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"}"></i>
-                              <span>${c.dislike_count || 0}</span>
-                            </button>
-    
-                            <button class="phpmusic-comments-action-btn reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" style="padding: 4px 10px; font-size: 0.8rem;">
-                              <i class="bi bi-chat-left-text"></i> Reply
-                            </button>
-                          </div>
-                          `
-                              : `
-                          <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.8rem;">
-                            <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-white"></i> ${c.like_count || 0}</span>
-                            <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-white"></i> ${c.dislike_count || 0}</span>
-                          </div>
-                          `
-                          }
-                          <div class="mt-2">${buildTree(comments, c.id)}</div>
-                        </div>
+                    <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-secondary rounded-4 p-2" style="animation: slideFadeIn 0.3s ease forwards;">
+                      <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
+                        <img src="?action=get_profile_picture&id=${c.u_id}"
+                             class="rounded-circle shadow-sm ${c.is_disabled ? "" : "user-profile-link"}"
+                             data-userid="${c.u_id}"
+                             data-artist="${encodeURIComponent(c.artist)}"
+                             style="width:36px; height:36px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
+                             onmouseover="this.style.transform='scale(1.15)'"
+                             onmouseout="this.style.transform='scale(1)'">
                       </div>
-                    `,
+  
+                      <div class="flex-grow-1" style="min-width: 0;">
+                        <div class="d-flex justify-content-between align-items-start mb-1">
+                          <div class="d-flex align-items-center flex-wrap gap-2">
+                            <span class="fw-bold text-white ${c.is_disabled ? "" : "user-profile-link"}"
+                                  data-userid="${c.u_id}"
+                                  data-artist="${encodeURIComponent(c.artist)}"
+                                  style="font-size: 0.85rem; cursor:${c.is_disabled ? "default" : "pointer"}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
+                                  onmouseover="this.style.textDecoration='underline'"
+                                  onmouseout="this.style.textDecoration='none'">
+                              ${escapeHTML(c.artist)}
+                            </span>
+                            <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.7;">
+                              <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
+                            </span>
+                          </div>
+                          ${
+                            currentUser &&
+                            (currentUser.id == c.u_id ||
+                              currentUser.status === "super_admin" ||
+                              currentUser.is_admin == 1)
+                              ? `
+                            <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                              <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                                <li><button class="dropdown-item edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                                <li><button class="dropdown-item text-danger delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
+                              </ul>
+                            </div>
+                          `
+                              : ""
+                          }
+                        </div>
+  
+                        <div class="p-2 mb-2">
+                          ${renderContent(c.content)}
+                        </div>
+  
+                        ${
+                          currentUser
+                            ? `
+                        <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                          <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" style="padding: 4px 10px; font-size: 0.8rem;">
+                            <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"}"></i>
+                            <span>${c.like_count || 0}</span>
+                          </button>
+  
+                          <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" style="padding: 4px 10px; font-size: 0.8rem;">
+                            <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"}"></i>
+                            <span>${c.dislike_count || 0}</span>
+                          </button>
+  
+                          <button class="phpmusic-comments-action-btn reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" style="padding: 4px 10px; font-size: 0.8rem;">
+                            <i class="bi bi-chat-left-text"></i> Reply
+                          </button>
+                        </div>
+                        `
+                            : `
+                        <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.8rem;">
+                          <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-white"></i> ${c.like_count || 0}</span>
+                          <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-white"></i> ${c.dislike_count || 0}</span>
+                        </div>
+                        `
+                        }
+                        <div class="mt-2">${buildTree(comments, c.id)}</div>
+                      </div>
+                    </div>
+                  `,
                 )
                 .join("");
     
               return `
-                      <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
-                        <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="comment-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
-                          <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
-                            <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
-                          </div>
-                          View ${children.length} ${children.length === 1 ? "reply" : "replies"}
-                        </button>
-                        <div id="comment-reply-container-${parent}" class="d-none mt-2 pt-2">
-                          ${repliesHtml}
-                        </div>
-                      </div>
-                    `;
+                <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
+                  <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="comment-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
+                    <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
+                      <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
+                    </div>
+                    View ${children.length} ${children.length === 1 ? "reply" : "replies"}
+                  </button>
+                  <div id="comment-reply-container-${parent}" class="d-none mt-2 pt-2">
+                    ${repliesHtml}
+                  </div>
+                </div>
+              `;
             }
           };
     
@@ -67930,14 +68795,14 @@ SOFTWARE.</div>
             list.innerHTML = catArray
               .map(
                 (c) => `
-                    <div class="cat-manage-item">
-                      <span class="text-white fw-medium">${escapeHTML(c.name)}</span>
-                      <div class="d-flex gap-2">
-                        <button class="note-icon-btn edit-cat-btn" data-id="${c.id}" data-name="${escapeHTML(c.name)}" data-type="${type}"><i class="bi bi-pencil"></i></button>
-                        <button class="note-icon-btn text-danger del-cat-btn" data-id="${c.id}" data-type="${type}"><i class="bi bi-trash2"></i></button>
-                      </div>
+                  <div class="cat-manage-item">
+                    <span class="text-white fw-medium">${escapeHTML(c.name)}</span>
+                    <div class="d-flex gap-2">
+                      <button class="note-icon-btn edit-cat-btn" data-id="${c.id}" data-name="${escapeHTML(c.name)}" data-type="${type}"><i class="bi bi-pencil"></i></button>
+                      <button class="note-icon-btn text-danger del-cat-btn" data-id="${c.id}" data-type="${type}"><i class="bi bi-trash2"></i></button>
                     </div>
-                    `,
+                  </div>
+                `,
               )
               .join("");
           }
@@ -68571,23 +69436,23 @@ SOFTWARE.</div>
                   );
                   if (alertContainer) {
                     alertContainer.innerHTML = `
-                            <div class="alert bg-dark border-secondary text-white alert-dismissible fade show mt-3 position-relative shadow-lg" role="alert" style="border-radius: 12px;">
-                              <h6 class="alert-heading fw-bold mb-3"><i class="bi bi-stars"></i> Because you followed this artist...</h6>
-                              <div class="d-flex gap-3 overflow-auto pb-2" style="scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.2) transparent;">
-                                ${recs
-                                  .map(
-                                    (a) => `
-                                  <div class="text-center user-profile-link" data-userid="${a.id}" data-artist="${encodeURIComponent(a.artist)}" style="width: 80px; flex-shrink: 0; cursor: pointer;">
-                                    <img src="?action=get_profile_picture&id=${a.id}" class="rounded-circle mb-2" style="width: 60px; height: 60px; object-fit: cover;">
-                                    <div class="small text-truncate w-100 hover-underline">${escapeHTML(a.artist)}</div>
-                                  </div>
-                                `,
-                                  )
-                                  .join("")}
-                              </div>
-                              <button type="button" class="btn-close btn-close-white" data-bs-dismiss="alert"></button>
+                      <div class="alert bg-dark border-secondary text-white alert-dismissible fade show mt-3 position-relative shadow-lg" role="alert" style="border-radius: 12px;">
+                        <h6 class="alert-heading fw-bold mb-3"><i class="bi bi-stars"></i> Because you followed this artist...</h6>
+                        <div class="d-flex gap-3 overflow-auto pb-2" style="scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.2) transparent;">
+                          ${recs
+                            .map(
+                              (a) => `
+                            <div class="text-center user-profile-link" data-userid="${a.id}" data-artist="${encodeURIComponent(a.artist)}" style="width: 80px; flex-shrink: 0; cursor: pointer;">
+                              <img src="?action=get_profile_picture&id=${a.id}" class="rounded-circle mb-2" style="width: 60px; height: 60px; object-fit: cover;">
+                              <div class="small text-truncate w-100 hover-underline">${escapeHTML(a.artist)}</div>
                             </div>
-                          `;
+                          `,
+                            )
+                            .join("")}
+                        </div>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="alert"></button>
+                      </div>
+                    `;
                   }
                 }
               } else if (res && res.status === "unfollowed") {
@@ -68658,25 +69523,25 @@ SOFTWARE.</div>
                   const html = data
                     .map(
                       (u) => `
-                          <div class="d-flex align-items-center justify-content-between gap-3 p-3 rounded-4" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); transition: transform 0.2s, background 0.2s;" onmouseover="this.style.transform='scale(1.02)'; this.style.background='rgba(255,255,255,0.08)';" onmouseout="this.style.transform='scale(1)'; this.style.background='rgba(255,255,255,0.03)';">
-                            <div class="d-flex align-items-center gap-3 user-profile-link flex-grow-1" data-userid="${u.id}" data-artist="${encodeURIComponent(u.artist)}" style="cursor: pointer; min-width: 0;" title="View Profile">
-                              <div class="position-relative flex-shrink-0">
-                                <img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle shadow-sm" style="width: 52px; height: 52px; object-fit: cover; border: 2px solid rgba(255,255,255,0.1);">
-                              </div>
-                              <div class="d-flex flex-column text-truncate" style="min-width: 0;">
-                                <span class="fw-bold text-white fs-6 text-truncate" style="letter-spacing: 0.3px;">${escapeHTML(u.artist)}</span>
-                                <span class="text-secondary fw-medium" style="font-size: 0.8rem;">ID: ${u.id}</span>
-                              </div>
+                        <div class="d-flex align-items-center justify-content-between gap-3 p-3 rounded-4" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); transition: transform 0.2s, background 0.2s;" onmouseover="this.style.transform='scale(1.02)'; this.style.background='rgba(255,255,255,0.08)';" onmouseout="this.style.transform='scale(1)'; this.style.background='rgba(255,255,255,0.03)';">
+                          <div class="d-flex align-items-center gap-3 user-profile-link flex-grow-1" data-userid="${u.id}" data-artist="${encodeURIComponent(u.artist)}" style="cursor: pointer; min-width: 0;" title="View Profile">
+                            <div class="position-relative flex-shrink-0">
+                              <img src="?action=get_profile_picture&id=${u.id}" class="rounded-circle shadow-sm" style="width: 52px; height: 52px; object-fit: cover; border: 2px solid rgba(255,255,255,0.1);">
                             </div>
-                            ${
-                              currentUser && currentUser.id != u.id
-                                ? `<button class="btn btn-sm ${u.is_followed ? "btn-outline-light" : "btn-danger"} rounded-pill fw-bold follow-btn-modal px-4 py-2 flex-shrink-0 shadow-sm" data-user-id="${u.id}" style="font-size: 0.85rem; transition: transform 0.1s;">
-                                     ${u.is_followed ? "Unfollow" : "Follow"}
-                                   </button>`
-                                : ""
-                            }
+                            <div class="d-flex flex-column text-truncate" style="min-width: 0;">
+                              <span class="fw-bold text-white fs-6 text-truncate" style="letter-spacing: 0.3px;">${escapeHTML(u.artist)}</span>
+                              <span class="text-secondary fw-medium" style="font-size: 0.8rem;">ID: ${u.id}</span>
+                            </div>
                           </div>
-                        `,
+                          ${
+                            currentUser && currentUser.id != u.id
+                              ? `<button class="btn btn-sm ${u.is_followed ? "btn-outline-light" : "btn-danger"} rounded-pill fw-bold follow-btn-modal px-4 py-2 flex-shrink-0 shadow-sm" data-user-id="${u.id}" style="font-size: 0.85rem; transition: transform 0.1s;">
+                                   ${u.is_followed ? "Unfollow" : "Follow"}
+                                 </button>`
+                              : ""
+                          }
+                        </div>
+                      `,
                     )
                     .join("");
     
@@ -68687,10 +69552,10 @@ SOFTWARE.</div>
                     listEl.insertAdjacentHTML(
                       "beforeend",
                       `
-                             <div class="text-center p-3" id="load-more-conn-btn-container">
-                               <button class="btn btn-sm btn-outline-light rounded-pill px-4" id="load-more-conn-btn">Load More</button>
-                             </div>
-                           `,
+                        <div class="text-center p-3" id="load-more-conn-btn-container">
+                          <button class="btn btn-sm btn-outline-light rounded-pill px-4" id="load-more-conn-btn">Load More</button>
+                        </div>
+                      `,
                     );
                   }
                 } else {
@@ -69082,10 +69947,10 @@ SOFTWARE.</div>
                 const modalTitle = artistsModalEl.querySelector(".modal-title");
                 if (modalTitle) modalTitle.textContent = "Artists";
                 artistsModalBody.innerHTML = `
-                        <div class="list-group list-group-flush rounded">
-                          ${artistsList.map((a, idx) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${idx === 0 ? userId || "" : ""}">${a}</button>`).join("")}
-                        </div>
-                      `;
+                  <div class="list-group list-group-flush rounded">
+                    ${artistsList.map((a, idx) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${idx === 0 ? userId || "" : ""}">${a}</button>`).join("")}
+                  </div>
+                `;
                 if (artistsModal) artistsModal.show();
               }
             } else {
@@ -69665,21 +70530,21 @@ SOFTWARE.</div>
                 const html = res.members
                   .map(
                     (m) => `
-                        <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
-                          <div class="d-flex align-items-center gap-3">
-                            <img src="?action=get_profile_picture&id=${m.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
-                            <div>
-                              <div class="d-flex align-items-center gap-2">
-                                <span class="badge bg-dark border border-secondary text-secondary" style="font-size: 0.75rem;">ID: ${m.id}</span>
-                                <strong class="text-white">${escapeHTML(m.artist)}</strong>
-                                ${m.role === "owner" ? '<span class="badge bg-warning text-dark">Owner</span>' : ""}
-                              </div>
-                              <div class="small text-secondary" style="font-size: 0.75rem; margin-top: 2px;">${escapeHTML(m.email || "")}</div>
+                      <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
+                        <div class="d-flex align-items-center gap-3">
+                          <img src="?action=get_profile_picture&id=${m.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                          <div>
+                            <div class="d-flex align-items-center gap-2">
+                              <span class="badge bg-dark border border-secondary text-secondary" style="font-size: 0.75rem;">ID: ${m.id}</span>
+                              <strong class="text-white">${escapeHTML(m.artist)}</strong>
+                              ${m.role === "owner" ? '<span class="badge bg-warning text-dark">Owner</span>' : ""}
                             </div>
+                            <div class="small text-secondary" style="font-size: 0.75rem; margin-top: 2px;">${escapeHTML(m.email || "")}</div>
                           </div>
-                          ${m.role !== "owner" ? `<button class="btn btn-sm btn-outline-danger project-member-remove-btn" data-id="${m.id}"><i class="bi bi-x-lg"></i></button>` : ""}
                         </div>
-                      `,
+                        ${m.role !== "owner" ? `<button class="btn btn-sm btn-outline-danger project-member-remove-btn" data-id="${m.id}"><i class="bi bi-x-lg"></i></button>` : ""}
+                      </div>
+                    `,
                   )
                   .join("");
     
@@ -69943,10 +70808,10 @@ SOFTWARE.</div>
                   const modalTitle = artistsModalEl.querySelector(".modal-title");
                   if (modalTitle) modalTitle.textContent = "Artists";
                   artistsModalBody.innerHTML = `
-                          <div class="list-group list-group-flush rounded">
-                            ${artistsList.map((a, idx) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${idx === 0 ? userId || "" : ""}">${a}</button>`).join("")}
-                          </div>
-                        `;
+                    <div class="list-group list-group-flush rounded">
+                      ${artistsList.map((a, idx) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${idx === 0 ? userId || "" : ""}">${a}</button>`).join("")}
+                    </div>
+                  `;
                   if (artistsModal) artistsModal.show();
                 }
               } else {
@@ -69981,10 +70846,10 @@ SOFTWARE.</div>
                   const modalTitle = artistsModalEl.querySelector(".modal-title");
                   if (modalTitle) modalTitle.textContent = "Select Album Artist";
                   artistsModalBody.innerHTML = `
-                          <div class="list-group list-group-flush rounded">
-                            ${songArtistsList.map((a) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary album-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${safeMenuUserId}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join("")}
-                          </div>
-                        `;
+                    <div class="list-group list-group-flush rounded">
+                      ${songArtistsList.map((a) => `<button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary album-modal-item py-3" data-album="${encodeURIComponent(albumRaw)}" data-artist="${encodeURIComponent(a)}" data-userid="${safeMenuUserId}">${escapeHTML(albumRaw)} (${escapeHTML(a)})</button>`).join("")}
+                    </div>
+                  `;
                   if (artistsModal) artistsModal.show();
                 }
               } else {
@@ -70196,22 +71061,22 @@ SOFTWARE.</div>
                       listEl.innerHTML = res.collaborators
                         .map(
                           (c) => `
-                              <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
-                                <div class="d-flex align-items-center gap-3">
-                                  <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
-                                  <div>
-                                    <div class="d-flex align-items-center gap-2">
-                                      <span class="badge bg-dark border border-secondary text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</span>
-                                      <strong class="text-white">${escapeHTML(c.artist)}</strong>
-                                    </div>
-                                    <div class="small text-secondary" style="font-size: 0.75rem; margin-top: 2px;">${escapeHTML(c.email || "")}</div>
+                            <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
+                              <div class="d-flex align-items-center gap-3">
+                                <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                                <div>
+                                  <div class="d-flex align-items-center gap-2">
+                                    <span class="badge bg-dark border border-secondary text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</span>
+                                    <strong class="text-white">${escapeHTML(c.artist)}</strong>
                                   </div>
+                                  <div class="small text-secondary" style="font-size: 0.75rem; margin-top: 2px;">${escapeHTML(c.email || "")}</div>
                                 </div>
-                                <button class="btn btn-sm btn-outline-danger collab-remove-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
                               </div>
-                            `,
-                        )
-                        .join("");
+                              <button class="btn btn-sm btn-outline-danger collab-remove-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
+                            </div>
+                          `,
+                      )
+                      .join("");
                     }
                   }
                 };
@@ -70726,62 +71591,63 @@ SOFTWARE.</div>
               );
               if (metaSongData && metadataModalBody) {
                 metadataModalBody.innerHTML = `
-                        <div class="p-2">
-                          <div class="d-flex align-items-center gap-3 mb-4 border-bottom border-secondary pb-3">
-                            <div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary shadow-sm" style="width: 48px; height: 48px;">
-                              <i class="bi bi-info-circle-fill text-danger fs-4"></i>
-                            </div>
-                            <div>
-                              <h5 class="text-white fw-bold mb-0">Song Metadata</h5>
-                              <div class="text-secondary small">Database ID: ${metaSongData.id}</div>
-                            </div>
-                          </div>
-    
-                          <div class="mb-3">
-                            <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Title</div>
-                            <div class="text-white fs-5 fw-bold text-wrap text-break lh-sm">${escapeHTML(metaSongData.title) || "N/A"}</div>
-                          </div>
-    
-                          <div class="mb-3">
-                            <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Artist</div>
-                            <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">
-                              ${formatArtistsHTML(metaSongData.artist, metaSongData.user_id, metaSongData.is_collaborative)}
-                            </div>
-                          </div>
-    
-                          <div class="mb-3">
-                            <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Album</div>
-                            <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm song-album" style="cursor: pointer;" data-album="${encodeURIComponent(metaSongData.album || "")}" data-userid="${metaSongData.user_id || ""}" data-artistname="${encodeURIComponent(metaSongData.artist || "")}">
-                              <span class="hover-underline">${escapeHTML(metaSongData.album) || "N/A"}</span>
-                            </div>
-                          </div>
-    
-                          <div class="mb-4">
-                            <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Genre</div>
-                            <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm" style="cursor: pointer;" onclick="bootstrap.Modal.getInstance(document.getElementById('metadata-modal'))?.hide(); loadView({type: 'genre_songs', param: '${(escapeHTML(metaSongData.genre) || '').replace(/'/g, "\\'")}', sort: 'artist_asc', filter_user_id: ''});">
-                              <span class="hover-underline">${escapeHTML(metaSongData.genre) || "N/A"}</span>
-                            </div>
-                          </div>
-    
-                          <div class="row g-3 p-3 mt-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
-                            <div class="col-6">
-                              <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Year</div>
-                              <div class="text-white fw-medium text-wrap">${metaSongData.year || "N/A"}</div>
-                            </div>
-                            <div class="col-6">
-                              <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Duration</div>
-                              <div class="text-white fw-medium text-wrap">${formatTime(metaSongData.duration)}</div>
-                            </div>
-                            <div class="col-6">
-                              <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Bitrate</div>
-                              <div class="text-white fw-medium text-wrap">${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + " kbps" : "N/A"}</div>
-                            </div>
-                            <div class="col-6">
-                              <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Size</div>
-                              <div class="text-white fw-medium text-wrap">${metaSongData.filesize ? (metaSongData.filesize / 1048576).toFixed(2) + " MB" : "N/A"}</div>
-                            </div>
-                          </div>
-                        </div>`;
+                  <div class="p-2">
+                    <div class="d-flex align-items-center gap-3 mb-4 border-bottom border-secondary pb-3">
+                      <div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary shadow-sm" style="width: 48px; height: 48px;">
+                        <i class="bi bi-info-circle-fill text-danger fs-4"></i>
+                      </div>
+                      <div>
+                        <h5 class="text-white fw-bold mb-0">Song Metadata</h5>
+                        <div class="text-secondary small">Database ID: ${metaSongData.id}</div>
+                      </div>
+                    </div>
+
+                    <div class="mb-3">
+                      <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Title</div>
+                      <div class="text-white fs-5 fw-bold text-wrap text-break lh-sm">${escapeHTML(metaSongData.title) || "N/A"}</div>
+                    </div>
+
+                    <div class="mb-3">
+                      <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Artist</div>
+                      <div class="text-white fs-6 fw-medium text-wrap text-break lh-sm">
+                        ${formatArtistsHTML(metaSongData.artist, metaSongData.user_id, metaSongData.is_collaborative)}
+                      </div>
+                    </div>
+
+                    <div class="mb-3">
+                      <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Album</div>
+                      <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm song-album" style="cursor: pointer;" data-album="${encodeURIComponent(metaSongData.album || "")}" data-userid="${metaSongData.user_id || ""}" data-artistname="${encodeURIComponent(metaSongData.artist || "")}">
+                        <span class="hover-underline">${escapeHTML(metaSongData.album) || "N/A"}</span>
+                      </div>
+                    </div>
+
+                    <div class="mb-4">
+                      <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Genre</div>
+                      <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm" style="cursor: pointer;" onclick="bootstrap.Modal.getInstance(document.getElementById('metadata-modal'))?.hide(); loadView({type: 'genre_songs', param: '${(escapeHTML(metaSongData.genre) || '').replace(/'/g, "\\'")}', sort: 'artist_asc', filter_user_id: ''});">
+                        <span class="hover-underline">${escapeHTML(metaSongData.genre) || "N/A"}</span>
+                      </div>
+                    </div>
+
+                    <div class="row g-3 p-3 mt-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
+                      <div class="col-6">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Year</div>
+                        <div class="text-white fw-medium text-wrap">${metaSongData.year || "N/A"}</div>
+                      </div>
+                      <div class="col-6">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Duration</div>
+                        <div class="text-white fw-medium text-wrap">${formatTime(metaSongData.duration)}</div>
+                      </div>
+                      <div class="col-6">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Bitrate</div>
+                        <div class="text-white fw-medium text-wrap">${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + " kbps" : "N/A"}</div>
+                      </div>
+                      <div class="col-6">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Size</div>
+                        <div class="text-white fw-medium text-wrap">${metaSongData.filesize ? (metaSongData.filesize / 1048576).toFixed(2) + " MB" : "N/A"}</div>
+                      </div>
+                    </div>
+                  </div>
+                `;
                 bootstrap.Modal.getOrCreateInstance(
                   document.getElementById("metadata-modal"),
                 ).show();
@@ -70825,11 +71691,12 @@ SOFTWARE.</div>
                     currentLrcSongId = null;
                     lyricsBodyEl.style.height = "100%";
                     lyricsBodyEl.innerHTML = `
-                            <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 w-100 p-5 text-secondary opacity-50">
-                              <i class="bi bi-music-note-list mb-3" style="font-size: 3.5rem;"></i>
-                              <h5 class="fw-bold text-white mb-1">No Lyrics Available</h5>
-                              <p class="small mb-0">Lyrics haven't been added for this track yet.</p>
-                            </div>`;
+                      <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 w-100 p-5 text-secondary opacity-50">
+                        <i class="bi bi-music-note-list mb-3" style="font-size: 3.5rem;"></i>
+                        <h5 class="fw-bold text-white mb-1">No Lyrics Available</h5>
+                        <p class="small mb-0">Lyrics haven't been added for this track yet.</p>
+                      </div>
+                    `;
                   }
                 }
                 const lyricsModalEl = document.getElementById("lyrics-modal");
@@ -71303,9 +72170,9 @@ SOFTWARE.</div>
     
             if (updateModal && updateModalBody) {
               updateModalBody.innerHTML = `
-                      <div class="spinner-border text-secondary" role="status" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
-                      <p class="mt-3 text-secondary">Analyzing and comparing entire codebase...</p>
-                    `;
+                <div class="spinner-border text-secondary" role="status" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                <p class="mt-3 text-secondary">Analyzing and comparing entire codebase...</p>
+              `;
               updateModal.show();
     
               try {
@@ -71317,27 +72184,27 @@ SOFTWARE.</div>
                 if (result.status === "success") {
                   if (result.update_available) {
                     updateModalBody.innerHTML = `
-                            <i class="bi bi-info-circle-fill text-warning" style="font-size: 3.5rem;"></i>
-                            <h4 class="mt-3">Code Modification Detected!</h4>
-                            <p class="text-secondary mb-4">Your current code does not strictly match the latest source code on GitHub.</p>
-                            <a href="https://github.com/HirotakaDango/PHP-Music" target="_blank" class="btn btn-warning w-100"><i class="bi bi-github"></i> Download Latest Code</a>
-                          `;
+                      <i class="bi bi-info-circle-fill text-warning" style="font-size: 3.5rem;"></i>
+                      <h4 class="mt-3">Code Modification Detected!</h4>
+                      <p class="text-secondary mb-4">Your current code does not strictly match the latest source code on GitHub.</p>
+                      <a href="https://github.com/HirotakaDango/PHP-Music" target="_blank" class="btn btn-warning w-100"><i class="bi bi-github"></i> Download Latest Code</a>
+                    `;
                   } else {
                     updateModalBody.innerHTML = `
-                            <i class="bi bi-check-circle-fill text-success" style="font-size: 3.5rem;"></i>
-                            <h4 class="mt-3">Code is Identical!</h4>
-                            <p class="text-secondary mb-0">Your codebase perfectly matches the latest version on GitHub.</p>
-                          `;
+                      <i class="bi bi-check-circle-fill text-success" style="font-size: 3.5rem;"></i>
+                      <h4 class="mt-3">Code is Identical!</h4>
+                      <p class="text-secondary mb-0">Your codebase perfectly matches the latest version on GitHub.</p>
+                    `;
                   }
                 } else {
                   throw new Error(result.message || "Check failed.");
                 }
               } catch (error) {
                 updateModalBody.innerHTML = `
-                        <i class="bi bi-x-circle-fill text-danger" style="font-size: 3.5rem;"></i>
-                        <h4 class="mt-3">Comparison Failed</h4>
-                        <p class="text-secondary mb-0">${error.message}</p>
-                      `;
+                  <i class="bi bi-x-circle-fill text-danger" style="font-size: 3.5rem;"></i>
+                  <h4 class="mt-3">Comparison Failed</h4>
+                  <p class="text-secondary mb-0">${error.message}</p>
+                `;
               }
             }
           });
@@ -71395,163 +72262,163 @@ SOFTWARE.</div>
     
               const extraStyle = document.createElement("style");
               extraStyle.textContent = `
-                      body { margin: 0; font-family: 'Roboto', sans-serif; background: var(--ytm-bg); color: var(--ytm-primary-text); overflow: hidden; }
-                        .player-btn { transition: color 0.2s, transform 0.1s; display: flex; align-items: center; justify-content: center; cursor: pointer; }
-                        .player-btn:hover { color: var(--ytm-primary-text) !important; }
-                        .play-btn:hover { transform: scale(1.1); background-color: #383838 !important; }
-                        .progress-bar-fg::after { display: none !important; }
-                        .progress-bar-container:hover .progress-bar-fg { background-color: var(--ytm-accent) !important; }
-                        .progress-bar-container:hover .slide-range::-webkit-slider-thumb { opacity: 1; }
-                        .progress-bar-container:hover .slide-range::-moz-range-thumb { opacity: 1; }
-                        .title, .artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-                        .marquee-container { width: 100%; overflow: hidden; white-space: nowrap; position: relative; }
-                        .marquee-container.is-overflowing { -webkit-mask-image: linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent); mask-image: linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent); }
-                        .marquee-content { display: inline-block; white-space: nowrap; }
-                        .marquee-content.title, .marquee-content.artist { overflow: visible; text-overflow: clip; }
-                        .marquee-anim {
-                          display: inline-flex;
-                          animation: marquee-scroll 12s linear infinite;
-                        }
+              body { margin: 0; font-family: 'Roboto', sans-serif; background: var(--ytm-bg); color: var(--ytm-primary-text); overflow: hidden; }
+                .player-btn { transition: color 0.2s, transform 0.1s; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+                .player-btn:hover { color: var(--ytm-primary-text) !important; }
+                .play-btn:hover { transform: scale(1.1); background-color: #383838 !important; }
+                .progress-bar-fg::after { display: none !important; }
+                .progress-bar-container:hover .progress-bar-fg { background-color: var(--ytm-accent) !important; }
+                .progress-bar-container:hover .slide-range::-webkit-slider-thumb { opacity: 1; }
+                .progress-bar-container:hover .slide-range::-moz-range-thumb { opacity: 1; }
+                .title, .artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+                .marquee-container { width: 100%; overflow: hidden; white-space: nowrap; position: relative; }
+                .marquee-container.is-overflowing { -webkit-mask-image: linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent); mask-image: linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent); }
+                .marquee-content { display: inline-block; white-space: nowrap; }
+                .marquee-content.title, .marquee-content.artist { overflow: visible; text-overflow: clip; }
+                .marquee-anim {
+                  display: inline-flex;
+                  animation: marquee-scroll 12s linear infinite;
+                }
 
-                        @keyframes marquee-scroll {
-                          0% { transform: translateX(0); }
-                          100% { transform: translateX(-50%); }
-                        }
-                        .player-btn.active { color: var(--ytm-accent) !important; }
-                        .pip-tabs { display: flex; border-bottom: 1px solid var(--ytm-surface-2); }
-                        .pip-tab-btn { flex: 1; background: none; border: none; color: var(--ytm-secondary-text); padding: 1rem; cursor: pointer; font-weight: 500; font-size: 1rem; transition: color 0.2s; border-bottom: 2px solid transparent; }
-                        .pip-tab-btn:hover { color: var(--ytm-primary-text); }
-                        .pip-tab-btn.active { color: var(--ytm-primary-text); border-bottom-color: var(--ytm-accent); }
-                        .pip-pane { display: none; flex-direction: column; height: calc(100vh - 54px); }
-                        .pip-pane.active { display: flex; }
-                        #pip-lyrics-container { flex-grow: 1; overflow-y: auto; text-align: left; padding: 50vh 1rem; scrollbar-width: none; }
-                        #pip-lyrics-container::-webkit-scrollbar { display: none; }
-                        .pip-lyric-line { font-size: 1.5rem; color: rgba(255,255,255,0.4); margin-bottom: 1rem; transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); cursor: pointer; min-height: 1.5rem; transform-origin: left center; font-weight: 700; }
-                        .pip-lyric-line:hover { color: rgba(255,255,255,0.8); }
-                        .pip-lyric-line.active { color: #ffffff; transform: scale(1.1); text-shadow: 0 4px 15px rgba(0,0,0,0.8); }
-    
-                        .slide-range { -webkit-appearance: none; appearance: none; width: 100%; background: transparent; height: 14px; position: absolute; top: 0; left: 0; z-index: 10; margin: 0; cursor: pointer; outline: none; }
-                        .slide-range::-webkit-slider-runnable-track { -webkit-appearance: none; background: transparent; border: none; height: 14px; }
-                        .slide-range::-moz-range-track { background: transparent; border: none; height: 14px; }
-                        .slide-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; margin-top: 1px; opacity: 0; transition: opacity 0.2s; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
-                        .slide-range::-moz-range-thumb { appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; opacity: 0; transition: opacity 0.2s; border: none; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
-    
-                        @keyframes spinner-border {
-                          to { transform: rotate(360deg); }
-                        }
-                        .spinner-border {
-                          display: inline-block;
-                          width: 32px !important;
-                          height: 32px !important;
-                          vertical-align: -0.125em;
-                          border: 4px solid currentColor !important;
-                          border-right-color: transparent !important;
-                          border-radius: 50%;
-                          box-sizing: border-box;
-                          background-color: transparent;
-                          animation: 0.75s linear infinite spinner-border;
-                        }
-                        .text-secondary { color: var(--ytm-secondary-text) !important; }
-    
-                        body.theme-light-bg { background-color: #ffffff !important; color: #000000 !important; }
-                        body.theme-light-bg .text-secondary { color: rgba(0,0,0,0.6) !important; font-weight: 500; }
-                        body.theme-light-bg .pip-tab-btn { color: rgba(0,0,0,0.6) !important; }
-                        body.theme-light-bg .pip-tab-btn:hover { color: #000000 !important; }
-                        body.theme-light-bg .pip-tab-btn.active { color: #000000 !important; border-bottom-color: #000000 !important; font-weight: 800; text-shadow: none; }
-                        body.theme-light-bg .pip-lyric-line { color: rgba(0,0,0,0.6) !important; }
-                        body.theme-light-bg .pip-lyric-line:hover { color: #000000 !important; }
-                        body.theme-light-bg .pip-lyric-line.active { color: var(--ytm-accent) !important; font-weight: 800; text-shadow: none; }
-                        body.theme-light-bg .title, body.theme-light-bg .artist, .player-bar.theme-light-bg .pb-title { color: #000000 !important; font-weight: 700; text-shadow: none !important; }
-                        body.theme-light-bg .time-stamps span, .player-bar.theme-light-bg .pb-artist, .player-bar.theme-light-bg .pb-time, .player-bar.theme-light-bg .text-secondary { color: rgba(0,0,0,0.6) !important; font-weight: 600; text-shadow: none !important; }
-                        body.theme-light-bg .player-btn, .player-bar.theme-light-bg .pb-btn { color: #333333 !important; text-shadow: none !important; }
-                        body.theme-light-bg .player-btn:hover, body.theme-light-bg .player-btn.active, .player-bar.theme-light-bg .pb-btn:hover, .player-bar.theme-light-bg .pb-btn.active { color: #000000 !important; }
-                        body.theme-light-bg .play-btn, .player-bar.theme-light-bg .pb-play-circle { background-color: #000000 !important; color: #ffffff !important; box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important; }
-                        body.theme-light-bg .progress-bar-bg, .player-bar.theme-light-bg .timeline-bg, .player-bar.theme-light-bg .volume-bg { background-color: rgba(0, 0, 0, 0.2) !important; }
-                        body.theme-light-bg .progress-bar-fg, .player-bar.theme-light-bg .timeline-filled, .player-bar.theme-light-bg .volume-filled { background-color: #000000 !important; }
-                        .player-bar.theme-light-bg .timeline-container:hover .timeline-filled, .player-bar.theme-light-bg .volume-bar:hover .volume-filled { background-color: var(--ytm-accent) !important; }
-                        .ytm-modal .timeline-filled::after {
-                          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3) !important;
-                          border: none !important;
-                        }
+                @keyframes marquee-scroll {
+                  0% { transform: translateX(0); }
+                  100% { transform: translateX(-50%); }
+                }
+                .player-btn.active { color: var(--ytm-accent) !important; }
+                .pip-tabs { display: flex; border-bottom: 1px solid var(--ytm-surface-2); }
+                .pip-tab-btn { flex: 1; background: none; border: none; color: var(--ytm-secondary-text); padding: 1rem; cursor: pointer; font-weight: 500; font-size: 1rem; transition: color 0.2s; border-bottom: 2px solid transparent; }
+                .pip-tab-btn:hover { color: var(--ytm-primary-text); }
+                .pip-tab-btn.active { color: var(--ytm-primary-text); border-bottom-color: var(--ytm-accent); }
+                .pip-pane { display: none; flex-direction: column; height: calc(100vh - 54px); }
+                .pip-pane.active { display: flex; }
+                #pip-lyrics-container { flex-grow: 1; overflow-y: auto; text-align: left; padding: 50vh 1rem; scrollbar-width: none; }
+                #pip-lyrics-container::-webkit-scrollbar { display: none; }
+                .pip-lyric-line { font-size: 1.5rem; color: rgba(255,255,255,0.4); margin-bottom: 1rem; transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); cursor: pointer; min-height: 1.5rem; transform-origin: left center; font-weight: 700; }
+                .pip-lyric-line:hover { color: rgba(255,255,255,0.8); }
+                .pip-lyric-line.active { color: #ffffff; transform: scale(1.1); text-shadow: 0 4px 15px rgba(0,0,0,0.8); }
 
-                        .ytm-modal .timeline-container:hover .timeline-filled::after {
-                          background: var(--ytm-accent, #ff0000) !important;
-                          border-color: var(--ytm-accent, #ff0000) !important;
-                          box-shadow: 0 0 8px rgba(255, 0, 0, 0.5) !important;
-                        }
+                .slide-range { -webkit-appearance: none; appearance: none; width: 100%; background: transparent; height: 14px; position: absolute; top: 0; left: 0; z-index: 10; margin: 0; cursor: pointer; outline: none; }
+                .slide-range::-webkit-slider-runnable-track { -webkit-appearance: none; background: transparent; border: none; height: 14px; }
+                .slide-range::-moz-range-track { background: transparent; border: none; height: 14px; }
+                .slide-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; margin-top: 1px; opacity: 0; transition: opacity 0.2s; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
+                .slide-range::-moz-range-thumb { appearance: none; height: 12px; width: 12px; background: var(--ytm-primary-text); border-radius: 50%; opacity: 0; transition: opacity 0.2s; border: none; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
 
-                        .player-modal-content.theme-light-bg .progress-bar-fg::after,
-                        .player-bar.theme-light-bg .timeline-filled::after { 
-                          border: none !important;
-                          background: #000000 !important; 
-                          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2) !important; 
-                        }
-                        .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg::after,
-                        .player-bar.theme-light-bg .timeline-container:hover .timeline-filled::after { 
-                          border-color: var(--ytm-accent, #ff0000) !important; 
-                          background: var(--ytm-accent, #ff0000) !important; 
-                          box-shadow: 0 0 8px rgba(255, 0, 0, 0.5) !important; 
-                        }
-                        .player-bar .pb-title, .player-bar .pb-time { text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
-                        .player-bar .pb-artist, .player-bar .pb-btn, .player-bar .text-secondary { text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
-                        .pb-play-circle .bi-play-fill, .play-btn .bi-play-fill { margin-left: 4px; }
-                        /* Force bootstrap icon tags inside control buttons to inherit their parent's inline font-sizes */
-                        .player-modal-controls .player-btn .bi { font-size: inherit !important; }
-                        .player-modal-controls .play-btn .bi { font-size: inherit !important; }
-                      `;
+                @keyframes spinner-border {
+                  to { transform: rotate(360deg); }
+                }
+                .spinner-border {
+                  display: inline-block;
+                  width: 32px !important;
+                  height: 32px !important;
+                  vertical-align: -0.125em;
+                  border: 4px solid currentColor !important;
+                  border-right-color: transparent !important;
+                  border-radius: 50%;
+                  box-sizing: border-box;
+                  background-color: transparent;
+                  animation: 0.75s linear infinite spinner-border;
+                }
+                .text-secondary { color: var(--ytm-secondary-text) !important; }
+
+                body.theme-light-bg { background-color: #ffffff !important; color: #000000 !important; }
+                body.theme-light-bg .text-secondary { color: rgba(0,0,0,0.6) !important; font-weight: 500; }
+                body.theme-light-bg .pip-tab-btn { color: rgba(0,0,0,0.6) !important; }
+                body.theme-light-bg .pip-tab-btn:hover { color: #000000 !important; }
+                body.theme-light-bg .pip-tab-btn.active { color: #000000 !important; border-bottom-color: #000000 !important; font-weight: 800; text-shadow: none; }
+                body.theme-light-bg .pip-lyric-line { color: rgba(0,0,0,0.6) !important; }
+                body.theme-light-bg .pip-lyric-line:hover { color: #000000 !important; }
+                body.theme-light-bg .pip-lyric-line.active { color: var(--ytm-accent) !important; font-weight: 800; text-shadow: none; }
+                body.theme-light-bg .title, body.theme-light-bg .artist, .player-bar.theme-light-bg .pb-title { color: #000000 !important; font-weight: 700; text-shadow: none !important; }
+                body.theme-light-bg .time-stamps span, .player-bar.theme-light-bg .pb-artist, .player-bar.theme-light-bg .pb-time, .player-bar.theme-light-bg .text-secondary { color: rgba(0,0,0,0.6) !important; font-weight: 600; text-shadow: none !important; }
+                body.theme-light-bg .player-btn, .player-bar.theme-light-bg .pb-btn { color: #333333 !important; text-shadow: none !important; }
+                body.theme-light-bg .player-btn:hover, body.theme-light-bg .player-btn.active, .player-bar.theme-light-bg .pb-btn:hover, .player-bar.theme-light-bg .pb-btn.active { color: #000000 !important; }
+                body.theme-light-bg .play-btn, .player-bar.theme-light-bg .pb-play-circle { background-color: #000000 !important; color: #ffffff !important; box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important; }
+                body.theme-light-bg .progress-bar-bg, .player-bar.theme-light-bg .timeline-bg, .player-bar.theme-light-bg .volume-bg { background-color: rgba(0, 0, 0, 0.2) !important; }
+                body.theme-light-bg .progress-bar-fg, .player-bar.theme-light-bg .timeline-filled, .player-bar.theme-light-bg .volume-filled { background-color: #000000 !important; }
+                .player-bar.theme-light-bg .timeline-container:hover .timeline-filled, .player-bar.theme-light-bg .volume-bar:hover .volume-filled { background-color: var(--ytm-accent) !important; }
+                .ytm-modal .timeline-filled::after {
+                  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3) !important;
+                  border: none !important;
+                }
+
+                .ytm-modal .timeline-container:hover .timeline-filled::after {
+                  background: var(--ytm-accent, #ff0000) !important;
+                  border-color: var(--ytm-accent, #ff0000) !important;
+                  box-shadow: 0 0 8px rgba(255, 0, 0, 0.5) !important;
+                }
+
+                .player-modal-content.theme-light-bg .progress-bar-fg::after,
+                .player-bar.theme-light-bg .timeline-filled::after { 
+                  border: none !important;
+                  background: #000000 !important; 
+                  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2) !important; 
+                }
+                .player-modal-content.theme-light-bg .progress-bar-container:hover .progress-bar-fg::after,
+                .player-bar.theme-light-bg .timeline-container:hover .timeline-filled::after { 
+                  border-color: var(--ytm-accent, #ff0000) !important; 
+                  background: var(--ytm-accent, #ff0000) !important; 
+                  box-shadow: 0 0 8px rgba(255, 0, 0, 0.5) !important; 
+                }
+                .player-bar .pb-title, .player-bar .pb-time { text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+                .player-bar .pb-artist, .player-bar .pb-btn, .player-bar .text-secondary { text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
+                .pb-play-circle .bi-play-fill, .play-btn .bi-play-fill { margin-left: 4px; }
+                /* Force bootstrap icon tags inside control buttons to inherit their parent's inline font-sizes */
+                .player-modal-controls .player-btn .bi { font-size: inherit !important; }
+                .player-modal-controls .play-btn .bi { font-size: inherit !important; }
+              `;
               docPipWindow.document.head.appendChild(extraStyle);
     
               docPipWindow.document.body.className = "player-modal-content";
               docPipWindow.document.body.innerHTML = `
-                        <div class="dynamic-blur-bg" id="pip-bg" style="position: absolute; z-index: -1;"></div>
-                        <div style="display: flex; flex-direction: column; background: transparent; height: 100vh; position: relative; z-index: 1;">
-                          <div class="pip-tabs">
-                            <button class="pip-tab-btn active" id="pip-tab-player">Player</button>
-                            <button class="pip-tab-btn" id="pip-tab-lyrics">Lyrics</button>
-                          </div>
-    
-                          <div class="pip-pane active mt-4" id="pip-pane-player" style="padding: 1rem 1.5rem 1.5rem 1.5rem; justify-content: space-evenly;">
-                            <div style="width: 100%; max-width: min(440px, 48vh); margin: 0 auto; display: flex; flex-direction: column; height: 100%; justify-content: space-evenly;">
-                              <div class="player-modal-art-wrapper" style="flex-grow: 1; display: flex; align-items: center; justify-content: center; margin-bottom: 1.5rem; min-height: 0;">
-                                <div class="position-relative shadow-lg" style="width: 100%; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden;">
-                                  <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="pip-art" alt="Album Art" style="width: 100%; height: 100%; object-fit: cover;">
-                                  <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
-                                </div>
-                              </div>
-                              <div class="player-modal-track-info mt-2" style="text-align: left; margin-bottom: 1rem; min-width: 0; width: 100%;">
-                                <div class="marquee-container mb-1">
-                                  <h3 id="pip-title" class="title marquee-content" style="font-weight: 700; font-size: 1.5rem; margin-bottom: 0;">Song Title</h3>
-                                </div>
-                                <div class="marquee-container">
-                                  <p id="pip-artist" class="artist marquee-content" style="color: var(--ytm-secondary-text); font-size: 1rem; margin-bottom: 0;">Artist Name</p>
-                                </div>
-                              </div>
-                              <div class="player-modal-progress" style="width: 100%;">
-                                <div class="progress-bar-container" id="pip-progress-container" style="height: 14px; border-radius: 2px; position: relative; margin-bottom: 0.2em;">
-                                  <div class="progress-bar-bg" style="height: 4px; background-color: rgba(255, 255, 255, 0.2); border-radius: 2px; position: absolute; top: 5px; left: 0; right: 0; pointer-events: none;"></div>
-                                  <div class="progress-bar-fg" id="pip-progress-bar" style="height: 4px; background-color: var(--ytm-primary-text); border-radius: 2px; width: 0%; position: absolute; top: 5px; left: 0; pointer-events: none;"></div>
-                                  <input type="range" id="pip-seek-slider" class="slide-range" min="0" max="100" value="0" step="0.1">
-                                </div>
-                                <div class="time-stamps" style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--ytm-secondary-text); margin-top: 0.5rem;">
-                                  <span id="pip-current-time">0:00</span>
-                                  <span id="pip-time-left">0:00</span>
-                                </div>
-                              </div>
-                              <div class="player-modal-controls" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                                <button class="player-btn" id="pip-shuffle-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.25rem; padding: 10px;"></button>
-                                <button class="player-btn" id="pip-prev-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 1.25rem; padding: 10px;"></button>
-                                <button class="player-btn play-btn" id="pip-play-pause-btn" style="background: var(--ytm-surface); border: none; color: var(--ytm-primary-text); font-size: 2rem; width: 70px; height: 70px; border-radius: 50%;"></button>
-                                <button class="player-btn" id="pip-next-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 1.25rem;"></button>
-                                <button class="player-btn" id="pip-repeat-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.25rem; padding: 10px;"></button>
-                              </div>
-                            </div>
-                          </div>
-    
-                          <div class="pip-pane" id="pip-pane-lyrics">
-                            <div id="pip-lyrics-container"></div>
-                          </div>
+                <div class="dynamic-blur-bg" id="pip-bg" style="position: absolute; z-index: -1;"></div>
+                <div style="display: flex; flex-direction: column; background: transparent; height: 100vh; position: relative; z-index: 1;">
+                  <div class="pip-tabs">
+                    <button class="pip-tab-btn active" id="pip-tab-player">Player</button>
+                    <button class="pip-tab-btn" id="pip-tab-lyrics">Lyrics</button>
+                  </div>
+
+                  <div class="pip-pane active mt-4" id="pip-pane-player" style="padding: 1rem 1.5rem 1.5rem 1.5rem; justify-content: space-evenly;">
+                    <div style="width: 100%; max-width: min(440px, 48vh); margin: 0 auto; display: flex; flex-direction: column; height: 100%; justify-content: space-evenly;">
+                      <div class="player-modal-art-wrapper" style="flex-grow: 1; display: flex; align-items: center; justify-content: center; margin-bottom: 1.5rem; min-height: 0;">
+                        <div class="position-relative shadow-lg" style="width: 100%; aspect-ratio: 1/1; border-radius: 12px; overflow: hidden;">
+                          <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" id="pip-art" alt="Album Art" style="width: 100%; height: 100%; object-fit: cover;">
+                          <canvas class="visualizer-canvas" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
                         </div>
-                      `;
+                      </div>
+                      <div class="player-modal-track-info mt-2" style="text-align: left; margin-bottom: 1rem; min-width: 0; width: 100%;">
+                        <div class="marquee-container mb-1">
+                          <h3 id="pip-title" class="title marquee-content" style="font-weight: 700; font-size: 1.5rem; margin-bottom: 0;">Song Title</h3>
+                        </div>
+                        <div class="marquee-container">
+                          <p id="pip-artist" class="artist marquee-content" style="color: var(--ytm-secondary-text); font-size: 1rem; margin-bottom: 0;">Artist Name</p>
+                        </div>
+                      </div>
+                      <div class="player-modal-progress" style="width: 100%;">
+                        <div class="progress-bar-container" id="pip-progress-container" style="height: 14px; border-radius: 2px; position: relative; margin-bottom: 0.2em;">
+                          <div class="progress-bar-bg" style="height: 4px; background-color: rgba(255, 255, 255, 0.2); border-radius: 2px; position: absolute; top: 5px; left: 0; right: 0; pointer-events: none;"></div>
+                          <div class="progress-bar-fg" id="pip-progress-bar" style="height: 4px; background-color: var(--ytm-primary-text); border-radius: 2px; width: 0%; position: absolute; top: 5px; left: 0; pointer-events: none;"></div>
+                          <input type="range" id="pip-seek-slider" class="slide-range" min="0" max="100" value="0" step="0.1">
+                        </div>
+                        <div class="time-stamps" style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--ytm-secondary-text); margin-top: 0.5rem;">
+                          <span id="pip-current-time">0:00</span>
+                          <span id="pip-time-left">0:00</span>
+                        </div>
+                      </div>
+                      <div class="player-modal-controls" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                        <button class="player-btn" id="pip-shuffle-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.25rem; padding: 10px;"></button>
+                        <button class="player-btn" id="pip-prev-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 1.25rem; padding: 10px;"></button>
+                        <button class="player-btn play-btn" id="pip-play-pause-btn" style="background: var(--ytm-surface); border: none; color: var(--ytm-primary-text); font-size: 2rem; width: 70px; height: 70px; border-radius: 50%;"></button>
+                        <button class="player-btn" id="pip-next-btn" style="background: none; border: none; color: var(--ytm-primary-text); font-size: 1.25rem;"></button>
+                        <button class="player-btn" id="pip-repeat-btn" style="background: none; border: none; color: var(--ytm-secondary-text); font-size: 1.25rem; padding: 10px;"></button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="pip-pane" id="pip-pane-lyrics">
+                    <div id="pip-lyrics-container"></div>
+                  </div>
+                </div>
+              `;
     
               const pipTabPlayer =
                 docPipWindow.document.getElementById("pip-tab-player");
@@ -71617,10 +72484,11 @@ SOFTWARE.</div>
                 } else {
                   container.style.height = "100dvh";
                   container.innerHTML = `
-                            <div class="d-flex flex-column align-items-center justify-content-center text-center p-4 text-secondary opacity-50" style="height: 100dvh;">
-                              <i class="bi bi-music-note-list mb-2" style="font-size: 2.5rem;"></i>
-                              <h6 class="fw-bold text-white mb-1">No Lyrics Available</h6>
-                            </div>`;
+                    <div class="d-flex flex-column align-items-center justify-content-center text-center p-4 text-secondary opacity-50" style="height: 100dvh;">
+                      <i class="bi bi-music-note-list mb-2" style="font-size: 2.5rem;"></i>
+                      <h6 class="fw-bold text-white mb-1">No Lyrics Available</h6>
+                    </div>
+                  `;
                 }
               };
     
@@ -71930,17 +72798,17 @@ SOFTWARE.</div>
     
               if (currentUser && currentUser.verified === "pending") {
                 reqModalBody.innerHTML = `
-                        <i class="bi bi-hourglass-split text-info" style="font-size: 3.5rem; display: block; margin-bottom: 1rem;"></i>
-                        <h5 class="text-white mb-3">Verification Pending</h5>
-                        <p class="text-secondary mb-0">Your request is currently being reviewed by an administrator. Please check back later.</p>
-                      `;
+                  <i class="bi bi-hourglass-split text-info" style="font-size: 3.5rem; display: block; margin-bottom: 1rem;"></i>
+                  <h5 class="text-white mb-3">Verification Pending</h5>
+                  <p class="text-secondary mb-0">Your request is currently being reviewed by an administrator. Please check back later.</p>
+                `;
               } else {
                 reqModalBody.innerHTML = `
-                        <i class="bi bi-cloud-upload text-secondary mb-3" style="font-size: 3rem; display: block;"></i>
-                        <h5 class="text-white mb-3">Upload Permissions Required</h5>
-                        <p class="text-secondary mb-4">Please notify the admin to verify your account so you can upload your own songs and share them with the community.</p>
-                        <button class="btn btn-info w-100 fw-bold text-dark" id="send-verification-request-btn">Request Verification</button>
-                      `;
+                  <i class="bi bi-cloud-upload text-secondary mb-3" style="font-size: 3rem; display: block;"></i>
+                  <h5 class="text-white mb-3">Upload Permissions Required</h5>
+                  <p class="text-secondary mb-4">Please notify the admin to verify your account so you can upload your own songs and share them with the community.</p>
+                  <button class="btn btn-info w-100 fw-bold text-dark" id="send-verification-request-btn">Request Verification</button>
+                `;
     
                 const newBtn = document.getElementById(
                   "send-verification-request-btn",
@@ -72787,22 +73655,22 @@ SOFTWARE.</div>
                     listEl.innerHTML = res.collaborators
                       .map(
                         (c) => `
-                            <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
-                              <div class="d-flex align-items-center gap-3">
-                                <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
-                                <div>
-                                  <div class="d-flex align-items-center gap-2">
-                                    <span class="badge bg-dark border border-secondary text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</span>
-                                    <strong class="text-white">${escapeHTML(c.artist)}</strong>
-                                  </div>
-                                  <div class="small text-secondary" style="font-size: 0.75rem; margin-top: 2px;">${escapeHTML(c.email || "")}</div>
+                          <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
+                            <div class="d-flex align-items-center gap-3">
+                              <img src="?action=get_profile_picture&id=${c.id}" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                              <div>
+                                <div class="d-flex align-items-center gap-2">
+                                  <span class="badge bg-dark border border-secondary text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</span>
+                                  <strong class="text-white">${escapeHTML(c.artist)}</strong>
                                 </div>
+                                <div class="small text-secondary" style="font-size: 0.75rem; margin-top: 2px;">${escapeHTML(c.email || "")}</div>
                               </div>
-                              <button class="btn btn-sm btn-outline-danger song-collab-remove-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
                             </div>
-                          `,
+                            <button class="btn btn-sm btn-outline-danger song-collab-remove-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
+                          </div>
+                        `,
                       )
-                      .join("");
+                    .join("");
                   }
                 }
               };
@@ -72833,14 +73701,14 @@ SOFTWARE.</div>
                       collabDropdown.innerHTML = res.users
                         .map(
                           (u) => `
-                              <div class="search-dropdown-item song-collab-user-item" data-id="${u.id}" data-artist="${escapeHTML(u.artist)}">
-                                <img src="?action=get_profile_picture&id=${u.id}" class="search-dropdown-img rounded-circle">
-                                <div class="search-dropdown-text">
-                                  <div class="search-dropdown-title">${escapeHTML(u.artist)}</div>
-                                  <div class="search-dropdown-subtitle">ID: ${u.id}</div>
-                                </div>
+                            <div class="search-dropdown-item song-collab-user-item" data-id="${u.id}" data-artist="${escapeHTML(u.artist)}">
+                              <img src="?action=get_profile_picture&id=${u.id}" class="search-dropdown-img rounded-circle">
+                              <div class="search-dropdown-text">
+                                <div class="search-dropdown-title">${escapeHTML(u.artist)}</div>
+                                <div class="search-dropdown-subtitle">ID: ${u.id}</div>
                               </div>
-                            `,
+                            </div>
+                          `,
                         )
                         .join("");
                       collabDropdown.classList.remove("d-none");
@@ -75150,17 +76018,17 @@ SOFTWARE.</div>
               uploadCollabList.innerHTML = selectedUploadCollabs
                 .map(
                   (c) => `
-                      <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
-                        <div class="d-flex align-items-center gap-3">
-                          <img src="?action=get_profile_picture&id=${c.id}" onerror="this.outerHTML='<i class=\\'bi bi-person-circle fs-3 text-secondary\\'></i>'" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
-                          <div>
-                            <div>${escapeHTML(c.artist)}</div>
-                            <div class="small text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</div>
-                          </div>
+                    <div class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center border-secondary px-0">
+                      <div class="d-flex align-items-center gap-3">
+                        <img src="?action=get_profile_picture&id=${c.id}" onerror="this.outerHTML='<i class=\\'bi bi-person-circle fs-3 text-secondary\\'></i>'" class="rounded-circle" style="width: 32px; height: 32px; object-fit: cover;">
+                        <div>
+                          <div>${escapeHTML(c.artist)}</div>
+                          <div class="small text-secondary" style="font-size: 0.75rem;">ID: ${c.id}</div>
                         </div>
-                        <button type="button" class="btn btn-sm btn-outline-danger remove-upload-collab-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
                       </div>
-                    `,
+                      <button type="button" class="btn btn-sm btn-outline-danger remove-upload-collab-btn" data-id="${c.id}"><i class="bi bi-x-lg"></i></button>
+                    </div>
+                  `,
                 )
                 .join("");
             }
@@ -75209,14 +76077,14 @@ SOFTWARE.</div>
                   uploadCollabDropdown.innerHTML = res.users
                     .map(
                       (u) => `
-                          <div class="search-dropdown-item upload-collab-user-item" data-id="${u.id}" data-artist="${escapeHTML(u.artist)}">
-                            <img src="?action=get_profile_picture&id=${u.id}" class="search-dropdown-img rounded-circle">
-                            <div class="search-dropdown-text">
-                              <div class="search-dropdown-title">${escapeHTML(u.artist)}</div>
-                              <div class="search-dropdown-subtitle">ID: ${u.id}</div>
-                            </div>
+                        <div class="search-dropdown-item upload-collab-user-item" data-id="${u.id}" data-artist="${escapeHTML(u.artist)}">
+                          <img src="?action=get_profile_picture&id=${u.id}" class="search-dropdown-img rounded-circle">
+                          <div class="search-dropdown-text">
+                            <div class="search-dropdown-title">${escapeHTML(u.artist)}</div>
+                            <div class="search-dropdown-subtitle">ID: ${u.id}</div>
                           </div>
-                        `,
+                        </div>
+                      `,
                     )
                     .join("");
                   uploadCollabDropdown.classList.remove("d-none");
@@ -75301,15 +76169,16 @@ SOFTWARE.</div>
             uploadProgressArea.insertAdjacentHTML(
               "beforeend",
               `
-                    <div class="mb-3 p-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid #404040;">
-                      <div class="d-flex justify-content-between align-items-center mb-2">
-                        <small class="text-white text-truncate fw-bold" style="max-width: 80%;">${escapeHTML(file.name)}</small>
-                        <small class="text-secondary fw-bold" id="${progressId}-text">0%</small>
-                      </div>
-                      <div class="progress" style="height: 8px; background-color: #000;">
-                        <div id="${progressId}" class="progress-bar bg-danger" role="progressbar" style="width: 0%; transition: width 0.1s linear;"></div>
-                      </div>
-                    </div>`,
+                <div class="mb-3 p-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid #404040;">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <small class="text-white text-truncate fw-bold" style="max-width: 80%;">${escapeHTML(file.name)}</small>
+                    <small class="text-secondary fw-bold" id="${progressId}-text">0%</small>
+                  </div>
+                  <div class="progress" style="height: 8px; background-color: #000;">
+                    <div id="${progressId}" class="progress-bar bg-danger" role="progressbar" style="width: 0%; transition: width 0.1s linear;"></div>
+                  </div>
+                </div>
+              `,
             );
     
             const formData = new FormData();
@@ -75591,18 +76460,18 @@ SOFTWARE.</div>
             .map((song, idx) => {
               const globalIdx = start + idx;
               return `
-                    <div class="song-item pd-song-row" style="color: #ffffff !important;">
-                      <div class="text-secondary small d-flex align-items-center" style="color: #ffffff !important;">
-                        <input class="form-check-input pd-song-checkbox me-2" type="checkbox" data-id="${song.id}" ${song.pdSelected !== false ? "checked" : ""}>
-                        <span class="d-none d-md-inline">${globalIdx + 1}</span>
-                      </div>
-                      <div class="title-col text-truncate" title="${pdEscapeHtml(song.title)}" style="color: #ffffff !important;">${pdEscapeHtml(pdTruncate(song.title, 60))}</div>
-                      <div class="artist-col text-truncate d-none d-md-block" title="${pdEscapeHtml(song.artist)}" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : "Unknown")}</div>
-                      <div class="duration-col d-none d-md-block" style="color: #ffffff !important;">${formatTime(song.duration)}</div>
-                      <div class="download-col"><button class="btn btn-sm btn-outline-light pd-manual-dl" data-id="${song.id}" style="color: #ffffff !important; border-color: #ffffff !important;"><i class="bi bi-download"></i></button></div>
-                      <div class="pd-mobile-artist d-md-none text-truncate" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : "Unknown")}</div>
-                    </div>
-                  `;
+                <div class="song-item pd-song-row" style="color: #ffffff !important;">
+                  <div class="text-secondary small d-flex align-items-center" style="color: #ffffff !important;">
+                    <input class="form-check-input pd-song-checkbox me-2" type="checkbox" data-id="${song.id}" ${song.pdSelected !== false ? "checked" : ""}>
+                    <span class="d-none d-md-inline">${globalIdx + 1}</span>
+                  </div>
+                  <div class="title-col text-truncate" title="${pdEscapeHtml(song.title)}" style="color: #ffffff !important;">${pdEscapeHtml(pdTruncate(song.title, 60))}</div>
+                  <div class="artist-col text-truncate d-none d-md-block" title="${pdEscapeHtml(song.artist)}" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : "Unknown")}</div>
+                  <div class="duration-col d-none d-md-block" style="color: #ffffff !important;">${formatTime(song.duration)}</div>
+                  <div class="download-col"><button class="btn btn-sm btn-outline-light pd-manual-dl" data-id="${song.id}" style="color: #ffffff !important; border-color: #ffffff !important;"><i class="bi bi-download"></i></button></div>
+                  <div class="pd-mobile-artist d-md-none text-truncate" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : "Unknown")}</div>
+                </div>
+              `;
             })
             .join("");
     
@@ -75800,18 +76669,18 @@ SOFTWARE.</div>
                 .map((song, idx) => {
                   const globalIdx = start + idx;
                   return `
-                        <div class="song-item pd-song-row" style="color: #ffffff !important;">
-                          <div class="text-secondary small d-flex align-items-center" style="color: #ffffff !important;">
-                            <input class="form-check-input pd-song-checkbox me-2" type="checkbox" data-id="${song.id}" ${song.pdSelected !== false ? "checked" : ""}>
-                            <span class="d-none d-md-inline">${globalIdx + 1}</span>
-                          </div>
-                          <div class="title-col text-truncate" title="${pdEscapeHtml(song.title)}" style="color: #ffffff !important;">${pdEscapeHtml(pdTruncate(song.title, 60))}</div>
-                          <div class="artist-col text-truncate d-none d-md-block" title="${pdEscapeHtml(song.artist)}" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : "Unknown")}</div>
-                          <div class="duration-col d-none d-md-block" style="color: #ffffff !important;">${formatTime(song.duration)}</div>
-                          <div class="download-col"><button class="btn btn-sm btn-outline-light pd-manual-dl" data-id="${song.id}" style="color: #ffffff !important; border-color: #ffffff !important;"><i class="bi bi-download"></i></button></div>
-                          <div class="pd-mobile-artist d-md-none text-truncate" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : "Unknown")}</div>
-                        </div>
-                      `;
+                    <div class="song-item pd-song-row" style="color: #ffffff !important;">
+                      <div class="text-secondary small d-flex align-items-center" style="color: #ffffff !important;">
+                        <input class="form-check-input pd-song-checkbox me-2" type="checkbox" data-id="${song.id}" ${song.pdSelected !== false ? "checked" : ""}>
+                        <span class="d-none d-md-inline">${globalIdx + 1}</span>
+                      </div>
+                      <div class="title-col text-truncate" title="${pdEscapeHtml(song.title)}" style="color: #ffffff !important;">${pdEscapeHtml(pdTruncate(song.title, 60))}</div>
+                      <div class="artist-col text-truncate d-none d-md-block" title="${pdEscapeHtml(song.artist)}" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : "Unknown")}</div>
+                      <div class="duration-col d-none d-md-block" style="color: #ffffff !important;">${formatTime(song.duration)}</div>
+                      <div class="download-col"><button class="btn btn-sm btn-outline-light pd-manual-dl" data-id="${song.id}" style="color: #ffffff !important; border-color: #ffffff !important;"><i class="bi bi-download"></i></button></div>
+                      <div class="pd-mobile-artist d-md-none text-truncate" style="color: #ffffff !important;">${pdEscapeHtml(song.artist ? pdTruncate(song.artist, 40) : "Unknown")}</div>
+                    </div>
+                  `;
                 })
                 .join("");
               pdSongRows.insertAdjacentHTML("beforeend", rowsHtml);
@@ -76914,89 +77783,89 @@ SOFTWARE.</div>
                 children
                   .map(
                     (c) => `
-                      <div class="d-flex gap-3 mb-4 position-relative" style="animation: slideFadeIn 0.4s ease forwards;">
-                        <div class="d-flex flex-column align-items-center" style="width: 50px; flex-shrink: 0;">
-                          <div class="position-relative">
-                            <img src="?action=get_profile_picture&id=${c.u_id}"
-                                 class="rounded-circle shadow-lg ${c.is_disabled ? "" : "user-profile-link"}"
-                                 data-userid="${c.u_id}"
-                                 data-artist="${encodeURIComponent(c.artist)}"
-                                 style="width:50px; height:50px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 2px solid rgba(255,255,255,0.08); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s;"
-                                 onmouseover="this.style.transform='scale(1.15) rotate(5deg)'; this.style.borderColor='var(--ytm-accent)';"
-                                 onmouseout="this.style.transform='scale(1) rotate(0deg)'; this.style.borderColor='rgba(255,255,255,0.08)';">
-                            ${c.u_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ""}
-                          </div>
-                        </div>
-    
-                        <div class="flex-grow-1" style="min-width: 0;">
-                          <div class="d-flex justify-content-between align-items-start mb-2">
-                            <div class="d-flex align-items-center flex-wrap gap-2">
-                              <span class="fw-bolder text-white ${c.is_disabled ? "" : "user-profile-link"}"
-                                    data-userid="${c.u_id}"
-                                    data-artist="${encodeURIComponent(c.artist)}"
-                                    style="font-size: 1rem; cursor:${c.is_disabled ? "default" : "pointer"}; letter-spacing: 0.3px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"
-                                    onmouseover="this.style.textDecoration='underline'"
-                                    onmouseout="this.style.textDecoration='none'">
-                                ${escapeHTML(c.artist)}
-                              </span>
-                              <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.75rem; opacity: 0.8; background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 50px;">
-                                <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
-                              </span>
-                            </div>
-                            ${
-                              currentUser &&
-                              (currentUser.id == c.u_id ||
-                                currentUser.status === "super_admin" ||
-                                currentUser.is_admin == 1)
-                                ? `
-                              <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                                <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                  <li><button class="dropdown-item edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                  <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                                </ul>
-                              </div>
-                            `
-                                : ""
-                            }
-                          </div>
-    
-                          <div class="p-3 mb-3 rounded-4">
-                            ${renderContent(c.content)}
-                          </div>
-    
-                          ${
-                            currentUser
-                              ? `
-                          <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
-                            <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" title="Like">
-                              <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-5"></i>
-                              <span>${c.like_count || 0}</span>
-                            </button>
-    
-                            <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" title="Dislike">
-                              <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-5"></i>
-                              <span>${c.dislike_count || 0}</span>
-                            </button>
-    
-                            <button class="phpmusic-comments-action-btn blog-reply-btn" data-id="${c.id}" data-root-id="${c.id}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" title="Reply to ${escapeHTML(c.artist)}">
-                              <i class="bi bi-chat-left-text fs-5"></i> Reply ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == c.id).length})` : ""}
-                            </button>
-                          </div>
-                          `
-                              : `
-                          <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.9rem;">
-                            <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-info fs-5"></i> ${c.like_count || 0}</span>
-                            <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-danger fs-5"></i> ${c.dislike_count || 0}</span>
-                          </div>
-                          `
-                          }
-                          <div class="mt-4">${buildTree(comments, c.id)}</div>
+                    <div class="d-flex gap-3 mb-4 position-relative" style="animation: slideFadeIn 0.4s ease forwards;">
+                      <div class="d-flex flex-column align-items-center" style="width: 50px; flex-shrink: 0;">
+                        <div class="position-relative">
+                          <img src="?action=get_profile_picture&id=${c.u_id}"
+                               class="rounded-circle shadow-lg ${c.is_disabled ? "" : "user-profile-link"}"
+                               data-userid="${c.u_id}"
+                               data-artist="${encodeURIComponent(c.artist)}"
+                               style="width:50px; height:50px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 2px solid rgba(255,255,255,0.08); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s;"
+                               onmouseover="this.style.transform='scale(1.15) rotate(5deg)'; this.style.borderColor='var(--ytm-accent)';"
+                               onmouseout="this.style.transform='scale(1) rotate(0deg)'; this.style.borderColor='rgba(255,255,255,0.08)';">
+                          ${c.u_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ""}
                         </div>
                       </div>
-                    `,
-                  )
-                  .join("")
+  
+                      <div class="flex-grow-1" style="min-width: 0;">
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                          <div class="d-flex align-items-center flex-wrap gap-2">
+                            <span class="fw-bolder text-white ${c.is_disabled ? "" : "user-profile-link"}"
+                                  data-userid="${c.u_id}"
+                                  data-artist="${encodeURIComponent(c.artist)}"
+                                  style="font-size: 1rem; cursor:${c.is_disabled ? "default" : "pointer"}; letter-spacing: 0.3px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"
+                                  onmouseover="this.style.textDecoration='underline'"
+                                  onmouseout="this.style.textDecoration='none'">
+                              ${escapeHTML(c.artist)}
+                            </span>
+                            <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.75rem; opacity: 0.8; background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 50px;">
+                              <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
+                            </span>
+                          </div>
+                          ${
+                            currentUser &&
+                            (currentUser.id == c.u_id ||
+                              currentUser.status === "super_admin" ||
+                              currentUser.is_admin == 1)
+                              ? `
+                            <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                              <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                                <li><button class="dropdown-item edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                                <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
+                              </ul>
+                            </div>
+                          `
+                              : ""
+                          }
+                        </div>
+  
+                        <div class="p-3 mb-3 rounded-4">
+                          ${renderContent(c.content)}
+                        </div>
+  
+                        ${
+                          currentUser
+                            ? `
+                        <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                          <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" title="Like">
+                            <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-5"></i>
+                            <span>${c.like_count || 0}</span>
+                          </button>
+  
+                          <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" title="Dislike">
+                            <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-5"></i>
+                            <span>${c.dislike_count || 0}</span>
+                          </button>
+  
+                          <button class="phpmusic-comments-action-btn blog-reply-btn" data-id="${c.id}" data-root-id="${c.id}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" title="Reply to ${escapeHTML(c.artist)}">
+                            <i class="bi bi-chat-left-text fs-5"></i> Reply ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == c.id).length})` : ""}
+                          </button>
+                        </div>
+                        `
+                            : `
+                        <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.9rem;">
+                          <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-info fs-5"></i> ${c.like_count || 0}</span>
+                          <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-danger fs-5"></i> ${c.dislike_count || 0}</span>
+                        </div>
+                        `
+                        }
+                        <div class="mt-4">${buildTree(comments, c.id)}</div>
+                      </div>
+                    </div>
+                  `,
+                )
+                .join("")
               );
             } else {
               const repliesHtml = children
@@ -77008,109 +77877,109 @@ SOFTWARE.</div>
                       "",
                     );
                     replyQuoteHtml = `
-                          <div class="chat-reply-quote mb-2" onclick="const target=document.querySelector('.reply-anchor-${c.reply_to_id}'); if(target) target.scrollIntoView({behavior:'smooth', block:'center'});" title="Click to jump to post" style="background: rgba(0,0,0,0.2); border-left: 3px solid var(--ytm-accent); padding: 6px 10px; border-radius: 0 6px 6px 0; font-size: 0.85rem; cursor: pointer;">
-                            <strong class="text-info">${escapeHTML(c.reply_sender || "Someone")}</strong><br>
-                            <span class="text-truncate d-block text-secondary">${escapeHTML(cleanRep)}</span>
-                          </div>
-                        `;
+                      <div class="chat-reply-quote mb-2" onclick="const target=document.querySelector('.reply-anchor-${c.reply_to_id}'); if(target) target.scrollIntoView({behavior:'smooth', block:'center'});" title="Click to jump to post" style="background: rgba(0,0,0,0.2); border-left: 3px solid var(--ytm-accent); padding: 6px 10px; border-radius: 0 6px 6px 0; font-size: 0.85rem; cursor: pointer;">
+                        <strong class="text-info">${escapeHTML(c.reply_sender || "Someone")}</strong><br>
+                        <span class="text-truncate d-block text-secondary">${escapeHTML(cleanRep)}</span>
+                      </div>
+                    `;
                   }
                   return `
-                      <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-dark border-2 rounded-4 p-2 reply-anchor-${c.id}" style="animation: slideFadeIn 0.3s ease forwards; --bs-border-opacity: .5;">
-                        <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
-                          <img src="?action=get_profile_picture&id=${c.u_id}"
-                               class="rounded-circle shadow-sm ${c.is_disabled ? "" : "user-profile-link"}"
-                               data-userid="${c.u_id}"
-                               data-artist="${encodeURIComponent(c.artist)}"
-                               style="width:36px; height:36px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
-                               onmouseover="this.style.transform='scale(1.15)'"
-                               onmouseout="this.style.transform='scale(1)'">
-                          ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `<div class="mt-2" style="width: 2px; flex-grow: 1; background: linear-gradient(to bottom, rgba(255,255,255,0.1), transparent); border-radius: 2px;"></div>` : ""}
-                        </div>
-    
-                        <div class="flex-grow-1" style="min-width: 0;">
-                          <div class="d-flex justify-content-between align-items-start mb-1">
-                            <div class="d-flex align-items-center flex-wrap gap-2">
-                              <span class="fw-bold text-white ${c.is_disabled ? "" : "user-profile-link"}"
-                                    data-userid="${c.u_id}"
-                                    data-artist="${encodeURIComponent(c.artist)}"
-                                    style="font-size: 0.85rem; cursor:${c.is_disabled ? "default" : "pointer"}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
-                                    onmouseover="this.style.textDecoration='underline'"
-                                    onmouseout="this.style.textDecoration='none'">
-                                ${escapeHTML(c.artist)}
-                              </span>
-                              <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.7;">
-                                <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
-                              </span>
-                            </div>
-                            ${
-                              currentUser &&
-                              (currentUser.id == c.u_id ||
-                                currentUser.status === "super_admin" ||
-                                currentUser.is_admin == 1)
-                                ? `
-                              <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                                <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                  <li><button class="dropdown-item edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                  <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                                </ul>
-                              </div>
-                            `
-                                : ""
-                            }
-                          </div>
-    
-                          <div class="p-2 mb-2">
-                            ${replyQuoteHtml}
-                            ${renderContent(c.content)}
-                          </div>
-    
-                          ${
-                            currentUser
-                              ? `
-                          <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
-                            <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" style="padding: 4px 12px; font-size: 0.85rem;">
-                              <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"}"></i>
-                              <span>${c.like_count || 0}</span>
-                            </button>
-    
-                            <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" style="padding: 4px 12px; font-size: 0.85rem;">
-                              <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"}"></i>
-                              <span>${c.dislike_count || 0}</span>
-                            </button>
-    
-                            <button class="phpmusic-comments-action-btn blog-reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" style="padding: 4px 12px; font-size: 0.85rem;">
-                              <i class="bi bi-chat-left-text"></i> Reply ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == c.id).length})` : ""}
-                            </button>
-                          </div>
-                          `
-                              : `
-                          <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.8rem;">
-                            <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-info"></i> ${c.like_count || 0}</span>
-                            <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-danger"></i> ${c.dislike_count || 0}</span>
-                          </div>
-                          `
-                          }
-                          <div class="mt-2">${buildTree(comments, c.id)}</div>
-                        </div>
+                    <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-dark border-2 rounded-4 p-2 reply-anchor-${c.id}" style="animation: slideFadeIn 0.3s ease forwards; --bs-border-opacity: .5;">
+                      <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
+                        <img src="?action=get_profile_picture&id=${c.u_id}"
+                             class="rounded-circle shadow-sm ${c.is_disabled ? "" : "user-profile-link"}"
+                             data-userid="${c.u_id}"
+                             data-artist="${encodeURIComponent(c.artist)}"
+                             style="width:36px; height:36px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
+                             onmouseover="this.style.transform='scale(1.15)'"
+                             onmouseout="this.style.transform='scale(1)'">
+                        ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `<div class="mt-2" style="width: 2px; flex-grow: 1; background: linear-gradient(to bottom, rgba(255,255,255,0.1), transparent); border-radius: 2px;"></div>` : ""}
                       </div>
-                    `;
-                })
-                .join("");
+  
+                      <div class="flex-grow-1" style="min-width: 0;">
+                        <div class="d-flex justify-content-between align-items-start mb-1">
+                          <div class="d-flex align-items-center flex-wrap gap-2">
+                            <span class="fw-bold text-white ${c.is_disabled ? "" : "user-profile-link"}"
+                                  data-userid="${c.u_id}"
+                                  data-artist="${encodeURIComponent(c.artist)}"
+                                  style="font-size: 0.85rem; cursor:${c.is_disabled ? "default" : "pointer"}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
+                                  onmouseover="this.style.textDecoration='underline'"
+                                  onmouseout="this.style.textDecoration='none'">
+                              ${escapeHTML(c.artist)}
+                            </span>
+                            <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.7;">
+                              <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
+                            </span>
+                          </div>
+                          ${
+                            currentUser &&
+                            (currentUser.id == c.u_id ||
+                              currentUser.status === "super_admin" ||
+                              currentUser.is_admin == 1)
+                              ? `
+                            <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                              <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                                <li><button class="dropdown-item edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                                <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
+                              </ul>
+                            </div>
+                          `
+                              : ""
+                          }
+                        </div>
+  
+                        <div class="p-2 mb-2">
+                          ${replyQuoteHtml}
+                          ${renderContent(c.content)}
+                        </div>
+  
+                        ${
+                          currentUser
+                            ? `
+                        <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                          <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" style="padding: 4px 12px; font-size: 0.85rem;">
+                            <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"}"></i>
+                            <span>${c.like_count || 0}</span>
+                          </button>
+  
+                          <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" style="padding: 4px 12px; font-size: 0.85rem;">
+                            <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"}"></i>
+                            <span>${c.dislike_count || 0}</span>
+                          </button>
+  
+                          <button class="phpmusic-comments-action-btn blog-reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" style="padding: 4px 12px; font-size: 0.85rem;">
+                            <i class="bi bi-chat-left-text"></i> Reply ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == c.id).length})` : ""}
+                          </button>
+                        </div>
+                        `
+                            : `
+                        <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.8rem;">
+                          <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-info"></i> ${c.like_count || 0}</span>
+                          <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-danger"></i> ${c.dislike_count || 0}</span>
+                        </div>
+                        `
+                        }
+                        <div class="mt-2">${buildTree(comments, c.id)}</div>
+                      </div>
+                    </div>
+                  `;
+              })
+              .join("");
     
               return `
-                      <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
-                        <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="blog-comment-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
-                          <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
-                            <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
-                          </div>
-                          View ${children.length} ${children.length === 1 ? "reply" : "replies"}
-                        </button>
-                        <div id="blog-comment-reply-container-${parent}" class="d-none mt-2 pt-2">
-                          ${repliesHtml}
-                        </div>
-                      </div>
-                    `;
+                <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
+                  <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="blog-comment-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
+                    <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
+                      <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
+                    </div>
+                    View ${children.length} ${children.length === 1 ? "reply" : "replies"}
+                  </button>
+                  <div id="blog-comment-reply-container-${parent}" class="d-none mt-2 pt-2">
+                    ${repliesHtml}
+                  </div>
+                </div>
+              `;
             }
           };
     
@@ -78436,13 +79305,13 @@ SOFTWARE.</div>
           container.innerHTML = (window.currentTaskItems || [])
             .map(
               (item, idx) => `
-                  <div class="task-item-row" data-idx="${idx}">
-                    <i class="bi bi-grip-vertical text-secondary task-item-drag-handle" title="Drag to reorder" style="cursor: grab; font-size: 1.1rem; user-select: none;"></i>
-                    <input type="checkbox" class="task-item-checkbox" data-idx="${idx}" ${item.completed ? "checked" : ""}>
-                    <textarea class="task-item-input ${item.completed ? "completed" : ""}" data-idx="${idx}" placeholder="Task description..." rows="1" style="resize: none; overflow: hidden; height: 24px; padding: 2px 0; line-height: 1.4;">${escapeHTML(item.text)}</textarea>
-                    <button class="task-item-del" data-idx="${idx}"><i class="bi bi-x-lg"></i></button>
-                  </div>
-                `,
+                <div class="task-item-row" data-idx="${idx}">
+                  <i class="bi bi-grip-vertical text-secondary task-item-drag-handle" title="Drag to reorder" style="cursor: grab; font-size: 1.1rem; user-select: none;"></i>
+                  <input type="checkbox" class="task-item-checkbox" data-idx="${idx}" ${item.completed ? "checked" : ""}>
+                  <textarea class="task-item-input ${item.completed ? "completed" : ""}" data-idx="${idx}" placeholder="Task description..." rows="1" style="resize: none; overflow: hidden; height: 24px; padding: 2px 0; line-height: 1.4;">${escapeHTML(item.text)}</textarea>
+                  <button class="task-item-del" data-idx="${idx}"><i class="bi bi-x-lg"></i></button>
+                </div>
+              `,
             )
             .join("");
 
@@ -79557,20 +80426,20 @@ SOFTWARE.</div>
                 // FIX BLANK PDF: Pass a clean HTML string directly to html2pdf.
                 // This forces it to create its own isolated rendering container, avoiding document scroll & CSS clipping bugs entirely.
                 const pdfHtmlContent = `
-                        <div style="background-color: #ffffff; color: #000000; padding: 20px; font-family: Arial, sans-serif; line-height: 1.6; word-wrap: break-word;">
-                          <style>
-                            h1, h2, h3 { color: #000000 !important; margin-top: 16px; margin-bottom: 8px; font-weight: bold; }
-                            code, pre { background-color: #f4f4f4 !important; border: 1px solid #ddd; padding: 6px 10px; border-radius: 4px; font-family: monospace; color: #000000 !important; }
-                            blockquote { border-left: 4px solid #cc0000 !important; padding-left: 12px; color: #444444 !important; margin: 15px 0; }
-                            table { width: 100%; border-collapse: collapse; margin: 15px 0; color: #000000 !important; }
-                            th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
-                            th { background-color: #eeeeee !important; }
-                            p, li, span, div { color: #000000 !important; }
-                          </style>
-                          <h1 style="font-size: 24px; border-bottom: 2px solid #333; padding-bottom: 8px;">${escapeHTML(title)}</h1>
-                          <div style="font-size: 14px;">${htmlContent}</div>
-                        </div>
-                      `;
+                  <div style="background-color: #ffffff; color: #000000; padding: 20px; font-family: Arial, sans-serif; line-height: 1.6; word-wrap: break-word;">
+                    <style>
+                      h1, h2, h3 { color: #000000 !important; margin-top: 16px; margin-bottom: 8px; font-weight: bold; }
+                      code, pre { background-color: #f4f4f4 !important; border: 1px solid #ddd; padding: 6px 10px; border-radius: 4px; font-family: monospace; color: #000000 !important; }
+                      blockquote { border-left: 4px solid #cc0000 !important; padding-left: 12px; color: #444444 !important; margin: 15px 0; }
+                      table { width: 100%; border-collapse: collapse; margin: 15px 0; color: #000000 !important; }
+                      th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+                      th { background-color: #eeeeee !important; }
+                      p, li, span, div { color: #000000 !important; }
+                    </style>
+                    <h1 style="font-size: 24px; border-bottom: 2px solid #333; padding-bottom: 8px;">${escapeHTML(title)}</h1>
+                    <div style="font-size: 14px;">${htmlContent}</div>
+                  </div>
+                `;
     
                 await html2pdf().set(opt).from(pdfHtmlContent).save();
     
@@ -80877,11 +81746,12 @@ SOFTWARE.</div>
                     currentLrcSongId = null;
                     lyricsBodyEl.style.height = "100%";
                     lyricsBodyEl.innerHTML = `
-                            <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 w-100 p-5 text-secondary opacity-50">
-                              <i class="bi bi-music-note-list mb-3" style="font-size: 3.5rem;"></i>
-                              <h5 class="fw-bold text-white mb-1">No Lyrics Available</h5>
-                              <p class="small mb-0">Lyrics haven't been added for this track yet.</p>
-                            </div>`;
+                      <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 w-100 p-5 text-secondary opacity-50">
+                        <i class="bi bi-music-note-list mb-3" style="font-size: 3.5rem;"></i>
+                        <h5 class="fw-bold text-white mb-1">No Lyrics Available</h5>
+                        <p class="small mb-0">Lyrics haven't been added for this track yet.</p>
+                      </div>
+                    `;
                   }
                 }
                 const lyricsModalEl = document.getElementById("lyrics-modal");
@@ -80990,62 +81860,63 @@ SOFTWARE.</div>
                 const metaBody = document.getElementById("metadata-modal-body");
                 if (metaBody) {
                   metaBody.innerHTML = `
-                          <div class="p-2">
-                            <div class="d-flex align-items-center gap-3 mb-4 border-bottom border-secondary pb-3">
-                              <div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary shadow-sm" style="width: 48px; height: 48px;">
-                                <i class="bi bi-info-circle-fill text-danger fs-4"></i>
-                              </div>
-                              <div>
-                                <h5 class="text-white fw-bold mb-0">Song Metadata</h5>
-                                <div class="text-secondary small">Database ID: ${metaSongData.id}</div>
-                              </div>
-                            </div>
-    
-                            <div class="mb-3">
-                              <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Title</div>
-                              <div class="text-white fs-5 fw-bold text-wrap text-break lh-sm">${escapeHTML(metaSongData.title) || "N/A"}</div>
-                            </div>
-    
-                            <div class="mb-3">
-                              <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Artist</div>
-                              <div class="text-white fs-5 fw-medium text-wrap text-break lh-sm">
-                                ${formatArtistsHTML(metaSongData.artist, metaSongData.user_id, metaSongData.is_collaborative)}
-                              </div>
-                            </div>
-    
-                            <div class="mb-3">
-                              <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Album</div>
-                              <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm song-album" style="cursor: pointer;" data-album="${encodeURIComponent(metaSongData.album || "")}" data-userid="${metaSongData.user_id || ""}" data-artistname="${encodeURIComponent(metaSongData.artist || "")}">
-                                <span class="hover-underline">${escapeHTML(metaSongData.album) || "N/A"}</span>
-                              </div>
-                            </div>
-    
-                            <div class="mb-4">
-                              <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Genre</div>
-                              <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm" style="cursor: pointer;" onclick="bootstrap.Modal.getInstance(document.getElementById('metadata-modal'))?.hide(); loadView({type: 'genre_songs', param: '${(escapeHTML(metaSongData.genre) || '').replace(/'/g, "\\'")}', sort: 'artist_asc', filter_user_id: ''});">
-                                <span class="hover-underline">${escapeHTML(metaSongData.genre) || "N/A"}</span>
-                              </div>
-                            </div>
-    
-                            <div class="row g-3 p-3 mt-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
-                              <div class="col-6">
-                                <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Year</div>
-                                <div class="text-white fw-medium text-wrap">${metaSongData.year || "N/A"}</div>
-                              </div>
-                              <div class="col-6">
-                                <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Duration</div>
-                                <div class="text-white fw-medium text-wrap">${formatTime(metaSongData.duration)}</div>
-                              </div>
-                              <div class="col-6">
-                                <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Bitrate</div>
-                                <div class="text-white fw-medium text-wrap">${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + " kbps" : "N/A"}</div>
-                              </div>
-                              <div class="col-6">
-                                <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Size</div>
-                                <div class="text-white fw-medium text-wrap">${metaSongData.filesize ? (metaSongData.filesize / 1048576).toFixed(2) + " MB" : "N/A"}</div>
-                              </div>
-                            </div>
-                          </div>`;
+                    <div class="p-2">
+                      <div class="d-flex align-items-center gap-3 mb-4 border-bottom border-secondary pb-3">
+                        <div class="rounded-circle bg-dark d-flex align-items-center justify-content-center border border-secondary shadow-sm" style="width: 48px; height: 48px;">
+                          <i class="bi bi-info-circle-fill text-danger fs-4"></i>
+                        </div>
+                        <div>
+                          <h5 class="text-white fw-bold mb-0">Song Metadata</h5>
+                          <div class="text-secondary small">Database ID: ${metaSongData.id}</div>
+                        </div>
+                      </div>
+
+                      <div class="mb-3">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Title</div>
+                        <div class="text-white fs-5 fw-bold text-wrap text-break lh-sm">${escapeHTML(metaSongData.title) || "N/A"}</div>
+                      </div>
+
+                      <div class="mb-3">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Artist</div>
+                        <div class="text-white fs-5 fw-medium text-wrap text-break lh-sm">
+                          ${formatArtistsHTML(metaSongData.artist, metaSongData.user_id, metaSongData.is_collaborative)}
+                        </div>
+                      </div>
+
+                      <div class="mb-3">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Album</div>
+                        <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm song-album" style="cursor: pointer;" data-album="${encodeURIComponent(metaSongData.album || "")}" data-userid="${metaSongData.user_id || ""}" data-artistname="${encodeURIComponent(metaSongData.artist || "")}">
+                          <span class="hover-underline">${escapeHTML(metaSongData.album) || "N/A"}</span>
+                        </div>
+                      </div>
+
+                      <div class="mb-4">
+                        <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px;">Genre</div>
+                        <div class="text-info fs-6 fw-medium text-wrap text-break lh-sm" style="cursor: pointer;" onclick="bootstrap.Modal.getInstance(document.getElementById('metadata-modal'))?.hide(); loadView({type: 'genre_songs', param: '${(escapeHTML(metaSongData.genre) || '').replace(/'/g, "\\'")}', sort: 'artist_asc', filter_user_id: ''});">
+                          <span class="hover-underline">${escapeHTML(metaSongData.genre) || "N/A"}</span>
+                        </div>
+                      </div>
+
+                      <div class="row g-3 p-3 mt-3 rounded" style="background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
+                        <div class="col-6">
+                          <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Year</div>
+                          <div class="text-white fw-medium text-wrap">${metaSongData.year || "N/A"}</div>
+                        </div>
+                        <div class="col-6">
+                          <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Duration</div>
+                          <div class="text-white fw-medium text-wrap">${formatTime(metaSongData.duration)}</div>
+                        </div>
+                        <div class="col-6">
+                          <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Bitrate</div>
+                          <div class="text-white fw-medium text-wrap">${metaSongData.bitrate ? Math.round(metaSongData.bitrate / 1000) + " kbps" : "N/A"}</div>
+                        </div>
+                        <div class="col-6">
+                          <div class="text-secondary small fw-bold text-uppercase mb-1" style="letter-spacing: 1px; font-size: 0.7rem;">Size</div>
+                          <div class="text-white fw-medium text-wrap">${metaSongData.filesize ? (metaSongData.filesize / 1048576).toFixed(2) + " MB" : "N/A"}</div>
+                        </div>
+                      </div>
+                    </div>
+                  `;
                   bootstrap.Modal.getOrCreateInstance(
                     document.getElementById("metadata-modal"),
                   ).show();
@@ -81207,20 +82078,20 @@ SOFTWARE.</div>
               }
 
               html += `
-                      <div class="artist-tooltip-card ${i < artistsList.length - 1 ? "border-bottom border-secondary pb-3 mb-3" : ""}">
-                        <div class="d-flex align-items-center gap-3 artist-tt-click" data-artist="${encodeURIComponent(data.name)}" style="cursor: pointer; overflow: hidden;">
-                          <img src="${data.image_url}" style="width: 60px; height: 60px; object-fit: cover; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.5); flex-shrink: 0;">
-                          <div style="min-width: 0; flex-grow: 1; overflow: hidden;">
-                             <div class="marquee-container w-100 mb-1">
-                               <h6 class="text-white fw-bold m-0 marquee-content tooltip-marquee" style="font-size: 1.05rem;">${escapeHTML(data.name)}</h6>
-                             </div>
-                             <div class="text-secondary" style="font-size: 0.8rem;">${formatSongCount(data.song_count || 0)} tracks • ${formatTime(data.total_duration || 0)}</div>
-                             ${data.followers_count !== undefined ? `<div class="text-info mt-1" style="font-size: 0.75rem;"><i class="bi bi-people-fill"></i> ${formatSongCount(data.followers_count)} followers</div>` : `<div class="text-secondary mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(data.play_count || 0)} plays</div>`}
-                          </div>
-                        </div>
-                        ${followBtn}
-                      </div>
-                    `;
+                <div class="artist-tooltip-card ${i < artistsList.length - 1 ? "border-bottom border-secondary pb-3 mb-3" : ""}">
+                  <div class="d-flex align-items-center gap-3 artist-tt-click" data-artist="${encodeURIComponent(data.name)}" style="cursor: pointer; overflow: hidden;">
+                    <img src="${data.image_url}" style="width: 60px; height: 60px; object-fit: cover; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.5); flex-shrink: 0;">
+                    <div style="min-width: 0; flex-grow: 1; overflow: hidden;">
+                       <div class="marquee-container w-100 mb-1">
+                         <h6 class="text-white fw-bold m-0 marquee-content tooltip-marquee" style="font-size: 1.05rem;">${escapeHTML(data.name)}</h6>
+                       </div>
+                       <div class="text-secondary" style="font-size: 0.8rem;">${formatSongCount(data.song_count || 0)} tracks • ${formatTime(data.total_duration || 0)}</div>
+                       ${data.followers_count !== undefined ? `<div class="text-info mt-1" style="font-size: 0.75rem;"><i class="bi bi-people-fill"></i> ${formatSongCount(data.followers_count)} followers</div>` : `<div class="text-secondary mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(data.play_count || 0)} plays</div>`}
+                    </div>
+                  </div>
+                  ${followBtn}
+                </div>
+              `;
             } else {
               html += `<div class="text-secondary small text-center p-2 ${i < artistsList.length - 1 ? "border-bottom border-secondary pb-3 mb-3" : ""}">${escapeHTML(artistName)}: Details not found</div>`;
             }
@@ -82662,9 +83533,10 @@ SOFTWARE.</div>
               this.songsPage = 1;
               if (this.listSongsEl) {
                 this.listSongsEl.innerHTML = `
-                        <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
-                          <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
-                        </div>`;
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>
+                `;
               }
               this.allSongsLoaded = false;
             }
@@ -82731,13 +83603,13 @@ SOFTWARE.</div>
                     this.listSongsEl.insertAdjacentHTML(
                       "beforeend",
                       `
-                            <div style="background: rgba(255, 59, 48, 0.1); border: 1px solid var(--rg-primary); border-radius: 16px; padding: 20px; margin-bottom: 16px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
-                              <i class="bi bi-exclamation-triangle-fill text-danger d-block mb-2" style="font-size: 2.5rem;"></i>
-                              <h6 class="text-white fw-bold text-uppercase mb-2" style="letter-spacing: 1px;">No Charts Generated</h6>
-                              <p class="text-secondary small mb-3">The database currently has no pre-compiled note charts. Songs will generate on-the-fly when clicked, which may cause a slight initial delay.</p>
-                              ${isAdmin ? `<button class="btn btn-danger rounded-pill fw-bold px-4 py-2 shadow-sm" onclick="document.getElementById('nav-chart-scan').click();"><i class="bi bi-open-chart-scan me-1"></i> Run Server Scanner Now</button>` : `<div class="badge bg-dark border border-secondary text-secondary p-2"><i class="bi bi-lock-fill me-1"></i> Contact Admin to Run Scanner</div>`}
-                            </div>
-                          `,
+                        <div style="background: rgba(255, 59, 48, 0.1); border: 1px solid var(--rg-primary); border-radius: 16px; padding: 20px; margin-bottom: 16px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+                          <i class="bi bi-exclamation-triangle-fill text-danger d-block mb-2" style="font-size: 2.5rem;"></i>
+                          <h6 class="text-white fw-bold text-uppercase mb-2" style="letter-spacing: 1px;">No Charts Generated</h6>
+                          <p class="text-secondary small mb-3">The database currently has no pre-compiled note charts. Songs will generate on-the-fly when clicked, which may cause a slight initial delay.</p>
+                          ${isAdmin ? `<button class="btn btn-danger rounded-pill fw-bold px-4 py-2 shadow-sm" onclick="document.getElementById('nav-chart-scan').click();"><i class="bi bi-open-chart-scan me-1"></i> Run Server Scanner Now</button>` : `<div class="badge bg-dark border border-secondary text-secondary p-2"><i class="bi bi-lock-fill me-1"></i> Contact Admin to Run Scanner</div>`}
+                        </div>
+                      `,
                     );
                   }
                 }
@@ -82826,9 +83698,10 @@ SOFTWARE.</div>
               this.favsPage = 1;
               if (this.listFavsEl) {
                 this.listFavsEl.innerHTML = `
-                        <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
-                          <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
-                        </div>`;
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>
+                `;
               }
               this.allFavsLoaded = false;
             }
@@ -82869,12 +83742,14 @@ SOFTWARE.</div>
             } catch (e) {
               console.error(e);
               if (!append && this.listFavsEl && !navigator.onLine) {
-                this.listFavsEl.innerHTML = `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100">
-                          <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i>
-                          <h5 class="fw-bold text-white">You are offline</h5>
-                          <p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p>
-                          <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button>
-                        </div>`;
+                this.listFavsEl.innerHTML = `
+                  <div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100">
+                    <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i>
+                    <h5 class="fw-bold text-white">You are offline</h5>
+                    <p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p>
+                    <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button>
+                  </div>
+                `;
               }
             }
             this.isLoadingFavs = false;
@@ -82942,23 +83817,23 @@ SOFTWARE.</div>
                         ? '<span class="badge bg-danger ms-2" style="font-size: 0.6rem;" title="Suspicious Activity"><i class="bi bi-exclamation-triangle-fill"></i> SUS</span>'
                         : "";
                     return `
-                          <div class="rg-list-item rank-row" data-userid="${entry.user_id}" data-player-name="${encodeURIComponent(entry.player_name)}" style="cursor: pointer; display: flex; align-items: center; justify-content: space-between;">
-                            <div class="rg-list-item-info" style="min-width: 0; flex: 1;">
-                              <div style="width: 24px; font-weight: 900; color: var(--rg-primary); text-align: center;">${globalIdx}</div>
-                              <img src="?action=get_profile_picture&id=${entry.user_id}&v=${cacheBuster}" class="rg-cover-img" style="border-radius: 50%;">
-                              <div style="min-width: 0; flex: 1; margin-right: 12px;">
-                                <div class="rg-list-item-title text-truncate">${escapeHTML(entry.player_name)}${suspicious}</div>
-                                <div class="rg-list-item-sub text-truncate" style="color: var(--rg-primary); font-size: 0.8rem; font-weight: 700;">
-                                  Total Score: ${parseInt(entry.total_score).toLocaleString()}
-                                  <span style="color:#aaa; font-size:0.75rem; margin-left:8px;">(${entry.total_plays} Plays)</span>
-                                </div>
-                              </div>
-                            </div>
-                            <div class="d-flex align-items-center gap-2" style="flex-shrink: 0;">
-                              <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.75rem; font-weight: 900; background-color: ${jud.color}; color: #000; height: 26px; min-width: 32px; border-radius: 6px; box-shadow: 0 2px 8px ${jud.color}40;" title="AVERAGE RANK">${jud.rank}</span>
+                      <div class="rg-list-item rank-row" data-userid="${entry.user_id}" data-player-name="${encodeURIComponent(entry.player_name)}" style="cursor: pointer; display: flex; align-items: center; justify-content: space-between;">
+                        <div class="rg-list-item-info" style="min-width: 0; flex: 1;">
+                          <div style="width: 24px; font-weight: 900; color: var(--rg-primary); text-align: center;">${globalIdx}</div>
+                          <img src="?action=get_profile_picture&id=${entry.user_id}&v=${cacheBuster}" class="rg-cover-img" style="border-radius: 50%;">
+                          <div style="min-width: 0; flex: 1; margin-right: 12px;">
+                            <div class="rg-list-item-title text-truncate">${escapeHTML(entry.player_name)}${suspicious}</div>
+                            <div class="rg-list-item-sub text-truncate" style="color: var(--rg-primary); font-size: 0.8rem; font-weight: 700;">
+                              Total Score: ${parseInt(entry.total_score).toLocaleString()}
+                              <span style="color:#aaa; font-size:0.75rem; margin-left:8px;">(${entry.total_plays} Plays)</span>
                             </div>
                           </div>
-                        `;
+                        </div>
+                        <div class="d-flex align-items-center gap-2" style="flex-shrink: 0;">
+                          <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.75rem; font-weight: 900; background-color: ${jud.color}; color: #000; height: 26px; min-width: 32px; border-radius: 6px; box-shadow: 0 2px 8px ${jud.color}40;" title="AVERAGE RANK">${jud.rank}</span>
+                        </div>
+                      </div>
+                    `;
                   })
                   .join("");
     
@@ -82982,12 +83857,14 @@ SOFTWARE.</div>
               console.error("Failed to load Leaderboard:", err);
               const container = document.getElementById("rg-list-leaderboard");
               if (!append && container && !navigator.onLine) {
-                container.innerHTML = `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100">
-                          <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i>
-                          <h5 class="fw-bold text-white">You are offline</h5>
-                          <p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p>
-                          <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button>
-                        </div>`;
+                container.innerHTML = `
+                  <div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100">
+                    <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i>
+                    <h5 class="fw-bold text-white">You are offline</h5>
+                    <p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p>
+                    <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button>
+                  </div>
+                `;
               }
             }
             this.isLoadingLeaderboard = false;
@@ -83353,10 +84230,10 @@ SOFTWARE.</div>
                 buttonContainer.insertAdjacentHTML(
                   "beforebegin",
                   `
-                        <div id="${warningId}" class="alert border-warning text-warning small mb-3 text-start rounded-3" style="background: rgba(255,193,7,0.1); width: 100%; max-width: 360px; margin: 16px auto 0 auto; line-height: 1.4;">
-                          <i class="bi bi-exclamation-triangle-fill me-2"></i><strong>Offline Mode:</strong> Played song information/scores will <strong>NOT</strong> be stored in the database, even after you go back online. Only online plays are saved.
-                        </div>
-                      `,
+                    <div id="${warningId}" class="alert border-warning text-warning small mb-3 text-start rounded-3" style="background: rgba(255,193,7,0.1); width: 100%; max-width: 360px; margin: 16px auto 0 auto; line-height: 1.4;">
+                      <i class="bi bi-exclamation-triangle-fill me-2"></i><strong>Offline Mode:</strong> Played song information/scores will <strong>NOT</strong> be stored in the database, even after you go back online. Only online plays are saved.
+                    </div>
+                  `,
                 );
               }
             } else {
@@ -83463,42 +84340,42 @@ SOFTWARE.</div>
                       : "";
     
                   return `
-                        <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${jud.color}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default; margin-bottom: 8px; text-align: left;">
-                          <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
-                            <div style="font-size: 1.1rem; font-weight: 900; color: var(--rg-primary); width: 24px; text-align: center; font-family: monospace;">${idx + 1}</div>
-                            <div class="flex-grow-1" style="min-width: 0; display: flex; align-items: center; justify-content: space-between;">
-                              <div class="d-flex flex-column align-items-start">
-                                <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Accuracy</span>
-                                <span style="font-size: 1.1rem; font-weight: 800; font-family: monospace; color: #fff;">${jud.acc}%</span>
-                              </div>
-                              <div class="d-flex flex-column align-items-end">
-                                <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Rank</span>
-                                <span style="font-size: 1.8rem; font-weight: 900; font-family: 'Arial Black', sans-serif; color: ${jud.color}; text-shadow: 0 0 8px ${jud.color}; line-height: 1;">${jud.rank}</span>
-                              </div>
-                            </div>
+                    <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${jud.color}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default; margin-bottom: 8px; text-align: left;">
+                      <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
+                        <div style="font-size: 1.1rem; font-weight: 900; color: var(--rg-primary); width: 24px; text-align: center; font-family: monospace;">${idx + 1}</div>
+                        <div class="flex-grow-1" style="min-width: 0; display: flex; align-items: center; justify-content: space-between;">
+                          <div class="d-flex flex-column align-items-start">
+                            <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Accuracy</span>
+                            <span style="font-size: 1.1rem; font-weight: 800; font-family: monospace; color: #fff;">${jud.acc}%</span>
                           </div>
-    
-                          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; text-align: center;">
-                            <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
-                              <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Score</span>
-                              <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: var(--rg-primary);">${parseInt(entry.score).toLocaleString()}</span>
-                            </div>
-                            <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
-                              <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Combo</span>
-                              <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: #fff;">${entry.max_combo}x${fcBadge}</span>
-                            </div>
-                            <div style="font-size: 0.75rem;"><span style="color:#aaa; display:block; font-size:0.6rem; text-transform:uppercase;">Perf</span><strong style="font-family: monospace; color:#fff;">${entry.perfect}</strong></div>
-                            <div style="font-size: 0.75rem;"><span style="color:#ff3b30; display:block; font-size:0.6rem; text-transform:uppercase;">Great</span><strong style="font-family: monospace; color:#fff;">${entry.great}</strong></div>
-                            <div style="font-size: 0.75rem;"><span style="color:#ffa000; display:block; font-size:0.6rem; text-transform:uppercase;">Good</span><strong style="font-family: monospace; color:#fff;">${entry.good}</strong></div>
-                            <div style="font-size: 0.75rem;"><span style="color:#555; display:block; font-size:0.6rem; text-transform:uppercase;">Miss</span><strong style="font-family: monospace; color:#fff;">${entry.miss}</strong></div>
-                          </div>
-    
-                          <div style="display: flex; align-items: center; gap: 8px; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; width: 100%;">
-                            <img src="${pfpUrl}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;">
-                            <span class="text-white text-truncate fw-medium" style="font-size: 0.85rem; max-width: 220px;">${escapeHTML(entry.player_name)}${suspicious}</span>
+                          <div class="d-flex flex-column align-items-end">
+                            <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Rank</span>
+                            <span style="font-size: 1.8rem; font-weight: 900; font-family: 'Arial Black', sans-serif; color: ${jud.color}; text-shadow: 0 0 8px ${jud.color}; line-height: 1;">${jud.rank}</span>
                           </div>
                         </div>
-                      `;
+                      </div>
+
+                      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; text-align: center;">
+                        <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                          <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Score</span>
+                          <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: var(--rg-primary);">${parseInt(entry.score).toLocaleString()}</span>
+                        </div>
+                        <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                          <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Combo</span>
+                          <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: #fff;">${entry.max_combo}x${fcBadge}</span>
+                        </div>
+                        <div style="font-size: 0.75rem;"><span style="color:#aaa; display:block; font-size:0.6rem; text-transform:uppercase;">Perf</span><strong style="font-family: monospace; color:#fff;">${entry.perfect}</strong></div>
+                        <div style="font-size: 0.75rem;"><span style="color:#ff3b30; display:block; font-size:0.6rem; text-transform:uppercase;">Great</span><strong style="font-family: monospace; color:#fff;">${entry.great}</strong></div>
+                        <div style="font-size: 0.75rem;"><span style="color:#ffa000; display:block; font-size:0.6rem; text-transform:uppercase;">Good</span><strong style="font-family: monospace; color:#fff;">${entry.good}</strong></div>
+                        <div style="font-size: 0.75rem;"><span style="color:#555; display:block; font-size:0.6rem; text-transform:uppercase;">Miss</span><strong style="font-family: monospace; color:#fff;">${entry.miss}</strong></div>
+                      </div>
+
+                      <div style="display: flex; align-items: center; gap: 8px; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; width: 100%;">
+                        <img src="${pfpUrl}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;">
+                        <span class="text-white text-truncate fw-medium" style="font-size: 0.85rem; max-width: 220px;">${escapeHTML(entry.player_name)}${suspicious}</span>
+                      </div>
+                    </div>
+                  `;
                 })
                 .join("");
             } catch (err) {
@@ -83515,15 +84392,15 @@ SOFTWARE.</div>
     
             if (page === 1) {
               body.innerHTML = `
-                      <div class="text-center mb-4">
-                        <img src="?action=get_profile_picture&id=${userId}" class="rounded-circle shadow-lg mb-2" style="width: 80px; height: 80px; object-fit: cover; border: 2px solid var(--rg-primary);">
-                        <h4 class="text-white fw-bold">${escapeHTML(name)}</h4>
-                        <p class="text-secondary small">Rhythm Game Played Tracks</p>
-                      </div>
-                      <div id="rg-player-scores-list" class="d-flex flex-column gap-3">
-                        <div class="text-center py-4"><div class="spinner-border text-danger"></div></div>
-                      </div>
-                    `;
+                <div class="text-center mb-4">
+                  <img src="?action=get_profile_picture&id=${userId}" class="rounded-circle shadow-lg mb-2" style="width: 80px; height: 80px; object-fit: cover; border: 2px solid var(--rg-primary);">
+                  <h4 class="text-white fw-bold">${escapeHTML(name)}</h4>
+                  <p class="text-secondary small">Rhythm Game Played Tracks</p>
+                </div>
+                <div id="rg-player-scores-list" class="d-flex flex-column gap-3">
+                  <div class="text-center py-4"><div class="spinner-border text-danger"></div></div>
+                </div>
+              `;
               modal.show();
               this.currentStatsPage = 1;
               this.statsUserId = userId;
@@ -83591,41 +84468,41 @@ SOFTWARE.</div>
                         : "";
     
                     return `
-                          <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${diffColor}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;">
-                            <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
-                              <div class="d-flex align-items-center gap-3" style="min-width: 0; flex: 1;">
-                                <img src="?action=get_image&id=${s.song_id}&v=${s.last_modified}" onerror="this.onerror=null; this.src='${coverSvg}'" style="width: 48px; height: 48px; border-radius: 8px; object-fit: cover; box-shadow: 0 4px 8px rgba(0,0,0,0.4); flex-shrink: 0;">
-                                <div class="text-truncate" style="min-width: 0; flex: 1;">
-                                  <div class="text-white fw-bold text-truncate" style="font-size: 1rem;">${escapeHTML(s.title)}</div>
-                                  <div class="text-secondary text-truncate small" style="font-size: 0.8rem; margin-top: 1px;">${escapeHTML(s.artist)}</div>
-                                </div>
-                              </div>
-                              <div class="d-flex flex-column align-items-end" style="flex-shrink: 0;">
-                                <div class="d-flex align-items-center gap-1">
-                                  ${suspicious}
-                                  <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty === "demon" ? "#fff" : "#000"}; padding: 2px 6px; border-radius: 4px;" title="${s.difficulty.toUpperCase()} level">${diffLabel} ${lvlText}</span>
-                                  <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${jud.color}; color: #000;" title="RANK">${jud.rank}</span>
-                                </div>
-                                <div class="text-secondary small mt-1" style="font-size: 0.75rem;">${playedAt}</div>
-                              </div>
-                            </div>
-    
-                            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; text-align: center;">
-                              <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
-                                <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Score</span>
-                                <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: var(--rg-primary);">${parseInt(s.score).toLocaleString()}</span>
-                              </div>
-                              <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
-                                <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Combo</span>
-                                <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: #fff;">${s.max_combo}x</span>
-                              </div>
-                              <div style="font-size: 0.75rem;"><span style="color:#aaa; display:block; font-size:0.6rem; text-transform:uppercase;">Perf</span><strong style="font-family: monospace; color:#fff;">${s.perfect}</strong></div>
-                              <div style="font-size: 0.75rem;"><span style="color:#ff3b30; display:block; font-size:0.6rem; text-transform:uppercase;">Great</span><strong style="font-family: monospace; color:#fff;">${s.great}</strong></div>
-                              <div style="font-size: 0.75rem;"><span style="color:#ffa000; display:block; font-size:0.6rem; text-transform:uppercase;">Good</span><strong style="font-family: monospace; color:#fff;">${s.good}</strong></div>
-                              <div style="font-size: 0.75rem;"><span style="color:#555; display:block; font-size:0.6rem; text-transform:uppercase;">Miss</span><strong style="font-family: monospace; color:#fff;">${s.miss}</strong></div>
+                      <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${diffColor}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;">
+                        <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
+                          <div class="d-flex align-items-center gap-3" style="min-width: 0; flex: 1;">
+                            <img src="?action=get_image&id=${s.song_id}&v=${s.last_modified}" onerror="this.onerror=null; this.src='${coverSvg}'" style="width: 48px; height: 48px; border-radius: 8px; object-fit: cover; box-shadow: 0 4px 8px rgba(0,0,0,0.4); flex-shrink: 0;">
+                            <div class="text-truncate" style="min-width: 0; flex: 1;">
+                              <div class="text-white fw-bold text-truncate" style="font-size: 1rem;">${escapeHTML(s.title)}</div>
+                              <div class="text-secondary text-truncate small" style="font-size: 0.8rem; margin-top: 1px;">${escapeHTML(s.artist)}</div>
                             </div>
                           </div>
-                        `;
+                          <div class="d-flex flex-column align-items-end" style="flex-shrink: 0;">
+                            <div class="d-flex align-items-center gap-1">
+                              ${suspicious}
+                              <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty === "demon" ? "#fff" : "#000"}; padding: 2px 6px; border-radius: 4px;" title="${s.difficulty.toUpperCase()} level">${diffLabel} ${lvlText}</span>
+                              <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${jud.color}; color: #000;" title="RANK">${jud.rank}</span>
+                            </div>
+                            <div class="text-secondary small mt-1" style="font-size: 0.75rem;">${playedAt}</div>
+                          </div>
+                        </div>
+
+                        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; text-align: center;">
+                          <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                            <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Score</span>
+                            <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: var(--rg-primary);">${parseInt(s.score).toLocaleString()}</span>
+                          </div>
+                          <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                            <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Combo</span>
+                            <span style="font-size: 0.95rem; font-weight: 900; font-family: monospace; color: #fff;">${s.max_combo}x</span>
+                          </div>
+                          <div style="font-size: 0.75rem;"><span style="color:#aaa; display:block; font-size:0.6rem; text-transform:uppercase;">Perf</span><strong style="font-family: monospace; color:#fff;">${s.perfect}</strong></div>
+                          <div style="font-size: 0.75rem;"><span style="color:#ff3b30; display:block; font-size:0.6rem; text-transform:uppercase;">Great</span><strong style="font-family: monospace; color:#fff;">${s.great}</strong></div>
+                          <div style="font-size: 0.75rem;"><span style="color:#ffa000; display:block; font-size:0.6rem; text-transform:uppercase;">Good</span><strong style="font-family: monospace; color:#fff;">${s.good}</strong></div>
+                          <div style="font-size: 0.75rem;"><span style="color:#555; display:block; font-size:0.6rem; text-transform:uppercase;">Miss</span><strong style="font-family: monospace; color:#fff;">${s.miss}</strong></div>
+                        </div>
+                      </div>
+                    `;
                   })
                   .join("");
     
@@ -83993,32 +84870,32 @@ SOFTWARE.</div>
             };
     
             el.innerHTML = `
-                    <div class="d-flex align-items-center gap-3 w-100" style="min-width: 0;">
-                      <div class="position-relative" style="width: 80px; height: 80px; flex-shrink: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.6);">
-                        <img src="?action=get_image&id=${song.id}&v=${song.last_modified}&size=small" onerror="this.onerror=null; this.src='${getSvgPlaceholder(song.title)}';" style="width: 100%; height: 100%; object-fit: cover;">
-                        <div class="position-absolute bottom-0 start-0 w-100 h-50" style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);"></div>
-                        <div class="position-absolute bottom-0 start-0 w-100 p-1 d-flex align-items-center justify-content-center gap-1 text-white" style="font-size: 0.65rem; font-weight: bold;">
-                          <i class="bi bi-play-fill text-danger"></i> ${formatSongCount(song.play_count || 0)}
-                        </div>
-                      </div>
-    
-                      <div class="d-flex flex-column justify-content-center" style="min-width: 0; flex-grow: 1; gap: 2px;">
-                        <div class="text-white fw-bolder text-truncate" style="font-size: 1.15rem; letter-spacing: -0.2px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${escapeHTML(song.title)}</div>
-                        <div class="text-secondary fw-bold text-truncate artist-link" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id || ""}" style="font-size: 0.85rem; color: #a1a1aa !important; margin-top: -2px;">${escapeHTML(song.artist)}</div>
-                        ${badgesHTML}
-                      </div>
-    
-                      <div class="d-flex flex-column align-items-end justify-content-between ms-2" style="flex-shrink: 0; align-self: stretch; min-height: 84px; gap: 8px;">
-                        <div class="d-flex gap-2">
-                          <button class="btn p-1 border-0 rg-fav-btn ${song.rg_favorite == 1 ? "text-danger" : "text-secondary"}" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi ${song.rg_favorite == 1 ? "bi-heart-fill" : "bi-heart"} fs-5"></i></button>
-                          <button class="btn p-1 border-0 rg-share-song-btn text-light" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-share-fill fs-5"></i></button>
-                        </div>
-                        <button class="btn p-0 border-0 rounded-circle rg-play-btn d-flex align-items-center justify-content-center mt-auto" style="width: 42px; height: 42px; background: linear-gradient(135deg, var(--rg-primary), #ff0055); box-shadow: 0 4px 12px rgba(255,59,48,0.5); transition: transform 0.2s;">
-                          <i class="bi bi-play-fill text-white" style="font-size: 1.8rem; margin-left: 3px;"></i>
-                        </button>
-                      </div>
-                    </div>
-                  `;
+              <div class="d-flex align-items-center gap-3 w-100" style="min-width: 0;">
+                <div class="position-relative" style="width: 80px; height: 80px; flex-shrink: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.6);">
+                  <img src="?action=get_image&id=${song.id}&v=${song.last_modified}&size=small" onerror="this.onerror=null; this.src='${getSvgPlaceholder(song.title)}';" style="width: 100%; height: 100%; object-fit: cover;">
+                  <div class="position-absolute bottom-0 start-0 w-100 h-50" style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);"></div>
+                  <div class="position-absolute bottom-0 start-0 w-100 p-1 d-flex align-items-center justify-content-center gap-1 text-white" style="font-size: 0.65rem; font-weight: bold;">
+                    <i class="bi bi-play-fill text-danger"></i> ${formatSongCount(song.play_count || 0)}
+                  </div>
+                </div>
+
+                <div class="d-flex flex-column justify-content-center" style="min-width: 0; flex-grow: 1; gap: 2px;">
+                  <div class="text-white fw-bolder text-truncate" style="font-size: 1.15rem; letter-spacing: -0.2px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${escapeHTML(song.title)}</div>
+                  <div class="text-secondary fw-bold text-truncate artist-link" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id || ""}" style="font-size: 0.85rem; color: #a1a1aa !important; margin-top: -2px;">${escapeHTML(song.artist)}</div>
+                  ${badgesHTML}
+                </div>
+
+                <div class="d-flex flex-column align-items-end justify-content-between ms-2" style="flex-shrink: 0; align-self: stretch; min-height: 84px; gap: 8px;">
+                  <div class="d-flex gap-2">
+                    <button class="btn p-1 border-0 rg-fav-btn ${song.rg_favorite == 1 ? "text-danger" : "text-secondary"}" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi ${song.rg_favorite == 1 ? "bi-heart-fill" : "bi-heart"} fs-5"></i></button>
+                    <button class="btn p-1 border-0 rg-share-song-btn text-light" style="background: transparent; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.2)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-share-fill fs-5"></i></button>
+                  </div>
+                  <button class="btn p-0 border-0 rounded-circle rg-play-btn d-flex align-items-center justify-content-center mt-auto" style="width: 42px; height: 42px; background: linear-gradient(135deg, var(--rg-primary), #ff0055); box-shadow: 0 4px 12px rgba(255,59,48,0.5); transition: transform 0.2s;">
+                    <i class="bi bi-play-fill text-white" style="font-size: 1.8rem; margin-left: 3px;"></i>
+                  </button>
+                </div>
+              </div>
+            `;
     
             const favBtn = el.querySelector(".rg-fav-btn");
             const shareBtn = el.querySelector(".rg-share-song-btn");
@@ -84110,13 +84987,13 @@ SOFTWARE.</div>
               this.listSongsEl.insertAdjacentHTML(
                 "beforeend",
                 `
-                      <div style="background: rgba(255, 59, 48, 0.1); border: 1px solid var(--rg-primary); border-radius: 16px; padding: 20px; margin-bottom: 16px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
-                        <i class="bi bi-exclamation-triangle-fill text-danger d-block mb-2" style="font-size: 2.5rem;"></i>
-                        <h6 class="text-white fw-bold text-uppercase mb-2" style="letter-spacing: 1px;">No Charts Generated</h6>
-                        <p class="text-secondary small mb-3">The database currently has no pre-compiled note charts. Songs will generate on-the-fly when clicked, which may cause a slight initial delay.</p>
-                        ${isAdmin ? `<button class="btn btn-danger rounded-pill fw-bold px-4 py-2 shadow-sm" onclick="document.getElementById('nav-chart-scan').click();"><i class="bi bi-open-chart-scan me-1"></i> Run Server Scanner Now</button>` : `<div class="badge bg-dark border border-secondary text-secondary p-2"><i class="bi bi-lock-fill me-1"></i> Contact Admin to Run Scanner</div>`}
-                      </div>
-                    `,
+                  <div style="background: rgba(255, 59, 48, 0.1); border: 1px solid var(--rg-primary); border-radius: 16px; padding: 20px; margin-bottom: 16px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+                    <i class="bi bi-exclamation-triangle-fill text-danger d-block mb-2" style="font-size: 2.5rem;"></i>
+                    <h6 class="text-white fw-bold text-uppercase mb-2" style="letter-spacing: 1px;">No Charts Generated</h6>
+                    <p class="text-secondary small mb-3">The database currently has no pre-compiled note charts. Songs will generate on-the-fly when clicked, which may cause a slight initial delay.</p>
+                    ${isAdmin ? `<button class="btn btn-danger rounded-pill fw-bold px-4 py-2 shadow-sm" onclick="document.getElementById('nav-chart-scan').click();"><i class="bi bi-open-chart-scan me-1"></i> Run Server Scanner Now</button>` : `<div class="badge bg-dark border border-secondary text-secondary p-2"><i class="bi bi-lock-fill me-1"></i> Contact Admin to Run Scanner</div>`}
+                  </div>
+                `,
               );
             }
     
@@ -85670,9 +86547,10 @@ SOFTWARE.</div>
               const container = document.getElementById("rg-list-artists");
               if (container) {
                 container.innerHTML = `
-                        <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
-                          <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
-                        </div>`;
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>
+                `;
               }
               this.allArtistsLoaded = false;
             }
@@ -85747,12 +86625,14 @@ SOFTWARE.</div>
               console.error(e);
               const container = document.getElementById("rg-list-artists");
               if (!append && container && !navigator.onLine) {
-                container.innerHTML = `<div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100">
-                          <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i>
-                          <h5 class="fw-bold text-white">You are offline</h5>
-                          <p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p>
-                          <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button>
-                        </div>`;
+                container.innerHTML = `
+                  <div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100">
+                    <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 4rem;"></i>
+                    <h5 class="fw-bold text-white">You are offline</h5>
+                    <p class="text-secondary mt-2 mb-4" style="max-width: 300px;">Play your cached songs in the Offline tab.</p>
+                    <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="document.querySelector('.rg-nav-item[data-target=\\'offline\\']')?.click()"><i class="bi bi-cloud-check-fill text-success me-2"></i> Go to Offline Tab</button>
+                  </div>
+                `;
               }
             }
             this.isLoadingArtists = false;
@@ -85811,38 +86691,38 @@ SOFTWARE.</div>
                 : getSvgPlaceholder(artist.name);
     
             el.innerHTML = `
-                    <div class="d-flex align-items-center gap-3 w-100" style="min-width: 0;">
-                      <div class="position-relative" style="width: 80px; height: 80px; flex-shrink: 0; border-radius: 50%; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.6); border: 2px solid rgba(255,255,255,0.1);">
-                        <img src="${imgUrl}" onerror="this.onerror=null; this.src='${getSvgPlaceholder(artist.name)}';" style="width: 100%; height: 100%; object-fit: cover;">
-                        <div class="position-absolute bottom-0 start-0 w-100 h-50" style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);"></div>
-                      </div>
-    
-                      <div class="d-flex flex-column justify-content-center text-start text-col-info" style="min-width: 0; flex-grow: 1; gap: 2px;">
-                        <!-- Row 1: Artist Name -->
-                        <div class="text-white fw-bolder text-truncate mb-1" style="font-size: 1.15rem; letter-spacing: -0.2px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${escapeHTML(artist.name)}</div>
-    
-                        <!-- Row 2: Rank Badge -->
-                        <div class="mb-1" style="min-height: 24px; line-height: 1;">
-                          ${rankBadgeHTML}
-                        </div>
-    
-                        <!-- Row 3: Score -->
-                        <div class="text-secondary small fw-bold score-val mb-1" style="font-size: 0.75rem; font-family: monospace;">Score: <b class="text-white">${(artist.score || 0).toLocaleString()}</b></div>
-    
-                        <!-- Row 4: Plays -->
-                        <div class="text-secondary small fw-bold plays-val mb-1" style="font-size: 0.75rem; font-family: monospace;">Plays: <b class="text-white">${artist.plays || 0}</b></div>
-    
-                        <!-- Row 5: Tracks -->
-                        <div class="text-secondary fw-bold text-truncate rg-tracks-count" style="font-size: 0.85rem; color: #a1a1aa !important;"><i class="bi bi-music-note-beamed text-danger me-1"></i> ${artist.count} Tracks ${artist.followers > 0 ? ` • <i class="bi bi-people-fill text-info ms-1 me-1"></i> ${formatSongCount(artist.followers)}` : ""}</div>
-                      </div>
-    
-                      <div class="d-flex align-items-center justify-content-center ms-2 right-actions-col" style="flex-shrink: 0; align-self: stretch; min-height: 84px;">
-                        <button class="btn p-0 border-0 rounded-circle d-flex align-items-center justify-content-center" style="width: 42px; height: 42px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); transition: background-color 0.2s, transform 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,59,48,0.2)'; this.style.transform='scale(1.1)';" onmouseout="this.style.backgroundColor='rgba(255,255,255,0.05)'; this.style.transform='none';">
-                          <i class="bi bi-chevron-right text-white fs-5" style="margin-left: 2px;"></i>
-                        </button>
-                      </div>
-                    </div>
-                  `;
+              <div class="d-flex align-items-center gap-3 w-100" style="min-width: 0;">
+                <div class="position-relative" style="width: 80px; height: 80px; flex-shrink: 0; border-radius: 50%; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.6); border: 2px solid rgba(255,255,255,0.1);">
+                  <img src="${imgUrl}" onerror="this.onerror=null; this.src='${getSvgPlaceholder(artist.name)}';" style="width: 100%; height: 100%; object-fit: cover;">
+                  <div class="position-absolute bottom-0 start-0 w-100 h-50" style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);"></div>
+                </div>
+
+                <div class="d-flex flex-column justify-content-center text-start text-col-info" style="min-width: 0; flex-grow: 1; gap: 2px;">
+                  <!-- Row 1: Artist Name -->
+                  <div class="text-white fw-bolder text-truncate mb-1" style="font-size: 1.15rem; letter-spacing: -0.2px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${escapeHTML(artist.name)}</div>
+
+                  <!-- Row 2: Rank Badge -->
+                  <div class="mb-1" style="min-height: 24px; line-height: 1;">
+                    ${rankBadgeHTML}
+                  </div>
+
+                  <!-- Row 3: Score -->
+                  <div class="text-secondary small fw-bold score-val mb-1" style="font-size: 0.75rem; font-family: monospace;">Score: <b class="text-white">${(artist.score || 0).toLocaleString()}</b></div>
+
+                  <!-- Row 4: Plays -->
+                  <div class="text-secondary small fw-bold plays-val mb-1" style="font-size: 0.75rem; font-family: monospace;">Plays: <b class="text-white">${artist.plays || 0}</b></div>
+
+                  <!-- Row 5: Tracks -->
+                  <div class="text-secondary fw-bold text-truncate rg-tracks-count" style="font-size: 0.85rem; color: #a1a1aa !important;"><i class="bi bi-music-note-beamed text-danger me-1"></i> ${artist.count} Tracks ${artist.followers > 0 ? ` • <i class="bi bi-people-fill text-info ms-1 me-1"></i> ${formatSongCount(artist.followers)}` : ""}</div>
+                </div>
+
+                <div class="d-flex align-items-center justify-content-center ms-2 right-actions-col" style="flex-shrink: 0; align-self: stretch; min-height: 84px;">
+                  <button class="btn p-0 border-0 rounded-circle d-flex align-items-center justify-content-center" style="width: 42px; height: 42px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); transition: background-color 0.2s, transform 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,59,48,0.2)'; this.style.transform='scale(1.1)';" onmouseout="this.style.backgroundColor='rgba(255,255,255,0.05)'; this.style.transform='none';">
+                    <i class="bi bi-chevron-right text-white fs-5" style="margin-left: 2px;"></i>
+                  </button>
+                </div>
+              </div>
+            `;
     
             el.addEventListener("click", () => {
               this.openArtistDetail(artist.name);
@@ -85904,9 +86784,10 @@ SOFTWARE.</div>
               const container = document.getElementById("rg-list-artist-songs");
               if (container) {
                 container.innerHTML = `
-                        <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
-                          <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
-                        </div>`;
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>
+                `;
               }
               this.allArtistSongsLoaded = false;
             }
@@ -85967,9 +86848,10 @@ SOFTWARE.</div>
               const container = document.getElementById("rg-list-artist-favs");
               if (container) {
                 container.innerHTML = `
-                        <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
-                          <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
-                        </div>`;
+                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                  </div>
+                `;
               }
               this.allArtistFavsLoaded = false;
             }
@@ -86092,21 +86974,21 @@ SOFTWARE.</div>
             );
             if (isUser && artistUserId) {
               headerContainer.innerHTML = `
-                      <img src="?action=get_image&id=${sampleSong.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-lg border border-secondary" style="width: 72px; height: 72px; object-fit: cover; flex-shrink: 0;">
-                      <div class="d-flex flex-column justify-content-center flex-grow-1" style="min-width: 0; text-align: left;">
-                        <h4 class="text-white fw-bold mb-1 text-truncate" style="font-size: 1.4rem; max-width: 100%;">${escapeHTML(artistName)}</h4>
-                        <div class="d-flex flex-column align-items-start text-secondary small gap-1" style="font-weight: 500;">
-                          <div class="d-flex align-items-center gap-3 flex-wrap">
-                            <span>Played: <b class="text-white">${artistScores.length}</b> times</span>
-                            <span>Score: <b class="text-white">${totalScore.toLocaleString()}</b></span>
-                          </div>
-                          <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold border-secondary text-secondary mt-1" id="rg-btn-share-artist" style="font-size: 0.7rem; height: 24px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s;"><i class="bi bi-share-fill"></i> Share</button>
-                        </div>
-                      </div>
-                      <div class="d-flex flex-column align-items-end flex-shrink-0">
-                        <span class="badge d-flex align-items-center justify-content-center" style="font-family: 'Arial Black', sans-serif; font-size: 1.1rem; font-weight: 900; background-color: ${rankColor}; color: #000; height: 42px; min-width: 48px; border-radius: 8px; box-shadow: 0 4px 12px ${rankColor}40;" title="AVERAGE RANK">${displayRank}</span>
-                      </div>
-                    `;
+                <img src="?action=get_image&id=${sampleSong.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-lg border border-secondary" style="width: 72px; height: 72px; object-fit: cover; flex-shrink: 0;">
+                <div class="d-flex flex-column justify-content-center flex-grow-1" style="min-width: 0; text-align: left;">
+                  <h4 class="text-white fw-bold mb-1 text-truncate" style="font-size: 1.4rem; max-width: 100%;">${escapeHTML(artistName)}</h4>
+                  <div class="d-flex flex-column align-items-start text-secondary small gap-1" style="font-weight: 500;">
+                    <div class="d-flex align-items-center gap-3 flex-wrap">
+                      <span>Played: <b class="text-white">${artistScores.length}</b> times</span>
+                      <span>Score: <b class="text-white">${totalScore.toLocaleString()}</b></span>
+                    </div>
+                    <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold border-secondary text-secondary mt-1" id="rg-btn-share-artist" style="font-size: 0.7rem; height: 24px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s;"><i class="bi bi-share-fill"></i> Share</button>
+                  </div>
+                </div>
+                <div class="d-flex flex-column align-items-end flex-shrink-0">
+                  <span class="badge d-flex align-items-center justify-content-center" style="font-family: 'Arial Black', sans-serif; font-size: 1.1rem; font-weight: 900; background-color: ${rankColor}; color: #000; height: 42px; min-width: 48px; border-radius: 8px; box-shadow: 0 4px 12px ${rankColor}40;" title="AVERAGE RANK">${displayRank}</span>
+                </div>
+              `;
     
               document.getElementById("rg-btn-share-artist").onclick = (e) => {
                 e.stopPropagation();
@@ -86114,15 +86996,15 @@ SOFTWARE.</div>
               };
             } else {
               headerContainer.innerHTML = `
-                      <img src="?action=get_image&id=${sampleSong.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-lg border border-secondary" style="width: 72px; height: 72px; object-fit: cover; flex-shrink: 0;">
-                      <div class="d-flex flex-column justify-content-center flex-grow-1" style="min-width: 0; text-align: left;">
-                        <h4 class="text-white fw-bold mb-1 text-truncate" style="font-size: 1.4rem; max-width: 100%;">${escapeHTML(artistName)}</h4>
-                        <div class="d-flex flex-column align-items-start text-secondary small gap-1" style="font-weight: 500;">
-                          <span class="badge bg-dark border border-secondary text-secondary">Guest Artist</span>
-                          <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold border-secondary text-secondary mt-1" id="rg-btn-share-artist" style="font-size: 0.7rem; height: 24px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s;"><i class="bi bi-share-fill"></i> Share</button>
-                        </div>
-                      </div>
-                    `;
+                <img src="?action=get_image&id=${sampleSong.id}&size=small" onerror="this.onerror=null; this.src='?action=get_app_icon';" class="rounded-circle shadow-lg border border-secondary" style="width: 72px; height: 72px; object-fit: cover; flex-shrink: 0;">
+                <div class="d-flex flex-column justify-content-center flex-grow-1" style="min-width: 0; text-align: left;">
+                  <h4 class="text-white fw-bold mb-1 text-truncate" style="font-size: 1.4rem; max-width: 100%;">${escapeHTML(artistName)}</h4>
+                  <div class="d-flex flex-column align-items-start text-secondary small gap-1" style="font-weight: 500;">
+                    <span class="badge bg-dark border border-secondary text-secondary">Guest Artist</span>
+                    <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold border-secondary text-secondary mt-1" id="rg-btn-share-artist" style="font-size: 0.7rem; height: 24px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s;"><i class="bi bi-share-fill"></i> Share</button>
+                  </div>
+                </div>
+              `;
     
               document.getElementById("rg-btn-share-artist").onclick = (e) => {
                 e.stopPropagation();
@@ -86185,34 +87067,34 @@ SOFTWARE.</div>
                       : "";
     
                   return `
-                        <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${diffColor}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;">
-                          <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
-                            <div class="d-flex align-items-center gap-3" style="min-width: 0; flex: 1;">
-                              <img src="?action=get_image&id=${s.song_id}&v=${s.last_modified}" onerror="this.onerror=null; this.src='${coverSvg}'" style="width: 44px; height: 44px; border-radius: 8px; object-fit: cover; box-shadow: 0 4px 8px rgba(0,0,0,0.4); flex-shrink: 0;">
-                              <div class="text-truncate text-start" style="min-width: 0; flex: 1;">
-                                <div class="text-white fw-bold text-truncate" style="font-size: 0.95rem;">${escapeHTML(s.title)}</div>
-                                <div class="text-secondary small mt-1" style="font-size: 0.75rem;">by ${escapeHTML(s.artist)}</div>
-                              </div>
-                            </div>
-                            <div class="d-flex align-items-center gap-1" style="flex-shrink: 0;">
-                              ${suspicious}
-                              <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty === "demon" ? "#fff" : "#000"}; padding: 2px 6px; border-radius: 4px;">${diffLabel} ${lvlText}</span>
-                              <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${jud.color}; color: #000;">${jud.rank}</span>
-                            </div>
-                          </div>
-    
-                          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; text-align: center;">
-                            <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
-                              <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Score</span>
-                              <span style="font-size: 0.9rem; font-weight: 900; font-family: monospace; color: var(--rg-primary);">${parseInt(s.score).toLocaleString()}</span>
-                            </div>
-                            <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
-                              <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Combo</span>
-                              <span style="font-size: 0.9rem; font-weight: 900; font-family: monospace; color: #fff;">${s.max_combo}x</span>
-                            </div>
+                    <div class="rg-list-item" style="background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${diffColor}; border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;">
+                      <div class="d-flex align-items-center justify-content-between gap-3" style="min-width: 0; width: 100%;">
+                        <div class="d-flex align-items-center gap-3" style="min-width: 0; flex: 1;">
+                          <img src="?action=get_image&id=${s.song_id}&v=${s.last_modified}" onerror="this.onerror=null; this.src='${coverSvg}'" style="width: 44px; height: 44px; border-radius: 8px; object-fit: cover; box-shadow: 0 4px 8px rgba(0,0,0,0.4); flex-shrink: 0;">
+                          <div class="text-truncate text-start" style="min-width: 0; flex: 1;">
+                            <div class="text-white fw-bold text-truncate" style="font-size: 0.95rem;">${escapeHTML(s.title)}</div>
+                            <div class="text-secondary small mt-1" style="font-size: 0.75rem;">by ${escapeHTML(s.artist)}</div>
                           </div>
                         </div>
-                      `;
+                        <div class="d-flex align-items-center gap-1" style="flex-shrink: 0;">
+                          ${suspicious}
+                          <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${diffColor}; color: ${s.difficulty === "demon" ? "#fff" : "#000"}; padding: 2px 6px; border-radius: 4px;">${diffLabel} ${lvlText}</span>
+                          <span class="badge d-flex align-items-center justify-content-center" style="font-family: monospace; font-size: 0.65rem; font-weight: 800; background-color: ${jud.color}; color: #000;">${jud.rank}</span>
+                        </div>
+                      </div>
+
+                      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; border-top: 1px solid rgba(255,255,255,0.03); padding-top: 8px; margin-top: 4px; text-align: center;">
+                        <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                          <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Score</span>
+                          <span style="font-size: 0.9rem; font-weight: 900; font-family: monospace; color: var(--rg-primary);">${parseInt(s.score).toLocaleString()}</span>
+                        </div>
+                        <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 4px 10px; border-radius: 6px; text-align: left;">
+                          <span style="font-size: 0.65rem; font-weight: 700; color: #888; text-transform: uppercase;">Combo</span>
+                          <span style="font-size: 0.9rem; font-weight: 900; font-family: monospace; color: #fff;">${s.max_combo}x</span>
+                        </div>
+                      </div>
+                    </div>
+                  `;
                 })
                 .join("");
             }
@@ -86329,18 +87211,18 @@ SOFTWARE.</div>
             if (modalTitle) modalTitle.textContent = "Artists";
     
             body.innerHTML = `
-                    <div class="list-group list-group-flush rounded">
-                      ${artistsList
-                        .map(
-                          (a) => `
-                        <button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary rhythm-artist-modal-item py-3 text-start px-4" style="border-left: none; border-right: none;" data-artist="${encodeURIComponent(a)}">
-                          ${a}
-                        </button>
-                      `,
-                        )
-                        .join("")}
-                    </div>
-                  `;
+              <div class="list-group list-group-flush rounded">
+                ${artistsList
+                  .map(
+                    (a) => `
+                  <button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary rhythm-artist-modal-item py-3 text-start px-4" style="border-left: none; border-right: none;" data-artist="${encodeURIComponent(a)}">
+                    ${a}
+                  </button>
+                `,
+                  )
+                  .join("")}
+              </div>
+            `;
     
             // Re-bind clicks directly to open the selected artist profile
             body.querySelectorAll(".rhythm-artist-modal-item").forEach((btn) => {
@@ -86392,10 +87274,10 @@ SOFTWARE.</div>
               resultButtonContainer.insertAdjacentHTML(
                 "beforebegin",
                 `
-                      <div id="${resultWarningId}" class="alert border-danger text-danger small mb-3 text-center rounded-3 w-100" style="background: rgba(255,59,48,0.1); line-height: 1.4; font-weight: bold; border-style: dashed;">
-                        <i class="bi bi-shield-slash-fill me-2"></i>Score Not Saved: Played while offline. This score will NOT be synced to the database.
-                      </div>
-                    `,
+                  <div id="${resultWarningId}" class="alert border-danger text-danger small mb-3 text-center rounded-3 w-100" style="background: rgba(255,59,48,0.1); line-height: 1.4; font-weight: bold; border-style: dashed;">
+                    <i class="bi bi-shield-slash-fill me-2"></i>Score Not Saved: Played while offline. This score will NOT be synced to the database.
+                  </div>
+                `,
               );
             }
     
