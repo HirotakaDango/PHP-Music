@@ -452,7 +452,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '9.6');
+define('APP_VERSION', '9.7');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1395,17 +1395,274 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     if (isset($_GET['share'])) {
       $token = $_GET['share'];
       $meta = driveGetMeta($driveConfig['meta_file']);
-      if (isset($meta['shares'][$token])) {
-        $rel = $meta['shares'][$token]['rel'] ?? '';
-        $fullPath = driveSafePath($driveConfig['root_dir'], $rel);
-        if ($fullPath && file_exists($fullPath) && is_file($fullPath)) {
-          $mime = mime_content_type($fullPath) ?: 'application/octet-stream';
-          driveStreamRangeFile($fullPath, $mime);
+      if (!isset($meta['shares'][$token])) {
+        http_response_code(404);
+        echo "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><title>404 Not Found</title><style>body{background:#030303;color:#fff;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><div style='text-align:center;'><h2>404 - Link Expired or Invalid</h2><p style='color:#aaa;'>This shared item is no longer available.</p></div></body></html>";
+        exit;
+      }
+
+      $currentScript = basename($_SERVER['SCRIPT_NAME'] ?? ($_SERVER['PHP_SELF'] ?? 'index.php'));
+      $rootRel = ltrim(str_replace(['\\', '//'], '/', $meta['shares'][$token]['rel'] ?? ''), '/');
+      $basePath = driveSafePath($driveConfig['root_dir'], $rootRel);
+      if (!$basePath || !file_exists($basePath)) {
+        http_response_code(404);
+        echo "Item missing on server.";
+        exit;
+      }
+
+      $isBaseFolder = is_dir($basePath);
+      $reqSub = trim(str_replace(['\\', '..'], ['/', ''], $_GET['file'] ?? ($_GET['f'] ?? '')), '/');
+      $targetPath = $basePath;
+
+      if ($isBaseFolder && $reqSub !== '') {
+        $resolvedSub = driveSafePath($basePath, $reqSub);
+        if ($resolvedSub && file_exists($resolvedSub) && strpos(realpath($resolvedSub), realpath($basePath)) === 0) {
+          $targetPath = $resolvedSub;
+        } else {
+          $reqSub = '';
+          $targetPath = $basePath;
+        }
+      }
+
+      $isDownload = !empty($_GET['download']) || ($_GET['action'] ?? '') === 'download';
+      $isRaw = !empty($_GET['raw']) || ($_GET['action'] ?? '') === 'raw';
+      $isThumb = !empty($_GET['thumb']) || ($_GET['action'] ?? '') === 'thumb';
+
+      if ($isThumb && is_file($targetPath)) {
+        $hash = md5($targetPath . filemtime($targetPath) . filesize($targetPath));
+        $cachePath = $driveConfig['cache_dir'] . DIRECTORY_SEPARATOR . $hash . '.jpg';
+        if (!file_exists($cachePath)) {
+          driveCreateThumbnail($targetPath, $cachePath, 480, 85);
+        }
+        if (file_exists($cachePath)) {
+          header('Content-Type: image/jpeg');
+          header('Content-Length: ' . filesize($cachePath));
+          readfile($cachePath);
+        } else {
+          $mime = mime_content_type($targetPath) ?: 'application/octet-stream';
+          header('Content-Type: ' . $mime);
+          readfile($targetPath);
+        }
+        exit;
+      }
+
+      if ($isRaw && is_file($targetPath)) {
+        $mime = mime_content_type($targetPath) ?: 'application/octet-stream';
+        driveStreamRangeFile($targetPath, $mime);
+        exit;
+      }
+
+      if ($isDownload) {
+        if (is_dir($targetPath)) {
+          if (!class_exists('ZipArchive')) {
+            http_response_code(500);
+            echo "ZipArchive extension required.";
+            exit;
+          }
+          $zipName = (basename($targetPath) ?: 'shared_folder') . '.zip';
+          $tempZip = $driveConfig['cache_dir'] . DIRECTORY_SEPARATOR . uniqid('dl_') . '.zip';
+          $zip = new ZipArchive();
+          if ($zip->open($tempZip, ZipArchive::CREATE | ZipArchive::OVERWRITE) === true) {
+            $dirBase = rtrim(str_replace(['\\', '//'], '/', realpath($targetPath)), '/');
+            $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($targetPath, RecursiveDirectoryIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS));
+            foreach ($files as $f) {
+              if (!$f->isFile()) continue;
+              $filePath = str_replace(['\\', '//'], '/', $f->getRealPath());
+              $localName = ltrim(str_replace($dirBase, '', $filePath), '/');
+              $zip->addFile($f->getRealPath(), $localName);
+            }
+            $zip->close();
+            while (ob_get_level()) ob_end_clean();
+            header('Content-Type: application/zip');
+            header('Content-Disposition: attachment; filename="' . $zipName . '"');
+            header('Content-Length: ' . filesize($tempZip));
+            readfile($tempZip);
+            @unlink($tempZip);
+            exit;
+          }
+        } else {
+          while (ob_get_level()) ob_end_clean();
+          header('Content-Type: application/octet-stream');
+          header('Content-Disposition: attachment; filename="' . basename($targetPath) . '"');
+          header('Content-Length: ' . filesize($targetPath));
+          readfile($targetPath);
           exit;
         }
       }
-      http_response_code(404);
-      echo "<h1>404 - Public Link Expired or Invalid</h1>";
+
+      $isCurrentDir = is_dir($targetPath);
+      $itemName = basename($targetPath) ?: 'Shared Folder';
+      $ext = strtolower(pathinfo($targetPath, PATHINFO_EXTENSION));
+      $fileType = driveGetFileType($ext, $driveConfig);
+      
+      $shareBaseUrl = $currentScript . "?access=admin&page=drive&share=" . urlencode($token);
+      $rawUrl = $shareBaseUrl . "&raw=1" . ($reqSub ? '&file=' . urlencode($reqSub) : '');
+      $downloadUrl = $shareBaseUrl . "&download=1" . ($reqSub ? '&file=' . urlencode($reqSub) : '');
+
+      $fullOriginalPath = trim($rootRel . ($reqSub ? '/' . $reqSub : ''), '/');
+      $rootBaseName = basename($rootRel) ?: 'Root';
+
+      $origAppUrl = $currentScript . '?access=admin&page=drive#/' . implode('/', array_map('rawurlencode', explode('/', $fullOriginalPath)));
+
+      $breadcrumbs = [];
+      if ($isBaseFolder) {
+        $breadcrumbs[] = [
+          'name'   => $rootBaseName,
+          'url'    => $shareBaseUrl,
+          'active' => empty($reqSub)
+        ];
+        if ($reqSub) {
+          $parts = explode('/', $reqSub);
+          $accum = '';
+          foreach ($parts as $idx => $part) {
+            if ($part === '') continue;
+            $accum = $accum ? ($accum . '/' . $part) : $part;
+            $isLast = ($idx === count($parts) - 1);
+            $breadcrumbs[] = [
+              'name'   => $part,
+              'url'    => $shareBaseUrl . "&file=" . urlencode($accum),
+              'active' => $isLast
+            ];
+          }
+        }
+      } else {
+        $breadcrumbs[] = [
+          'name'   => $itemName,
+          'url'    => $shareBaseUrl,
+          'active' => true
+        ];
+      }
+      ?>
+      <!DOCTYPE html>
+      <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+          <title><?= htmlspecialchars($itemName) ?> - Shared File</title>
+          <style>
+            *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+            html, body { height: 100dvh; max-height: 100dvh; overflow: hidden; background: #050505; color: #f1f1f1; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; }
+            .topbar { height: 50px; flex-shrink: 0; background: #101010; border-bottom: 1px solid #222; display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; z-index: 100; gap: 0.5rem; }
+            .topbar-title { font-weight: 700; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 0.5rem; }
+            .topbar-actions { display: flex; align-items: center; gap: 0.5rem; }
+            .subbar-path { height: 38px; flex-shrink: 0; background: #0c0c0c; border-bottom: 1px solid #1c1c1c; display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; font-size: 0.78rem; overflow-x: auto; white-space: nowrap; scrollbar-width: none; gap: 0.8rem; }
+            .subbar-path::-webkit-scrollbar { display: none; }
+            .breadcrumbs { display: flex; align-items: center; gap: 0.35rem; }
+            .bc-item { padding: 0.18rem 0.5rem; border-radius: 6px; color: #aaaaaa; font-weight: 500; text-decoration: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: background 0.15s ease, color 0.15s ease; }
+            .bc-item:hover { background: #1c1c1c; color: #ffffff; }
+            .bc-item.active { background: #ff0000; color: #ffffff; font-weight: 700; }
+            .bc-sep { color: #555555; font-size: 0.75rem; }
+            .original-path-badge { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.74rem; color: #ff5252; background: #141414; padding: 0.2rem 0.6rem; border-radius: 6px; border: 1px solid #ff0000; text-decoration: none; flex-shrink: 0; transition: all 0.15s ease; }
+            .original-path-badge:hover { background: #ff0000; color: #ffffff; }
+            .original-path-badge code { font-family: monospace; font-weight: 600; color: inherit; }
+            .btn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.85rem; border-radius: 20px; font-size: 0.78rem; font-weight: 600; text-decoration: none; border: none; cursor: pointer; transition: opacity 0.15s; }
+            .btn-primary { background: #ff0000; color: #ffffff; }
+            .btn-secondary { background: #1f1f1f; color: #f1f1f1; border: 1px solid #333; }
+            .btn:hover { opacity: 0.9; }
+            .viewer-wrap { flex: 1; min-height: 0; height: calc(100dvh - 88px); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0.75rem; overflow-y: auto; overflow-x: hidden; box-sizing: border-box; }
+            .media-img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.8); }
+            .media-video { max-width: 100%; max-height: 100%; width: auto; height: auto; border-radius: 10px; background: #000; box-shadow: 0 8px 30px rgba(0,0,0,0.8); }
+            .audio-card { background: #121212; border: 1px solid #282828; border-radius: 20px; padding: 1.5rem; width: 100%; max-width: 380px; max-height: 100%; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 0.8rem; box-shadow: 0 8px 30px rgba(0,0,0,0.8); }
+            .doc-box { width: 100%; max-width: 960px; height: 100%; background: #121212; border: 1px solid #282828; border-radius: 10px; padding: 1.25rem; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; overflow-y: auto; }
+            .pdf-frame { width: 100%; max-width: 1000px; height: 100%; border: none; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.8); }
+            .grid-wrap { width: 100%; max-width: 1200px; height: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); grid-auto-rows: min-content; gap: 0.65rem; overflow-y: auto; align-content: start; padding: 0.25rem; }
+            .card-item { background: #121212; border: 1px solid #222; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; text-decoration: none; color: inherit; transition: transform 0.15s, border-color 0.15s; }
+            .card-item:hover { transform: translateY(-2px); border-color: #ff0000; }
+            .card-thumb { aspect-ratio: 1/1; width: 100%; background: #080808; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+            .card-thumb img { width: 100%; height: 100%; object-fit: cover; }
+            .card-title { padding: 0.45rem; font-size: 0.76rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+          </style>
+        </head>
+        <body>
+          <div class="topbar">
+            <div class="topbar-title">
+              <span><?= htmlspecialchars($itemName) ?></span>
+            </div>
+            <div class="topbar-actions">
+              <?php if (!$isCurrentDir): ?>
+                <a href="<?= $rawUrl ?>" target="_blank" class="btn btn-secondary">Open Raw</a>
+              <?php endif; ?>
+              <a href="<?= $downloadUrl ?>" class="btn btn-primary"><?= $isCurrentDir ? 'Download ZIP' : 'Download' ?></a>
+            </div>
+          </div>
+
+          <div class="subbar-path">
+            <div class="breadcrumbs">
+              <?php foreach ($breadcrumbs as $bc): ?>
+                <?php if ($bc['active']): ?>
+                  <span class="bc-item active"><?= htmlspecialchars($bc['name']) ?></span>
+                <?php else: ?>
+                  <a href="<?= $bc['url'] ?>" class="bc-item"><?= htmlspecialchars($bc['name']) ?></a>
+                  <span class="bc-sep">/</span>
+                <?php endif; ?>
+              <?php endforeach; ?>
+            </div>
+            <a href="<?= htmlspecialchars($origAppUrl) ?>" class="original-path-badge" title="Click to view original location in Drive Manager">
+              <span>Original:</span>
+              <code>/<?= htmlspecialchars($fullOriginalPath) ?></code>
+              <svg viewBox="0 0 24 24" style="width:13px;height:13px;fill:currentColor;"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
+            </a>
+          </div>
+
+          <div class="viewer-wrap">
+            <?php if ($isCurrentDir): ?>
+              <div class="grid-wrap">
+                <?php
+                $scanned = @scandir($targetPath) ?: [];
+                foreach ($scanned as $item) {
+                  if ($item === '.' || $item === '..' || $item[0] === '.') continue;
+                  $itemFull = $targetPath . DIRECTORY_SEPARATOR . $item;
+                  $itemIsDir = is_dir($itemFull);
+                  $itemRel = $reqSub ? ($reqSub . '/' . $item) : $item;
+                  $itemExt = strtolower(pathinfo($item, PATHINFO_EXTENSION));
+                  $itemType = driveGetFileType($itemExt, $driveConfig);
+                  $itemUrl = $shareBaseUrl . "&file=" . urlencode($itemRel);
+                  $thumbUrl = $shareBaseUrl . "&thumb=1&file=" . urlencode($itemRel);
+                  ?>
+                  <a href="<?= $itemUrl ?>" class="card-item">
+                    <div class="card-thumb">
+                      <?php if ($itemIsDir): ?>
+                        <span style="font-size:2rem; color:#ff0000;">📁</span>
+                      <?php elseif ($itemType === 'image'): ?>
+                        <img src="<?= $thumbUrl ?>" alt="<?= htmlspecialchars($item) ?>" loading="lazy">
+                      <?php elseif ($itemType === 'video'): ?>
+                        <span style="font-size:2rem; color:#ef4444;">🎬</span>
+                      <?php elseif ($itemType === 'audio'): ?>
+                        <span style="font-size:2rem; color:#f87171;">🎵</span>
+                      <?php else: ?>
+                        <span style="font-size:2rem; color:#60a5fa;">📄</span>
+                      <?php endif; ?>
+                    </div>
+                    <div class="card-title"><?= htmlspecialchars($item) ?></div>
+                  </a>
+                <?php } ?>
+              </div>
+            <?php elseif ($fileType === 'image'): ?>
+              <img src="<?= $rawUrl ?>" class="media-img" alt="<?= htmlspecialchars($itemName) ?>">
+            <?php elseif ($fileType === 'video'): ?>
+              <video src="<?= $rawUrl ?>" class="media-video" controls autoplay playsinline></video>
+            <?php elseif ($fileType === 'audio'): ?>
+              <div class="audio-card">
+                <div style="font-size:3rem;">🎵</div>
+                <div style="font-weight:700; font-size:1rem; word-break:break-all;"><?= htmlspecialchars($itemName) ?></div>
+                <audio src="<?= $rawUrl ?>" controls autoplay style="width:100%;"></audio>
+              </div>
+            <?php elseif ($ext === 'pdf'): ?>
+              <iframe src="<?= $rawUrl ?>" class="pdf-frame"></iframe>
+            <?php elseif ($fileType === 'text' && filesize($targetPath) < 5000000): ?>
+              <div class="doc-box"><?= htmlspecialchars(@file_get_contents($targetPath) ?: '') ?></div>
+            <?php else: ?>
+              <div style="text-align:center;">
+                <div style="font-size:3.5rem; margin-bottom:0.8rem;">📦</div>
+                <div style="font-size:1.1rem; font-weight:700; margin-bottom:0.4rem;"><?= htmlspecialchars($itemName) ?></div>
+                <p style="color:#aaa; margin-bottom:1.2rem; font-size:0.85rem;"><?= driveFormatBytes(filesize($targetPath)) ?></p>
+                <a href="<?= $downloadUrl ?>" class="btn btn-primary" style="padding:0.55rem 1.3rem;">Download File</a>
+              </div>
+            <?php endif; ?>
+          </div>
+        </body>
+      </html>
+      <?php
       exit;
     }
 
@@ -1416,7 +1673,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         'upload_chunk', 'create', 'rename', 'batch_rename', 'delete', 'save_text',
         'trash', 'trash_restore', 'trash_delete', 'trash_empty', 'version_restore',
         'star_toggle', 'clipboard_paste', 'fetch_url', 'encrypt_file',
-        'decrypt_file', 'zip', 'unzip'
+        'decrypt_file', 'zip', 'unzip', 'save_image'
       ];
 
       if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($driveAction, $postWriteActions)) {
@@ -2049,6 +2306,50 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         driveJsonResponse(['success' => $saved]);
       }
 
+      if ($driveAction === 'save_image') {
+        $file = $_POST['f'] ?? ($_POST['file'] ?? '');
+        $dataUrl = $_POST['image_data'] ?? '';
+        $saveMode = $_POST['save_mode'] ?? 'overwrite';
+        $fullPath = driveFindRealFile($driveConfig['root_dir'], $file);
+        if (!$fullPath) $fullPath = driveSafePath($driveConfig['root_dir'], $file);
+        if (!$fullPath || !is_file($fullPath)) driveJsonResponse(['error' => 'Image file not found'], 404);
+
+        if (preg_match('/^data:image\/(png|jpeg|webp);base64,(.+)$/i', $dataUrl, $matches)) {
+          $imgData = base64_decode($matches[2]);
+          if ($imgData !== false) {
+            $targetPath = $fullPath;
+            $finalName = basename($fullPath);
+
+            if ($saveMode === 'copy') {
+              $dir = dirname($fullPath);
+              $ext = pathinfo($fullPath, PATHINFO_EXTENSION);
+              $base = pathinfo($fullPath, PATHINFO_FILENAME);
+              $counter = 1;
+              do {
+                $finalName = "{$base}_edited_({$counter})" . ($ext ? ".{$ext}" : '');
+                $targetPath = $dir . DIRECTORY_SEPARATOR . $finalName;
+                $counter++;
+              } while (file_exists($targetPath));
+            } else {
+              driveBackupVersion($fullPath, $driveConfig);
+            }
+
+            $saved = @file_put_contents($targetPath, $imgData) !== false;
+            if ($saved) {
+              if ($saveMode === 'overwrite') {
+                $mtime = (int)@filemtime($targetPath);
+                $size = (int)@filesize($targetPath);
+                $cachePath = $driveConfig['cache_dir'] . DIRECTORY_SEPARATOR . md5($targetPath . $mtime . $size) . '.jpg';
+                if (file_exists($cachePath)) @unlink($cachePath);
+              }
+              driveLogActivity($driveConfig['meta_file'], $saveMode === 'copy' ? 'uploaded' : 'modified', $targetPath, $saveMode === 'copy' ? 'Saved edited copy' : 'Edited image');
+              driveJsonResponse(['success' => true, 'filename' => $finalName, 'is_copy' => $saveMode === 'copy']);
+            }
+          }
+        }
+        driveJsonResponse(['error' => 'Failed to save image payload'], 500);
+      }
+
       // IDE Version History Sync Alias
       if ($driveAction === 'get_versions') {
         $file = $_POST['file'] ?? ($_GET['file'] ?? ($_GET['f'] ?? ''));
@@ -2607,12 +2908,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
       if ($driveAction === 'share_create') {
         $file = driveSafePath($driveConfig['root_dir'], $_POST['f'] ?? '');
-        if (!$file || !is_file($file)) driveJsonResponse(['error' => 'File not found'], 404);
+        if (!$file || !file_exists($file)) driveJsonResponse(['error' => 'Target not found'], 404);
 
         $token = bin2hex(random_bytes(16));
         $meta = driveGetMeta($driveConfig['meta_file']);
         $meta['shares'][$token] = [
           'rel'     => ltrim(str_replace(['\\', '//'], '/', substr(realpath($file), strlen(realpath($driveConfig['root_dir'])))), '/'),
+          'is_dir'  => is_dir($file),
           'created' => time()
         ];
         driveSaveMeta($driveConfig['meta_file'], $meta);
@@ -14551,6 +14853,132 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
             }
 
+            .layout-justified {
+              display: flex;
+              flex-wrap: wrap;
+              gap: 0.65rem;
+              align-content: flex-start;
+              width: 100%;
+              box-sizing: border-box;
+            }
+            .layout-justified .file-card {
+              height: var(--justified-row-height, 200px) !important;
+              flex-grow: var(--card-grow, 1);
+              flex-shrink: 0;
+              flex-basis: auto;
+              width: auto !important;
+              min-width: 100px;
+              max-width: 100%;
+              aspect-ratio: var(--card-ratio, auto);
+            }
+            .layout-justified .file-thumb {
+              height: 100% !important;
+              width: 100% !important;
+              min-height: 0 !important;
+            }
+            .layout-justified .file-thumb img {
+              width: 100%;
+              height: 100%;
+              object-fit: cover;
+            }
+
+            .img-editor-nav {
+              display: flex;
+              align-items: center;
+              gap: 0.4rem;
+              background: #121212;
+              border-bottom: 1px solid #262626;
+              padding: 0.45rem 0.85rem;
+              overflow-x: auto;
+              white-space: nowrap;
+              flex-wrap: nowrap;
+              flex-shrink: 0;
+              scrollbar-width: none;
+              -webkit-overflow-scrolling: touch;
+            }
+            .img-editor-nav::-webkit-scrollbar { display: none; }
+            .img-editor-nav > * { flex-shrink: 0; }
+            .img-editor-nav-btn {
+              display: inline-flex;
+              align-items: center;
+              gap: 0.4rem;
+              padding: 0.4rem 0.95rem;
+              border-radius: 20px !important;
+              font-size: 0.8rem;
+              font-weight: 600;
+              color: #aaaaaa;
+              background: transparent;
+              border: 1px solid transparent;
+              cursor: pointer;
+              transition: all 0.15s ease;
+              white-space: nowrap;
+              flex-shrink: 0;
+            }
+            .img-editor-nav-btn:hover {
+              background: rgba(255, 255, 255, 0.08);
+              color: #ffffff;
+            }
+            .img-editor-nav-btn.active {
+              background: #ff0000 !important;
+              color: #ffffff !important;
+              font-weight: 700 !important;
+              border: 1px solid #ff0000 !important;
+              box-shadow: 0 2px 12px rgba(255, 0, 0, 0.45) !important;
+            }
+            .img-editor-nav-btn svg {
+              width: 16px;
+              height: 16px;
+              fill: currentColor;
+            }
+            #ie-undo, #ie-redo {
+              color: #ffffff !important;
+              background: rgba(255, 255, 255, 0.08) !important;
+              border: 1px solid rgba(255, 255, 255, 0.15) !important;
+              border-radius: 50% !important;
+              width: 32px !important;
+              height: 32px !important;
+              transition: all 0.15s ease;
+            }
+            #ie-undo:hover, #ie-redo:hover {
+              background: rgba(255, 0, 0, 0.25) !important;
+              color: #ff0000 !important;
+              border-color: #ff0000 !important;
+            }
+            .img-editor-subbar {
+              display: flex;
+              align-items: center;
+              gap: 0.75rem;
+              background: var(--md-sys-color-surface-container-low);
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+              padding: 0.45rem 0.85rem;
+              overflow-x: auto;
+              white-space: nowrap;
+              flex-wrap: nowrap;
+              flex-shrink: 0;
+              font-size: 0.8rem;
+              scrollbar-width: thin;
+              -webkit-overflow-scrolling: touch;
+            }
+            .img-editor-subbar > * { flex-shrink: 0; }
+            .img-editor-canvas-wrap {
+              position: relative;
+              flex: 1;
+              width: 100%;
+              min-height: 380px;
+              background: #080808;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              overflow: hidden;
+              user-select: none;
+            }
+            .img-editor-canvas-wrap canvas {
+              max-width: 95%;
+              max-height: 85%;
+              box-shadow: 0 12px 40px rgba(0, 0, 0, 0.85);
+              border-radius: 6px;
+            }
+
             .layout-columns {
               display: flex;
               gap: 0.75rem;
@@ -15318,20 +15746,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               right: 1.2rem;
             }
 
-            .modal-backdrop {
-              position: fixed;
-              inset: 0;
-              background: rgba(0, 0, 0, 0.75);
-              backdrop-filter: blur(4px);
-              z-index: 3000;
-              display: none;
-              align-items: center;
-              justify-content: center;
-              padding: 1rem;
+            .modal-backdrop,
+            #modal-backdrop {
+              position: fixed !important;
+              inset: 0 !important;
+              background: rgba(0, 0, 0, 0.8) !important;
+              backdrop-filter: blur(6px) !important;
+              -webkit-backdrop-filter: blur(6px) !important;
+              z-index: 6000 !important;
+              display: none !important;
+              align-items: center !important;
+              justify-content: center !important;
+              padding: 1rem !important;
+              opacity: 1 !important;
+              visibility: visible !important;
             }
 
-            .modal-backdrop.active {
-              display: flex;
+            .modal-backdrop.active,
+            #modal-backdrop.active {
+              display: flex !important;
+              opacity: 1 !important;
+              visibility: visible !important;
+              pointer-events: auto !important;
             }
 
             .modal-box {
@@ -16595,36 +17031,44 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
             }
 
-            .toast-container {
-              position: fixed;
-              bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
-              left: 50%;
-              transform: translateX(-50%);
-              display: flex;
-              flex-direction: column;
-              align-items: center;
-              gap: 0.45rem;
-              z-index: 9999;
-              pointer-events: none;
-              width: max-content;
-              max-width: calc(100vw - 2rem);
+            .toast-container,
+            #toast-container {
+              position: fixed !important;
+              bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px)) !important;
+              left: 50% !important;
+              transform: translateX(-50%) !important;
+              display: flex !important;
+              flex-direction: column !important;
+              align-items: center !important;
+              gap: 0.45rem !important;
+              z-index: 99999 !important;
+              pointer-events: none !important;
+              width: max-content !important;
+              max-width: calc(100vw - 2rem) !important;
             }
 
-            .toast {
-              background: #1c1c1c;
-              border: 1px solid #ff0000;
-              padding: 0.6rem 1.1rem;
-              border-radius: 24px;
-              box-shadow: var(--md-elevation-2);
-              font-size: 0.82rem;
-              font-weight: 600;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              gap: 0.5rem;
-              color: #ffffff;
-              pointer-events: auto;
-              text-align: center;
+            #toast-container .toast,
+            .drive-toast {
+              display: flex !important;
+              align-items: center !important;
+              justify-content: center !important;
+              background: #181818 !important;
+              border: 1px solid #ff0000 !important;
+              padding: 0.65rem 1.25rem !important;
+              border-radius: 28px !important;
+              box-shadow: 0 10px 35px rgba(0, 0, 0, 0.9) !important;
+              font-size: 0.84rem !important;
+              font-weight: 600 !important;
+              gap: 0.55rem !important;
+              color: #ffffff !important;
+              pointer-events: auto !important;
+              text-align: center !important;
+              animation: driveToastIn 0.2s cubic-bezier(0.2, 0, 0, 1) !important;
+            }
+
+            @keyframes driveToastIn {
+              from { opacity: 0; transform: translateY(12px) scale(0.95); }
+              to { opacity: 1; transform: translateY(0) scale(1); }
             }
 
             .dropzone-overlay {
@@ -16829,6 +17273,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <button class="btn-icon" data-layout="columns" title="Masonry Layout">
                       <svg viewBox="0 0 24 24"><path d="M3 3h8v11H3zm10 0h8v6h-8zM3 16h8v5H3zm10-8h8v13h-8z"/></svg>
                     </button>
+                    <button class="btn-icon" data-layout="justified" title="Justified Masonry Layout">
+                      <svg viewBox="0 0 24 24"><path d="M3 4h8v7H3V4zm10 0h8v7h-8V4zm-10 9h5v7H3v-7zm7 0h11v7H10v-7z"/></svg>
+                    </button>
                     <button class="btn-icon" data-layout="list" title="List View">
                       <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
                     </button>
@@ -17023,6 +17470,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <div class="lightbox-header">
                 <div class="lightbox-title" id="lb-title">image.jpg</div>
                 <div style="display:flex; gap:0.4rem;">
+                  <button class="btn-icon" id="btn-lb-edit" title="Edit Image"><svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>
                   <button class="btn-icon" id="btn-lb-details" title="Metadata"><svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg></button>
                   <button class="btn-icon" id="btn-lb-download" title="Download"><svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg></button>
                   <button class="btn-icon" id="btn-lb-close" title="Close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
@@ -17442,6 +17890,100 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <button class="btn-primary" onclick="hdmEngine.prevSlide()">← Prev</button>
                   <span id="presentation-indicator" style="font-weight:700;">1 / 1</span>
                   <button class="btn-primary" onclick="hdmEngine.nextSlide()">Next →</button>
+                </div>
+              </div>
+
+              <!-- Comprehensive In-App Image Editor Modal -->
+              <div class="modal-box large" id="modal-image-editor" style="display:none; padding:0;">
+                <div class="editor-modal-header">
+                  <div class="editor-header-left">
+                    <button class="btn-icon modal-close" title="Back / Close" style="width:34px;height:34px;flex-shrink:0;">
+                      <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+                    </button>
+                    <div class="editor-title" id="image-editor-title">Image Editor</div>
+                  </div>
+                  <div class="editor-header-actions">
+                    <button class="btn-primary" id="btn-save-image-copy" style="height:32px; padding:0 0.8rem; background:transparent !important; color:#ffffff !important; border:1px solid rgba(255, 255, 255, 0.25) !important;">Save as Copy</button>
+                    <button class="btn-primary" id="btn-save-image-overwrite" style="height:32px; padding:0 0.85rem;">Save (Overwrite)</button>
+                  </div>
+                </div>
+
+                <div class="img-editor-nav">
+                  <button class="btn-icon" id="ie-undo" title="Undo (Ctrl+Z)" style="width:30px; height:30px;">
+                    <svg viewBox="0 0 24 24"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
+                  </button>
+                  <button class="btn-icon" id="ie-redo" title="Redo (Ctrl+Y)" style="width:30px; height:30px;">
+                    <svg viewBox="0 0 24 24"><path d="M18.4 10.6C16.55 8.99 14.15 8 11.5 8c-4.65 0-8.58 3.03-9.96 7.22L3.9 16c1.05-3.19 4.05-5.5 7.6-5.5 1.95 0 3.73.72 5.12 1.88L13 16h9V7l-3.6 3.6z"/></svg>
+                  </button>
+                  <div style="width:1px; height:18px; background:var(--md-sys-color-outline-variant); margin:0 0.2rem;"></div>
+                  <button class="img-editor-nav-btn active" data-ietab="tab-transform">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg> Transform
+                  </button>
+                  <button class="img-editor-nav-btn" data-ietab="tab-crop">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M17 15h2V7c0-1.1-.9-2-2-2H9v2h8v8zM7 17V1H5v4H1v2h4v10c0 1.1.9 2 2 2h10v4h2v-4h4v-2H7z"/></svg> Crop
+                  </button>
+                  <button class="img-editor-nav-btn" data-ietab="tab-adjust">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg> Adjust & Filters
+                  </button>
+                  <button class="img-editor-nav-btn" data-ietab="tab-text">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M5 4v3h5.5v12h3V7H19V4H5z"/></svg> Freeform Text
+                  </button>
+                  <button class="btn-icon" id="ie-global-reset" title="Reset to Original" style="margin-left:auto; width:30px; height:30px;">
+                    <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                  </button>
+                </div>
+
+                <div class="img-editor-subbar" id="ietab-tab-transform">
+                  <button class="btn-icon" id="ie-rotate-left" title="Rotate Left 90°"><svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg></button>
+                  <button class="btn-icon" id="ie-rotate-right" title="Rotate Right 90°"><svg viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 8-8 8-8z"/></svg></button>
+                  <button class="btn-icon" id="ie-flip-h" title="Flip Horizontal"><svg viewBox="0 0 24 24"><path d="M15 21h2v-2h-2v2zm4-12h2V7h-2v2zM3 5v14c0 1.1.9 2 2 2h4v-2H5V5h4V3H5c-1.1 0-2 .9-2 2zm16-2v2h2c0-1.1-.9-2-2-2zm-8 20h2V1h-2v22zm8-6h2v-2h-2v2zM15 5h2V3h-2v2zm4 8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2z"/></svg></button>
+                  <button class="btn-icon" id="ie-flip-v" title="Flip Vertical"><svg viewBox="0 0 24 24" style="transform:rotate(90deg);"><path d="M15 21h2v-2h-2v2zm4-12h2V7h-2v2zM3 5v14c0 1.1.9 2 2 2h4v-2H5V5h4V3H5c-1.1 0-2 .9-2 2zm16-2v2h2c0-1.1-.9-2-2-2zm-8 20h2V1h-2v22zm8-6h2v-2h-2v2zM15 5h2V3h-2v2zm4 8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2z"/></svg></button>
+                </div>
+
+                <div class="img-editor-subbar" id="ietab-tab-crop" style="display:none;">
+                  <span style="font-weight:700;">Aspect:</span>
+                  <select id="ie-crop-ratio" class="form-input" style="width:auto; padding:0.25rem 1.8rem 0.25rem 0.6rem; height:32px; font-size:0.78rem;">
+                    <option value="free">Freeform (Drag Handles)</option>
+                    <option value="1:1">1:1 Square</option>
+                    <option value="16:9">16:9 Landscape</option>
+                    <option value="4:3">4:3 Standard</option>
+                    <option value="9:16">9:16 Story</option>
+                  </select>
+                  <button class="btn-primary" id="ie-apply-crop" style="height:30px; padding:0 0.85rem; font-size:0.75rem;">Apply Crop</button>
+                  <button class="btn-primary" id="ie-cancel-crop" style="height:30px; padding:0 0.85rem; font-size:0.75rem; background:transparent !important; border:1px solid rgba(255,255,255,0.25) !important;">Cancel</button>
+                </div>
+
+                <div class="img-editor-subbar" id="ietab-tab-adjust" style="display:none;">
+                  <div style="display:flex; align-items:center; gap:0.35rem;">
+                    <span>Bright</span>
+                    <input type="range" class="slider-input" id="ie-brightness" min="40" max="180" value="100" style="width:60px;">
+                  </div>
+                  <div style="display:flex; align-items:center; gap:0.35rem;">
+                    <span>Contrast</span>
+                    <input type="range" class="slider-input" id="ie-contrast" min="40" max="180" value="100" style="width:60px;">
+                  </div>
+                  <div style="display:flex; align-items:center; gap:0.35rem;">
+                    <span>Saturate</span>
+                    <input type="range" class="slider-input" id="ie-saturate" min="0" max="200" value="100" style="width:60px;">
+                  </div>
+                  <label style="display:flex; align-items:center; gap:0.25rem; cursor:pointer;"><input type="checkbox" id="ie-grayscale"><span>Grayscale</span></label>
+                  <label style="display:flex; align-items:center; gap:0.25rem; cursor:pointer;"><input type="checkbox" id="ie-sepia"><span>Sepia</span></label>
+                  <label style="display:flex; align-items:center; gap:0.25rem; cursor:pointer;"><input type="checkbox" id="ie-invert"><span>Invert</span></label>
+                </div>
+
+                <div class="img-editor-subbar" id="ietab-tab-text" style="display:none;">
+                  <input type="text" id="ie-text-input" class="form-input" placeholder="Type text here..." style="width:140px; height:30px; padding:0.2rem 0.5rem; font-size:0.78rem;">
+                  <input type="number" id="ie-text-size" class="form-input" value="36" min="10" max="200" title="Font Size (px)" style="width:58px; height:30px; padding:0.2rem; font-size:0.78rem; text-align:center;">
+                  <input type="color" id="ie-text-color" value="#ffffff" title="Text Color" style="width:28px; height:28px; border:none; background:transparent; cursor:pointer;">
+                  <label style="display:flex; align-items:center; gap:0.3rem; cursor:pointer; font-size:0.75rem;">
+                    <input type="checkbox" id="ie-text-banner"><span>Header Banner</span>
+                  </label>
+                  <button class="btn-primary" id="ie-add-text-btn" style="height:30px; padding:0 0.8rem; font-size:0.75rem;">Stamp Text</button>
+                  <span style="font-size:0.72rem; color:var(--md-sys-color-outline); margin-left:auto;">💡 Click/drag canvas to position text</span>
+                </div>
+
+                <div class="img-editor-canvas-wrap">
+                  <canvas id="image-editor-canvas"></canvas>
                 </div>
               </div>
 
@@ -17930,6 +18472,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   if (item) window.location.href = `?access=admin&page=drive&action=download&f=${encodeURIComponent(item.path)}`;
                 });
 
+                document.getElementById('btn-lb-edit').addEventListener('click', () => {
+                  const item = this.mediaList[this.currentIndex];
+                  if (item && item.type === 'image' && window.app) {
+                    this.close(false);
+                    app.openImageEditor(item.path, item.name || item.path.split('/').pop());
+                  }
+                });
+
                 document.getElementById('btn-lb-details').addEventListener('click', () => {
                   const item = this.mediaList[this.currentIndex];
                   if (item && window.app) app.showDetails(item.path);
@@ -18062,31 +18612,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   }
                 } else {
                   this.body.innerHTML = `
-                    <svg class="m3-spinner lb-spinner active" id="lb-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
-                    <img class="lightbox-media" id="lb-img" src="" alt="${fileName}" style="opacity:0;">
+                    <img class="lightbox-media" id="lb-img" src="${rawUrl}" alt="${fileName}">
                     ${navPrev}
                     ${navNext}
                   `;
-
-                  const img = document.getElementById('lb-img');
-                  const spinner = document.getElementById('lb-spinner');
-                  const preloader = new Image();
-                  preloader.onload = () => {
-                    if (!this.mediaList[this.currentIndex] || this.mediaList[this.currentIndex].path !== item.path) return;
-                    if (spinner) spinner.classList.remove('active');
-                    if (img) {
-                      img.src = rawUrl;
-                      img.style.opacity = '1';
-                    }
-                  };
-                  preloader.onerror = () => {
-                    if (spinner) spinner.classList.remove('active');
-                    if (img) {
-                      img.src = rawUrl;
-                      img.style.opacity = '1';
-                    }
-                  };
-                  preloader.src = rawUrl;
                 }
 
                 const btnPrev = document.getElementById('lb-prev');
@@ -18827,11 +19356,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (this.sliderColsVal) this.sliderColsVal.innerText = text;
                 if (this.sliderColsDeskVal) this.sliderColsDeskVal.innerText = text;
 
+                // Row height scale mapping for Justified Masonry
+                const heightMap = { 0: '200px', 1: '380px', 2: '320px', 3: '270px', 4: '220px', 5: '185px', 6: '155px', 8: '125px' };
+                this.container.style.setProperty('--justified-row-height', heightMap[this.gridCols] || '200px');
+
                 if (this.currentSection === 'activity' || this.currentSection === 'trash') {
                   return;
                 }
 
-                if (this.layout === 'columns') {
+                if (this.layout === 'columns' || this.layout === 'justified') {
                   this.renderLimit = 25;
                   this.renderGallery(true);
                 }
@@ -19531,7 +20064,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                     if (item.type === 'image') {
                       card.classList.add('has-image');
-                      thumbHtml = `<img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}" alt="" loading="lazy" decoding="async" onload="this.style.opacity='1';">`;
+                      thumbHtml = `<img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}" alt="" loading="lazy" decoding="async" onload="this.style.opacity='1'; if(this.naturalWidth && this.naturalHeight && window.app && window.app.layout==='justified'){ const c=this.closest('.file-card'); if(c){ const r=this.naturalWidth/this.naturalHeight; c.style.setProperty('--card-grow', r); c.style.setProperty('--card-ratio', r); } }">`;
                       if (this.layout === 'columns') {
                         thumbRatio = 'style="min-height:140px; height:auto;"';
                       }
@@ -20200,6 +20733,630 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     </div>
                   `;
                 }
+              }
+
+              openImageEditor(path, name) {
+                this.activeModalPath = path;
+                document.getElementById('image-editor-title').innerText = `Edit: ${name}`;
+                const canvas = document.getElementById('image-editor-canvas');
+                const ctx = canvas.getContext('2d');
+
+                // Prevent native browser drag & selection on canvas
+                canvas.onselectstart = () => false;
+                canvas.ondragstart = (e) => { e.preventDefault(); return false; };
+
+                let baseImg = new Image();
+                baseImg.crossOrigin = 'anonymous';
+
+                let historyStack = [];
+                let redoStack = [];
+
+                let state = {
+                  rotation: 0,
+                  flipH: 1,
+                  flipV: 1,
+                  brightness: 100,
+                  contrast: 100,
+                  saturate: 100,
+                  grayscale: false,
+                  sepia: false,
+                  invert: false,
+                  cropActive: false,
+                  cropRatio: 'free',
+                  textActive: false
+                };
+
+                let crop = {
+                  x: 0, y: 0, w: 0, h: 0,
+                  activeHandle: null,
+                  startX: 0, startY: 0,
+                  origX: 0, origY: 0, origW: 0, origH: 0
+                };
+
+                let freeText = {
+                  x: 100, y: 100,
+                  isDragging: false,
+                  hasMoved: false,
+                  dragOffsetX: 0,
+                  dragOffsetY: 0
+                };
+
+                window.resetImageEditorSession = () => {
+                  historyStack = [];
+                  redoStack = [];
+                  baseImg.onload = null;
+                  baseImg.src = '';
+                  canvas.width = 1;
+                  canvas.height = 1;
+                  ctx.clearRect(0, 0, 1, 1);
+                  const txtInput = document.getElementById('ie-text-input');
+                  if (txtInput) txtInput.value = '';
+                  state.textActive = false;
+                  state.cropActive = false;
+                  freeText.isDragging = false;
+                };
+
+                const updateCanvasSize = () => {
+                  const isVert = state.rotation % 180 !== 0;
+                  const targetW = isVert ? baseImg.height : baseImg.width;
+                  const targetH = isVert ? baseImg.width : baseImg.height;
+                  if (canvas.width !== targetW || canvas.height !== targetH) {
+                    canvas.width = targetW;
+                    canvas.height = targetH;
+                  }
+                };
+
+                const renderFilters = () => {
+                  let f = [];
+                  if (state.brightness !== 100) f.push(`brightness(${state.brightness}%)`);
+                  if (state.contrast !== 100) f.push(`contrast(${state.contrast}%)`);
+                  if (state.saturate !== 100) f.push(`saturate(${state.saturate}%)`);
+                  if (state.grayscale) f.push(`grayscale(100%)`);
+                  if (state.sepia) f.push(`sepia(100%)`);
+                  if (state.invert) f.push(`invert(100%)`);
+                  return f.length ? f.join(' ') : 'none';
+                };
+
+                const pushSnapshot = () => {
+                  const temp = document.createElement('canvas');
+                  const isVert = state.rotation % 180 !== 0;
+                  temp.width = isVert ? baseImg.height : baseImg.width;
+                  temp.height = isVert ? baseImg.width : baseImg.height;
+                  const tctx = temp.getContext('2d');
+                  tctx.translate(temp.width / 2, temp.height / 2);
+                  tctx.rotate((state.rotation * Math.PI) / 180);
+                  tctx.scale(state.flipH, state.flipV);
+                  tctx.filter = renderFilters();
+                  tctx.drawImage(baseImg, -baseImg.width / 2, -baseImg.height / 2);
+
+                  historyStack.push(temp.toDataURL('image/png'));
+                  if (historyStack.length > 30) historyStack.shift();
+                  redoStack = [];
+                  updateUndoUI();
+                };
+
+                const updateUndoUI = () => {
+                  const btnUndo = document.getElementById('ie-undo');
+                  const btnRedo = document.getElementById('ie-redo');
+                  if (btnUndo) {
+                    btnUndo.style.opacity = historyStack.length > 0 ? '1' : '0.35';
+                    btnUndo.style.pointerEvents = historyStack.length > 0 ? 'auto' : 'none';
+                  }
+                  if (btnRedo) {
+                    btnRedo.style.opacity = redoStack.length > 0 ? '1' : '0.35';
+                    btnRedo.style.pointerEvents = redoStack.length > 0 ? 'auto' : 'none';
+                  }
+                };
+
+                const initCropBounds = () => {
+                  let cw = canvas.width * 0.75;
+                  let ch = canvas.height * 0.75;
+                  if (state.cropRatio === '1:1') { const s = Math.min(cw, ch); cw = s; ch = s; }
+                  else if (state.cropRatio === '16:9') { ch = cw * (9 / 16); }
+                  else if (state.cropRatio === '4:3') { ch = cw * (3 / 4); }
+                  else if (state.cropRatio === '9:16') { cw = ch * (9 / 16); }
+                  crop.x = Math.round((canvas.width - cw) / 2);
+                  crop.y = Math.round((canvas.height - ch) / 2);
+                  crop.w = Math.round(cw);
+                  crop.h = Math.round(ch);
+                };
+
+                const getTextMetrics = () => {
+                  const txt = document.getElementById('ie-text-input')?.value || 'Your Text Here';
+                  const size = parseInt(document.getElementById('ie-text-size')?.value || '36', 10);
+                  const isBanner = document.getElementById('ie-text-banner')?.checked;
+
+                  ctx.save();
+                  ctx.font = `bold ${size}px sans-serif`;
+                  const metrics = ctx.measureText(txt);
+                  ctx.restore();
+
+                  const w = isBanner ? canvas.width : metrics.width + 30;
+                  const h = isBanner ? size * 2.2 : size + 20;
+
+                  return {
+                    txt, size, isBanner, w, h,
+                    left: isBanner ? 0 : freeText.x - w / 2,
+                    top: freeText.y - h / 2,
+                    right: isBanner ? canvas.width : freeText.x + w / 2,
+                    bottom: freeText.y + h / 2
+                  };
+                };
+
+                const isInsideText = (pt) => {
+                  const tm = getTextMetrics();
+                  return pt.x >= tm.left && pt.x <= tm.right && pt.y >= tm.top && pt.y <= tm.bottom;
+                };
+
+                const redraw = () => {
+                  updateCanvasSize();
+
+                  if (!freeText.hasMoved) {
+                    freeText.x = Math.round(canvas.width / 2);
+                    freeText.y = Math.round(canvas.height / 2);
+                  }
+
+                  ctx.save();
+                  ctx.clearRect(0, 0, canvas.width, canvas.height);
+                  ctx.translate(canvas.width / 2, canvas.height / 2);
+                  ctx.rotate((state.rotation * Math.PI) / 180);
+                  ctx.scale(state.flipH, state.flipV);
+                  ctx.filter = renderFilters();
+                  ctx.drawImage(baseImg, -baseImg.width / 2, -baseImg.height / 2);
+                  ctx.restore();
+
+                  // Clear Viewport Crop Drawing
+                  if (state.cropActive) {
+                    if (crop.w === 0 || crop.h === 0) initCropBounds();
+
+                    ctx.save();
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+                    ctx.fillRect(0, 0, canvas.width, crop.y);
+                    ctx.fillRect(0, crop.y + crop.h, canvas.width, canvas.height - (crop.y + crop.h));
+                    ctx.fillRect(0, crop.y, crop.x, crop.h);
+                    ctx.fillRect(crop.x + crop.w, crop.y, canvas.width - (crop.x + crop.w), crop.h);
+
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(crop.x + crop.w / 3, crop.y, 0, crop.h);
+                    ctx.strokeRect(crop.x + (crop.w * 2) / 3, crop.y, 0, crop.h);
+                    ctx.strokeRect(crop.x, crop.y + crop.h / 3, crop.w, 0);
+                    ctx.strokeRect(crop.x, crop.y + (crop.h * 2) / 3, crop.w, 0);
+
+                    ctx.strokeStyle = '#ff0000';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(crop.x, crop.y, crop.w, crop.h);
+
+                    const hs = Math.max(10, Math.round(canvas.width / 100));
+                    ctx.fillStyle = '#ffffff';
+                    ctx.strokeStyle = '#ff0000';
+                    ctx.lineWidth = 1.5;
+
+                    const handles = [
+                      [crop.x, crop.y], [crop.x + crop.w, crop.y],
+                      [crop.x, crop.y + crop.h], [crop.x + crop.w, crop.y + crop.h],
+                      [crop.x + crop.w / 2, crop.y], [crop.x + crop.w / 2, crop.y + crop.h],
+                      [crop.x, crop.y + crop.h / 2], [crop.x + crop.w, crop.y + crop.h / 2]
+                    ];
+                    handles.forEach(([hx, hy]) => {
+                      ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
+                      ctx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs);
+                    });
+                    ctx.restore();
+                  }
+
+                  // Live Draggable Freeform Text Preview
+                  if (state.textActive) {
+                    const tm = getTextMetrics();
+                    const color = document.getElementById('ie-text-color')?.value || '#ffffff';
+
+                    ctx.save();
+                    ctx.font = `bold ${tm.size}px sans-serif`;
+
+                    if (tm.isBanner) {
+                      ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+                      ctx.fillRect(0, freeText.y - tm.h / 2, canvas.width, tm.h);
+                      ctx.fillStyle = color;
+                      ctx.textAlign = 'center';
+                      ctx.textBaseline = 'middle';
+                      ctx.fillText(tm.txt, canvas.width / 2, freeText.y);
+
+                      ctx.fillStyle = '#ff0000';
+                      ctx.beginPath();
+                      ctx.arc(canvas.width / 2, freeText.y, 6, 0, Math.PI * 2);
+                      ctx.fill();
+                    } else {
+                      ctx.fillStyle = color;
+                      ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+                      ctx.shadowBlur = 8;
+                      ctx.textAlign = 'center';
+                      ctx.textBaseline = 'middle';
+                      ctx.fillText(tm.txt, freeText.x, freeText.y);
+
+                      ctx.shadowBlur = 0;
+                      ctx.strokeStyle = 'rgba(255, 0, 0, 0.85)';
+                      ctx.lineWidth = 1.5;
+                      ctx.setLineDash([4, 4]);
+                      ctx.strokeRect(tm.left, tm.top, tm.w, tm.h);
+                      ctx.setLineDash([]);
+
+                      ctx.fillStyle = '#ff0000';
+                      ctx.beginPath();
+                      ctx.arc(freeText.x, freeText.y, 5, 0, Math.PI * 2);
+                      ctx.fill();
+                    }
+                    ctx.restore();
+                  }
+                };
+
+                const getCanvasPoint = (e) => {
+                  const rect = canvas.getBoundingClientRect();
+                  const scaleX = canvas.width / rect.width;
+                  const scaleY = canvas.height / rect.height;
+                  const cx = e.touches ? e.touches[0].clientX : e.clientX;
+                  const cy = e.touches ? e.touches[0].clientY : e.clientY;
+                  return {
+                    x: Math.max(0, Math.min(canvas.width, (cx - rect.left) * scaleX)),
+                    y: Math.max(0, Math.min(canvas.height, (cy - rect.top) * scaleY))
+                  };
+                };
+
+                const getCropHandleAt = (pt) => {
+                  const threshold = Math.max(16, Math.round(canvas.width / 45));
+                  const near = (hx, hy) => Math.hypot(pt.x - hx, pt.y - hy) < threshold;
+
+                  if (near(crop.x, crop.y)) return 'nw';
+                  if (near(crop.x + crop.w, crop.y)) return 'ne';
+                  if (near(crop.x, crop.y + crop.h)) return 'sw';
+                  if (near(crop.x + crop.w, crop.y + crop.h)) return 'se';
+
+                  if (near(crop.x + crop.w / 2, crop.y)) return 'n';
+                  if (near(crop.x + crop.w / 2, crop.y + crop.h)) return 's';
+                  if (near(crop.x, crop.y + crop.h / 2)) return 'w';
+                  if (near(crop.x + crop.w, crop.y + crop.h / 2)) return 'e';
+
+                  if (pt.x >= crop.x && pt.x <= crop.x + crop.w && pt.y >= crop.y && pt.y <= crop.y + crop.h) return 'move';
+                  return null;
+                };
+
+                canvas.onmousedown = canvas.ontouchstart = (e) => {
+                  if (e.cancelable) e.preventDefault();
+                  const pt = getCanvasPoint(e);
+
+                  if (state.cropActive) {
+                    const handle = getCropHandleAt(pt);
+                    if (handle) {
+                      crop.activeHandle = handle;
+                      crop.startX = pt.x;
+                      crop.startY = pt.y;
+                      crop.origX = crop.x;
+                      crop.origY = crop.y;
+                      crop.origW = crop.w;
+                      crop.origH = crop.h;
+                    }
+                  } else if (state.textActive) {
+                    freeText.isDragging = true;
+                    freeText.hasMoved = true;
+                    if (isInsideText(pt)) {
+                      freeText.dragOffsetX = pt.x - freeText.x;
+                      freeText.dragOffsetY = pt.y - freeText.y;
+                    } else {
+                      freeText.x = pt.x;
+                      freeText.y = pt.y;
+                      freeText.dragOffsetX = 0;
+                      freeText.dragOffsetY = 0;
+                    }
+                    redraw();
+                  }
+                };
+
+                canvas.onmousemove = (e) => {
+                  if (state.cropActive && !crop.activeHandle) {
+                    const pt = getCanvasPoint(e);
+                    const h = getCropHandleAt(pt);
+                    if (h === 'nw' || h === 'se') canvas.style.cursor = 'nwse-resize';
+                    else if (h === 'ne' || h === 'sw') canvas.style.cursor = 'nesw-resize';
+                    else if (h === 'n' || h === 's') canvas.style.cursor = 'ns-resize';
+                    else if (h === 'e' || h === 'w') canvas.style.cursor = 'ew-resize';
+                    else if (h === 'move') canvas.style.cursor = 'move';
+                    else canvas.style.cursor = 'crosshair';
+                  } else if (state.textActive) {
+                    const pt = getCanvasPoint(e);
+                    canvas.style.cursor = isInsideText(pt) ? 'grab' : 'crosshair';
+                  } else {
+                    canvas.style.cursor = 'default';
+                  }
+                };
+
+                window.onmousemove = window.ontouchmove = (e) => {
+                  if (state.cropActive && crop.activeHandle) {
+                    if (e.cancelable) e.preventDefault();
+                    const pt = getCanvasPoint(e);
+                    const dx = pt.x - crop.startX;
+                    const dy = pt.y - crop.startY;
+
+                    if (crop.activeHandle === 'move') {
+                      crop.x = Math.max(0, Math.min(canvas.width - crop.w, crop.origX + dx));
+                      crop.y = Math.max(0, Math.min(canvas.height - crop.h, crop.origY + dy));
+                    } else {
+                      let nx = crop.origX, ny = crop.origY, nw = crop.origW, nh = crop.origH;
+
+                      if (crop.activeHandle.includes('e')) nw = Math.max(20, crop.origW + dx);
+                      if (crop.activeHandle.includes('s')) nh = Math.max(20, crop.origH + dy);
+                      if (crop.activeHandle.includes('w')) {
+                        const cdx = Math.min(dx, crop.origW - 20);
+                        nx = crop.origX + cdx;
+                        nw = crop.origW - cdx;
+                      }
+                      if (crop.activeHandle.includes('n')) {
+                        const cdy = Math.min(dy, crop.origH - 20);
+                        ny = crop.origY + cdy;
+                        nh = crop.origH - cdy;
+                      }
+
+                      if (state.cropRatio !== 'free') {
+                        let r = 1;
+                        if (state.cropRatio === '16:9') r = 16 / 9;
+                        else if (state.cropRatio === '4:3') r = 4 / 3;
+                        else if (state.cropRatio === '9:16') r = 9 / 16;
+
+                        if (crop.activeHandle.includes('e') || crop.activeHandle.includes('w')) {
+                          nh = nw / r;
+                        } else {
+                          nw = nh * r;
+                        }
+                      }
+
+                      if (nx >= 0 && ny >= 0 && nx + nw <= canvas.width && ny + nh <= canvas.height) {
+                        crop.x = nx; crop.y = ny; crop.w = nw; crop.h = nh;
+                      }
+                    }
+                    redraw();
+                  } else if (state.textActive && freeText.isDragging) {
+                    if (e.cancelable) e.preventDefault();
+                    const pt = getCanvasPoint(e);
+                    freeText.x = Math.max(10, Math.min(canvas.width - 10, pt.x - freeText.dragOffsetX));
+                    freeText.y = Math.max(10, Math.min(canvas.height - 10, pt.y - freeText.dragOffsetY));
+                    redraw();
+                  }
+                };
+
+                window.onmouseup = window.ontouchend = () => {
+                  crop.activeHandle = null;
+                  freeText.isDragging = false;
+                };
+
+                baseImg.onload = () => {
+                  state = { rotation: 0, flipH: 1, flipV: 1, brightness: 100, contrast: 100, saturate: 100, grayscale: false, sepia: false, invert: false, cropActive: false, cropRatio: 'free', textActive: false };
+                  historyStack = [];
+                  redoStack = [];
+                  crop.w = 0;
+                  freeText.hasMoved = false;
+                  updateCanvasSize();
+                  updateUndoUI();
+                  redraw();
+                };
+                baseImg.src = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(path)}&t=${Date.now()}`;
+
+                // Tab Navigation
+                const tabs = ['tab-transform', 'tab-crop', 'tab-adjust', 'tab-text'];
+                document.querySelectorAll('.img-editor-nav-btn').forEach(btn => {
+                  btn.onclick = () => {
+                    document.querySelectorAll('.img-editor-nav-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    const target = btn.dataset.ietab;
+                    tabs.forEach(t => {
+                      const el = document.getElementById('ietab-' + t);
+                      if (el) el.style.display = (t === target) ? 'flex' : 'none';
+                    });
+                    state.cropActive = (target === 'tab-crop');
+                    state.textActive = (target === 'tab-text');
+                    if (state.cropActive) initCropBounds();
+                    redraw();
+                  };
+                });
+
+                // Clean Undo System (Clears live text so it never gets redrawn over restored state)
+                const applyHistoryState = (dataUrl) => {
+                  const nextImg = new Image();
+                  nextImg.crossOrigin = 'anonymous';
+                  nextImg.onload = () => {
+                    baseImg = nextImg;
+                    state.rotation = 0;
+                    state.flipH = 1;
+                    state.flipV = 1;
+                    state.cropActive = false;
+                    state.textActive = false;
+                    freeText.hasMoved = false;
+                    document.querySelectorAll('.img-editor-nav-btn').forEach(b => b.classList.remove('active'));
+                    document.querySelector('.img-editor-nav-btn[data-ietab="tab-transform"]')?.classList.add('active');
+                    tabs.forEach(t => {
+                      const el = document.getElementById('ietab-' + t);
+                      if (el) el.style.display = (t === 'tab-transform') ? 'flex' : 'none';
+                    });
+                    const txtInput = document.getElementById('ie-text-input');
+                    if (txtInput) txtInput.value = '';
+                    redraw();
+                    updateUndoUI();
+                  };
+                  nextImg.src = dataUrl;
+                };
+
+                document.getElementById('ie-undo').onclick = () => {
+                  if (historyStack.length === 0) return;
+                  const temp = document.createElement('canvas');
+                  temp.width = canvas.width;
+                  temp.height = canvas.height;
+                  temp.getContext('2d').drawImage(canvas, 0, 0);
+                  redoStack.push(temp.toDataURL('image/png'));
+
+                  const prev = historyStack.pop();
+                  applyHistoryState(prev);
+                };
+
+                document.getElementById('ie-redo').onclick = () => {
+                  if (redoStack.length === 0) return;
+                  const temp = document.createElement('canvas');
+                  temp.width = canvas.width;
+                  temp.height = canvas.height;
+                  temp.getContext('2d').drawImage(canvas, 0, 0);
+                  historyStack.push(temp.toDataURL('image/png'));
+
+                  const next = redoStack.pop();
+                  applyHistoryState(next);
+                };
+
+                window.addEventListener('keydown', (e) => {
+                  const modalOpen = document.getElementById('modal-image-editor')?.style.display === 'flex';
+                  if (!modalOpen) return;
+                  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+                    e.preventDefault();
+                    document.getElementById('ie-undo')?.click();
+                  } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
+                    e.preventDefault();
+                    document.getElementById('ie-redo')?.click();
+                  }
+                });
+
+                // Transform Controls
+                document.getElementById('ie-rotate-left').onclick = () => { pushSnapshot(); state.rotation = (state.rotation - 90 + 360) % 360; redraw(); };
+                document.getElementById('ie-rotate-right').onclick = () => { pushSnapshot(); state.rotation = (state.rotation + 90) % 360; redraw(); };
+                document.getElementById('ie-flip-h').onclick = () => { pushSnapshot(); state.flipH *= -1; redraw(); };
+                document.getElementById('ie-flip-v').onclick = () => { pushSnapshot(); state.flipV *= -1; redraw(); };
+
+                // Adjust Sliders
+                document.getElementById('ie-brightness').oninput = (e) => { state.brightness = e.target.value; redraw(); };
+                document.getElementById('ie-contrast').oninput = (e) => { state.contrast = e.target.value; redraw(); };
+                document.getElementById('ie-saturate').oninput = (e) => { state.saturate = e.target.value; redraw(); };
+                document.getElementById('ie-grayscale').onchange = (e) => { state.grayscale = e.target.checked; redraw(); };
+                document.getElementById('ie-sepia').onchange = (e) => { state.sepia = e.target.checked; redraw(); };
+                document.getElementById('ie-invert').onchange = (e) => { state.invert = e.target.checked; redraw(); };
+
+                // Crop Controls
+                document.getElementById('ie-crop-ratio').onchange = (e) => {
+                  state.cropRatio = e.target.value;
+                  initCropBounds();
+                  redraw();
+                };
+
+                document.getElementById('ie-apply-crop').onclick = () => {
+                  pushSnapshot();
+                  const temp = document.createElement('canvas');
+                  temp.width = Math.max(1, crop.w);
+                  temp.height = Math.max(1, crop.h);
+                  const tctx = temp.getContext('2d');
+                  state.cropActive = false;
+                  redraw();
+                  tctx.drawImage(canvas, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
+
+                  baseImg = new Image();
+                  baseImg.onload = () => {
+                    state.rotation = 0;
+                    state.flipH = 1;
+                    state.flipV = 1;
+                    crop.w = 0;
+                    redraw();
+                  };
+                  baseImg.src = temp.toDataURL('image/png');
+                  this.toast('Crop applied');
+                };
+
+                document.getElementById('ie-cancel-crop').onclick = () => {
+                  state.cropActive = false;
+                  redraw();
+                };
+
+                // Freeform Text Controls
+                ['ie-text-input', 'ie-text-size', 'ie-text-color', 'ie-text-banner'].forEach(id => {
+                  document.getElementById(id)?.addEventListener('input', redraw);
+                });
+
+                document.getElementById('ie-add-text-btn').onclick = () => {
+                  const txt = document.getElementById('ie-text-input')?.value.trim();
+                  if (!txt) return;
+                  pushSnapshot();
+
+                  state.textActive = false;
+
+                  updateCanvasSize();
+                  ctx.save();
+                  ctx.clearRect(0, 0, canvas.width, canvas.height);
+                  ctx.translate(canvas.width / 2, canvas.height / 2);
+                  ctx.rotate((state.rotation * Math.PI) / 180);
+                  ctx.scale(state.flipH, state.flipV);
+                  ctx.filter = renderFilters();
+                  ctx.drawImage(baseImg, -baseImg.width / 2, -baseImg.height / 2);
+                  ctx.restore();
+
+                  const size = parseInt(document.getElementById('ie-text-size')?.value || '36', 10);
+                  const color = document.getElementById('ie-text-color')?.value || '#ffffff';
+                  const isBanner = document.getElementById('ie-text-banner')?.checked;
+
+                  ctx.save();
+                  ctx.font = `bold ${size}px sans-serif`;
+
+                  if (isBanner) {
+                    const bannerH = size * 2.2;
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+                    ctx.fillRect(0, freeText.y - bannerH / 2, canvas.width, bannerH);
+                    ctx.fillStyle = color;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(txt, canvas.width / 2, freeText.y);
+                  } else {
+                    ctx.fillStyle = color;
+                    ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+                    ctx.shadowBlur = 8;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(txt, freeText.x, freeText.y);
+                  }
+                  ctx.restore();
+
+                  const nextImg = new Image();
+                  nextImg.crossOrigin = 'anonymous';
+                  nextImg.onload = () => {
+                    baseImg = nextImg;
+                    state.rotation = 0;
+                    state.flipH = 1;
+                    state.flipV = 1;
+                    const txtInp = document.getElementById('ie-text-input');
+                    if (txtInp) txtInp.value = '';
+                    redraw();
+                  };
+                  nextImg.src = canvas.toDataURL('image/png');
+                  this.toast('Text stamped to image');
+                };
+
+                document.getElementById('ie-global-reset').onclick = () => {
+                  baseImg.src = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(path)}&t=${Date.now()}`;
+                  this.toast('Reset all changes');
+                };
+
+                const executeSave = (mode) => {
+                  state.cropActive = false;
+                  state.textActive = false;
+                  redraw();
+
+                  const ext = (name.split('.').pop() || 'jpg').toLowerCase();
+                  const mime = (ext === 'png') ? 'image/png' : (ext === 'webp' ? 'image/webp' : 'image/jpeg');
+                  const dataUrl = canvas.toDataURL(mime, 0.94);
+
+                  this.api('save_image', { f: path, image_data: dataUrl, save_mode: mode }, (res) => {
+                    this.toast(mode === 'copy' ? `Saved duplicate: ${res.filename}` : 'Image updated successfully');
+                    this.closeModals();
+                    this.refresh();
+                  });
+                };
+
+                document.getElementById('btn-save-image-overwrite').onclick = () => {
+                  if (confirm(`Permanently overwrite and replace "${name}"?`)) {
+                    executeSave('overwrite');
+                  }
+                };
+                document.getElementById('btn-save-image-copy').onclick = () => executeSave('copy');
+
+                this.showModal('modal-image-editor');
               }
 
               openEditor(path, name) {
@@ -20992,10 +22149,51 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               createShareLink(path) {
                 this.api('share_create', { f: path }, (res) => {
-                  const url = `${window.location.origin}${window.location.pathname}?share=${res.token}`;
-                  navigator.clipboard.writeText(url);
-                  this.toast('Share link copied to clipboard!');
+                  const currentScript = window.location.pathname;
+                  const url = `${window.location.origin}${currentScript}?access=admin&page=drive&share=${res.token}`;
+                  this.copyToClipboard(url, 'Share link copied to clipboard!');
                 });
+              }
+
+              copyDirectUrl(path) {
+                const currentScript = window.location.pathname;
+                const directUrl = `${window.location.origin}${currentScript}?access=admin&page=drive&action=raw&f=${encodeURIComponent(path)}`;
+                this.copyToClipboard(directUrl, 'Direct URL copied to clipboard!');
+              }
+
+              copyToClipboard(text, successMsg = 'Copied to clipboard!') {
+                if (navigator.clipboard && window.isSecureContext) {
+                  navigator.clipboard.writeText(text).then(() => {
+                    this.toast(successMsg);
+                  }).catch(() => {
+                    this.fallbackCopy(text, successMsg);
+                  });
+                } else {
+                  this.fallbackCopy(text, successMsg);
+                }
+              }
+
+              fallbackCopy(text, successMsg = 'Copied to clipboard!') {
+                try {
+                  const ta = document.createElement('textarea');
+                  ta.value = text;
+                  ta.setAttribute('readonly', '');
+                  ta.style.position = 'fixed';
+                  ta.style.top = '-9999px';
+                  ta.style.left = '-9999px';
+                  document.body.appendChild(ta);
+                  ta.select();
+                  ta.setSelectionRange(0, 99999);
+                  const ok = document.execCommand('copy');
+                  document.body.removeChild(ta);
+                  if (ok) {
+                    this.toast(successMsg);
+                  } else {
+                    prompt('Copy link:', text);
+                  }
+                } catch (err) {
+                  prompt('Copy link:', text);
+                }
               }
 
               setClipboard(operation) {
@@ -21024,12 +22222,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   if (this.clipboard.operation === 'cut') this.clipboard = null;
                   this.refresh();
                 });
-              }
-
-              copyDirectUrl(path) {
-                const directUrl = new URL('?access=admin&page=drive&action=raw&f=' + encodeURIComponent(path), window.location.href).href;
-                navigator.clipboard.writeText(directUrl);
-                this.toast('Direct URL copied to clipboard');
               }
 
               openInNewTab(path, type) {
@@ -21092,6 +22284,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (type === 'folder') {
                   addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Preview / Open', () => this.navigate(path));
                   addItem('<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>', 'Open in a new tab', () => this.openInNewTab(path, 'folder'));
+                  addItem('<svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>', 'Public Folder Link', () => this.createShareLink(path));
                   addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => this.downloadZipWithProgress(`?access=admin&page=drive&action=download_zip&dir=${encodeURIComponent(path)}`, null, `${name}.zip`));
                   addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>', 'Compress to ZIP', () => {
                     this.showInputModal('Compress Folder', 'Archive Filename (.zip)', `${name}.zip`, (zipName) => {
@@ -21117,6 +22310,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   }
                   addItem('<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>', 'Open in a new tab', () => this.openInNewTab(path, 'file'));
                   addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => { window.location.href = `?access=admin&page=drive&action=download&f=${encodeURIComponent(path)}`; });
+                  if (fileType === 'image') {
+                    addItem('<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>', 'Edit Image', () => this.openImageEditor(path, name));
+                  }
                   if (fileType !== 'archive') {
                     addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>', 'Compress to ZIP', () => {
                       const baseName = name.replace(/\.[^/.]+$/, '');
@@ -21441,6 +22637,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
         
               closeModals() {
+                // Reset and cleanup Image Editor state & memory cache on close
+                if (typeof window.resetImageEditorSession === 'function') {
+                  window.resetImageEditorSession();
+                }
+
+                // If Media Lightbox is currently open behind the details modal, keep lightbox open without navigating away!
+                const isLightboxActive = document.getElementById('lightbox')?.classList.contains('active');
+                if (isLightboxActive) {
+                  this.modalStack = [];
+                  const mb = document.getElementById('modal-backdrop');
+                  if (mb) mb.classList.remove('active');
+                  document.querySelectorAll('.modal-box').forEach(m => m.style.display = 'none');
+                  return;
+                }
+
                 if (this.modalStack && this.modalStack.length > 0) {
                   const prevModalId = this.modalStack.pop();
                   document.querySelectorAll('.modal-box').forEach(m => m.style.display = 'none');
@@ -21512,11 +22723,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         
               toast(msg) {
                 const container = document.getElementById('toast-container');
+                if (!container) return;
                 const el = document.createElement('div');
-                el.className = 'toast';
-                el.innerHTML = `<span>${msg}</span>`;
+                el.className = 'toast drive-toast show';
+                el.innerHTML = `<svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:#4ade80;flex-shrink:0;"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg><span>${msg}</span>`;
                 container.appendChild(el);
-                setTimeout(() => el.remove(), 3000);
+                setTimeout(() => {
+                  el.style.opacity = '0';
+                  el.style.transition = 'opacity 0.25s ease';
+                  setTimeout(() => el.remove(), 250);
+                }, 3000);
               }
             }
         
