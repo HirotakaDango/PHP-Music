@@ -452,7 +452,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '9.7');
+define('APP_VERSION', '9.8');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -805,31 +805,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         if (function_exists('set_time_limit')) @set_time_limit(120);
 
         $cacheReal = realpath($cacheDir);
-        $cacheFile = $cacheDir . DIRECTORY_SEPARATOR . 'fstat_' . md5($dirPath) . '.dat';
-        $currentMtime = @filemtime($dirPath) ?: 0;
-
-        if (file_exists($cacheFile)) {
-          $fp = @fopen($cacheFile, 'rb');
-          if ($fp) {
-            $header = fread($fp, 128);
-            fclose($fp);
-            if ($header) {
-              $lines = explode("\n", trim($header));
-              if (count($lines) >= 4 && intval($lines[0]) >= $currentMtime) {
-                return [
-                  'size'    => floatval($lines[1]),
-                  'files'   => intval($lines[2]),
-                  'folders' => intval($lines[3])
-                ];
-              }
-            }
-          }
-        }
-
         $size = 0.0;
         $files = 0;
         $folders = 0;
-        $ignoreDirs = ['.gallery_cache', '.drive_trash_bin', '.file_version', '.git'];
+        $ignoreDirs = ['.gallery_cache', '.drive_trash_bin', '.file_version', '.git', 'node_modules', 'vendor'];
 
         $queue = [$dirPath];
         while (!empty($queue)) {
@@ -838,7 +817,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           if (!$dh) continue;
 
           while (($entry = @readdir($dh)) !== false) {
-            if ($entry === '.' || $entry === '..' || in_array($entry, $ignoreDirs) || $entry[0] === '.') {
+            if ($entry === '.' || $entry === '..' || in_array($entry, $ignoreDirs) || $entry[0] === '.' || preg_match('/\.(part|crdownload|tmp|swp)$/i', $entry)) {
               continue;
             }
             $full = $currentDir . DIRECTORY_SEPARATOR . $entry;
@@ -854,12 +833,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
           }
           @closedir($dh);
-        }
-
-        $outFp = @fopen($cacheFile, 'wb');
-        if ($outFp) {
-          fprintf($outFp, "%d\n%.0f\n%d\n%d\n", $currentMtime, $size, $files, $folders);
-          fclose($outFp);
         }
 
         return ['size' => $size, 'files' => $files, 'folders' => $folders];
@@ -906,6 +879,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $lon = driveParseGPSCoordinate($exif['GPS']['GPSLongitude'], $exif['GPS']['GPSLongitudeRef']);
               if ($lat !== null && $lon !== null) {
                 $meta['exif']['GPS Coordinates'] = sprintf('%.5f, %.5f', $lat, $lon);
+                $meta['exif']['OpenStreetMap'] = "https://www.openstreetmap.org/?mlat={$lat}&mlon={$lon}#map=16/{$lat}/{$lon}";
+                $meta['exif']['OSM_Embed'] = "https://www.openstreetmap.org/export/embed.html?bbox=" . ($lon - 0.006) . "%2C" . ($lat - 0.003) . "%2C" . ($lon + 0.006) . "%2C" . ($lat + 0.003) . "&layer=mapnik&marker={$lat}%2C{$lon}";
                 $meta['exif']['Maps'] = "https://www.google.com/maps?q={$lat},{$lon}";
               }
             }
@@ -942,6 +917,68 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     if (!function_exists('driveGetMediaMetadata')) {
       function driveGetMediaMetadata($filePath) {
         $meta = ['tags' => [], 'cover_art' => null, 'raw_cover' => null];
+        if (!file_exists($filePath)) return $meta;
+
+        // 1. Primary parser: getID3 Engine for audio and video files
+        if (class_exists('getID3')) {
+          try {
+            $getID3 = new getID3();
+            $getID3->setOption([
+              'option_md5_data'     => false,
+              'option_md5_checksum' => false,
+              'option_tags_images'  => true
+            ]);
+
+            $info = $getID3->analyze($filePath);
+
+            if (!empty($info['comments'])) {
+              if (!empty($info['comments']['title'][0])) $meta['tags']['Track Title'] = trim($info['comments']['title'][0]);
+              if (!empty($info['comments']['artist'][0])) $meta['tags']['Artist'] = trim($info['comments']['artist'][0]);
+              if (!empty($info['comments']['album'][0])) $meta['tags']['Album'] = trim($info['comments']['album'][0]);
+              if (!empty($info['comments']['year'][0])) $meta['tags']['Year'] = trim($info['comments']['year'][0]);
+              if (!empty($info['comments']['genre'][0])) $meta['tags']['Genre'] = trim($info['comments']['genre'][0]);
+            }
+
+            if (!empty($info['playtime_seconds'])) {
+              $meta['tags']['Duration'] = driveFormatDuration($info['playtime_seconds']);
+            }
+
+            if (!empty($info['video']['resolution_x']) && !empty($info['video']['resolution_y'])) {
+              $meta['tags']['Resolution'] = $info['video']['resolution_x'] . ' × ' . $info['video']['resolution_y'] . ' px';
+            }
+
+            if (!empty($info['audio']['sample_rate'])) {
+              $meta['tags']['Sample Rate'] = number_format($info['audio']['sample_rate']) . ' Hz';
+            }
+
+            $coverData = null;
+            $mimeType = 'image/jpeg';
+
+            if (!empty($info['comments']['picture'][0]['data'])) {
+              $coverData = $info['comments']['picture'][0]['data'];
+              $mimeType = $info['comments']['picture'][0]['image_mime'] ?? 'image/jpeg';
+            } elseif (!empty($info['id3v2']['APIC'][0]['data'])) {
+              $coverData = $info['id3v2']['APIC'][0]['data'];
+              $mimeType = $info['id3v2']['APIC'][0]['mime'] ?? 'image/jpeg';
+            } elseif (!empty($info['matroska']['attachments'])) {
+              foreach ($info['matroska']['attachments'] as $att) {
+                if (stripos($att['filename'] ?? '', 'cover') !== false && !empty($att['data'])) {
+                  $coverData = $att['data'];
+                  $mimeType = $att['file_mime'] ?? 'image/jpeg';
+                  break;
+                }
+              }
+            }
+
+            if ($coverData) {
+              $meta['raw_cover'] = $coverData;
+              $meta['cover_art'] = 'data:' . $mimeType . ';base64,' . base64_encode($coverData);
+              return $meta;
+            }
+          } catch (Exception $e) {}
+        }
+
+        // 2. Binary stream fallback
         $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
 
         if ($ext === 'mp3') {
@@ -1704,12 +1741,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           $mtime = @filemtime($itemPath);
 
           if (is_dir($itemPath)) {
-            $subCount = count(array_diff(@scandir($itemPath) ?: [], ['.', '..', '.gallery_cache', '.drive_trash_bin', '.file_version']));
+            $validItems = 0;
+            foreach (@scandir($itemPath) ?: [] as $subEntry) {
+              if ($subEntry === '.' || $subEntry === '..' || $subEntry[0] === '.' || in_array($subEntry, ['.git', '.gallery_cache', '.drive_trash_bin', '.file_version']) || preg_match('/\.(part|crdownload|tmp|swp)$/i', $subEntry)) {
+                continue;
+              }
+              $validItems++;
+            }
             $folders[] = [
               'name'        => $item,
               'path'        => $itemRel,
               'mtime'       => $mtime,
-              'items_count' => $subCount,
+              'items_count' => $validItems,
               'thumb_image' => driveGetFolderPreviewImage($itemPath, $itemRel, $driveConfig),
             ];
           } else {
@@ -1949,7 +1992,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
         if (!file_exists($cachePath)) {
           $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
-          if (in_array($ext, ['mp3', 'm4a', 'flac', 'mp4', 'mov'])) {
+          if (in_array($ext, ['mp3', 'm4a', 'flac', 'mp4', 'mov', 'mkv', 'webm', 'ogg', 'wav', 'aac', 'opus', 'avi', 'ts', 'm4v'])) {
             $mediaMeta = driveGetMediaMetadata($fullPath);
             if (!empty($mediaMeta['raw_cover'])) {
               $tmpCover = tempnam(sys_get_temp_dir(), 'cov_');
@@ -1958,7 +2001,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               @unlink($tmpCover);
             }
           }
-          if (!file_exists($cachePath)) {
+
+          // Video Frame Snapshot via FFmpeg on server
+          if (!file_exists($cachePath) && in_array($ext, $driveConfig['video_extensions']) && function_exists('exec')) {
+            $tmpSnap = tempnam(sys_get_temp_dir(), 'vsnap_') . '.jpg';
+            @exec("ffmpeg -ss 00:00:01 -i " . escapeshellarg($fullPath) . " -vframes 1 -q:v 2 " . escapeshellarg($tmpSnap) . " 2>&1");
+            if (file_exists($tmpSnap) && filesize($tmpSnap) > 0) {
+              driveCreateThumbnail($tmpSnap, $cachePath, $driveConfig['thumb_size'], $driveConfig['thumb_quality']);
+              @unlink($tmpSnap);
+            }
+          }
+
+          if (!file_exists($cachePath) && in_array($ext, $driveConfig['image_extensions'])) {
             driveCreateThumbnail($fullPath, $cachePath, $driveConfig['thumb_size'], $driveConfig['thumb_quality']);
           }
         }
@@ -1971,9 +2025,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           readfile($cachePath);
         } else {
           $mime = mime_content_type($fullPath) ?: 'application/octet-stream';
-          header('Content-Type: ' . $mime);
-          header('ETag: ' . $etag);
-          readfile($fullPath);
+          if (strpos($mime, 'image/') === 0) {
+            header('Content-Type: ' . $mime);
+            header('ETag: ' . $etag);
+            readfile($fullPath);
+          } else {
+            header('HTTP/1.0 404 Not Found');
+          }
         }
         exit;
       }
@@ -4440,6 +4498,92 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         border: 1px solid #333333;
       }
 
+      #admin-loader-overlay {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 260px;
+        background: rgba(3, 3, 3, 0.75);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        z-index: 1030;
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s ease, left 0.25s ease;
+      }
+
+      @media (min-width: 992px) {
+        .sidebar.minimized ~ .main-content #admin-loader-overlay {
+          left: 80px !important;
+        }
+      }
+
+      @media (max-width: 991.98px) {
+        #admin-loader-overlay {
+          left: 0 !important;
+          top: 0 !important;
+          z-index: 1030;
+        }
+      }
+
+      .app-container.ide-fullscreen #admin-loader-overlay {
+        left: 0 !important;
+      }
+
+      .login-container {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100dvh;
+        width: 100%;
+        padding: 1.5rem;
+        background-color: var(--ytm-bg);
+      }
+
+      .login-card {
+        background-color: var(--ytm-surface);
+        border: 1px solid var(--ytm-surface-2);
+        border-radius: 24px;
+        padding: 2.5rem;
+        width: 100%;
+        max-width: 400px;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8);
+      }
+
+      .login-card .form-control {
+        background-color: #050505 !important;
+        border: 1px solid var(--ytm-surface-2) !important;
+        color: #ffffff !important;
+        border-radius: 12px;
+        padding: 0.75rem 1rem;
+      }
+
+      .login-card .form-control:focus {
+        border-color: var(--ytm-accent) !important;
+        box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.2) !important;
+      }
+
+      .login-card .btn-danger {
+        background-color: var(--ytm-accent);
+        border: none;
+        border-radius: 20px;
+        padding: 0.65rem 1rem;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        transition: all 0.2s ease;
+      }
+
+      .login-card .btn-danger:hover {
+        background-color: #cc0000;
+        transform: translateY(-1px);
+        box-shadow: 0 6px 20px rgba(255, 0, 0, 0.35);
+      }
+
       .user-list {
         display: flex;
         flex-direction: column;
@@ -4986,22 +5130,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             // Seamless Admin Panel SPA Page Transition Router (Disabled for Drive)
-            const overlay = document.getElementById('admin-loader-overlay');
             let adminNavSeq = 0;
 
             const showAdminLoader = () => {
+              const overlay = document.getElementById('admin-loader-overlay');
               if (overlay) {
+                overlay.style.display = 'flex';
                 overlay.style.pointerEvents = 'auto';
-                overlay.style.opacity = '1';
+                requestAnimationFrame(() => {
+                  overlay.style.opacity = '1';
+                });
               }
             };
 
             const hideAdminLoader = () => {
+              const overlay = document.getElementById('admin-loader-overlay');
               if (overlay) {
                 overlay.style.opacity = '0';
                 setTimeout(() => {
                   overlay.style.pointerEvents = 'none';
-                }, 250);
+                  overlay.style.display = 'none';
+                }, 200);
               }
             };
 
@@ -5017,12 +5166,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(htmlText, 'text/html');
 
-                const newMain = doc.querySelector('main.main-content');
-                const currentMain = document.querySelector('main.main-content');
+                const newContent = doc.querySelector('#admin-dynamic-content') || doc.querySelector('main.main-content');
+                const currentContent = document.querySelector('#admin-dynamic-content');
+                const mainContainer = document.querySelector('main.main-content');
 
-                if (newMain && currentMain) {
-                  const activeOverlay = document.getElementById('admin-loader-overlay');
-
+                if (newContent && currentContent) {
                   const appContainer = document.querySelector('.app-container');
                   if (appContainer) {
                     if (url.includes('page=ide') && localStorage.getItem('admin_ide_fullscreen') === 'true') {
@@ -5032,20 +5180,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     }
                   }
 
-                  currentMain.innerHTML = '';
-                  currentMain.appendChild(document.importNode(newMain, true).firstElementChild ? newMain.cloneNode(true) : newMain);
-                  currentMain.innerHTML = newMain.innerHTML;
-
-                  if (activeOverlay && !currentMain.contains(activeOverlay)) {
-                    currentMain.prepend(activeOverlay);
-                  }
+                  currentContent.innerHTML = newContent.innerHTML;
                   
                   if (doc.title) {
                     document.title = doc.title;
                   }
 
-                  const newNavLinks = doc.querySelectorAll('.sidebar .nav-link');
-                  const currentNavLinks = document.querySelectorAll('.sidebar .nav-link');
+                  const newNavLinks = doc.querySelectorAll('#admin-sidebar .nav-link');
+                  const currentNavLinks = document.querySelectorAll('#admin-sidebar .nav-link');
                   newNavLinks.forEach((newLink, idx) => {
                     if (currentNavLinks[idx]) {
                       currentNavLinks[idx].className = newLink.className;
@@ -5056,14 +5198,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     history.pushState({ adminUrl: url }, '', url);
                   }
 
-                  currentMain.querySelectorAll('script').forEach(oldScript => {
+                  currentContent.querySelectorAll('script').forEach(oldScript => {
                     const newScript = document.createElement('script');
                     Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
                     newScript.appendChild(document.createTextNode(oldScript.innerHTML));
                     oldScript.parentNode.replaceChild(newScript, oldScript);
                   });
 
-                  currentMain.scrollTop = 0;
+                  if (mainContainer) mainContainer.scrollTop = 0;
                 }
               } catch (err) {
                 console.error('Admin SPA Load Error:', err);
@@ -5119,11 +5261,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         </script>
       </nav>
       <main class="main-content position-relative">
-        <!-- Admin Content Area Loading Overlay -->
-        <div id="admin-loader-overlay" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(3, 3, 3, 0.75); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); z-index: 1000; display: flex; flex-direction: column; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.2s ease;">
+        <!-- Scoped Loading Overlay: Centered in active viewport on all devices, sidebar is never covered -->
+        <div id="admin-loader-overlay" style="display: none; opacity: 0; pointer-events: none;">
           <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.25em;" role="status"></div>
           <div class="text-white mt-3 fw-bold small" style="letter-spacing: 1px;">LOADING...</div>
         </div>
+
+        <div id="admin-dynamic-content" style="flex-grow: 1; display: flex; flex-direction: column; min-height: 100%;">
 
         <?php if (!empty($_SESSION['admin_flash_msg'])): ?>
           <div class="alert alert-success alert-dismissible fade show m-4 position-absolute top-0 end-0 shadow-lg z-3" style="max-width: 90vw; word-break: break-word;" role="alert">
@@ -14034,18 +14178,92 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               background: #ff0000;
             }
 
+            html, body {
+              height: 100% !important;
+              min-height: 100dvh !important;
+              background-color: #030303 !important;
+              margin: 0 !important;
+              padding: 0 !important;
+              overflow: hidden !important;
+            }
+
+            .app-container {
+              display: flex !important;
+              height: 100dvh !important;
+              max-height: 100dvh !important;
+              flex-direction: column !important;
+              overflow: hidden !important;
+            }
+
+            @media (min-width: 992px) {
+              .app-container {
+                flex-direction: row !important;
+              }
+            }
+
+            .main-content {
+              flex: 1 1 0% !important;
+              min-height: 0 !important;
+              display: flex !important;
+              flex-direction: column !important;
+              overflow: hidden !important;
+              position: relative !important;
+              padding: 0 !important;
+              margin: 0 !important;
+              background-color: var(--ytm-bg) !important;
+            }
+
+            #admin-dynamic-content {
+              flex: 1 1 0% !important;
+              min-height: 0 !important;
+              display: flex !important;
+              flex-direction: column !important;
+              overflow: hidden !important;
+              width: 100% !important;
+            }
+
             #phpfiles-app-root {
               font-family: 'Roboto', system-ui, -apple-system, sans-serif;
               background-color: var(--md-sys-color-surface);
               color: var(--md-sys-color-on-surface);
-              height: 100%;
-              width: 100%;
-              display: flex;
-              flex-direction: column;
-              overflow: hidden;
+              flex: 1 1 0% !important;
+              min-height: 0 !important;
+              width: 100% !important;
+              display: flex !important;
+              flex-direction: column !important;
+              overflow: hidden !important;
               user-select: none;
               -webkit-font-smoothing: antialiased;
-              position: relative;
+              position: relative !important;
+            }
+
+            .app-topbar {
+              height: 56px !important;
+              min-height: 56px !important;
+              flex-shrink: 0 !important;
+              background: var(--md-sys-color-surface);
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0 0.8rem;
+              z-index: 100;
+              gap: 0.6rem;
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
+            }
+
+            .subbar-path {
+              height: 36px !important;
+              min-height: 36px !important;
+              flex-shrink: 0 !important;
+              background: var(--md-sys-color-surface-container-low);
+              display: flex;
+              align-items: center;
+              padding: 0 1rem;
+              font-size: 0.8rem;
+              overflow: hidden;
+              white-space: nowrap;
+              text-overflow: ellipsis;
+              border-bottom: 1px solid var(--md-sys-color-outline-variant);
             }
 
             #phpfiles-app-root a {
@@ -14428,7 +14646,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
             .sidebar-backdrop.active { display: block; }
 
-            .sidebar {
+            #phpfiles-app-root .sidebar {
               width: var(--sidebar-width, 280px);
               background: #080808 !important;
               display: flex;
@@ -14441,7 +14659,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               position: relative;
             }
 
-            .sidebar.collapsed {
+            #phpfiles-app-root .sidebar.collapsed {
               margin-left: calc(-1 * var(--sidebar-width, 280px));
             }
 
@@ -14586,18 +14804,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               color: #ffffff;
             }
 
+            .app-body {
+              display: flex !important;
+              flex: 1 1 0% !important;
+              min-height: 0 !important;
+              overflow: hidden !important;
+              position: relative !important;
+            }
+
             .main-content-drive {
-              flex: 1;
-              display: flex;
-              flex-direction: column;
-              overflow-y: auto;
-              position: relative;
-              padding: 1rem 1.2rem calc(8rem + env(safe-area-inset-bottom, 0px)) 1.2rem;
-              -webkit-overflow-scrolling: touch;
-              min-height: 0;
-              min-width: 0;
-              width: 100%;
-              box-sizing: border-box;
+              flex: 1 1 0% !important;
+              display: flex !important;
+              flex-direction: column !important;
+              overflow-y: auto !important;
+              position: relative !important;
+              padding: 0.75rem 1rem calc(6.5rem + env(safe-area-inset-bottom, 0px)) 1rem !important;
+              -webkit-overflow-scrolling: touch !important;
+              min-width: 0 !important;
+              width: 100% !important;
+              box-sizing: border-box !important;
             }
 
             .content-header {
@@ -14664,15 +14889,56 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               box-sizing: border-box;
             }
 
+            .gallery-container {
+              --grid-gap: 12px;
+              --card-radius: 14px;
+              width: 100%;
+              min-width: 0;
+              flex: 1;
+              box-sizing: border-box;
+            }
+
             .layout-grid {
               display: grid;
               grid-template-columns: repeat(auto-fill, minmax(135px, 1fr));
               grid-auto-rows: min-content;
               align-content: start;
-              gap: 0.75rem;
+              gap: var(--grid-gap, 12px) !important;
               width: 100%;
               min-width: 0;
               box-sizing: border-box;
+            }
+
+            .layout-justified {
+              display: flex;
+              flex-wrap: wrap;
+              gap: var(--grid-gap, 12px) !important;
+              align-content: flex-start;
+              width: 100%;
+              box-sizing: border-box;
+            }
+
+            .layout-columns {
+              display: flex;
+              gap: var(--grid-gap, 12px) !important;
+              align-items: flex-start;
+              width: 100%;
+              box-sizing: border-box;
+            }
+
+            .masonry-col {
+              flex: 1;
+              min-width: 0;
+              display: flex;
+              flex-direction: column;
+              gap: var(--grid-gap, 12px) !important;
+              box-sizing: border-box;
+            }
+
+            .layout-list {
+              display: flex;
+              flex-direction: column;
+              gap: var(--grid-gap, 8px) !important;
             }
 
             .layout-grid[data-cols="1"] {
@@ -14760,7 +15026,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .file-card {
               background: var(--md-sys-color-surface-container-low);
               border: 1px solid var(--md-sys-color-outline-variant);
-              border-radius: 14px;
+              border-radius: var(--card-radius, 14px);
               overflow: hidden;
               display: flex;
               flex-direction: column;
@@ -14787,6 +15053,70 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               border-color: #ff0000;
               background: var(--md-sys-color-surface-container-high);
               box-shadow: 0 0 0 2px #ff0000;
+            }
+
+            .file-card.drag-over-folder {
+              border: 2px dashed #ff0000 !important;
+              transform: scale(1.04);
+              box-shadow: 0 10px 30px rgba(255, 0, 0, 0.4);
+              z-index: 15;
+            }
+
+            .folder-drop-overlay {
+              position: absolute;
+              inset: 0;
+              background: rgba(8, 8, 8, 0.94);
+              backdrop-filter: blur(6px);
+              -webkit-backdrop-filter: blur(6px);
+              border-radius: inherit;
+              display: none;
+              flex-direction: column;
+              align-items: center;
+              justify-content: center;
+              padding: 0.6rem;
+              text-align: center;
+              gap: 0.4rem;
+              z-index: 25;
+              pointer-events: none;
+            }
+
+            .file-card.drag-over-folder .folder-drop-overlay {
+              display: flex;
+            }
+
+            .folder-drop-overlay svg {
+              width: 32px;
+              height: 32px;
+              fill: #ff0000;
+              animation: drop-pulse 0.9s infinite alternate ease-in-out;
+            }
+
+            .folder-drop-overlay span {
+              font-size: 0.76rem;
+              font-weight: 700;
+              color: #ffffff;
+              word-break: break-word;
+              line-height: 1.2;
+            }
+
+            @keyframes drop-pulse {
+              from { transform: translateY(-3px); }
+              to { transform: translateY(3px); }
+            }
+
+            .file-card.drag-over-folder {
+              border: 2px dashed #ff0000 !important;
+              background: rgba(255, 0, 0, 0.22) !important;
+              transform: scale(1.03);
+              box-shadow: 0 8px 24px rgba(255, 0, 0, 0.35);
+            }
+
+            .osm-map-frame {
+              width: 100%;
+              height: 180px;
+              border: 1px solid var(--md-sys-color-outline-variant);
+              border-radius: 12px;
+              margin-top: 0.5rem;
             }
 
             .file-thumb {
@@ -15065,7 +15395,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               height: auto;
               min-height: 56px;
               border: 1px solid var(--md-sys-color-outline-variant);
-              border-radius: 14px;
+              border-radius: var(--card-radius, 14px) !important;
               background: var(--md-sys-color-surface-container-low);
               box-shadow: none;
               transition: background-color 0.15s ease, border-color 0.15s ease;
@@ -15269,21 +15599,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               position: fixed;
               bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
               left: 50%;
-              transform: translateX(-50%) translateY(160%);
+              transform: translateX(-50%) translateY(250%);
               background: var(--md-sys-color-surface-container-highest);
               border: 1px solid #ff0000;
               padding: 0.35rem 0.75rem;
               border-radius: 32px;
-              box-shadow: 0 10px 25px rgba(0, 0, 0, 0.8);
+              box-shadow: 0 10px 30px rgba(0, 0, 0, 0.9);
               display: flex;
               align-items: center;
               gap: 0.3rem;
-              z-index: 500;
-              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1);
+              z-index: 5000;
+              opacity: 0;
+              visibility: hidden;
+              pointer-events: none;
+              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease, visibility 0.2s;
             }
 
             .batch-bar.active {
               transform: translateX(-50%) translateY(0);
+              opacity: 1;
+              visibility: visible;
+              pointer-events: auto;
             }
 
             .batch-bar .btn-icon {
@@ -16980,13 +17316,46 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .slider-input {
               width: 100%;
               height: 6px;
-              background: #383838 !important;
-              border: 1px solid #555555 !important;
+              background: #252525 !important;
+              border: 1px solid #444444 !important;
               outline: none;
               -webkit-appearance: none;
               appearance: none;
               border-radius: 4px;
               cursor: pointer;
+              transition: background 0.2s ease;
+            }
+            .slider-input::-webkit-slider-thumb {
+              -webkit-appearance: none;
+              appearance: none;
+              width: 16px;
+              height: 16px;
+              margin-top: -5px;
+              background: #ff0000;
+              border: 2px solid #ffffff;
+              border-radius: 50%;
+              cursor: pointer;
+              box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+              transition: transform 0.1s ease, box-shadow 0.1s ease;
+            }
+            .slider-input::-webkit-slider-thumb:hover,
+            .slider-input:active::-webkit-slider-thumb {
+              transform: scale(1.25);
+              box-shadow: 0 0 0 4px rgba(255, 0, 0, 0.35);
+            }
+            .slider-input::-moz-range-thumb {
+              width: 16px;
+              height: 16px;
+              background: #ff0000;
+              border: 2px solid #ffffff;
+              border-radius: 50%;
+              cursor: pointer;
+              box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+              transition: transform 0.1s ease;
+            }
+            .slider-input::-moz-range-thumb:hover,
+            .slider-input:active::-moz-range-thumb {
+              transform: scale(1.25);
             }
 
             .slider-input::-webkit-slider-runnable-track {
@@ -17073,22 +17442,66 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             .dropzone-overlay {
               position: fixed;
-              inset: 0;
-              background: rgba(255, 0, 0, 0.15);
-              border: 3px dashed #ff0000;
+              inset: 12px;
+              background: rgba(5, 5, 5, 0.7);
+              border: 2px dashed #ff0000;
+              border-radius: 24px;
               backdrop-filter: blur(4px);
-              z-index: 9000;
+              -webkit-backdrop-filter: blur(4px);
+              z-index: 8000;
               display: none;
               align-items: center;
               justify-content: center;
-              font-size: 1.3rem;
+              font-size: 1.15rem;
               font-weight: 700;
               color: #ff0000;
               pointer-events: none;
+              box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.35);
             }
-
             .dropzone-overlay.active {
               display: flex;
+            }
+
+            .folder-drop-overlay {
+              position: absolute;
+              inset: 0;
+              background: rgba(8, 8, 8, 0.94);
+              backdrop-filter: blur(6px);
+              -webkit-backdrop-filter: blur(6px);
+              border: 2px dashed #ff0000;
+              border-radius: inherit;
+              display: none;
+              flex-direction: column;
+              align-items: center;
+              justify-content: center;
+              padding: 0.6rem;
+              text-align: center;
+              gap: 0.35rem;
+              z-index: 30;
+              pointer-events: none;
+            }
+
+            .file-card.drag-over-folder .folder-drop-overlay {
+              display: flex;
+            }
+
+            .folder-drop-overlay svg {
+              width: 30px;
+              height: 30px;
+              fill: #ff0000;
+              animation: drop-bounce 0.8s infinite alternate ease-in-out;
+            }
+
+            .folder-drop-overlay span {
+              font-size: 0.74rem;
+              font-weight: 700;
+              color: #ffffff;
+              line-height: 1.25;
+            }
+
+            @keyframes drop-bounce {
+              from { transform: translateY(-3px); }
+              to { transform: translateY(3px); }
             }
 
             .bottom-pad {
@@ -17105,21 +17518,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               display: none;
             }
 
-            @media (max-width: 768px) {
-              .desktop-only {
+            @media (max-width: 991.98px) {
+              #phpfiles-app-root .desktop-only {
                 display: none !important;
               }
 
-              .mobile-only {
+              #phpfiles-app-root .mobile-only {
                 display: flex !important;
               }
 
-              .sidebar,
-              .sidebar.collapsed {
+              #phpfiles-app-root .sidebar,
+              #phpfiles-app-root .sidebar.collapsed {
                 margin-left: 0 !important;
               }
 
-              .sidebar {
+              #phpfiles-app-root .sidebar {
                 position: fixed !important;
                 top: 0 !important;
                 bottom: 0 !important;
@@ -17129,14 +17542,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 width: 280px !important;
                 height: 100dvh !important;
                 padding-top: calc(0.5rem + env(safe-area-inset-top, 0px));
+                z-index: 2050 !important;
               }
 
-              .sidebar.open,
-              .sidebar.collapsed.open {
+              #phpfiles-app-root .sidebar.open,
+              #phpfiles-app-root .sidebar.collapsed.open {
                 transform: translateX(0) !important;
               }
 
-              .layout-columns {
+              #phpfiles-app-root .layout-columns {
                 column-count: 2;
               }
 
@@ -17144,7 +17558,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 padding: 0.6rem 0.6rem calc(5rem + env(safe-area-inset-bottom, 0px)) 0.6rem;
               }
 
-              .modal-box.large {
+              #phpfiles-app-root .modal-box.large {
                 position: fixed;
                 inset: 0;
                 max-width: 100vw;
@@ -17182,11 +17596,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               <div class="topbar-right">
                 <div class="desktop-only" style="display:flex; align-items:center; gap:0.5rem;">
-                  <div id="desk-cols-container" style="display:flex; align-items:center; gap:0.4rem; padding:0 0.6rem; background:var(--md-sys-color-surface-container-high); border-radius:20px; height:40px; border: 1px solid var(--md-sys-color-outline-variant);">
-                    <span style="font-size:0.75rem; font-weight:700; color:var(--md-sys-color-on-surface-variant);">Cols:</span>
-                    <input type="range" id="slider-cols-desk" class="slider-input" min="0" max="8" value="0" style="width:70px;">
-                    <span id="slider-cols-desk-val" style="font-size:0.75rem; font-weight:700; min-width:28px; color:#ff0000;">Auto</span>
-                  </div>
+                  <button class="btn-icon" id="btn-grid-adjust" title="Grid, Gap & Radius Settings">
+                    <svg viewBox="0 0 24 24"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg>
+                  </button>
                   <button class="btn-icon" id="btn-clear-cache-desk" title="Clear Cache">
                     <svg viewBox="0 0 24 24"><path d="M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12V5z"/></svg>
                   </button>
@@ -17316,6 +17728,34 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <div class="dm-item" id="du-upload-url"><svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg> Upload from URL</div>
             </div>
 
+            <!-- Layout & Visual Adjustments Dropdown (Columns, Gap, Radius & Reset) -->
+            <div class="dropdown-menu" id="dropdown-grid-adjust" style="min-width: 250px; padding: 0.75rem 0.9rem;">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem;">
+                <span style="font-size: 0.75rem; font-weight: 700; text-transform: uppercase; color: #ff0000; letter-spacing: 0.6px;">Grid & Appearance</span>
+              </div>
+              
+              <div class="slider-container" style="padding: 0.35rem 0;">
+                <div class="slider-header"><span>Columns</span><span id="slider-cols-val" style="color:#ff0000; font-weight:700;">Auto</span></div>
+                <input type="range" class="slider-input" id="slider-cols" min="0" max="8" value="0">
+              </div>
+
+              <div class="slider-container" style="padding: 0.35rem 0;">
+                <div class="slider-header"><span>Item Gap</span><span id="slider-gap-val" style="color:#ff0000; font-weight:700;">12px</span></div>
+                <input type="range" class="slider-input" id="slider-gap" min="2" max="36" value="12">
+              </div>
+
+              <div class="slider-container" style="padding: 0.35rem 0;">
+                <div class="slider-header"><span>Border Radius</span><span id="slider-radius-val" style="color:#ff0000; font-weight:700;">14px</span></div>
+                <input type="range" class="slider-input" id="slider-radius" min="0" max="32" value="14">
+              </div>
+
+              <div class="dm-sep" style="margin: 0.5rem 0;"></div>
+              <button type="button" class="dm-item" id="btn-reset-grid-adjust" style="width: 100%; padding: 0.45rem 0.6rem; border-radius: 10px; font-size: 0.8rem; color: var(--md-sys-color-on-surface-variant); justify-content: center; gap: 0.4rem;">
+                <svg viewBox="0 0 24 24" style="width: 15px; height: 15px;"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                <span>Reset to Defaults</span>
+              </button>
+            </div>
+
             <!-- Mobile More Menu -->
             <div class="dropdown-menu" id="dropdown-more">
               <div class="dm-item" id="dm-upload-files"><svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg> Upload Files</div>
@@ -17326,9 +17766,24 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <div class="dm-item" id="dm-refresh-mob"><svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg> Refresh</div>
               <div class="dm-item" id="dm-clear-cache"><svg viewBox="0 0 24 24"><path d="M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12V5z"/></svg> Clear Cache</div>
               <div class="dm-sep" id="mobile-cols-sep"></div>
-              <div class="slider-container" id="mobile-cols-container">
-                <div class="slider-header"><span>Grid Columns</span><span id="slider-cols-val" style="color:#ff0000; font-weight:700;">Auto</span></div>
-                <input type="range" class="slider-input" id="slider-cols" min="0" max="8" value="0">
+              <div id="mobile-grid-adjust-container">
+                <div class="slider-container" id="mobile-cols-container" style="padding: 0.35rem 0.8rem;">
+                  <div class="slider-header"><span>Grid Columns</span><span id="slider-cols-val-mob" style="color:#ff0000; font-weight:700;">Auto</span></div>
+                  <input type="range" class="slider-input" id="slider-cols-mob" min="0" max="8" value="0">
+                </div>
+                <div class="slider-container" style="padding: 0.35rem 0.8rem;">
+                  <div class="slider-header"><span>Item Gap</span><span id="slider-gap-val-mob" style="color:#ff0000; font-weight:700;">12px</span></div>
+                  <input type="range" class="slider-input" id="slider-gap-mob" min="2" max="36" value="12">
+                </div>
+                <div class="slider-container" style="padding: 0.35rem 0.8rem;">
+                  <div class="slider-header"><span>Border Radius</span><span id="slider-radius-val-mob" style="color:#ff0000; font-weight:700;">14px</span></div>
+                  <input type="range" class="slider-input" id="slider-radius-mob" min="0" max="32" value="14">
+                </div>
+                <div class="dm-sep" style="margin: 0.4rem 0;"></div>
+                <button type="button" class="dm-item" id="btn-reset-grid-adjust-mob" style="width: 100%; padding: 0.45rem 0.6rem; border-radius: 10px; font-size: 0.8rem; color: var(--md-sys-color-on-surface-variant); justify-content: center; gap: 0.4rem;">
+                  <svg viewBox="0 0 24 24" style="width: 15px; height: 15px;"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                  <span>Reset Layout Defaults</span>
+                </button>
               </div>
             </div>
 
@@ -17928,6 +18383,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <button class="img-editor-nav-btn" data-ietab="tab-text">
                     <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M5 4v3h5.5v12h3V7H19V4H5z"/></svg> Freeform Text
                   </button>
+                  <button class="img-editor-nav-btn" data-ietab="tab-draw">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg> Free Drawing
+                  </button>
                   <button class="btn-icon" id="ie-global-reset" title="Reset to Original" style="margin-left:auto; width:30px; height:30px;">
                     <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
                   </button>
@@ -17980,6 +18438,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   </label>
                   <button class="btn-primary" id="ie-add-text-btn" style="height:30px; padding:0 0.8rem; font-size:0.75rem;">Stamp Text</button>
                   <span style="font-size:0.72rem; color:var(--md-sys-color-outline); margin-left:auto;">💡 Click/drag canvas to position text</span>
+                </div>
+
+                <!-- Freehand Drawing Subbar -->
+                <div class="img-editor-subbar" id="ietab-tab-draw" style="display:none;">
+                  <div style="display:flex; align-items:center; gap:0.35rem;">
+                    <span>Size:</span>
+                    <input type="range" class="slider-input" id="ie-draw-size" min="1" max="50" value="6" style="width:70px;">
+                    <span id="ie-draw-size-val" style="font-size:0.75rem; min-width:24px; color:#ff0000; font-weight:700;">6px</span>
+                  </div>
+                  <input type="color" id="ie-draw-color" value="#ff0000" title="Brush Color" style="width:28px; height:28px; border:none; background:transparent; cursor:pointer;">
+                  <label style="display:flex; align-items:center; gap:0.3rem; cursor:pointer; font-size:0.75rem;">
+                    <input type="checkbox" id="ie-draw-eraser"><span>Eraser</span>
+                  </label>
+                  <button class="btn-primary" id="ie-draw-clear-btn" style="height:30px; padding:0 0.75rem; font-size:0.75rem; background:transparent !important; border:1px solid rgba(255, 255, 255, 0.25) !important;">Clear Drawing</button>
+                  <span style="font-size:0.72rem; color:var(--md-sys-color-outline); margin-left:auto;">✏️ Draw directly on the canvas</span>
                 </div>
 
                 <div class="img-editor-canvas-wrap">
@@ -18108,7 +18581,24 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         
               enqueue(items, targetDir) {
                 if (!items || !items.length) return;
-                const newTasks = items.map((item, idx) => ({
+
+                const uniqueItems = [];
+                const seenKeys = new Set();
+
+                for (const item of items) {
+                  const rel = item.relativePath || item.file.name;
+                  const key = `${targetDir || ''}::${rel}`;
+                  const isAlreadyQueued = this.queue.some(q => q.status === 'pending' && q.targetDir === targetDir && q.relativePath === rel);
+
+                  if (!seenKeys.has(key) && !isAlreadyQueued) {
+                    seenKeys.add(key);
+                    uniqueItems.push(item);
+                  }
+                }
+
+                if (!uniqueItems.length) return;
+
+                const newTasks = uniqueItems.map((item, idx) => ({
                   id: 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9) + '_' + idx,
                   file: item.file,
                   fileName: item.file.name,
@@ -18119,8 +18609,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   status: 'pending',
                   aborted: false
                 }));
-        
+
                 this.queue.push(...newTasks);
+                this.dock.classList.remove('minimized');
                 this.dock.classList.add('active');
                 this.renderDock();
                 if (!this.isProcessing) this.processQueue();
@@ -18244,8 +18735,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.isProcessing = false;
                 const allDone = this.queue.every(i => i.status === 'completed');
                 if (allDone) {
-                  this.title.innerText = `${this.queue.length} upload(s) complete`;
+                  const count = this.queue.length;
+                  this.title.innerText = `${count} upload(s) complete`;
                   this.bar.style.width = '100%';
+                  this.queue = [];
                   if (window.app) app.refresh();
                 }
               }
@@ -18640,7 +19133,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const returnSection = app.originSection || (app.currentSection !== 'home' ? app.currentSection : null);
                   if (returnSection) {
                     app.originSection = null;
-                    const targetHash = `#/${returnSection}`;
+                    const targetHash = `#/@${returnSection}`;
                     if (window.location.hash !== targetHash) {
                       window.location.hash = targetHash;
                     } else {
@@ -18681,6 +19174,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.selectedItems = new Set();
                 this.layout = localStorage.getItem('pg_layout') || 'grid';
                 this.gridCols = parseInt(localStorage.getItem('pg_grid_cols')) || 0;
+                this.gridGap = parseInt(localStorage.getItem('pg_grid_gap')) || 12;
+                this.gridRadius = parseInt(localStorage.getItem('pg_grid_radius')) || 14;
                 this.renderLimit = 25;
                 this.filteredList = [];
                 this.searchDebounceTimer = null;
@@ -18719,16 +19214,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.dropdownMore = document.getElementById('dropdown-more');
                 this.dropdownSort = document.getElementById('dropdown-sort');
                 this.btnSort = document.getElementById('btn-sort');
+                this.dropdownGridAdjust = document.getElementById('dropdown-grid-adjust');
+                this.btnGridAdjust = document.getElementById('btn-grid-adjust');
+                this.btnResetGridAdjust = document.getElementById('btn-reset-grid-adjust');
                 this.sliderCols = document.getElementById('slider-cols');
                 this.sliderColsVal = document.getElementById('slider-cols-val');
-                this.sliderColsDesk = document.getElementById('slider-cols-desk');
-                this.sliderColsDeskVal = document.getElementById('slider-cols-desk-val');
+                this.sliderGap = document.getElementById('slider-gap');
+                this.sliderGapVal = document.getElementById('slider-gap-val');
+                this.sliderRadius = document.getElementById('slider-radius');
+                this.sliderRadiusVal = document.getElementById('slider-radius-val');
+                this.sliderColsMob = document.getElementById('slider-cols-mob');
+                this.sliderColsValMob = document.getElementById('slider-cols-val-mob');
+                this.sliderGapMob = document.getElementById('slider-gap-mob');
+                this.sliderGapValMob = document.getElementById('slider-gap-val-mob');
+                this.sliderRadiusMob = document.getElementById('slider-radius-mob');
+                this.sliderRadiusValMob = document.getElementById('slider-radius-val-mob');
+                this.btnResetGridAdjustMob = document.getElementById('btn-reset-grid-adjust-mob');
                 this.scrollTrigger = document.getElementById('infinite-scroll-trigger');
               }
         
               bindEvents() {
                 document.getElementById('btn-sidebar').addEventListener('click', () => {
-                  if (window.innerWidth <= 768) {
+                  if (window.innerWidth <= 991.98) {
                     this.sidebar.classList.remove('collapsed');
                     this.sidebar.classList.toggle('open');
                     this.sidebarBackdrop.classList.toggle('active');
@@ -18740,7 +19247,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
 
                 window.addEventListener('resize', () => {
-                  if (window.innerWidth > 768) {
+                  if (window.innerWidth > 991.98) {
                     this.sidebar.classList.remove('open');
                     this.sidebarBackdrop.classList.remove('active');
                     if (localStorage.getItem('pg_sidebar_collapsed') === '1') {
@@ -18839,7 +19346,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   ro.observe(this.container);
                 }
         
-                if (window.innerWidth > 768 && localStorage.getItem('pg_sidebar_collapsed') === '1') {
+                if (window.innerWidth > 991.98 && localStorage.getItem('pg_sidebar_collapsed') === '1') {
                   this.sidebar.classList.add('collapsed');
                 }
         
@@ -19059,36 +19566,124 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 };
                 document.getElementById('btn-more-menu').addEventListener('click', toggleMoreMenu);
         
-                const handleColChange = (val) => {
-                  this.gridCols = parseInt(val);
-                  localStorage.setItem('pg_grid_cols', this.gridCols);
-                  if (this.sliderCols) this.sliderCols.value = this.gridCols;
-                  if (this.sliderColsDesk) this.sliderColsDesk.value = this.gridCols;
-                  this.applyGridSizing();
-                };
-        
+                if (this.btnGridAdjust && this.dropdownGridAdjust) {
+                  this.btnGridAdjust.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const rect = this.btnGridAdjust.getBoundingClientRect();
+                    this.dropdownGridAdjust.style.top = `${rect.bottom + 8}px`;
+                    this.dropdownGridAdjust.style.right = `${window.innerWidth - rect.right}px`;
+                    this.dropdownGridAdjust.classList.toggle('active');
+                  });
+
+                  // Prevent dropdown closure while dragging sliders
+                  ['click', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'pointerdown', 'pointerup'].forEach(evt => {
+                    this.dropdownGridAdjust.addEventListener(evt, e => e.stopPropagation());
+                  });
+                }
+
+                const mobGridContainer = document.getElementById('mobile-grid-adjust-container');
+                if (mobGridContainer) {
+                  ['click', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'pointerdown', 'pointerup'].forEach(evt => {
+                    mobGridContainer.addEventListener(evt, e => e.stopPropagation());
+                  });
+                }
+
                 if (this.sliderCols) {
                   this.sliderCols.value = this.gridCols;
-                  this.sliderCols.addEventListener('input', (e) => handleColChange(e.target.value));
+                  this.sliderCols.addEventListener('input', (e) => {
+                    this.gridCols = parseInt(e.target.value);
+                    localStorage.setItem('pg_grid_cols', this.gridCols);
+                    this.applyGridSizing(true);
+                  });
+                }
+
+                if (this.sliderGap) {
+                  this.sliderGap.value = this.gridGap;
+                  this.sliderGap.addEventListener('input', (e) => {
+                    this.gridGap = parseInt(e.target.value);
+                    localStorage.setItem('pg_grid_gap', this.gridGap);
+                    this.applyGridSizing(false);
+                  });
+                }
+
+                if (this.sliderRadius) {
+                  this.sliderRadius.value = this.gridRadius;
+                  this.sliderRadius.addEventListener('input', (e) => {
+                    this.gridRadius = parseInt(e.target.value);
+                    localStorage.setItem('pg_grid_radius', this.gridRadius);
+                    this.applyGridSizing(false);
+                  });
+                }
+
+                const handleResetLayout = (e) => {
+                  if (e) e.stopPropagation();
+                  this.gridCols = 0;
+                  this.gridGap = 12;
+                  this.gridRadius = 14;
+                  localStorage.removeItem('pg_grid_cols');
+                  localStorage.removeItem('pg_grid_gap');
+                  localStorage.removeItem('pg_grid_radius');
+
+                  this.applyGridSizing();
+                  this.toast('Layout reset to default');
+                };
+
+                if (this.btnResetGridAdjust) {
+                  this.btnResetGridAdjust.addEventListener('click', handleResetLayout);
+                }
+
+                if (this.btnResetGridAdjustMob) {
+                  this.btnResetGridAdjustMob.addEventListener('click', handleResetLayout);
+                }
+
+                if (this.sliderColsMob) {
+                  this.sliderColsMob.addEventListener('input', (e) => {
+                    this.gridCols = parseInt(e.target.value);
+                    localStorage.setItem('pg_grid_cols', this.gridCols);
+                    this.applyGridSizing(true);
+                  });
+                }
+
+                if (this.sliderGapMob) {
+                  this.sliderGapMob.addEventListener('input', (e) => {
+                    this.gridGap = parseInt(e.target.value);
+                    localStorage.setItem('pg_grid_gap', this.gridGap);
+                    this.applyGridSizing(false);
+                  });
+                }
+
+                if (this.sliderRadiusMob) {
+                  this.sliderRadiusMob.addEventListener('input', (e) => {
+                    this.gridRadius = parseInt(e.target.value);
+                    localStorage.setItem('pg_grid_radius', this.gridRadius);
+                    this.applyGridSizing(false);
+                  });
                 }
         
-                if (this.sliderColsDesk) {
-                  this.sliderColsDesk.value = this.gridCols;
-                  this.sliderColsDesk.addEventListener('input', (e) => handleColChange(e.target.value));
-                }
-        
-                window.addEventListener('dragover', (e) => {
+                let dragCounter = 0;
+                window.addEventListener('dragenter', (e) => {
                   e.preventDefault();
-                  document.getElementById('dropzone').classList.add('active');
+                  dragCounter++;
+                  document.getElementById('dropzone')?.classList.add('active');
                 });
+
                 window.addEventListener('dragleave', (e) => {
-                  if (e.clientX <= 0 || e.clientY <= 0) {
-                    document.getElementById('dropzone').classList.remove('active');
+                  e.preventDefault();
+                  dragCounter--;
+                  if (dragCounter <= 0) {
+                    dragCounter = 0;
+                    document.getElementById('dropzone')?.classList.remove('active');
                   }
                 });
+
+                window.addEventListener('dragover', (e) => {
+                  e.preventDefault();
+                });
+
                 window.addEventListener('drop', async (e) => {
                   e.preventDefault();
-                  document.getElementById('dropzone').classList.remove('active');
+                  dragCounter = 0;
+                  document.getElementById('dropzone')?.classList.remove('active');
                   if (e.dataTransfer.items && e.dataTransfer.items.length) {
                     const items = await this.readDropData(e.dataTransfer.items);
                     if (items.length) uploadManager.enqueue(items, this.currentPath);
@@ -19195,15 +19790,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   });
                 });
         
-                window.addEventListener('click', () => {
+                const closeAllDropdowns = () => {
                   this.contextMenu.classList.remove('active');
                   this.dropdownMore.classList.remove('active');
+                  this.dropdownGridAdjust?.classList.remove('active');
                   if (this.dropdownSort) this.dropdownSort.classList.remove('active');
-                  const du = document.getElementById('dropdown-upload');
-                  if (du) du.classList.remove('active');
-                  const dbm = document.getElementById('dropdown-batch-more');
-                  if (dbm) dbm.classList.remove('active');
-                });
+                  document.getElementById('dropdown-upload')?.classList.remove('active');
+                  document.getElementById('dropdown-batch-more')?.classList.remove('active');
+                };
+
+                window.addEventListener('click', closeAllDropdowns);
+                document.getElementById('main-content')?.addEventListener('scroll', closeAllDropdowns, { passive: true });
+                document.getElementById('search-input')?.addEventListener('focus', closeAllDropdowns);
                 this.dropdownMore.addEventListener('click', (e) => {
                   if (e.target.closest('.dm-item')) {
                     this.dropdownMore.classList.remove('active');
@@ -19269,7 +19867,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 else cols = 6;
 
                 const isCollapsed = this.sidebar && this.sidebar.classList.contains('collapsed');
-                if (isCollapsed && window.innerWidth > 768) {
+                if (isCollapsed && window.innerWidth > 991.98) {
                   cols += 1;
                 }
                 return cols;
@@ -19317,6 +19915,33 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   toolbar.style.display = (isTrash || isActivity) ? 'none' : 'flex';
                 }
 
+                // Hide Layout Settings button in Trash & Activity
+                const btnGridAdjust = document.getElementById('btn-grid-adjust');
+                if (btnGridAdjust) {
+                  btnGridAdjust.style.display = (isTrash || isActivity) ? 'none' : 'flex';
+                }
+
+                // In List Layout, hide the Columns adjustment slider (Desktop & Mobile)
+                const colsSliderContainer = document.getElementById('slider-cols')?.closest('.slider-container');
+                if (colsSliderContainer) {
+                  colsSliderContainer.style.display = (this.layout === 'list') ? 'none' : 'flex';
+                }
+
+                const mobColsContainer = document.getElementById('mobile-cols-container');
+                if (mobColsContainer) {
+                  mobColsContainer.style.display = (this.layout === 'list') ? 'none' : 'flex';
+                }
+
+                // Hide mobile grid adjustments completely in Trash & Activity
+                const mobAdjustContainer = document.getElementById('mobile-grid-adjust-container');
+                const mobColsSep = document.getElementById('mobile-cols-sep');
+                if (mobAdjustContainer) {
+                  mobAdjustContainer.style.display = (isTrash || isActivity) ? 'none' : 'block';
+                }
+                if (mobColsSep) {
+                  mobColsSep.style.display = (isTrash || isActivity) ? 'none' : 'block';
+                }
+
                 // Hide Manga Mode in Trash & Activity
                 const btnMangaDesk = document.getElementById('btn-manga-desk');
                 const dmManga = document.getElementById('dm-manga');
@@ -19346,19 +19971,53 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (mobSep) mobSep.style.display = showCols ? 'block' : 'none';
               }
           
-              applyGridSizing() {
+              applyGridSizing(recalcColumns = false) {
                 const text = this.gridCols > 0 ? `${this.gridCols}` : 'Auto';
                 if (this.gridCols > 0) {
                   this.container.setAttribute('data-cols', this.gridCols);
                 } else {
                   this.container.removeAttribute('data-cols');
                 }
-                if (this.sliderColsVal) this.sliderColsVal.innerText = text;
-                if (this.sliderColsDeskVal) this.sliderColsDeskVal.innerText = text;
 
-                // Row height scale mapping for Justified Masonry
+                if (this.sliderColsVal) this.sliderColsVal.innerText = text;
+                if (this.sliderGapVal) this.sliderGapVal.innerText = `${this.gridGap}px`;
+                if (this.sliderRadiusVal) this.sliderRadiusVal.innerText = `${this.gridRadius}px`;
+
+                if (this.sliderCols) this.sliderCols.value = this.gridCols;
+                if (this.sliderGap) this.sliderGap.value = this.gridGap;
+                if (this.sliderRadius) this.sliderRadius.value = this.gridRadius;
+
+                if (this.sliderColsMob) this.sliderColsMob.value = this.gridCols;
+                if (this.sliderGapMob) this.sliderGapMob.value = this.gridGap;
+                if (this.sliderRadiusMob) this.sliderRadiusMob.value = this.gridRadius;
+
+                if (this.sliderColsValMob) this.sliderColsValMob.innerText = text;
+                if (this.sliderGapValMob) this.sliderGapValMob.innerText = `${this.gridGap}px`;
+                if (this.sliderRadiusValMob) this.sliderRadiusValMob.innerText = `${this.gridRadius}px`;
+
+                // Real-time CSS property interpolation without destroying cards
+                if (this.container) {
+                  this.container.style.setProperty('--grid-gap', `${this.gridGap}px`);
+                  this.container.style.setProperty('--card-radius', `${this.gridRadius}px`);
+                }
+                const appRoot = document.getElementById('phpfiles-app-root');
+                if (appRoot) {
+                  appRoot.style.setProperty('--grid-gap', `${this.gridGap}px`);
+                  appRoot.style.setProperty('--card-radius', `${this.gridRadius}px`);
+                }
+                document.documentElement.style.setProperty('--grid-gap', `${this.gridGap}px`);
+                document.documentElement.style.setProperty('--card-radius', `${this.gridRadius}px`);
+
                 const heightMap = { 0: '200px', 1: '380px', 2: '320px', 3: '270px', 4: '220px', 5: '185px', 6: '155px', 8: '125px' };
-                this.container.style.setProperty('--justified-row-height', heightMap[this.gridCols] || '200px');
+                if (this.container) {
+                  this.container.style.setProperty('--justified-row-height', heightMap[this.gridCols] || '200px');
+                }
+
+                // Only rearrange DOM structure if column count itself changed
+                if (recalcColumns && (this.layout === 'columns' || this.layout === 'justified')) {
+                  this.renderLimit = 25;
+                  this.renderGallery(true);
+                }
 
                 if (this.currentSection === 'activity' || this.currentSection === 'trash') {
                   return;
@@ -19481,15 +20140,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
                 decoded = decoded.replace(/^\/+|\/+$/g, '').replace(/\.part$/i, '');
 
-                const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
-                const lowerDecoded = decoded.toLowerCase();
-
-                if (specialSections.includes(lowerDecoded)) {
-                  if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
-                    lightbox.close(false);
+                // Distinguish special virtual tabs (@gallery, @recents, etc.) from physical folders
+                if (decoded.startsWith('@')) {
+                  const secName = decoded.substring(1).toLowerCase();
+                  const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
+                  if (specialSections.includes(secName)) {
+                    if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
+                      lightbox.close(false);
+                    }
+                    this.switchDriveSection(secName, false);
+                    return;
                   }
-                  this.switchDriveSection(lowerDecoded, false);
-                  return;
                 }
 
                 if (!decoded) {
@@ -20039,6 +20700,47 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     card.onclick = (e) => app.handleItemClick(e, 'folder', item.path);
                     card.oncontextmenu = (e) => app.showContextMenu(e, 'folder', item.path, item.name);
 
+                    // Direct Folder Drag & Drop without opening the folder
+                    card.ondragover = (e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      card.classList.add('drag-over-folder');
+                    };
+                    card.ondragenter = (e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      card.classList.add('drag-over-folder');
+                    };
+                    card.ondragleave = (e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (!card.contains(e.relatedTarget)) {
+                        card.classList.remove('drag-over-folder');
+                      }
+                    };
+                    card.ondrop = async (e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      card.classList.remove('drag-over-folder');
+                      document.getElementById('dropzone')?.classList.remove('active');
+
+                      let count = 0;
+                      if (e.dataTransfer.items && e.dataTransfer.items.length) {
+                        const itemsList = await app.readDropData(e.dataTransfer.items);
+                        if (itemsList.length) {
+                          count = itemsList.length;
+                          uploadManager.enqueue(itemsList, item.path);
+                        }
+                      } else if (e.dataTransfer.files && e.dataTransfer.files.length) {
+                        const itemsList = Array.from(e.dataTransfer.files).map(f => ({ file: f, relativePath: f.name }));
+                        count = itemsList.length;
+                        uploadManager.enqueue(itemsList, item.path);
+                      }
+                      if (count > 0) {
+                        app.toast(`Uploading ${count} item(s) directly to "${item.name}"`);
+                      }
+                    };
+
                     if (item.thumb_image) card.classList.add('has-image');
 
                     let folderThumbHtml = item.thumb_image
@@ -20056,6 +20758,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         </div>
                       </div>
                       <div class="file-star-btn ${isStarred ? 'active' : ''}" title="${isStarred ? 'Unstar' : 'Star'}">${starSvg}</div>
+                      <div class="folder-drop-overlay">
+                        <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
+                        <span>Drop to upload into<br><strong>${this.escapeHtml(item.name)}</strong></span>
+                      </div>
                     `;
                   } else {
                     let thumbHtml = '';
@@ -20069,9 +20775,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         thumbRatio = 'style="min-height:140px; height:auto;"';
                       }
                     } else if (item.type === 'video') {
-                      thumbHtml = `<div class="type-icon" style="color:#ef4444;"><svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg></div>`;
+                      thumbHtml = `
+                        <div class="type-icon" style="color:#ef4444;"><svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg></div>
+                        <img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}" alt="" loading="lazy" decoding="async" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity 0.2s; z-index:3;" onload="this.style.opacity='1'; this.closest('.file-card')?.classList.add('has-image');" onerror="app.captureVideoThumb(this, '${encodeURIComponent(item.path)}')">
+                      `;
                     } else if (item.type === 'audio') {
-                      thumbHtml = `<div class="type-icon" style="color:#f87171;"><svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg></div>`;
+                      thumbHtml = `
+                        <div class="type-icon" style="color:#f87171;"><svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg></div>
+                        <img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}" alt="" loading="lazy" decoding="async" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity 0.2s; z-index:3;" onload="this.style.opacity='1'; this.closest('.file-card')?.classList.add('has-image');" onerror="this.remove();">
+                      `;
                     } else if (item.type === 'archive') {
                       thumbHtml = `<div class="type-icon" style="color:#f59e0b;"><svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg></div>`;
                     } else {
@@ -20507,15 +21219,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               updateBreadcrumbs() {
                 let html = `<a href="#/" class="bc-item ${this.currentSection === 'home' && !this.currentPath ? 'active' : ''}">Home</a>`;
                 if (this.currentSection === 'recents') {
-                  html += `<span class="bc-sep">/</span><a href="#/recents" class="bc-item active">Recents</a>`;
+                  html += `<span class="bc-sep">/</span><a href="#/@recents" class="bc-item active">Recents</a>`;
                 } else if (this.currentSection === 'starred') {
-                  html += `<span class="bc-sep">/</span><a href="#/starred" class="bc-item active">Starred Items</a>`;
+                  html += `<span class="bc-sep">/</span><a href="#/@starred" class="bc-item active">Starred Items</a>`;
                 } else if (this.currentSection === 'activity') {
-                  html += `<span class="bc-sep">/</span><a href="#/activity" class="bc-item active">File Activity</a>`;
+                  html += `<span class="bc-sep">/</span><a href="#/@activity" class="bc-item active">File Activity</a>`;
                 } else if (this.currentSection === 'trash') {
-                  html += `<span class="bc-sep">/</span><a href="#/trash" class="bc-item active">Trash Bin</a>`;
+                  html += `<span class="bc-sep">/</span><a href="#/@trash" class="bc-item active">Trash Bin</a>`;
                 } else if (this.currentSection === 'gallery') {
-                  html += `<span class="bc-sep">/</span><a href="#/gallery" class="bc-item active">Gallery</a>`;
+                  html += `<span class="bc-sep">/</span><a href="#/@gallery" class="bc-item active">Gallery</a>`;
                 } else if (this.currentPath) {
                   const parts = this.currentPath.split('/');
                   let accum = '';
@@ -20541,6 +21253,33 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (doc.includes(ext)) return 'text';
                 if (arc.includes(ext)) return 'archive';
                 return 'file';
+              }
+
+              captureVideoThumb(imgEl, encodedPath) {
+                if (!imgEl) return;
+                const video = document.createElement('video');
+                video.src = `?access=admin&page=drive&action=raw&f=${encodedPath}#t=0.8`;
+                video.crossOrigin = 'anonymous';
+                video.muted = true;
+                video.playsInline = true;
+                video.preload = 'metadata';
+
+                video.onloadeddata = () => {
+                  try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = Math.min(480, video.videoWidth || 320);
+                    canvas.height = Math.min(480, video.videoHeight || 240);
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    imgEl.src = canvas.toDataURL('image/jpeg', 0.82);
+                    imgEl.style.opacity = '1';
+                    imgEl.closest('.file-card')?.classList.add('has-image');
+                    video.remove();
+                  } catch (e) {
+                    imgEl.remove();
+                  }
+                };
+                video.onerror = () => { imgEl.remove(); };
               }
 
               updateBadges() {
@@ -20624,7 +21363,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 } else if (resolvedType === 'text') {
                   this.openEditor(file.path, file.name);
                 } else {
-                  window.location.href = `?access=admin&page=drive&action=download&f=${encodeURIComponent(file.path)}`;
+                  this.openDocViewer(file.path, file.name);
                 }
               }
 
@@ -20717,10 +21456,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     }
                   } else {
                     container.innerHTML = `
-                      <div class="center-state" style="min-height:300px;">
-                        <div style="font-weight:700; font-size:1rem; margin-bottom:0.4rem;">Unsupported Preview Format</div>
-                        <div style="font-size:0.8rem; color:var(--md-sys-color-on-surface-variant); margin-bottom:1rem;">This format can be opened in an external application.</div>
-                        <a href="${directUrl}" class="btn-primary" download style="text-decoration:none;">Download File</a>
+                      <div class="center-state" style="min-height:320px;">
+                        <svg viewBox="0 0 24 24" style="width:54px; height:54px; opacity:0.35; color:var(--md-sys-color-outline); margin-bottom:0.6rem;"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+                        <div style="font-weight:700; font-size:1.1rem; color:#ffffff; margin-bottom:0.3rem;">This file can't be viewed.</div>
+                        <div style="font-size:0.82rem; color:var(--md-sys-color-on-surface-variant); margin-bottom:1.2rem;">Preview is not supported for .${ext.toUpperCase() || 'this'} files. You can download it directly.</div>
+                        <a href="${directUrl}" class="btn-primary" download style="text-decoration:none; padding:0.5rem 1.4rem; gap:0.4rem;">
+                          <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                          Download File
+                        </a>
                       </div>
                     `;
                   }
@@ -20763,7 +21506,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   invert: false,
                   cropActive: false,
                   cropRatio: 'free',
-                  textActive: false
+                  textActive: false,
+                  drawActive: false
+                };
+
+                let drawing = {
+                  isDrawing: false,
+                  lastX: 0,
+                  lastY: 0,
+                  strokes: []
                 };
 
                 let crop = {
@@ -21047,6 +21798,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       freeText.dragOffsetY = 0;
                     }
                     redraw();
+                  } else if (state.drawActive) {
+                    pushSnapshot();
+                    drawing.isDrawing = true;
+                    drawing.lastX = pt.x;
+                    drawing.lastY = pt.y;
                   }
                 };
 
@@ -21069,7 +21825,34 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 };
 
                 window.onmousemove = window.ontouchmove = (e) => {
-                  if (state.cropActive && crop.activeHandle) {
+                  if (state.drawActive && drawing.isDrawing) {
+                    if (e.cancelable) e.preventDefault();
+                    const pt = getCanvasPoint(e);
+                    const brushSize = parseInt(document.getElementById('ie-draw-size')?.value || '6', 10);
+                    const brushColor = document.getElementById('ie-draw-color')?.value || '#ff0000';
+                    const isEraser = document.getElementById('ie-draw-eraser')?.checked;
+
+                    ctx.save();
+                    ctx.lineJoin = 'round';
+                    ctx.lineCap = 'round';
+                    ctx.lineWidth = brushSize;
+
+                    if (isEraser) {
+                      ctx.globalCompositeOperation = 'destination-out';
+                    } else {
+                      ctx.globalCompositeOperation = 'source-over';
+                      ctx.strokeStyle = brushColor;
+                    }
+
+                    ctx.beginPath();
+                    ctx.moveTo(drawing.lastX, drawing.lastY);
+                    ctx.lineTo(pt.x, pt.y);
+                    ctx.stroke();
+                    ctx.restore();
+
+                    drawing.lastX = pt.x;
+                    drawing.lastY = pt.y;
+                  } else if (state.cropActive && crop.activeHandle) {
                     if (e.cancelable) e.preventDefault();
                     const pt = getCanvasPoint(e);
                     const dx = pt.x - crop.startX;
@@ -21124,6 +21907,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 window.onmouseup = window.ontouchend = () => {
                   crop.activeHandle = null;
                   freeText.isDragging = false;
+                  if (state.drawActive && drawing.isDrawing) {
+                    drawing.isDrawing = false;
+                    const nextImg = new Image();
+                    nextImg.crossOrigin = 'anonymous';
+                    nextImg.onload = () => {
+                      baseImg = nextImg;
+                      state.rotation = 0;
+                      state.flipH = 1;
+                      state.flipV = 1;
+                    };
+                    nextImg.src = canvas.toDataURL('image/png');
+                  }
                 };
 
                 baseImg.onload = () => {
@@ -21139,7 +21934,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 baseImg.src = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(path)}&t=${Date.now()}`;
 
                 // Tab Navigation
-                const tabs = ['tab-transform', 'tab-crop', 'tab-adjust', 'tab-text'];
+                const tabs = ['tab-transform', 'tab-crop', 'tab-adjust', 'tab-text', 'tab-draw'];
                 document.querySelectorAll('.img-editor-nav-btn').forEach(btn => {
                   btn.onclick = () => {
                     document.querySelectorAll('.img-editor-nav-btn').forEach(b => b.classList.remove('active'));
@@ -21151,10 +21946,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     });
                     state.cropActive = (target === 'tab-crop');
                     state.textActive = (target === 'tab-text');
+                    state.drawActive = (target === 'tab-draw');
                     if (state.cropActive) initCropBounds();
                     redraw();
                   };
                 });
+
+                const drawSizeInput = document.getElementById('ie-draw-size');
+                const drawSizeVal = document.getElementById('ie-draw-size-val');
+                if (drawSizeInput && drawSizeVal) {
+                  drawSizeInput.oninput = (e) => {
+                    drawSizeVal.innerText = `${e.target.value}px`;
+                  };
+                }
+
+                document.getElementById('ie-draw-clear-btn').onclick = () => {
+                  pushSnapshot();
+                  baseImg.src = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(path)}&t=${Date.now()}`;
+                  this.toast('Cleared drawing strokes');
+                };
 
                 // Clean Undo System (Clears live text so it never gets redrawn over restored state)
                 const applyHistoryState = (dataUrl) => {
@@ -21440,7 +22250,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 document.getElementById(`nav-${section}`)?.classList.add('active');
 
                 if (updateHash) {
-                  const targetHash = section === 'home' ? '#/' : `#/${section}`;
+                  const targetHash = section === 'home' ? '#/' : `#/@${section}`;
                   if (window.location.hash !== targetHash) {
                     window.location.hash = targetHash;
                   }
@@ -22518,13 +23328,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <div class="details-section">
                       <div class="details-title">
                         <svg viewBox="0 0 24 24"><path d="M12 12m-3 0a3 3 0 1 0 6 0 3 3 0 1 0-6 0M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9z"/></svg>
-                        Camera EXIF
+                        Camera EXIF & GPS Location
                       </div>
                       <div class="details-grid">
                   `;
+                  let osmEmbedUrl = res.exif['OSM_Embed'] || null;
                   for (let k in res.exif) {
-                    let val = k === 'Maps' ? `<a href="${res.exif[k]}" target="_blank" style="color:#ff0000; text-decoration:underline;">Open Maps</a>` : res.exif[k];
+                    if (k === 'OSM_Embed') continue;
+                    let val = res.exif[k];
+                    if (k === 'OpenStreetMap') {
+                      val = `<a href="${res.exif[k]}" target="_blank" style="color:#ff0000; font-weight:700; text-decoration:underline;">View on OpenStreetMap</a>`;
+                    } else if (k === 'Maps') {
+                      val = `<a href="${res.exif[k]}" target="_blank" style="color:#ff0000; font-weight:700; text-decoration:underline;">Google Maps</a>`;
+                    }
                     html += `<div class="details-row"><span class="details-label">${k}</span><span class="details-value">${val}</span></div>`;
+                  }
+                  if (osmEmbedUrl) {
+                    html += `
+                      <div style="padding-top:0.6rem;">
+                        <iframe class="osm-map-frame" src="${osmEmbedUrl}" loading="lazy"></iframe>
+                      </div>
+                    `;
                   }
                   html += `</div></div>`;
                 }
@@ -22694,7 +23518,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (returnSection) {
                   this.originSection = null;
                   this.currentSection = returnSection;
-                  const targetHash = `#/${returnSection}`;
+                  const targetHash = `#/@${returnSection}`;
                   if (window.location.hash !== targetHash) {
                     window.location.hash = targetHash;
                   } else {
@@ -22716,9 +23540,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (window.location.hash !== targetHash) {
                   window.location.hash = targetHash;
                 } else {
-                  this.loadDir(parentDir, false);
+                  // Keep existing scroll position and loaded items completely intact!
+                  this.updateDocTitle(parentDir ? parentDir.split('/').pop() : '', (this.data.folders?.length || 0) + (this.data.files?.length || 0));
                 }
-                this.updateDocTitle(parentDir ? parentDir.split('/').pop() : '', (this.data.folders?.length || 0) + (this.data.files?.length || 0));
               }
         
               toast(msg) {
@@ -23610,6 +24434,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php endif; ?>
           </div>
         <?php endif; ?>
+        </div><!-- #admin-dynamic-content -->
       </main>
     </div>
     <?php endif; ?>
