@@ -203,6 +203,51 @@ if (function_exists('opcache_is_script_cached') && function_exists('opcache_comp
   }
 }
 
+if (isset($_GET['action']) && $_GET['action'] === 'og_image') {
+  header('Content-Type: image/svg+xml; charset=utf-8');
+  header('Cache-Control: public, max-age=604800, immutable');
+  $title = htmlspecialchars(!empty($_GET['title']) ? $_GET['title'] : 'PHP Music');
+  $sub = htmlspecialchars(!empty($_GET['sub']) ? $_GET['sub'] : 'Self-Hosted Music Streaming & Audio Cloud');
+  echo <<<SVG
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#181818"/>
+      <stop offset="100%" stop-color="#0a0a0a"/>
+    </linearGradient>
+    <radialGradient id="redGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ff0000" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#ff0000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="discGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff0000"/>
+      <stop offset="100%" stop-color="#990000"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#050505"/>
+  <circle cx="600" cy="200" r="300" fill="url(#redGlow)"/>
+  <rect x="40" y="40" width="1120" height="550" rx="32" fill="url(#cardGrad)" stroke="#262626" stroke-width="2"/>
+  
+  <!-- Vinyl Disc & Icon -->
+  <g transform="translate(600, 195)">
+    <circle cx="0" cy="0" r="85" fill="#121212" stroke="#222" stroke-width="4"/>
+    <circle cx="0" cy="0" r="72" fill="none" stroke="#1c1c1c" stroke-width="1.5"/>
+    <circle cx="0" cy="0" r="60" fill="none" stroke="#202020" stroke-width="1.5"/>
+    <circle cx="0" cy="0" r="48" fill="none" stroke="#1c1c1c" stroke-width="1.5"/>
+    <circle cx="0" cy="0" r="34" fill="url(#discGrad)"/>
+    <circle cx="0" cy="0" r="10" fill="#0a0a0a" stroke="#ffffff" stroke-width="2"/>
+    <path d="M-6 4 V-14 C-6 -17 -2 -19 4 -19 V-14 C0 -14 -2 -13 -2 -11 V4 C-4 2 -8 2 -10 4 C-12 6 -12 9 -9 10 C-6 11 -4 9 -4 6 V-8 H2 V4 C0 2 -4 2 -6 4 Z" fill="#ffffff"/>
+  </g>
+
+  <!-- Typography -->
+  <text x="600" y="365" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="44" font-weight="700" fill="#ffffff" text-anchor="middle">{$title}</text>
+  <text x="600" y="420" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="22" font-weight="500" fill="#aaaaaa" text-anchor="middle">{$sub}</text>
+  <text x="600" y="480" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="16" font-weight="400" fill="#666666" text-anchor="middle">Single-File PHP • Full PWA Offline • Rhythm Studio • Drive Studio</text>
+</svg>
+SVG;
+  exit;
+}
+
 if (isset($_GET['pwa'])) {
   if ($_GET['pwa'] == 'manifest') {
     header('Content-Type: application/json; charset=utf-8');
@@ -452,7 +497,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '9.8');
+define('APP_VERSION', '9.9');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -15872,6 +15917,47 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               font-size: 0;
               margin: 0 auto;
               padding: 0;
+              position: relative;
+            }
+            .manga-page-btn {
+              position: absolute;
+              top: 14px;
+              right: 14px;
+              background: rgba(20, 20, 20, 0.88);
+              backdrop-filter: blur(10px);
+              -webkit-backdrop-filter: blur(10px);
+              color: #ffffff;
+              border: 1px solid var(--md-sys-color-outline-variant);
+              padding: 0.35rem 0.8rem;
+              border-radius: 20px;
+              font-size: 0.78rem;
+              font-weight: 600;
+              display: flex;
+              align-items: center;
+              gap: 0.4rem;
+              cursor: pointer;
+              opacity: 0;
+              transform: translateY(-4px);
+              transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+              z-index: 10;
+              pointer-events: auto;
+              text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+              box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+            }
+            .manga-page:hover .manga-page-btn,
+            .manga-page:focus-within .manga-page-btn {
+              opacity: 1;
+              transform: translateY(0);
+            }
+            .manga-page-btn:hover {
+              background: #ff0000;
+              color: #ffffff;
+              border-color: #ff0000;
+            }
+            .manga-page-btn svg {
+              width: 15px;
+              height: 15px;
+              fill: currentColor;
             }
 
             .manga-page img {
@@ -15907,30 +15993,39 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             .lightbox {
-              position: fixed;
-              inset: 0;
-              height: 100dvh;
-              min-height: 100dvh;
-              background: #030303;
-              z-index: 3500;
+              position: fixed !important;
+              top: 0 !important;
+              left: 0 !important;
+              right: 0 !important;
+              bottom: 0 !important;
+              width: 100vw !important;
+              height: 100vh !important;
+              height: 100dvh !important;
+              min-height: 100vh !important;
+              min-height: 100dvh !important;
+              max-height: 100vh !important;
+              max-height: 100dvh !important;
+              background: #000000 !important;
+              z-index: 99999 !important;
               display: none;
-              flex-direction: column;
-              touch-action: pan-y;
+              margin: 0 !important;
+              padding: 0 !important;
+              border: none !important;
+              overflow: hidden !important;
+              user-select: none;
+              box-sizing: border-box;
             }
-
             .lightbox.active {
-              display: flex;
+              display: block !important;
             }
-
             .lightbox-header {
               height: 56px;
               display: flex;
               align-items: center;
               justify-content: space-between;
-              padding: 0 1.2rem;
-              background: #101010;
-              border-bottom: 1px solid var(--md-sys-color-outline-variant);
-              color: #fff;
+              padding: 0 1rem;
+              background: linear-gradient(to bottom, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0.35) 75%, transparent 100%);
+              color: #ffffff;
               position: absolute;
               top: 0;
               left: 0;
@@ -15938,45 +16033,251 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               z-index: 3550;
               opacity: 0;
               transform: translateY(-100%);
-              transition: transform 0.2s ease, opacity 0.2s ease;
+              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.25s ease;
+              pointer-events: none;
             }
-
             .lightbox-header.active {
               opacity: 1;
               transform: translateY(0);
+              pointer-events: auto;
             }
-
             .lightbox-title {
-              font-weight: 700;
+              font-weight: 600;
               font-size: 0.95rem;
               white-space: nowrap;
               overflow: hidden;
               text-overflow: ellipsis;
-              max-width: 60vw;
-              letter-spacing: 0.2px;
+              max-width: 55vw;
+              color: #ffffff;
+              text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
             }
-
-            .lightbox-body {
-              flex: 1;
-              position: relative;
+            .lightbox-bottom-bar {
+              position: absolute;
+              bottom: 0;
+              left: 0;
+              right: 0;
+              width: 100%;
+              padding: 0.4rem 0.8rem calc(0.6rem + env(safe-area-inset-bottom, 0px)) 0.8rem;
+              background: linear-gradient(to top, rgba(0, 0, 0, 0.94) 0%, rgba(0, 0, 0, 0.6) 65%, transparent 100%);
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              gap: 0.35rem;
+              z-index: 3550;
+              opacity: 0;
+              transform: translateY(100%);
+              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.25s ease;
+              pointer-events: none;
+            }
+            .lightbox-bottom-bar.active {
+              opacity: 1;
+              transform: translateY(0);
+              pointer-events: auto;
+            }
+            .lightbox-carousel-wrap {
+              width: 100%;
+              max-width: 100%;
               display: flex;
               align-items: center;
               justify-content: center;
               overflow: hidden;
-              user-select: none;
+              padding: 2px 0;
+              pointer-events: auto;
+              mask-image: linear-gradient(to right, transparent 0%, black 5%, black 95%, transparent 100%);
+              -webkit-mask-image: linear-gradient(to right, transparent 0%, black 5%, black 95%, transparent 100%);
             }
-
-            .lightbox-media {
-              max-width: 95%;
-              max-height: 86dvh;
-              object-fit: contain;
-              user-select: none;
-              box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
-              border-radius: 16px;
-              opacity: 1;
+            .lightbox-carousel {
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              overflow-x: auto;
+              scrollbar-width: none;
+              width: 100%;
+              padding: 6px 32px;
+              scroll-behavior: smooth;
+              -webkit-overflow-scrolling: touch;
+            }
+            .lightbox-carousel::-webkit-scrollbar {
+              display: none;
+            }
+            .lb-carousel-item {
+              width: 44px;
+              height: 44px;
+              border-radius: 10px;
+              overflow: hidden;
+              background: rgba(255, 255, 255, 0.08);
+              border: 2px solid rgba(255, 255, 255, 0.15);
+              flex-shrink: 0;
+              cursor: pointer;
+              opacity: 0.45;
               transform: translateZ(0);
-              will-change: transform, opacity;
+              backface-visibility: hidden;
+              -webkit-backface-visibility: hidden;
+              transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+            }
+            .lb-carousel-item:hover {
+              opacity: 0.85;
+              transform: translateZ(0) scale(1.05);
+            }
+            .lb-carousel-item.active {
+              opacity: 1;
+              border-color: #ffffff;
+              transform: translateZ(0) scale(1.12);
+              box-shadow: 0 0 0 1.5px #ff3b30, 0 4px 14px rgba(0, 0, 0, 0.8), 0 0 12px rgba(255, 59, 48, 0.55);
+              z-index: 5;
+            }
+            .lb-carousel-item img {
+              width: 100%;
+              height: 100%;
+              object-fit: cover;
+              display: block;
+              pointer-events: none;
+            }
+            .lb-carousel-item .lb-carousel-icon {
+              width: 100%;
+              height: 100%;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              background: rgba(30, 30, 30, 0.85);
+              color: #fff;
+            }
+            .lb-carousel-item .lb-carousel-icon svg {
+              width: 20px;
+              height: 20px;
+            }
+            .lightbox-actions-row {
+              display: flex;
+              align-items: center;
+              justify-content: space-around;
+              width: 100%;
+              max-width: 100%;
+              pointer-events: auto;
+            }
+            .lb-action-btn {
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              justify-content: center;
+              gap: 3px;
+              color: #e0e0e0;
               background: transparent;
+              border: none;
+              cursor: pointer;
+              padding: 0.3rem 0.6rem;
+              border-radius: 12px;
+              transition: all 0.15s ease;
+              min-width: 54px;
+            }
+            .lb-action-btn:hover {
+              color: #ffffff;
+              background: rgba(255, 255, 255, 0.12);
+            }
+            .lb-action-btn svg {
+              width: 22px;
+              height: 22px;
+              fill: currentColor;
+            }
+            .lb-action-btn span {
+              font-size: 0.72rem;
+              font-weight: 500;
+              letter-spacing: 0.2px;
+            }
+            .lb-action-btn.active svg {
+              fill: #ff3b30;
+              color: #ff3b30;
+            }
+            .lightbox-arrow {
+              position: absolute;
+              top: 50%;
+              transform: translateY(-50%);
+              width: 44px;
+              height: 44px;
+              background: rgba(20, 20, 20, 0.65);
+              backdrop-filter: blur(12px);
+              -webkit-backdrop-filter: blur(12px);
+              border: 1px solid rgba(255, 255, 255, 0.12);
+              color: #ffffff;
+              border-radius: 50%;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              cursor: pointer;
+              z-index: 3550;
+              opacity: 0;
+              pointer-events: none;
+              transition: all 0.25s cubic-bezier(0.2, 0, 0, 1);
+              box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+            }
+            .lightbox-arrow:hover {
+              background: rgba(255, 0, 0, 0.35);
+              border-color: #ff0000;
+              transform: translateY(-50%) scale(1.08);
+            }
+            .lightbox-arrow.left {
+              left: 16px;
+            }
+            .lightbox-arrow.right {
+              right: 16px;
+            }
+            .lightbox-arrow.active {
+              opacity: 1;
+              pointer-events: auto;
+            }
+            .lightbox-body {
+              position: absolute !important;
+              top: 0 !important;
+              left: 0 !important;
+              right: 0 !important;
+              bottom: 0 !important;
+              width: 100% !important;
+              height: 100% !important;
+              display: flex !important;
+              align-items: center !important;
+              justify-content: center !important;
+              overflow: hidden !important;
+              touch-action: none;
+              contain: strict;
+              z-index: 1;
+              box-sizing: border-box;
+              margin: 0 !important;
+              padding: 0 !important;
+            }
+            .lightbox-media {
+              display: block !important;
+              max-width: 100% !important;
+              max-height: 100% !important;
+              width: auto !important;
+              height: auto !important;
+              object-fit: contain !important;
+              object-position: center center !important;
+              margin: auto !important;
+              user-select: none;
+              -webkit-user-drag: none;
+              transform-origin: center center;
+              will-change: transform;
+              border-radius: 0;
+              box-shadow: none;
+              cursor: default;
+              pointer-events: auto;
+            }
+            .lightbox-media.zoomed {
+              cursor: grab;
+            }
+            .lightbox-media.zoomed:active {
+              cursor: grabbing;
+            }
+            .lightbox-media.smooth-zoom {
+              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease;
+            }
+            .lightbox-media.zoomed {
+              cursor: grab;
+            }
+            .lightbox-media.zoomed:active {
+              cursor: grabbing;
+            }
+            .lightbox-media.smooth-zoom {
+              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease;
             }
 
             .lightbox-audio-card {
@@ -16092,41 +16393,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               display: block;
             }
 
-            .lightbox-nav {
-              position: absolute;
-              top: 50%;
-              transform: translateY(-50%);
-              width: 46px;
-              height: 46px;
-              background: rgba(30, 30, 30, 0.8);
-              border: 1px solid var(--md-sys-color-outline-variant);
-              backdrop-filter: blur(16px);
-              -webkit-backdrop-filter: blur(16px);
-              color: #ffffff;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              cursor: pointer;
-              border-radius: 50%;
-              z-index: 3520;
-              box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
-              transition: all 0.2s cubic-bezier(0.2, 0, 0, 1);
-            }
-
-            .lightbox-nav:hover {
-              background: #ff0000;
-              border-color: #ff0000;
-              transform: translateY(-50%) scale(1.08);
-            }
-
-            .lightbox-nav.prev {
-              left: 1.2rem;
-            }
-
-            .lightbox-nav.next {
-              right: 1.2rem;
-            }
-
             .modal-backdrop,
             #modal-backdrop {
               position: fixed !important;
@@ -16134,7 +16400,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               background: rgba(0, 0, 0, 0.8) !important;
               backdrop-filter: blur(6px) !important;
               -webkit-backdrop-filter: blur(6px) !important;
-              z-index: 6000 !important;
+              z-index: 100005 !important;
               display: none !important;
               align-items: center !important;
               justify-content: center !important;
@@ -17968,24 +18234,96 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <!-- Full Lightbox Media Viewer -->
             <div class="lightbox" id="lightbox">
               <div class="lightbox-header">
-                <div class="lightbox-title" id="lb-title">image.jpg</div>
-                <div style="display:flex; gap:0.4rem;">
-                  <button class="btn-icon" id="btn-lb-search-google" title="Search Image on Google"><svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14zm2.5-4h-2v2H9v-2H7V9h2V7h1v2h2v1z"/></svg></button>
-                  <button class="btn-icon" id="btn-lb-edit" title="Edit Image"><svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>
-                  <button class="btn-icon" id="btn-lb-details" title="Metadata"><svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg></button>
-                  <button class="btn-icon" id="btn-lb-download" title="Download"><svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg></button>
-                  <button class="btn-icon" id="btn-lb-close" title="Close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                <div style="display:flex; align-items:center; gap:0.6rem; min-width:0;">
+                  <button class="btn-icon" id="btn-lb-close" title="Close">
+                    <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+                  </button>
+                  <div class="lightbox-title" id="lb-title">image.jpg</div>
+                </div>
+                <div style="display:flex; gap:0.4rem; align-items:center;">
+                  <button class="btn-icon" id="btn-lb-search-google" title="Search on Google">
+                    <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14zm2.5-4h-2v2H9v-2H7V9h2V7h1v2h2v1z"/></svg>
+                  </button>
+                  <button class="btn-icon" id="btn-lb-edit" title="Edit Image">
+                    <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                  </button>
                 </div>
               </div>
+              <button class="lightbox-arrow left" id="btn-lb-prev" title="Previous Media (←)">
+                <svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+              </button>
+              <button class="lightbox-arrow right" id="btn-lb-next" title="Next Media (→)">
+                <svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+              </button>
               <div class="lightbox-body" id="lb-body">
                 <img class="lightbox-media" id="lb-img" src="" alt="">
-                <div class="lightbox-nav prev" id="lb-prev"><svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg></div>
-                <div class="lightbox-nav next" id="lb-next"><svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg></div>
+              </div>
+              <div class="lightbox-bottom-bar" id="lb-bottom-bar">
+                <div class="lightbox-carousel-wrap" id="lb-carousel-wrap">
+                  <div class="lightbox-carousel" id="lb-carousel"></div>
+                </div>
+                <div class="lightbox-actions-row">
+                  <button class="lb-action-btn" id="btn-lb-manga" title="Read as Manga">
+                    <svg viewBox="0 0 24 24"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg>
+                    <span>Manga</span>
+                  </button>
+                  <button class="lb-action-btn" id="btn-lb-rename" title="Rename">
+                    <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                    <span>Rename</span>
+                  </button>
+                  <button class="lb-action-btn" id="btn-lb-share" title="Share">
+                    <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>
+                    <span>Share</span>
+                  </button>
+                  <button class="lb-action-btn" id="btn-lb-star" title="Favorite">
+                    <svg id="lb-star-icon" viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+                    <span>Favorite</span>
+                  </button>
+                  <button class="lb-action-btn" id="btn-lb-details" title="Info">
+                    <svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>
+                    <span>Info</span>
+                  </button>
+                  <button class="lb-action-btn" id="btn-lb-download" title="Download">
+                    <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                    <span>Download</span>
+                  </button>
+                </div>
               </div>
             </div>
 
             <!-- Modal Backdrops -->
             <div class="modal-backdrop" id="modal-backdrop">
+              <!-- Share Modal -->
+              <div class="modal-box" id="modal-share" style="display:none; max-width: 420px;">
+                <div class="modal-header">
+                  <div style="display:flex; align-items:center; gap:0.5rem; overflow:hidden;">
+                    <svg viewBox="0 0 24 24" style="width:20px;height:20px;color:#ff0000;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>
+                    <span id="share-modal-title" style="font-weight:700; font-size:1rem; color:#ffffff;">Share Link</span>
+                  </div>
+                  <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-content" style="padding: 1.5rem;">
+                  <div style="text-align:center; margin-bottom: 1.5rem;">
+                    <div style="width: 64px; height: 64px; background: rgba(255,0,0,0.15); color: #ff0000; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 1rem auto; border: 1px solid rgba(255,0,0,0.3);">
+                      <svg viewBox="0 0 24 24" style="width: 32px; height: 32px;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>
+                    </div>
+                    <h5 style="margin:0; font-weight:700; color:#ffffff; word-break: break-all;" id="share-modal-filename">filename.ext</h5>
+                    <p style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); margin-top:0.5rem;">Anyone with this link can access the file.</p>
+                  </div>
+                  <div class="form-group" style="margin:0;">
+                    <div style="display:flex; align-items:center; background: var(--md-sys-color-surface-container-low); border: 1px solid var(--md-sys-color-outline-variant); border-radius: 12px; padding: 0.3rem; gap: 0.4rem;">
+                      <input type="text" id="share-link-input" class="form-input" style="border:none !important; background:transparent !important; box-shadow:none !important; flex:1; padding:0.5rem; color:#ffffff;" readonly>
+                      <button class="btn-primary" id="share-copy-btn" style="height:36px; padding:0 1rem; border-radius:10px;"><svg viewBox="0 0 24 24" style="width:16px;height:16px;margin-right:0.3rem;"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg> Copy</button>
+                    </div>
+                  </div>
+                  <div style="display:none; justify-content:center; margin-top:1.2rem;" id="share-native-container">
+                    <button class="btn-primary" id="share-native-btn" style="background:transparent !important; color:#ffffff !important; border:1px solid rgba(255,255,255,0.2) !important; width:100%; justify-content:center;">
+                      <svg viewBox="0 0 24 24" style="width:16px;height:16px;margin-right:0.4rem;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg> Share via Device Apps
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <!-- Advanced Batch Rename Modal -->
               <div class="modal-box" id="modal-batch-rename" style="display:none; max-width:600px; max-height:90dvh;">
                 <div class="modal-header">
@@ -18896,11 +19234,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
               }
         
-              async open() {
+              async open(targetImageName = null) {
                 const appInstance = window.app;
                 const currentPath = appInstance ? (appInstance.currentPath || '') : '';
                 this.currentDirPath = currentPath;
                 this.images = [];
+                this.targetImageName = targetImageName;
 
                 try {
                   const res = await fetch(`?access=admin&page=drive&action=list&dir=${encodeURIComponent(currentPath)}`);
@@ -18919,9 +19258,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.render();
               }
 
-              async openPath(path) {
+              async openPath(path, targetImageName = null) {
                 this.currentDirPath = path || '';
                 this.images = [];
+                this.targetImageName = targetImageName;
 
                 try {
                   const res = await fetch(`?access=admin&page=drive&action=list&dir=${encodeURIComponent(path || '')}`);
@@ -18959,21 +19299,56 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   html += `
                     <div class="manga-page" data-index="${idx}" id="mpage-${idx}">
                       <img src="${rawUrl}" alt="${img.name}" loading="lazy" decoding="async">
+                      <button type="button" class="manga-page-btn" onclick="mangaViewer.goToImage(${idx})" title="View in Lightbox">
+                        <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                        <span>Go to this image</span>
+                      </button>
                     </div>
                   `;
                 });
                 this.pagesWrap.innerHTML = html;
                 this.pagesWrap.querySelectorAll('.manga-page').forEach(page => this.observer.observe(page));
-                this.el.scrollTop = 0;
+                
+                if (this.targetImageName) {
+                  const targetIdx = this.images.findIndex(img => img.name === this.targetImageName);
+                  if (targetIdx !== -1) {
+                    setTimeout(() => {
+                      const targetEl = document.getElementById(`mpage-${targetIdx}`);
+                      if (targetEl) {
+                        targetEl.scrollIntoView({ behavior: 'instant', block: 'start' });
+                        this.counter.innerText = `${targetIdx + 1} / ${this.images.length}`;
+                      }
+                    }, 50);
+                  } else {
+                    this.el.scrollTop = 0;
+                  }
+                  this.targetImageName = null;
+                } else {
+                  this.el.scrollTop = 0;
+                }
               }
         
-              close() {
+              goToImage(idx) {
+                const target = this.images[idx];
+                if (!target) return;
+                this.close(false);
+                if (window.app) {
+                  app.openFile(target.path, true);
+                }
+              }
+
+              close(updateLocation = true) {
                 if (this.observer) this.observer.disconnect();
                 this.el.classList.remove('active');
                 this.pagesWrap.innerHTML = '';
+                const lastDir = this.currentDirPath;
                 this.images = [];
                 this.currentDirPath = '';
                 if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+
+                if (updateLocation && window.app && lastDir !== undefined) {
+                  app.navigate(lastDir);
+                }
               }
             }
         
@@ -18983,45 +19358,98 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.title = document.getElementById('lb-title');
                 this.body = document.getElementById('lb-body');
                 this.header = document.querySelector('.lightbox-header');
+                this.bottomBar = document.getElementById('lb-bottom-bar');
+                this.carouselEl = document.getElementById('lb-carousel');
                 this.currentIndex = 0;
                 this.mediaList = [];
+                this.uiTimer = null;
+                this.isUiVisible = true;
+
+                // Smooth Zoom & Drag Engine State
+                this.scale = 1;
+                this.panX = 0;
+                this.panY = 0;
+                this.isMouseDragging = false;
+                this.mouseStartX = 0;
+                this.mouseStartY = 0;
+                this.mouseMoveDist = 0;
+                this.lastTapTime = 0;
+                this.tapTimeout = null;
+
+                // Touch Gesture Engine State
                 this.touchStartX = 0;
                 this.touchStartY = 0;
-                this.uiTimer = null;
+                this.touchStartTime = 0;
+                this.initialPanX = 0;
+                this.initialPanY = 0;
+                this.initialPinchDistance = 0;
+                this.initialPinchScale = 1;
+                this.isTouchPanning = false;
+                this.swipeDeltaX = 0;
+
+                // Carousel Pagination State
+                this.carouselBatchSize = 25;
+                this.carouselLoadedCount = 0;
+
                 this.bindEvents();
               }
 
-              showUI() {
+              showUI(autoHide = true) {
+                this.isUiVisible = true;
                 if (this.header) this.header.classList.add('active');
+                if (this.bottomBar) this.bottomBar.classList.add('active');
+                document.getElementById('btn-lb-prev')?.classList.add('active');
+                document.getElementById('btn-lb-next')?.classList.add('active');
                 clearTimeout(this.uiTimer);
-                this.uiTimer = setTimeout(() => {
-                  if (this.header) this.header.classList.remove('active');
-                }, 3000);
+                if (autoHide) {
+                  this.uiTimer = setTimeout(() => this.hideUI(), 3600);
+                }
+              }
+
+              hideUI() {
+                this.isUiVisible = false;
+                if (this.header) this.header.classList.remove('active');
+                if (this.bottomBar) this.bottomBar.classList.remove('active');
+                document.getElementById('btn-lb-prev')?.classList.remove('active');
+                document.getElementById('btn-lb-next')?.classList.remove('active');
+              }
+
+              toggleUI() {
+                if (this.isUiVisible) {
+                  this.hideUI();
+                } else {
+                  this.showUI();
+                }
               }
 
               bindEvents() {
-                this.el.addEventListener('mousemove', () => this.showUI());
-                this.el.addEventListener('click', () => this.showUI());
-                this.el.addEventListener('touchstart', () => this.showUI(), { passive: true });
-                
-                if (this.header) {
-                  this.header.addEventListener('mouseenter', () => clearTimeout(this.uiTimer));
-                  this.header.addEventListener('mouseleave', () => this.showUI());
-                }
-
-                document.getElementById('btn-lb-close').addEventListener('click', () => this.close());
-
-                document.getElementById('btn-lb-download').addEventListener('click', () => {
-                  const item = this.mediaList[this.currentIndex];
-                  if (item) window.location.href = `?access=admin&page=drive&action=download&f=${encodeURIComponent(item.path)}`;
+                document.getElementById('btn-lb-close')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  this.close();
                 });
 
-                document.getElementById('btn-lb-search-google')?.addEventListener('click', () => {
+                // Integrated Header Next / Prev Buttons
+                document.getElementById('btn-lb-prev')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  this.resetTransform(true);
+                  this.nav(-1);
+                });
+
+                document.getElementById('btn-lb-next')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  this.resetTransform(true);
+                  this.nav(1);
+                });
+
+                // Top Action Buttons
+                document.getElementById('btn-lb-search-google')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
                   const item = this.mediaList[this.currentIndex];
                   if (item && window.app) app.searchImageOnGoogle(item.path);
                 });
 
-                document.getElementById('btn-lb-edit').addEventListener('click', () => {
+                document.getElementById('btn-lb-edit')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
                   const item = this.mediaList[this.currentIndex];
                   if (item && item.type === 'image' && window.app) {
                     this.close(false);
@@ -19029,16 +19457,75 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   }
                 });
 
-                document.getElementById('btn-lb-details').addEventListener('click', () => {
+                document.getElementById('btn-lb-manga')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  const item = this.mediaList[this.currentIndex];
+                  if (item && window.app) {
+                    const parts = item.path.split('/');
+                    const imgName = parts.pop();
+                    const folderPath = parts.join('/');
+                    this.close(false);
+                    window.mangaViewer.openPath(folderPath, imgName);
+                  }
+                });
+  
+                // Bottom Bar Action Buttons
+                document.getElementById('btn-lb-rename')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  const item = this.mediaList[this.currentIndex];
+                  if (item && window.app) {
+                    const name = item.name || item.path.split('/').pop();
+                    app.renameItem(item.path, name);
+                  }
+                });
+
+                document.getElementById('btn-lb-share')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  const item = this.mediaList[this.currentIndex];
+                  if (item && window.app) app.createShareLink(item.path);
+                });
+
+                document.getElementById('btn-lb-star')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  const item = this.mediaList[this.currentIndex];
+                  if (item && window.app) {
+                    app.toggleStarDirect(e, item.path);
+                    setTimeout(() => this.updateStarUI(item.path), 120);
+                  }
+                });
+
+                document.getElementById('btn-lb-details')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
                   const item = this.mediaList[this.currentIndex];
                   if (item && window.app) app.showDetails(item.path);
                 });
 
+                document.getElementById('btn-lb-download')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  const item = this.mediaList[this.currentIndex];
+                  if (item) window.location.href = `?access=admin&page=drive&action=download&f=${encodeURIComponent(item.path)}`;
+                });
+
+                // Carousel Scroll Infinite Batch Loading
+                this.carouselEl?.addEventListener('scroll', () => {
+                  if (this.carouselEl.scrollLeft + this.carouselEl.clientWidth >= this.carouselEl.scrollWidth - 60) {
+                    this.loadMoreCarouselItems();
+                  }
+                }, { passive: true });
+
+                // Window Resize & Orientation Change Reset
+                window.addEventListener('resize', () => {
+                  if (this.el.classList.contains('active')) {
+                    this.resetTransform(false);
+                  }
+                });
+
+                // Keyboard Navigation
                 window.addEventListener('keydown', (e) => {
                   if (!this.el.classList.contains('active')) return;
                   if (e.key === 'Escape') this.close();
-                  if (e.key === 'ArrowLeft') this.nav(-1);
-                  if (e.key === 'ArrowRight') this.nav(1);
+                  if (e.key === 'ArrowLeft') { this.resetTransform(true); this.nav(-1); }
+                  if (e.key === 'ArrowRight') { this.resetTransform(true); this.nav(1); }
                   if (e.key === ' ' && (e.target === document.body || e.target === this.el)) {
                     const vid = this.body.querySelector('video, audio');
                     if (vid) {
@@ -19048,23 +19535,343 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   }
                 });
 
-                this.body.addEventListener('touchstart', (e) => {
-                  if (e.target.closest('video, audio, .lightbox-audio-card, .lightbox-nav')) {
-                    this.touchStartX = null;
-                    return;
+                // Desktop Wheel Zoom
+                this.body.addEventListener('wheel', (e) => {
+                  const img = this.body.querySelector('.lightbox-media');
+                  if (!img || img.tagName !== 'IMG') return;
+                  e.preventDefault();
+
+                  const rect = this.body.getBoundingClientRect();
+                  const pointerX = e.clientX - rect.left - rect.width / 2;
+                  const pointerY = e.clientY - rect.top - rect.height / 2;
+
+                  const zoomDelta = e.deltaY < 0 ? 1.25 : 0.8;
+                  const prevScale = this.scale;
+                  this.scale = Math.min(5, Math.max(1, this.scale * zoomDelta));
+
+                  if (this.scale === 1) {
+                    this.panX = 0;
+                    this.panY = 0;
+                  } else {
+                    this.panX -= (pointerX - this.panX) * (this.scale / prevScale - 1);
+                    this.panY -= (pointerY - this.panY) * (this.scale / prevScale - 1);
+                    this.clampPan();
                   }
-                  this.touchStartX = e.changedTouches[0].screenX;
-                  this.touchStartY = e.changedTouches[0].screenY;
-                }, { passive: true });
+                  this.applyTransform(true);
+                }, { passive: false });
+
+                // Desktop Mouse Down / Drag
+                this.body.addEventListener('mousedown', (e) => {
+                  if (e.button !== 0 || e.target.closest('video, audio, button, .lightbox-carousel-wrap')) return;
+                  this.isMouseDragging = true;
+                  this.mouseStartX = e.clientX;
+                  this.mouseStartY = e.clientY;
+                  this.initialPanX = this.panX;
+                  this.initialPanY = this.panY;
+                  this.mouseMoveDist = 0;
+                });
+
+                window.addEventListener('mousemove', (e) => {
+                  if (!this.isMouseDragging) return;
+                  const dx = e.clientX - this.mouseStartX;
+                  const dy = e.clientY - this.mouseStartY;
+                  this.mouseMoveDist = Math.hypot(dx, dy);
+
+                  if (this.scale > 1) {
+                    this.panX = this.initialPanX + dx;
+                    this.panY = this.initialPanY + dy;
+                    this.applyTransform(false);
+                  }
+                });
+
+                window.addEventListener('mouseup', (e) => {
+                  if (!this.isMouseDragging) return;
+                  this.isMouseDragging = false;
+
+                  if (this.scale > 1) {
+                    this.clampPan();
+                    this.applyTransform(true);
+                  }
+
+                  if (this.mouseMoveDist < 5 && e.target.closest('#lb-body') && !e.target.closest('video, audio, button, .lightbox-carousel-wrap')) {
+                    this.toggleUI();
+                  }
+                });
+
+                // Desktop Double-Click Zoom Reset Toggle
+                this.body.addEventListener('dblclick', (e) => {
+                  const img = this.body.querySelector('.lightbox-media');
+                  if (!img || img.tagName !== 'IMG') return;
+                  e.preventDefault();
+
+                  if (this.scale > 1.2) {
+                    this.resetTransform(true);
+                  } else {
+                    this.scale = 2.5;
+                    const rect = this.body.getBoundingClientRect();
+                    const tapX = e.clientX - rect.left - rect.width / 2;
+                    const tapY = e.clientY - rect.top - rect.height / 2;
+                    this.panX = -tapX * 1.5;
+                    this.panY = -tapY * 1.5;
+                    this.clampPan();
+                    this.applyTransform(true);
+                  }
+                });
+
+                // Mobile Touch Handling (Tap Toggle, Double Tap Zoom, Pinch & Swipe)
+                this.body.addEventListener('touchstart', (e) => {
+                  const isImg = !!this.body.querySelector('img.lightbox-media');
+                  if (e.target.closest('video, audio, .lightbox-audio-card, button, .lightbox-carousel-wrap')) return;
+
+                  if (e.touches.length === 2 && isImg) {
+                    this.isTouchPanning = false;
+                    this.initialPinchDistance = Math.hypot(
+                      e.touches[0].clientX - e.touches[1].clientX,
+                      e.touches[0].clientY - e.touches[1].clientY
+                    );
+                    this.initialPinchScale = this.scale;
+                  } else if (e.touches.length === 1) {
+                    this.touchStartX = e.touches[0].clientX;
+                    this.touchStartY = e.touches[0].clientY;
+                    this.touchStartTime = Date.now();
+                    this.initialPanX = this.panX;
+                    this.initialPanY = this.panY;
+                    this.swipeDeltaX = 0;
+
+                    if (this.scale > 1 && isImg) {
+                      this.isTouchPanning = true;
+                    }
+                  }
+                }, { passive: false });
+
+                this.body.addEventListener('touchmove', (e) => {
+                  const isImg = !!this.body.querySelector('img.lightbox-media');
+
+                  if (e.touches.length === 2 && isImg) {
+                    e.preventDefault();
+                    const currDist = Math.hypot(
+                      e.touches[0].clientX - e.touches[1].clientX,
+                      e.touches[0].clientY - e.touches[1].clientY
+                    );
+                    if (this.initialPinchDistance > 0) {
+                      this.scale = Math.min(5, Math.max(1, this.initialPinchScale * (currDist / this.initialPinchDistance)));
+                      if (this.scale === 1) {
+                        this.panX = 0;
+                        this.panY = 0;
+                      }
+                      this.applyTransform(false);
+                    }
+                  } else if (e.touches.length === 1) {
+                    const diffX = e.touches[0].clientX - this.touchStartX;
+                    const diffY = e.touches[0].clientY - this.touchStartY;
+
+                    if (this.scale > 1 && this.isTouchPanning && isImg) {
+                      e.preventDefault();
+                      this.panX = this.initialPanX + diffX;
+                      this.panY = this.initialPanY + diffY;
+                      this.applyTransform(false);
+                    } else if (this.scale === 1) {
+                      if (Math.abs(diffX) > 8 && Math.abs(diffX) > Math.abs(diffY)) {
+                        e.preventDefault();
+                        this.swipeDeltaX = diffX;
+                        const img = this.body.querySelector('.lightbox-media');
+                        if (img) {
+                          img.classList.remove('smooth-zoom');
+                          img.style.transform = `translate3d(${diffX}px, 0, 0)`;
+                        }
+                      }
+                    }
+                  }
+                }, { passive: false });
 
                 this.body.addEventListener('touchend', (e) => {
-                  if (this.touchStartX === null) return;
-                  const diffX = e.changedTouches[0].screenX - this.touchStartX;
-                  const diffY = e.changedTouches[0].screenY - this.touchStartY;
-                  if (Math.abs(diffX) > 40 && Math.abs(diffX) > Math.abs(diffY) * 1.3) {
-                    this.nav(diffX > 0 ? -1 : 1);
+                  const isImg = !!this.body.querySelector('img.lightbox-media');
+
+                  if (e.touches.length === 0) {
+                    if (this.scale > 1) {
+                      this.isTouchPanning = false;
+                      this.clampPan();
+                      this.applyTransform(true);
+                    }
+
+                    const touchEndX = e.changedTouches[0].clientX;
+                    const touchEndY = e.changedTouches[0].clientY;
+                    const diffX = touchEndX - this.touchStartX;
+                    const diffY = touchEndY - this.touchStartY;
+                    const duration = Date.now() - this.touchStartTime;
+
+                    // Tap detection
+                    if (Math.abs(diffX) < 10 && Math.abs(diffY) < 10 && duration < 250) {
+                      const now = Date.now();
+                      if (now - this.lastTapTime < 300 && isImg) {
+                        clearTimeout(this.tapTimeout);
+                        this.lastTapTime = 0;
+                        if (this.scale > 1.2) {
+                          this.resetTransform(true);
+                        } else {
+                          this.scale = 2.5;
+                          const rect = this.body.getBoundingClientRect();
+                          const tapX = touchEndX - rect.left - rect.width / 2;
+                          const tapY = touchEndY - rect.top - rect.height / 2;
+                          this.panX = -tapX * 1.5;
+                          this.panY = -tapY * 1.5;
+                          this.clampPan();
+                          this.applyTransform(true);
+                        }
+                        return;
+                      }
+
+                      this.lastTapTime = now;
+                      this.tapTimeout = setTimeout(() => {
+                        this.toggleUI();
+                        this.lastTapTime = 0;
+                      }, 290);
+                      return;
+                    }
+
+                    // Swipe between images when scale is 1
+                    if (this.scale === 1) {
+                      const img = this.body.querySelector('.lightbox-media');
+                      if (Math.abs(this.swipeDeltaX) > 55) {
+                        const dir = this.swipeDeltaX < 0 ? 1 : -1;
+                        if (img) {
+                          img.classList.add('smooth-zoom');
+                          img.style.transform = `translate3d(${dir > 0 ? -100 : 100}vw, 0, 0)`;
+                          img.style.opacity = '0';
+                        }
+                        setTimeout(() => {
+                          this.resetTransform(false);
+                          this.nav(dir);
+                        }, 180);
+                      } else if (img) {
+                        img.classList.add('smooth-zoom');
+                        img.style.transform = 'translate3d(0, 0, 0)';
+                      }
+                      this.swipeDeltaX = 0;
+                    }
                   }
-                }, { passive: true });
+                });
+              }
+
+              clampPan() {
+                const img = this.body.querySelector('.lightbox-media');
+                if (!img || this.scale <= 1) {
+                  this.panX = 0;
+                  this.panY = 0;
+                  return;
+                }
+                const rect = this.body.getBoundingClientRect();
+                const maxPanX = Math.max(0, (rect.width * this.scale - rect.width) / 2);
+                const maxPanY = Math.max(0, (rect.height * this.scale - rect.height) / 2);
+                this.panX = Math.min(maxPanX, Math.max(-maxPanX, this.panX));
+                this.panY = Math.min(maxPanY, Math.max(-maxPanY, this.panY));
+              }
+
+              applyTransform(smooth = false) {
+                const img = this.body.querySelector('.lightbox-media');
+                if (!img) return;
+                img.classList.toggle('smooth-zoom', smooth);
+                img.classList.toggle('zoomed', this.scale > 1);
+                img.style.transform = `translate3d(${this.panX}px, ${this.panY}px, 0) scale(${this.scale})`;
+              }
+
+              resetTransform(smooth = false) {
+                this.scale = 1;
+                this.panX = 0;
+                this.panY = 0;
+                this.swipeDeltaX = 0;
+                const img = this.body.querySelector('.lightbox-media');
+                if (img) {
+                  img.classList.toggle('smooth-zoom', smooth);
+                  img.classList.remove('zoomed');
+                  img.style.transform = 'translate3d(0px, 0px, 0px) scale(1)';
+                  img.style.opacity = '1';
+                }
+              }
+
+              updateStarUI(path) {
+                const isStarred = window.app ? app.starredSet.has(path) : false;
+                const starBtn = document.getElementById('btn-lb-star');
+                const starIcon = document.getElementById('lb-star-icon');
+                if (starBtn && starIcon) {
+                  starBtn.classList.toggle('active', isStarred);
+                  starIcon.innerHTML = isStarred
+                    ? '<path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>'
+                    : '<path d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/>';
+                }
+              }
+
+              renderCarousel() {
+                if (!this.carouselEl) return;
+                this.carouselEl.innerHTML = '';
+
+                const total = this.mediaList.length;
+                const batchCount = Math.min(total, Math.max(this.carouselBatchSize, this.currentIndex + 12));
+                this.carouselLoadedCount = batchCount;
+
+                for (let i = 0; i < batchCount; i++) {
+                  this.appendCarouselTile(i);
+                }
+                this.scrollCarouselToActive();
+              }
+
+              loadMoreCarouselItems() {
+                if (!this.carouselEl || this.carouselLoadedCount >= this.mediaList.length) return;
+                const start = this.carouselLoadedCount;
+                const end = Math.min(this.mediaList.length, start + this.carouselBatchSize);
+                for (let i = start; i < end; i++) {
+                  this.appendCarouselTile(i);
+                }
+                this.carouselLoadedCount = end;
+              }
+
+              appendCarouselTile(index) {
+                const item = this.mediaList[index];
+                if (!item) return;
+
+                const tile = document.createElement('div');
+                tile.className = `lb-carousel-item ${index === this.currentIndex ? 'active' : ''}`;
+                tile.dataset.index = index;
+
+                const ext = (item.name ? item.name.split('.').pop() : '').toLowerCase();
+                const isImage = item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext);
+
+                if (isImage) {
+                  tile.innerHTML = `<img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}" loading="lazy" decoding="async" alt="">`;
+                } else {
+                  const isVid = item.type === 'video' || ['mp4', 'webm', 'mov', 'mkv'].includes(ext);
+                  tile.innerHTML = `
+                    <div class="lb-carousel-icon">
+                      <svg viewBox="0 0 24 24"><path d="${isVid ? 'M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z' : 'M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z'}"/></svg>
+                    </div>`;
+                }
+
+                tile.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  if (index !== this.currentIndex) {
+                    this.resetTransform(false);
+                    this.currentIndex = index;
+                    this.loadCurrent();
+                  }
+                });
+
+                this.carouselEl.appendChild(tile);
+              }
+
+              scrollCarouselToActive() {
+                if (!this.carouselEl) return;
+                while (this.currentIndex >= this.carouselLoadedCount && this.carouselLoadedCount < this.mediaList.length) {
+                  this.loadMoreCarouselItems();
+                }
+
+                this.carouselEl.querySelectorAll('.lb-carousel-item').forEach(el => {
+                  el.classList.toggle('active', parseInt(el.dataset.index) === this.currentIndex);
+                });
+
+                const activeTile = this.carouselEl.querySelector(`.lb-carousel-item[data-index="${this.currentIndex}"]`);
+                if (activeTile) {
+                  activeTile.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+                }
               }
 
               open(mediaList, startIndex) {
@@ -19072,6 +19879,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.currentIndex = startIndex || 0;
                 this.el.classList.add('active');
                 this.showUI();
+                this.renderCarousel();
                 this.loadCurrent();
               }
 
@@ -19086,11 +19894,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
               }
 
+              preloadAdjacent() {
+                if (!this.mediaList || this.mediaList.length <= 1) return;
+                const nextIdx = (this.currentIndex + 1) % this.mediaList.length;
+                const prevIdx = (this.currentIndex - 1 + this.mediaList.length) % this.mediaList.length;
+                [nextIdx, prevIdx].forEach(idx => {
+                  const item = this.mediaList[idx];
+                  if (item) {
+                    const ext = (item.name ? item.name.split('.').pop() : '').toLowerCase();
+                    if (item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext)) {
+                      const img = new Image();
+                      img.src = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(item.path)}`;
+                    }
+                  }
+                });
+              }
+
               loadCurrent() {
                 const item = this.mediaList[this.currentIndex];
                 if (!item) return;
 
                 this.cleanupMedia();
+                this.resetTransform(false);
 
                 const targetRel = ltrim(item.path, '/');
                 let currentDecoded = '';
@@ -19105,9 +19930,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (window.app) app.updateDocTitle(fileName);
 
                 const rawUrl = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(item.path)}`;
-                const navPrev = `<div class="lightbox-nav prev" id="lb-prev"><svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg></div>`;
-                const navNext = `<div class="lightbox-nav next" id="lb-next"><svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg></div>`;
-
                 const ext = (fileName.split('.').pop() || '').toLowerCase();
                 const isImage = item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext);
                 const isAudio = item.type === 'audio' || ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'm4r', 'mid', 'midi'].includes(ext);
@@ -19117,27 +19939,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (btnSearchGoogle) btnSearchGoogle.style.display = isImage ? 'flex' : 'none';
                 const btnLbEdit = document.getElementById('btn-lb-edit');
                 if (btnLbEdit) btnLbEdit.style.display = isImage ? 'flex' : 'none';
+                const btnLbManga = document.getElementById('btn-lb-manga');
+                if (btnLbManga) btnLbManga.style.display = isImage ? 'flex' : 'none';
+
+                this.updateStarUI(item.path);
+                this.scrollCarouselToActive();
+                this.preloadAdjacent();
 
                 if (isVideo) {
                   this.body.innerHTML = `
-                    <div style="display:flex; flex-direction:column; align-items:center; width:100%; max-width:960px; padding:0.5rem;">
-                      <div style="width:100%; display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                        <span style="font-size:0.85rem; font-weight:600; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:65%;">${fileName}</span>
-                        <a href="${rawUrl}" target="_blank" class="btn-primary" style="height:28px; padding:0 0.75rem; font-size:0.75rem; text-decoration:none; display:inline-flex; align-items:center; gap:4px;">
-                          <svg viewBox="0 0 24 24" style="width:14px;height:14px;"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg> External / Native Tab
-                        </a>
-                      </div>
-                      <video class="lightbox-media" src="${rawUrl}" controls autoplay playsinline preload="metadata" style="max-height:78dvh; max-width:100%; width:100%; background:#000; border-radius:8px; box-shadow:none;">
-                        Your browser does not support HTML5 video.
-                      </video>
-                    </div>
-                    ${navPrev}
-                    ${navNext}
+                    <video class="lightbox-media" src="${rawUrl}" controls autoplay playsinline preload="metadata" style="max-height:100%; max-width:100%; width:auto; height:auto; object-fit:contain; background:#000; margin:auto;">
+                      Your browser does not support HTML5 video.
+                    </video>
                   `;
                   const vid = this.body.querySelector('video');
-                  if (vid) {
-                    vid.play().catch(() => { vid.controls = true; });
-                  }
+                  if (vid) vid.play().catch(() => { vid.controls = true; });
                 } else if (isAudio) {
                   const thumbUrl = `?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}`;
                   this.body.innerHTML = `
@@ -19153,8 +19969,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         Your browser does not support HTML5 audio.
                       </audio>
                     </div>
-                    ${navPrev}
-                    ${navNext}
                   `;
                   const aud = this.body.querySelector('audio');
                   const disc = document.getElementById('lb-audio-disc');
@@ -19166,28 +19980,54 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     aud.play().catch(() => { aud.controls = true; });
                   }
                 } else {
-                  this.body.innerHTML = `
-                    <img class="lightbox-media" id="lb-img" src="${rawUrl}" alt="${fileName}">
-                    ${navPrev}
-                    ${navNext}
-                  `;
+                  this.body.innerHTML = '';
+                  
+                  const wrapper = document.createElement('div');
+                  wrapper.style.cssText = 'width:100%; height:100%; display:flex; align-items:center; justify-content:center; overflow:hidden;';
+                  
+                  const img = document.createElement('img');
+                  img.className = 'lightbox-media';
+                  img.id = 'lb-img';
+                  img.alt = fileName;
+                  img.decoding = 'async';
+                  img.style.opacity = '0';
+                  img.style.transition = 'opacity 0.2s ease';
+                  
+                  const onReady = () => {
+                    img.style.opacity = '1';
+                    this.resetTransform(false);
+                  };
+
+                  img.onload = onReady;
+                  img.onerror = onReady;
+                  img.src = rawUrl;
+                  
+                  wrapper.appendChild(img);
+                  this.body.appendChild(wrapper);
+                  this.resetTransform(false);
                 }
-
-                const btnPrev = document.getElementById('lb-prev');
-                if (btnPrev) btnPrev.onclick = (e) => { e.stopPropagation(); this.nav(-1); };
-
-                const btnNext = document.getElementById('lb-next');
-                if (btnNext) btnNext.onclick = (e) => { e.stopPropagation(); this.nav(1); };
               }
 
               nav(dir) {
                 if (!this.mediaList || this.mediaList.length <= 1) return;
+                this.showUI(true);
+                this.resetTransform(false);
                 this.currentIndex = (this.currentIndex + dir + this.mediaList.length) % this.mediaList.length;
-                this.loadCurrent();
+                
+                if (this.body) {
+                  this.body.style.display = 'none';
+                  this.body.innerHTML = '';
+                }
+                
+                setTimeout(() => {
+                  if (this.body) this.body.style.display = 'flex';
+                  this.loadCurrent();
+                }, 20);
               }
 
               close(updateHash = true) {
                 this.cleanupMedia();
+                this.resetTransform(false);
                 this.el.classList.remove('active');
                 this.body.innerHTML = '';
 
@@ -23134,11 +23974,51 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
               }
 
+              showShareModal(url, filename) {
+                const titleEl = document.getElementById('share-modal-filename');
+                const inputEl = document.getElementById('share-link-input');
+                const copyBtn = document.getElementById('share-copy-btn');
+                const nativeContainer = document.getElementById('share-native-container');
+                const nativeBtn = document.getElementById('share-native-btn');
+
+                if (titleEl) titleEl.innerText = filename;
+                if (inputEl) inputEl.value = url;
+
+                if (copyBtn) {
+                  copyBtn.onclick = () => {
+                    if (navigator.clipboard && window.isSecureContext) {
+                      navigator.clipboard.writeText(url);
+                      this.toast('Copied to clipboard!');
+                    } else {
+                      inputEl.select();
+                      document.execCommand('copy');
+                      this.toast('Copied to clipboard!');
+                    }
+                    copyBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:16px;height:16px;margin-right:0.3rem;"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg> Copied';
+                    setTimeout(() => copyBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:16px;height:16px;margin-right:0.3rem;"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg> Copy', 2000);
+                  };
+                }
+
+                if (navigator.share) {
+                  nativeContainer.style.display = 'flex';
+                  nativeBtn.onclick = () => {
+                    navigator.share({
+                      title: filename,
+                      url: url
+                    }).catch(console.error);
+                  };
+                } else {
+                  nativeContainer.style.display = 'none';
+                }
+
+                this.showModal('modal-share');
+              }
+
               createShareLink(path) {
                 this.api('share_create', { f: path }, (res) => {
                   const currentScript = window.location.pathname;
                   const url = `${window.location.origin}${currentScript}?access=admin&page=drive&share=${res.token}`;
-                  this.copyToClipboard(url, 'Share link copied to clipboard!');
+                  this.showShareModal(url, path.split('/').pop());
                 });
               }
 
@@ -23363,47 +24243,54 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
         
               async searchImageOnGoogle(path) {
-                this.toast('Uploading image to Google Search...');
-                try {
-                  const currentScript = window.location.pathname;
-                  const rawUrl = `${currentScript}?access=admin&page=drive&action=raw&f=${encodeURIComponent(path)}`;
-                  const res = await fetch(rawUrl);
-                  if (!res.ok) throw new Error('Could not read image buffer');
-                  const blob = await res.blob();
-                  
-                  const fileName = path.split('/').pop() || 'image.jpg';
-                  const file = new File([blob], fileName, { type: blob.type || 'image/jpeg' });
-                  
-                  // Post raw image bytes directly from browser to bypass localhost network limits
-                  const form = document.createElement('form');
-                  form.method = 'POST';
-                  form.action = 'https://www.google.com/searchbyimage/upload';
-                  form.enctype = 'multipart/form-data';
-                  form.target = '_blank';
-                  form.style.display = 'none';
+                const currentScript = window.location.pathname;
+                const directUrl = `${window.location.origin}${currentScript}?access=admin&page=drive&action=raw&f=${encodeURIComponent(path)}`;
+                const hostname = window.location.hostname.toLowerCase();
+                const isLocal = hostname === 'localhost' ||
+                                hostname === '127.0.0.1' ||
+                                hostname === '0.0.0.0' ||
+                                hostname.endsWith('.local') ||
+                                hostname.endsWith('.test') ||
+                                /^192\.168\./.test(hostname) ||
+                                /^10\./.test(hostname) ||
+                                /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname);
 
-                  const fileInput = document.createElement('input');
-                  fileInput.type = 'file';
-                  fileInput.name = 'encoded_image';
-
-                  const dt = new DataTransfer();
-                  dt.items.add(file);
-                  fileInput.files = dt.files;
-                  form.appendChild(fileInput);
-
-                  document.body.appendChild(form);
-                  form.submit();
-                  setTimeout(() => form.remove(), 1000);
-                } catch (err) {
-                  const currentScript = window.location.pathname;
-                  const directUrl = `${window.location.origin}${currentScript}?access=admin&page=drive&action=raw&f=${encodeURIComponent(path)}`;
-                  const isLocal = ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname);
-                  if (!isLocal) {
-                    window.open(`https://lens.google.com/uploadbyurl?url=${encodeURIComponent(directUrl)}`, '_blank');
-                  } else {
-                    window.open('https://lens.google.com/', '_blank');
-                  }
+                if (!isLocal) {
+                  this.toast('Opening Google Lens...');
+                  window.open(`https://lens.google.com/uploadbyurl?url=${encodeURIComponent(directUrl)}`, '_blank');
+                  return;
                 }
+
+                this.toast('Copying image for Google Search...');
+                try {
+                  const rawUrl = `${currentScript}?access=admin&page=drive&action=raw&f=${encodeURIComponent(path)}`;
+                  const img = new Image();
+                  img.crossOrigin = 'anonymous';
+
+                  await new Promise((resolve, reject) => {
+                    img.onload = resolve;
+                    img.onerror = reject;
+                    img.src = rawUrl;
+                  });
+
+                  const canvas = document.createElement('canvas');
+                  canvas.width = img.naturalWidth;
+                  canvas.height = img.naturalHeight;
+                  const ctx = canvas.getContext('2d');
+                  ctx.drawImage(img, 0, 0);
+
+                  const pngBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+                  if (pngBlob && navigator.clipboard && window.ClipboardItem) {
+                    await navigator.clipboard.write([
+                      new ClipboardItem({ 'image/png': pngBlob })
+                    ]);
+                    this.toast('Image copied! Press Ctrl+V (Paste) on Google to search.');
+                  }
+                } catch (err) {
+                  this.toast('Opening Google Lens...');
+                }
+
+                window.open('https://images.google.com/', '_blank');
               }
 
               previewArchive(path, name) {
@@ -36482,47 +37369,49 @@ function perform_cover_scan($db) {
 ?>
 
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
   <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title><?php echo $og_title; ?></title>
-    
-    <!-- Primary Meta Tags -->
-    <meta name="title" content="<?php echo $og_title; ?>">
-    <meta name="description" content="<?php echo $og_desc; ?>">
-    <meta name="keywords" content="music, player, php, streaming, audio, webapp">
-    <meta name="author" content="PHP Music">
-    <meta name="theme-color" content="#0a0a0a">
-    <meta name="application-name" content="PHP Music">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="PHP Music">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title><?php echo $og_title; ?> – Self-Hosted Web Audio &amp; Studio</title>
 
-    <!-- Open Graph / Facebook / WhatsApp -->
+    <?php
+      $og_image_url = !empty($og_image) ? $og_image : ($current_url . '?action=og_image');
+      $og_image_type = (strpos($og_image_url, 'action=og_image') !== false) ? 'image/svg+xml' : 'image/jpeg';
+    ?>
+
+    <!-- Primary Meta & Search Engine Optimization (50-60 char title & 120-160 char description) -->
+    <meta name="title" content="<?php echo $og_title; ?> – Self-Hosted Web Audio &amp; Studio">
+    <meta name="description" content="<?php echo $og_desc; ?>">
+    <link rel="canonical" href="<?php echo $current_url; ?>">
+    <meta name="theme-color" content="#030303">
+    <meta name="application-name" content="PHP Music">
+
+    <!-- Open Graph Social Media Protocol (Standard 1200x630 Aspect Ratio) -->
     <meta property="og:site_name" content="PHP Music">
     <meta property="og:locale" content="en_US">
     <meta property="og:type" content="website">
     <meta property="og:url" content="<?php echo $current_url; ?>">
-    <meta property="og:title" content="<?php echo $og_title; ?>">
+    <meta property="og:title" content="<?php echo $og_title; ?> – Self-Hosted Web Audio &amp; Studio">
     <meta property="og:description" content="<?php echo $og_desc; ?>">
-    <meta property="og:image" content="<?php echo $og_image; ?>">
-    <meta property="og:image:secure_url" content="<?php echo $og_image; ?>">
-    <meta property="og:image:type" content="image/jpeg">
+    <meta property="og:image" content="<?php echo $og_image_url; ?>">
+    <meta property="og:image:secure_url" content="<?php echo $og_image_url; ?>">
+    <meta property="og:image:type" content="<?php echo $og_image_type; ?>">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
-    <meta property="og:image:alt" content="<?php echo $og_title; ?> - PHP Music">
+    <meta property="og:image:alt" content="<?php echo $og_title; ?> Preview">
 
-    <!-- Twitter / Discord / Telegram -->
+    <!-- X (Twitter) Large Image Summary Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:domain" content="<?php echo $domainName; ?>">
     <meta name="twitter:url" content="<?php echo $current_url; ?>">
-    <meta name="twitter:title" content="<?php echo $og_title; ?>">
+    <meta name="twitter:title" content="<?php echo $og_title; ?> – Self-Hosted Web Audio &amp; Studio">
     <meta name="twitter:description" content="<?php echo $og_desc; ?>">
-    <meta name="twitter:image" content="<?php echo $og_image; ?>">
-    <meta name="twitter:image:alt" content="<?php echo $og_title; ?> - PHP Music">
+    <meta name="twitter:image" content="<?php echo $og_image_url; ?>">
+    <meta name="twitter:image:alt" content="<?php echo $og_title; ?> Preview">
 
-    <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
+    <!-- PWA Capabilities & Icons -->
+    <link rel="icon" type="image/svg+xml" href="?action=get_app_icon">
+    <link rel="apple-touch-icon" href="?action=get_app_icon&amp;size=192">
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
     <script>
       window.adminAutoToken = '<?php echo ($is_super_admin || $is_admin) ? "super_admin_bypass" : ""; ?>';
