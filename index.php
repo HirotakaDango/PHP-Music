@@ -497,7 +497,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '9.9');
+define('APP_VERSION', '10.0');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -16086,19 +16086,41 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               mask-image: linear-gradient(to right, transparent 0%, black 5%, black 95%, transparent 100%);
               -webkit-mask-image: linear-gradient(to right, transparent 0%, black 5%, black 95%, transparent 100%);
             }
-            .lightbox-carousel {
+            .lightbox-carousel,
+            #phpfiles-app-root .lightbox-carousel,
+            #phpfiles-app-root #lb-carousel {
               display: flex;
               align-items: center;
               gap: 8px;
-              overflow-x: auto;
-              scrollbar-width: none;
+              overflow-x: auto !important;
+              overflow-y: hidden !important;
+              scrollbar-width: none !important;
+              -ms-overflow-style: none !important;
               width: 100%;
               padding: 6px 32px;
               scroll-behavior: smooth;
               -webkit-overflow-scrolling: touch;
             }
-            .lightbox-carousel::-webkit-scrollbar {
-              display: none;
+            .lightbox-carousel::-webkit-scrollbar,
+            #phpfiles-app-root .lightbox-carousel::-webkit-scrollbar,
+            #phpfiles-app-root #lb-carousel::-webkit-scrollbar {
+              display: none !important;
+              width: 0 !important;
+              height: 0 !important;
+              background: transparent !important;
+              -webkit-appearance: none !important;
+            }
+            .lightbox-carousel::-webkit-scrollbar-thumb,
+            .lightbox-carousel::-webkit-scrollbar-track,
+            #phpfiles-app-root * .lightbox-carousel::-webkit-scrollbar-thumb,
+            #phpfiles-app-root * .lightbox-carousel::-webkit-scrollbar-track,
+            #phpfiles-app-root .lightbox-carousel::-webkit-scrollbar-thumb,
+            #phpfiles-app-root .lightbox-carousel::-webkit-scrollbar-track {
+              display: none !important;
+              background: transparent !important;
+              border: none !important;
+              width: 0 !important;
+              height: 0 !important;
             }
             .lb-carousel-item {
               width: 44px;
@@ -16251,7 +16273,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               height: auto !important;
               object-fit: contain !important;
               object-position: center center !important;
-              margin: auto !important;
+              margin: 0 !important;
               user-select: none;
               -webkit-user-drag: none;
               transform-origin: center center;
@@ -16270,14 +16292,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .lightbox-media.smooth-zoom {
               transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease;
             }
-            .lightbox-media.zoomed {
-              cursor: grab;
+            .lightbox-media.disintegrate {
+              opacity: 0 !important;
+              filter: blur(18px) brightness(1.4) contrast(1.2) !important;
+              transform: scale(1.06) translateZ(0) !important;
+              transition: opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1), filter 0.5s cubic-bezier(0.4, 0, 0.2, 1), transform 0.5s cubic-bezier(0.4, 0, 0.2, 1) !important;
             }
-            .lightbox-media.zoomed:active {
-              cursor: grabbing;
+            .lightbox-media.reconstruct {
+              opacity: 0;
+              filter: blur(16px) brightness(1.3) contrast(1.1);
+              transform: scale(0.95) translateZ(0);
+              transition: opacity 0.65s cubic-bezier(0.2, 0, 0, 1), filter 0.65s cubic-bezier(0.2, 0, 0, 1), transform 0.65s cubic-bezier(0.2, 0, 0, 1);
             }
-            .lightbox-media.smooth-zoom {
-              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease;
+            .lightbox-media.reconstruct.ready {
+              opacity: 1 !important;
+              filter: none !important;
+              transform: translate3d(0, 0, 0) scale(1) !important;
             }
 
             .lightbox-audio-card {
@@ -18241,6 +18271,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="lightbox-title" id="lb-title">image.jpg</div>
                 </div>
                 <div style="display:flex; gap:0.4rem; align-items:center;">
+                  <button class="btn-icon" id="btn-lb-slideshow" title="Play Slideshow (15s)">
+                    <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                  </button>
                   <button class="btn-icon" id="btn-lb-search-google" title="Search on Google">
                     <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14zm2.5-4h-2v2H9v-2H7V9h2V7h1v2h2v1z"/></svg>
                   </button>
@@ -18257,6 +18290,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </button>
               <div class="lightbox-body" id="lb-body">
                 <img class="lightbox-media" id="lb-img" src="" alt="">
+              </div>
+              <div id="lb-slideshow-track" style="display:none; position:absolute; bottom:0; left:0; width:100%; height:3px; background:rgba(255,255,255,0.25); z-index:3600; pointer-events:none; overflow:hidden;">
+                <div id="lb-slideshow-bar" style="width:0%; height:100%; background:rgba(255,0,0,0.85); transition:none;"></div>
               </div>
               <div class="lightbox-bottom-bar" id="lb-bottom-bar">
                 <div class="lightbox-carousel-wrap" id="lb-carousel-wrap">
@@ -19364,6 +19400,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.mediaList = [];
                 this.uiTimer = null;
                 this.isUiVisible = true;
+                this.isPinnedUI = false;
+                this.lastTouchEndTime = 0;
 
                 // Smooth Zoom & Drag Engine State
                 this.scale = 1;
@@ -19391,6 +19429,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.carouselBatchSize = 25;
                 this.carouselLoadedCount = 0;
 
+                // Slideshow State
+                this.slideshowTimer = null;
+                this.isSlideshowActive = false;
+
                 this.bindEvents();
               }
 
@@ -19401,24 +19443,36 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 document.getElementById('btn-lb-prev')?.classList.add('active');
                 document.getElementById('btn-lb-next')?.classList.add('active');
                 clearTimeout(this.uiTimer);
-                if (autoHide) {
+                if (autoHide && !this.isPinnedUI) {
                   this.uiTimer = setTimeout(() => this.hideUI(), 3600);
                 }
               }
 
               hideUI() {
                 this.isUiVisible = false;
+                clearTimeout(this.uiTimer);
                 if (this.header) this.header.classList.remove('active');
                 if (this.bottomBar) this.bottomBar.classList.remove('active');
                 document.getElementById('btn-lb-prev')?.classList.remove('active');
                 document.getElementById('btn-lb-next')?.classList.remove('active');
               }
 
-              toggleUI() {
-                if (this.isUiVisible) {
-                  this.hideUI();
+              toggleUI(fromUserTap = false) {
+                clearTimeout(this.uiTimer);
+                if (fromUserTap) {
+                  if (this.isUiVisible) {
+                    this.isPinnedUI = false;
+                    this.hideUI();
+                  } else {
+                    this.isPinnedUI = true;
+                    this.showUI(false);
+                  }
                 } else {
-                  this.showUI();
+                  if (this.isUiVisible) {
+                    this.hideUI();
+                  } else {
+                    this.showUI(!this.isPinnedUI);
+                  }
                 }
               }
 
@@ -19426,6 +19480,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 document.getElementById('btn-lb-close')?.addEventListener('click', (e) => {
                   e.stopPropagation();
                   this.close();
+                });
+
+                document.getElementById('btn-lb-slideshow')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  this.toggleSlideshow();
                 });
 
                 // Integrated Header Next / Prev Buttons
@@ -19562,7 +19621,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 // Desktop Mouse Down / Drag
                 this.body.addEventListener('mousedown', (e) => {
-                  if (e.button !== 0 || e.target.closest('video, audio, button, .lightbox-carousel-wrap')) return;
+                  if (Date.now() - this.lastTouchEndTime < 750) return;
+                  if (e.button !== 0 || e.target.closest('video, audio, button, .lightbox-carousel-wrap, .lightbox-header, .lightbox-bottom-bar, .lightbox-arrow')) return;
                   this.isMouseDragging = true;
                   this.mouseStartX = e.clientX;
                   this.mouseStartY = e.clientY;
@@ -19585,6 +19645,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
 
                 window.addEventListener('mouseup', (e) => {
+                  if (Date.now() - this.lastTouchEndTime < 750) return;
                   if (!this.isMouseDragging) return;
                   this.isMouseDragging = false;
 
@@ -19593,8 +19654,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     this.applyTransform(true);
                   }
 
-                  if (this.mouseMoveDist < 5 && e.target.closest('#lb-body') && !e.target.closest('video, audio, button, .lightbox-carousel-wrap')) {
-                    this.toggleUI();
+                  if (this.mouseMoveDist < 5 && e.target.closest('#lb-body') && !e.target.closest('video, audio, button, .lightbox-carousel-wrap, .lightbox-header, .lightbox-bottom-bar, .lightbox-arrow')) {
+                    this.toggleUI(true);
                   }
                 });
 
@@ -19621,7 +19682,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 // Mobile Touch Handling (Tap Toggle, Double Tap Zoom, Pinch & Swipe)
                 this.body.addEventListener('touchstart', (e) => {
                   const isImg = !!this.body.querySelector('img.lightbox-media');
-                  if (e.target.closest('video, audio, .lightbox-audio-card, button, .lightbox-carousel-wrap')) return;
+                  if (e.target.closest('video, audio, .lightbox-audio-card, button, .lightbox-carousel-wrap, .lightbox-header, .lightbox-bottom-bar, .lightbox-arrow')) return;
 
                   if (e.touches.length === 2 && isImg) {
                     this.isTouchPanning = false;
@@ -19686,6 +19747,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 this.body.addEventListener('touchend', (e) => {
                   const isImg = !!this.body.querySelector('img.lightbox-media');
+                  this.lastTouchEndTime = Date.now();
 
                   if (e.touches.length === 0) {
                     if (this.scale > 1) {
@@ -19722,10 +19784,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       }
 
                       this.lastTapTime = now;
+                      clearTimeout(this.tapTimeout);
                       this.tapTimeout = setTimeout(() => {
-                        this.toggleUI();
+                        this.toggleUI(true);
                         this.lastTapTime = 0;
-                      }, 290);
+                      }, 260);
                       return;
                     }
 
@@ -19787,6 +19850,114 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   img.style.transform = 'translate3d(0px, 0px, 0px) scale(1)';
                   img.style.opacity = '1';
                 }
+              }
+
+              toggleSlideshow() {
+                if (this.isSlideshowActive) {
+                  this.stopSlideshow();
+                } else {
+                  this.startSlideshow();
+                }
+              }
+
+              startSlideshow() {
+                if (!this.mediaList || this.mediaList.length <= 1) return;
+                const isImg = (item) => {
+                  if (!item) return false;
+                  const ext = (item.name ? item.name.split('.').pop() : '').toLowerCase();
+                  return item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext);
+                };
+                if (!this.mediaList.some(isImg)) return;
+
+                this.isSlideshowActive = true;
+                this.updateSlideshowUI();
+
+                if (!isImg(this.mediaList[this.currentIndex])) {
+                  this.navNextImage();
+                } else {
+                  this.runSlideshowStep();
+                }
+              }
+
+              navNextImage() {
+                if (!this.mediaList || this.mediaList.length === 0) return;
+                const len = this.mediaList.length;
+                let nextIdx = (this.currentIndex + 1) % len;
+                let count = 0;
+
+                const isImg = (item) => {
+                  if (!item) return false;
+                  const ext = (item.name ? item.name.split('.').pop() : '').toLowerCase();
+                  return item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext);
+                };
+
+                while (!isImg(this.mediaList[nextIdx]) && count < len) {
+                  nextIdx = (nextIdx + 1) % len;
+                  count++;
+                }
+
+                if (isImg(this.mediaList[nextIdx])) {
+                  this.resetTransform(false);
+                  this.currentIndex = nextIdx;
+                  this.loadCurrent();
+                } else {
+                  this.stopSlideshow();
+                }
+              }
+
+              runSlideshowStep() {
+                if (!this.isSlideshowActive) return;
+                this.resetSlideshowProgress();
+                clearTimeout(this.slideshowTimer);
+                this.slideshowTimer = setTimeout(() => {
+                  if (!this.isSlideshowActive) return;
+                  const img = this.body.querySelector('.lightbox-media');
+                  if (img && img.tagName === 'IMG') {
+                    img.classList.add('disintegrate');
+                    setTimeout(() => {
+                      if (!this.isSlideshowActive) return;
+                      this.navNextImage();
+                    }, 500);
+                  } else {
+                    this.navNextImage();
+                  }
+                }, 14500);
+              }
+
+              resetSlideshowProgress() {
+                const track = document.getElementById('lb-slideshow-track');
+                const bar = document.getElementById('lb-slideshow-bar');
+                if (!track || !bar) return;
+                if (!this.isSlideshowActive) {
+                  track.style.display = 'none';
+                  bar.style.transition = 'none';
+                  bar.style.width = '0%';
+                  return;
+                }
+                track.style.display = 'block';
+                bar.style.transition = 'none';
+                bar.style.width = '0%';
+                void bar.offsetWidth; // Force layout reflow
+                bar.style.transition = 'width 15s linear';
+                bar.style.width = '100%';
+              }
+
+              stopSlideshow() {
+                this.isSlideshowActive = false;
+                clearTimeout(this.slideshowTimer);
+                this.slideshowTimer = null;
+                this.updateSlideshowUI();
+                this.resetSlideshowProgress();
+              }
+
+              updateSlideshowUI() {
+                const btn = document.getElementById('btn-lb-slideshow');
+                if (!btn) return;
+                btn.classList.toggle('active', this.isSlideshowActive);
+                btn.title = this.isSlideshowActive ? 'Pause Slideshow' : 'Play Slideshow (15s)';
+                btn.innerHTML = this.isSlideshowActive
+                  ? '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'
+                  : '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
               }
 
               updateStarUI(path) {
@@ -19870,15 +20041,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 const activeTile = this.carouselEl.querySelector(`.lb-carousel-item[data-index="${this.currentIndex}"]`);
                 if (activeTile) {
-                  activeTile.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+                  const scrollTarget = activeTile.offsetLeft - (this.carouselEl.clientWidth / 2) + (activeTile.clientWidth / 2);
+                  this.carouselEl.scrollTo({ left: Math.max(0, scrollTarget), behavior: 'smooth' });
                 }
               }
 
               open(mediaList, startIndex) {
                 this.mediaList = mediaList || [];
                 this.currentIndex = startIndex || 0;
+                this.isPinnedUI = false;
                 this.el.classList.add('active');
-                this.showUI();
+                this.showUI(true);
                 this.renderCarousel();
                 this.loadCurrent();
               }
@@ -19896,9 +20069,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               preloadAdjacent() {
                 if (!this.mediaList || this.mediaList.length <= 1) return;
-                const nextIdx = (this.currentIndex + 1) % this.mediaList.length;
-                const prevIdx = (this.currentIndex - 1 + this.mediaList.length) % this.mediaList.length;
-                [nextIdx, prevIdx].forEach(idx => {
+                const indices = [];
+                const len = this.mediaList.length;
+                for (let offset = -3; offset <= 3; offset++) {
+                  if (offset === 0) continue;
+                  const targetIdx = (this.currentIndex + offset + len * 3) % len;
+                  if (!indices.includes(targetIdx)) {
+                    indices.push(targetIdx);
+                  }
+                }
+                indices.forEach(idx => {
                   const item = this.mediaList[idx];
                   if (item) {
                     const ext = (item.name ? item.name.split('.').pop() : '').toLowerCase();
@@ -19915,14 +20095,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (!item) return;
 
                 this.cleanupMedia();
-                this.resetTransform(false);
+                this.scale = 1;
+                this.panX = 0;
+                this.panY = 0;
+                this.swipeDeltaX = 0;
 
                 const targetRel = ltrim(item.path, '/');
                 let currentDecoded = '';
                 try { currentDecoded = decodeURIComponent(window.location.hash.replace(/^#\/?/, '')); } catch (e) { currentDecoded = window.location.hash.replace(/^#\/?/, ''); }
 
                 if (currentDecoded !== targetRel) {
-                  window.location.hash = '#/' + encodeURI(targetRel);
+                  if (window.history && window.history.replaceState) {
+                    window.history.replaceState(null, '', '#/' + encodeURI(targetRel));
+                  } else {
+                    window.location.hash = '#/' + encodeURI(targetRel);
+                  }
                 }
 
                 const fileName = item.name || item.path.split('/').pop() || '';
@@ -19935,6 +20122,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const isAudio = item.type === 'audio' || ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'm4r', 'mid', 'midi'].includes(ext);
                 const isVideo = item.type === 'video' || ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv', 'avi', 'ts', '3gp', 'wmv', 'flv'].includes(ext);
 
+                const btnSlideshow = document.getElementById('btn-lb-slideshow');
+                if (btnSlideshow) btnSlideshow.style.display = isImage ? 'flex' : 'none';
                 const btnSearchGoogle = document.getElementById('btn-lb-search-google');
                 if (btnSearchGoogle) btnSearchGoogle.style.display = isImage ? 'flex' : 'none';
                 const btnLbEdit = document.getElementById('btn-lb-edit');
@@ -19946,9 +20135,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.scrollCarouselToActive();
                 this.preloadAdjacent();
 
+                if (this.isSlideshowActive) {
+                  if (!isImage) {
+                    this.stopSlideshow();
+                  } else {
+                    this.runSlideshowStep();
+                  }
+                }
+
                 if (isVideo) {
                   this.body.innerHTML = `
-                    <video class="lightbox-media" src="${rawUrl}" controls autoplay playsinline preload="metadata" style="max-height:100%; max-width:100%; width:auto; height:auto; object-fit:contain; background:#000; margin:auto;">
+                    <video class="lightbox-media" src="${rawUrl}" controls autoplay playsinline preload="metadata" style="max-height:100%; max-width:100%; width:auto; height:auto; object-fit:contain; background:#000; margin:0;">
                       Your browser does not support HTML5 video.
                     </video>
                   `;
@@ -19982,50 +20179,43 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 } else {
                   this.body.innerHTML = '';
                   
-                  const wrapper = document.createElement('div');
-                  wrapper.style.cssText = 'width:100%; height:100%; display:flex; align-items:center; justify-content:center; overflow:hidden;';
-                  
                   const img = document.createElement('img');
-                  img.className = 'lightbox-media';
+                  img.className = 'lightbox-media reconstruct';
                   img.id = 'lb-img';
                   img.alt = fileName;
                   img.decoding = 'async';
-                  img.style.opacity = '0';
-                  img.style.transition = 'opacity 0.2s ease';
                   
                   const onReady = () => {
-                    img.style.opacity = '1';
-                    this.resetTransform(false);
+                    requestAnimationFrame(() => {
+                      img.classList.add('ready');
+                      this.resetTransform(false);
+                    });
                   };
 
                   img.onload = onReady;
                   img.onerror = onReady;
                   img.src = rawUrl;
                   
-                  wrapper.appendChild(img);
-                  this.body.appendChild(wrapper);
+                  this.body.appendChild(img);
                   this.resetTransform(false);
                 }
               }
 
               nav(dir) {
                 if (!this.mediaList || this.mediaList.length <= 1) return;
-                this.showUI(true);
+                if (this.isPinnedUI) {
+                  this.showUI(false);
+                } else {
+                  this.hideUI();
+                }
                 this.resetTransform(false);
                 this.currentIndex = (this.currentIndex + dir + this.mediaList.length) % this.mediaList.length;
-                
-                if (this.body) {
-                  this.body.style.display = 'none';
-                  this.body.innerHTML = '';
-                }
-                
-                setTimeout(() => {
-                  if (this.body) this.body.style.display = 'flex';
-                  this.loadCurrent();
-                }, 20);
+                this.loadCurrent();
               }
 
               close(updateHash = true) {
+                this.stopSlideshow();
+                this.isPinnedUI = false;
                 this.cleanupMedia();
                 this.resetTransform(false);
                 this.el.classList.remove('active');
