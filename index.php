@@ -186,7 +186,7 @@ if (empty($temp_action) && preg_match('/action=([a-zA-Z0-9_]+)/', $raw_uri, $act
   $temp_action = $act_match[1];
 }
 
-$is_media_request = in_array($temp_action, ['embed', 'get_stream', 'get_image', 'download_song', 'download_cover']);
+$is_media_request = in_array($temp_action, ['embed', 'get_stream', 'get_image', 'download_song', 'download_cover', 'icon', 'app_icon', 'get_app_icon']);
 $is_explicit_api = strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && $_GET['access'] === 'api');
 
 $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
@@ -499,7 +499,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '10.1');
+define('APP_VERSION', '10.2');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -662,6 +662,341 @@ if (isset($_SESSION['user_id'])) {
 }
 
 if (isset($_GET['access']) && $_GET['access'] === 'user') {
+  $temp_drive_action = $_GET['action'] ?? ($_POST['action'] ?? '');
+
+  // 1:1 Shared Link Handler for User Drive (?access=user&page=drive&share=TOKEN)
+  if (isset($_GET['share'])) {
+    $token = $_GET['share'];
+    $users_drive_base = MUSIC_DIR . '/users_drive';
+    $found_user_id = null;
+    $found_meta = null;
+
+    if (is_dir($users_drive_base)) {
+      foreach (glob($users_drive_base . '/user_*_folder/.gallery_cache/.drive_meta.json') as $meta_file) {
+        $meta_data = @json_decode(@file_get_contents($meta_file), true);
+        if (is_array($meta_data) && isset($meta_data['shares'][$token])) {
+          if (preg_match('/user_(\d+)_folder/', $meta_file, $m)) {
+            $found_user_id = (int)$m[1];
+            $found_meta = $meta_data;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!$found_user_id || !isset($found_meta['shares'][$token])) {
+      http_response_code(404);
+      echo "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><title>404 Not Found</title><style>body{background:#030303;color:#fff;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><div style='text-align:center;'><h2>404 - Link Expired or Invalid</h2><p style='color:#aaa;'>This shared item is no longer available.</p></div></body></html>";
+      exit;
+    }
+
+    $user_drive_root = $users_drive_base . '/user_' . $found_user_id . '_folder';
+    $cache_dir = $user_drive_root . '/.gallery_cache';
+    $currentScript = basename($_SERVER['SCRIPT_NAME'] ?? ($_SERVER['PHP_SELF'] ?? 'index.php'));
+    $rootRel = ltrim(str_replace(['\\', '//'], '/', $found_meta['shares'][$token]['rel'] ?? ''), '/');
+
+    $realBase = realpath($user_drive_root);
+    $cleanRel = ltrim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $rootRel), DIRECTORY_SEPARATOR);
+    $basePath = $cleanRel === '' ? $realBase : ($realBase . DIRECTORY_SEPARATOR . $cleanRel);
+    $basePath = realpath($basePath);
+
+    if (!$basePath || !file_exists($basePath) || strpos($basePath, $realBase) !== 0) {
+      http_response_code(404);
+      echo "Item missing on server.";
+      exit;
+    }
+
+    $isBaseFolder = is_dir($basePath);
+    $reqSub = trim(str_replace(['\\', '..'], ['/', ''], $_GET['file'] ?? ($_GET['f'] ?? '')), '/');
+    $targetPath = $basePath;
+
+    if ($isBaseFolder && $reqSub !== '') {
+      $subCleanRel = ltrim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $reqSub), DIRECTORY_SEPARATOR);
+      $resolvedSub = realpath($basePath . DIRECTORY_SEPARATOR . $subCleanRel);
+      if ($resolvedSub && file_exists($resolvedSub) && strpos($resolvedSub, $basePath) === 0) {
+        $targetPath = $resolvedSub;
+      } else {
+        $reqSub = '';
+        $targetPath = $basePath;
+      }
+    }
+
+    $isDownload = !empty($_GET['download']) || ($_GET['action'] ?? '') === 'download';
+    $isRaw = !empty($_GET['raw']) || ($_GET['action'] ?? '') === 'raw';
+    $isThumb = !empty($_GET['thumb']) || ($_GET['action'] ?? '') === 'thumb';
+
+    if ($isThumb && is_file($targetPath)) {
+      $hash = md5($targetPath . filemtime($targetPath) . filesize($targetPath));
+      $cachePath = $cache_dir . DIRECTORY_SEPARATOR . $hash . '.jpg';
+      if (!file_exists($cachePath)) {
+        if (!is_dir($cache_dir)) @mkdir($cache_dir, 0777, true);
+        $info = @getimagesize($targetPath);
+        if ($info) {
+          list($origW, $origH) = $info;
+          $ratio = min(480 / $origW, 480 / $origH);
+          $newW = max(1, round($origW * $ratio));
+          $newH = max(1, round($origH * $ratio));
+          $srcImg = @imagecreatefromstring(file_get_contents($targetPath));
+          if ($srcImg) {
+            $destImg = imagecreatetruecolor($newW, $newH);
+            imagecopyresampled($destImg, $srcImg, 0, 0, 0, 0, $newW, $newH, $origW, $origH);
+            @imagejpeg($destImg, $cachePath, 85);
+            imagedestroy($srcImg);
+            imagedestroy($destImg);
+          }
+        }
+      }
+      if (file_exists($cachePath)) {
+        header('Content-Type: image/jpeg');
+        header('Content-Length: ' . filesize($cachePath));
+        readfile($cachePath);
+      } else {
+        $mime = mime_content_type($targetPath) ?: 'application/octet-stream';
+        header('Content-Type: ' . $mime);
+        readfile($targetPath);
+      }
+      exit;
+    }
+
+    if ($isRaw && is_file($targetPath)) {
+      $mime = mime_content_type($targetPath) ?: 'application/octet-stream';
+      while (ob_get_level() > 0) @ob_end_clean();
+      $filesize = filesize($targetPath);
+      header('Content-Type: ' . $mime);
+      header('Accept-Ranges: bytes');
+      header('Content-Length: ' . $filesize);
+      readfile($targetPath);
+      exit;
+    }
+
+    if ($isDownload) {
+      while (ob_get_level() > 0) @ob_end_clean();
+      if (is_dir($targetPath)) {
+        if (!class_exists('ZipArchive')) {
+          http_response_code(500);
+          echo "ZipArchive extension required.";
+          exit;
+        }
+        $zipName = (basename($targetPath) ?: 'shared_folder') . '.zip';
+        $tempZip = tempnam(sys_get_temp_dir(), 'zip_');
+        $zip = new ZipArchive();
+        if ($zip->open($tempZip, ZipArchive::CREATE | ZipArchive::OVERWRITE) === true) {
+          $dirBase = rtrim(str_replace(['\\', '//'], '/', realpath($targetPath)), '/');
+          $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($targetPath, RecursiveDirectoryIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS));
+          foreach ($files as $f) {
+            if (!$f->isFile()) continue;
+            $filePath = str_replace(['\\', '//'], '/', $f->getRealPath());
+            $localName = ltrim(str_replace($dirBase, '', $filePath), '/');
+            $zip->addFile($f->getRealPath(), $localName);
+          }
+          $zip->close();
+          $fallbackZip = preg_replace('/[^\x20-\x7e]/', '_', $zipName) ?: 'shared_folder.zip';
+          header('Content-Type: application/zip');
+          header("Content-Disposition: attachment; filename=\"{$fallbackZip}\"; filename*=UTF-8''" . rawurlencode($zipName));
+          header('Content-Length: ' . filesize($tempZip));
+          readfile($tempZip);
+          @unlink($tempZip);
+          exit;
+        }
+      } else {
+        $fn = basename($targetPath);
+        $fallbackFn = preg_replace('/[^\x20-\x7e]/', '_', $fn) ?: 'file';
+        header('Content-Type: application/octet-stream');
+        header("Content-Disposition: attachment; filename=\"{$fallbackFn}\"; filename*=UTF-8''" . rawurlencode($fn));
+        header('Content-Length: ' . filesize($targetPath));
+        readfile($targetPath);
+        exit;
+      }
+    }
+
+    $isCurrentDir = is_dir($targetPath);
+    $itemName = basename($targetPath) ?: 'Shared Folder';
+    $ext = strtolower(pathinfo($targetPath, PATHINFO_EXTENSION));
+
+    $imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'];
+    $videoExts = ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv', 'avi', 'ts', '3gp', 'wmv', 'flv'];
+    $audioExts = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'm4r', 'mid', 'midi'];
+
+    $fileType = 'file';
+    if (in_array($ext, $imageExts)) $fileType = 'image';
+    elseif (in_array($ext, $videoExts)) $fileType = 'video';
+    elseif (in_array($ext, $audioExts)) $fileType = 'audio';
+
+    $shareBaseUrl = $currentScript . "?access=user&page=drive&share=" . urlencode($token);
+    $rawUrl = $shareBaseUrl . "&raw=1" . ($reqSub ? '&file=' . urlencode($reqSub) : '');
+    $downloadUrl = $shareBaseUrl . "&download=1" . ($reqSub ? '&file=' . urlencode($reqSub) : '');
+
+    $fullOriginalPath = trim($rootRel . ($reqSub ? '/' . $reqSub : ''), '/');
+    $rootBaseName = basename($rootRel) ?: 'Root';
+    $origAppUrl = $currentScript . '?access=user&page=drive#/' . implode('/', array_map('rawurlencode', explode('/', $fullOriginalPath)));
+
+    $breadcrumbs = [];
+    if ($isBaseFolder) {
+      $breadcrumbs[] = [
+        'name'   => $rootBaseName,
+        'url'    => $shareBaseUrl,
+        'active' => empty($reqSub)
+      ];
+      if ($reqSub) {
+        $parts = explode('/', $reqSub);
+        $accum = '';
+        foreach ($parts as $idx => $part) {
+          if ($part === '') continue;
+          $accum = $accum ? ($accum . '/' . $part) : $part;
+          $isLast = ($idx === count($parts) - 1);
+          $breadcrumbs[] = [
+            'name'   => $part,
+            'url'    => $shareBaseUrl . "&file=" . urlencode($accum),
+            'active' => $isLast
+          ];
+        }
+      }
+    } else {
+      $breadcrumbs[] = [
+        'name'   => $itemName,
+        'url'    => $shareBaseUrl,
+        'active' => true
+      ];
+    }
+    ?>
+    <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+        <title><?= htmlspecialchars($itemName) ?> - Shared File</title>
+        <style>
+          *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+          html, body { height: 100dvh; max-height: 100dvh; overflow: hidden; background: #050505; color: #f1f1f1; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; }
+          .topbar { height: 50px; flex-shrink: 0; background: #101010; border-bottom: 1px solid #222; display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; z-index: 100; gap: 0.5rem; }
+          .topbar-title { font-weight: 700; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 0.5rem; min-width: 0; flex: 1; }
+          .topbar-title span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; display: inline-block; }
+          .topbar-actions { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
+          .subbar-path { height: 38px; flex-shrink: 0; background: #0c0c0c; border-bottom: 1px solid #1c1c1c; display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; font-size: 0.78rem; overflow-x: auto; white-space: nowrap; scrollbar-width: none; gap: 0.8rem; }
+          .subbar-path::-webkit-scrollbar { display: none; }
+          .breadcrumbs { display: flex; align-items: center; gap: 0.35rem; }
+          .bc-item { padding: 0.18rem 0.5rem; border-radius: 6px; color: #aaaaaa; font-weight: 500; text-decoration: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: background 0.15s ease, color 0.15s ease; }
+          .bc-item:hover { background: #1c1c1c; color: #ffffff; }
+          .bc-item.active { background: #ff0000; color: #ffffff; font-weight: 700; }
+          .bc-sep { color: #555555; font-size: 0.75rem; }
+          .original-path-badge { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.74rem; color: #ff5252; background: #141414; padding: 0.2rem 0.6rem; border-radius: 6px; border: 1px solid #ff0000; text-decoration: none; flex-shrink: 0; transition: all 0.15s ease; }
+          .original-path-badge:hover { background: #ff0000; color: #ffffff; }
+          .original-path-badge code { font-family: monospace; font-weight: 600; color: inherit; }
+          .btn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.85rem; border-radius: 20px; font-size: 0.78rem; font-weight: 600; text-decoration: none; border: none; cursor: pointer; transition: opacity 0.15s; }
+          .btn-primary { background: #ff0000; color: #ffffff; }
+          .btn-secondary { background: #1f1f1f; color: #f1f1f1; border: 1px solid #333; }
+          .btn:hover { opacity: 0.9; }
+          .viewer-wrap { flex: 1; min-height: 0; height: calc(100dvh - 88px); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0.75rem; overflow-y: auto; overflow-x: hidden; box-sizing: border-box; }
+          .media-img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.8); }
+          .media-video { max-width: 100%; max-height: 100%; width: auto; height: auto; border-radius: 10px; background: #000; box-shadow: 0 8px 30px rgba(0,0,0,0.8); }
+          .audio-card { background: #121212; border: 1px solid #282828; border-radius: 20px; padding: 1.5rem; width: 100%; max-width: 380px; max-height: 100%; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 0.8rem; box-shadow: 0 8px 30px rgba(0,0,0,0.8); }
+          .doc-box { width: 100%; max-width: 960px; height: 100%; background: #121212; border: 1px solid #282828; border-radius: 10px; padding: 1.25rem; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; overflow-y: auto; }
+          .pdf-frame { width: 100%; max-width: 1000px; height: 100%; border: none; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.8); }
+          .grid-wrap { width: 100%; max-width: 1200px; height: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); grid-auto-rows: min-content; gap: 0.65rem; overflow-y: auto; align-content: start; padding: 0.25rem; }
+          .card-item { background: #121212; border: 1px solid #222; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; text-decoration: none; color: inherit; transition: transform 0.15s, border-color 0.15s; }
+          .card-item:hover { transform: translateY(-2px); border-color: #ff0000; }
+          .card-thumb { aspect-ratio: 1/1; width: 100%; background: #080808; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+          .card-thumb img { width: 100%; height: 100%; object-fit: cover; }
+          .card-title { padding: 0.45rem; font-size: 0.76rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+        </style>
+      </head>
+      <body>
+        <div class="topbar">
+          <div class="topbar-title">
+            <span><?= htmlspecialchars($itemName) ?></span>
+          </div>
+          <div class="topbar-actions">
+            <?php if (!$isCurrentDir): ?>
+              <a href="<?= $rawUrl ?>" target="_blank" class="btn btn-secondary">Open Raw</a>
+            <?php endif; ?>
+            <a href="<?= $downloadUrl ?>" class="btn btn-primary"><?= $isCurrentDir ? 'Download ZIP' : 'Download' ?></a>
+          </div>
+        </div>
+
+        <div class="subbar-path">
+          <div class="breadcrumbs">
+            <?php foreach ($breadcrumbs as $bc): ?>
+              <?php if ($bc['active']): ?>
+                <span class="bc-item active"><?= htmlspecialchars($bc['name']) ?></span>
+              <?php else: ?>
+                <a href="<?= $bc['url'] ?>" class="bc-item"><?= htmlspecialchars($bc['name']) ?></a>
+                <span class="bc-sep">/</span>
+              <?php endif; ?>
+            <?php endforeach; ?>
+          </div>
+          <a href="<?= htmlspecialchars($origAppUrl) ?>" class="original-path-badge" title="Click to view original location in User Drive">
+            <span>Original:</span>
+            <code>/<?= htmlspecialchars($fullOriginalPath) ?></code>
+            <svg viewBox="0 0 24 24" style="width:13px;height:13px;fill:currentColor;"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
+          </a>
+        </div>
+
+        <div class="viewer-wrap">
+          <?php if ($isCurrentDir): ?>
+            <div class="grid-wrap">
+              <?php
+              $scanned = @scandir($targetPath) ?: [];
+              foreach ($scanned as $item) {
+                if ($item === '.' || $item === '..' || $item[0] === '.') continue;
+                $itemFull = $targetPath . DIRECTORY_SEPARATOR . $item;
+                $itemIsDir = is_dir($itemFull);
+                $itemRel = $reqSub ? ($reqSub . '/' . $item) : $item;
+                $itemExt = strtolower(pathinfo($item, PATHINFO_EXTENSION));
+
+                $itemType = 'file';
+                if (in_array($itemExt, $imageExts)) $itemType = 'image';
+                elseif (in_array($itemExt, $videoExts)) $itemType = 'video';
+                elseif (in_array($itemExt, $audioExts)) $itemType = 'audio';
+
+                $itemUrl = $shareBaseUrl . "&file=" . urlencode($itemRel);
+                $thumbUrl = $shareBaseUrl . "&thumb=1&file=" . urlencode($itemRel);
+                ?>
+                <a href="<?= $itemUrl ?>" class="card-item">
+                  <div class="card-thumb">
+                    <?php if ($itemIsDir): ?>
+                      <span style="font-size:2rem; color:#ff0000;">📁</span>
+                    <?php elseif ($itemType === 'image'): ?>
+                      <img src="<?= $thumbUrl ?>" alt="<?= htmlspecialchars($item) ?>" loading="lazy">
+                    <?php elseif ($itemType === 'video'): ?>
+                      <span style="font-size:2rem; color:#ef4444;">🎬</span>
+                    <?php elseif ($itemType === 'audio'): ?>
+                      <span style="font-size:2rem; color:#f87171;">🎵</span>
+                    <?php else: ?>
+                      <span style="font-size:2rem; color:#60a5fa;">📄</span>
+                    <?php endif; ?>
+                  </div>
+                  <div class="card-title"><?= htmlspecialchars($item) ?></div>
+                </a>
+              <?php } ?>
+            </div>
+          <?php elseif ($fileType === 'image'): ?>
+            <img src="<?= $rawUrl ?>" class="media-img" alt="<?= htmlspecialchars($itemName) ?>">
+          <?php elseif ($fileType === 'video'): ?>
+            <video src="<?= $rawUrl ?>" class="media-video" controls autoplay playsinline></video>
+          <?php elseif ($fileType === 'audio'): ?>
+            <div class="audio-card">
+              <div style="font-size:3rem;">🎵</div>
+              <div style="font-weight:700; font-size:1rem; word-break:break-all;"><?= htmlspecialchars($itemName) ?></div>
+              <audio src="<?= $rawUrl ?>" controls autoplay style="width:100%;"></audio>
+            </div>
+          <?php elseif ($ext === 'pdf'): ?>
+            <iframe src="<?= $rawUrl ?>" class="pdf-frame"></iframe>
+          <?php elseif (in_array($ext, ['txt', 'md', 'markdown', 'json', 'js', 'css', 'html', 'htm', 'php', 'py', 'c', 'cpp', 'sh', 'log', 'xml', 'yaml', 'yml', 'ini', 'env', 'sql', 'csv']) && filesize($targetPath) < 5000000): ?>
+            <div class="doc-box"><?= htmlspecialchars(@file_get_contents($targetPath) ?: '') ?></div>
+          <?php else: ?>
+            <div style="text-align:center;">
+              <div style="font-size:3.5rem; margin-bottom:0.8rem;">📦</div>
+              <div style="font-size:1.1rem; font-weight:700; margin-bottom:0.4rem;"><?= htmlspecialchars($itemName) ?></div>
+              <p style="color:#aaa; margin-bottom:1.2rem; font-size:0.85rem;"><?= number_format(filesize($targetPath) / 1024, 2) ?> KB</p>
+              <a href="<?= $downloadUrl ?>" class="btn btn-primary" style="padding:0.55rem 1.3rem;">Download File</a>
+            </div>
+          <?php endif; ?>
+        </div>
+      </body>
+    </html>
+    <?php
+    exit;
+  }
+
   if (empty($_SESSION['user_id'])) {
     ?>
     <!DOCTYPE html>
@@ -670,6 +1005,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'user') {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Login - User Drive</title>
+        <link rel="icon" type="image/svg+xml" href="?action=get_app_icon">
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
         <style>
           body { background-color: #050505; color: #fff; height: 100vh; display: flex; align-items: center; justify-content: center; font-family: 'Roboto', sans-serif; margin: 0; }
@@ -796,7 +1132,7 @@ HTACCESS;
     'trash_dir'          => $user_drive_root . '/.drive_trash_bin',
     'version_dir'        => $user_drive_root . '/.file_version',
     'meta_file'          => $user_drive_root . '/.gallery_cache/.drive_meta.json',
-    'app_title'          => htmlspecialchars($current_user['artist'] ?? 'User') . ' Cloud Drive',
+    'app_title'          => htmlspecialchars($current_user['artist'] ?? 'User') . ' Drive',
     'auth_enabled'       => false,
     'password'           => '',
     'encryption_key'     => 'User_Secret_Salt_' . $user_id,
@@ -818,9 +1154,35 @@ HTACCESS;
     'archive_extensions' => ['zip', 'tar', 'gz', '7z', 'rar', 'tgz'],
   ];
 
+  function getDirectorySizeExcludingCache($dirPath, $cacheDir) {
+    if (!is_dir($dirPath)) return 0.0;
+    $cacheReal = realpath($cacheDir);
+    $size = 0.0;
+    $queue = [$dirPath];
+    while (!empty($queue)) {
+      $currentDir = array_shift($queue);
+      $dh = @opendir($currentDir);
+      if (!$dh) continue;
+      while (($entry = @readdir($dh)) !== false) {
+        if ($entry === '.' || $entry === '..') continue;
+        $full = $currentDir . DIRECTORY_SEPARATOR . $entry;
+        // Only exclude generated thumbnail image cache, keep .drive_trash_bin included in quota
+        if ($cacheReal && strpos($full, $cacheReal) === 0) continue;
+        if (is_dir($full)) {
+          $queue[] = $full;
+        } else {
+          $sz = @filesize($full);
+          if ($sz !== false) $size += (float)$sz;
+        }
+      }
+      @closedir($dh);
+    }
+    return $size;
+  }
+
   function getUserStorageUsage($config) {
-    $stats = getFolderStats($config['root_dir'], $config['cache_dir']);
-    return (float)$stats['size'];
+    // Calculates total user storage including files in .drive_trash_bin
+    return (float)getDirectorySizeExcludingCache($config['root_dir'], $config['cache_dir']);
   }
 
   ini_set('memory_limit', $config['memory_limit']);
@@ -913,7 +1275,7 @@ HTACCESS;
     $size = 0.0;
     $files = 0;
     $folders = 0;
-    $ignoreDirs = ['.gallery_cache', '.drive_trash_bin', '.file_version', '.git', 'node_modules', 'vendor'];
+    $ignoreDirs = ['.gallery_cache', '.file_version', '.git', 'node_modules', 'vendor'];
 
     $queue = [$dirPath];
     while (!empty($queue)) {
@@ -1516,8 +1878,16 @@ HTACCESS;
     header('Content-Type: image/svg+xml; charset=utf-8');
     header('Cache-Control: public, max-age=604800, immutable');
     echo <<<SVG
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="512" height="512" fill="#d0bcff">
-    <path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/>
+  <?xml version="1.0" encoding="utf-8"?>
+  <svg width="512px" height="512px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect width="24" height="24" rx="6" fill="#0a0a0a"/>
+    <path d="M0 24L24 0V24H0Z" fill="#141414" clip-path="inset(0px round 6px)"/>
+    <path d="M4 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M16 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M7 7L7 16" stroke="#ff0000" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M13 7L13 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M19 7L19 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M10 4L10 19" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/>
   </svg>
   SVG;
     exit;
@@ -1557,7 +1927,17 @@ HTACCESS;
     exit;
   }
 
-  $action = $_GET['action'] ?? ($_POST['action'] ?? '');
+  // Release session lock early for read actions to allow parallel fast requests
+  $user_write_actions = [
+    'upload_chunk', 'create', 'rename', 'batch_rename', 'delete', 'save_text',
+    'save_image', 'trash', 'trash_restore', 'trash_delete', 'trash_empty',
+    'version_restore', 'star_toggle', 'clipboard_paste', 'fetch_url',
+    'encrypt_file', 'decrypt_file', 'zip', 'unzip'
+  ];
+  if (!in_array($action, $user_write_actions)) {
+    session_write_close();
+  }
+
   $isAdmin = true; // Unlocks full features for the logged-in user
   $isDemo = false;
 
@@ -2666,7 +3046,7 @@ HTACCESS;
         $name = basename($src);
         $dest = $targetDir . DIRECTORY_SEPARATOR . $name;
 
-        if (file_exists($dest) && $src !== $dest) {
+        if (file_exists($dest)) {
           $ext = pathinfo($name, PATHINFO_EXTENSION);
           $baseName = pathinfo($name, PATHINFO_FILENAME);
           $counter = 1;
@@ -2871,12 +3251,13 @@ HTACCESS;
 
     if ($action === 'share_create') {
       $file = safePath($config['root_dir'], $_POST['f'] ?? '');
-      if (!$file || !is_file($file)) jsonResponse(['error' => 'File not found'], 404);
+      if (!$file || !file_exists($file)) jsonResponse(['error' => 'Target not found'], 404);
 
       $token = bin2hex(random_bytes(16));
       $meta = getDriveMeta($config['meta_file']);
       $meta['shares'][$token] = [
         'rel'     => ltrim(str_replace(['\\', '//'], '/', substr(realpath($file), strlen(realpath($config['root_dir'])))), '/'),
+        'is_dir'  => is_dir($file),
         'created' => time()
       ];
       saveDriveMeta($config['meta_file'], $meta);
@@ -3411,7 +3792,7 @@ HTACCESS;
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
       <title><?= $pageTitle ?></title>
-      <link rel="icon" type="image/svg+xml" href="?action=icon">
+      <link rel="icon" type="image/svg+xml" href="?action=get_app_icon">
 
       <!-- Primary Meta & Search Engine Optimization (50-60 char title & 120-160 char description) -->
       <meta name="title" content="<?= $pageTitle ?>">
@@ -3496,7 +3877,7 @@ HTACCESS;
           --md-elevation-1: 0px 1px 3px 1px rgba(0, 0, 0, 0.6);
           --md-elevation-2: 0px 2px 6px 2px rgba(0, 0, 0, 0.8);
         }
-    
+
         :root[data-theme="light"] {
           --md-sys-color-surface: #fef7ff;
           --md-sys-color-surface-container-lowest: #ffffff;
@@ -3520,30 +3901,40 @@ HTACCESS;
           --md-elevation-1: 0px 1px 3px 1px rgba(0, 0, 0, 0.08), 0px 1px 2px 0px rgba(0, 0, 0, 0.15);
           --md-elevation-2: 0px 2px 6px 2px rgba(0, 0, 0, 0.08), 0px 1px 2px 0px rgba(0, 0, 0, 0.15);
         }
-    
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-      * {
-        scrollbar-width: thin;
-        scrollbar-color: var(--md-sys-color-outline-variant) transparent;
-      }
-      *::-webkit-scrollbar {
-        width: 6px;
-        height: 6px;
-      }
-      *::-webkit-scrollbar-track {
-        background: transparent;
-      }
-      *::-webkit-scrollbar-thumb {
-        background: var(--md-sys-color-outline-variant);
-        border-radius: 4px;
-      }
-      *::-webkit-scrollbar-thumb:hover {
-        background: var(--md-sys-color-outline);
-      }
+        *,
+        *::before,
+        *::after {
+          box-sizing: border-box;
+          margin: 0;
+          padding: 0;
+        }
 
-      body {
-        font-family: 'Roboto', system-ui, -apple-system, sans-serif;
+        * {
+          scrollbar-width: thin;
+          scrollbar-color: var(--md-sys-color-outline-variant) transparent;
+        }
+
+        *::-webkit-scrollbar {
+          width: 6px;
+          height: 6px;
+        }
+
+        *::-webkit-scrollbar-track {
+          background: transparent;
+        }
+
+        *::-webkit-scrollbar-thumb {
+          background: var(--md-sys-color-outline-variant);
+          border-radius: 4px;
+        }
+
+        *::-webkit-scrollbar-thumb:hover {
+          background: var(--md-sys-color-outline);
+        }
+
+        body {
+          font-family: 'Roboto', system-ui, -apple-system, sans-serif;
           background-color: var(--md-sys-color-surface);
           color: var(--md-sys-color-on-surface);
           height: 100dvh;
@@ -3556,11 +3947,37 @@ HTACCESS;
           -webkit-font-smoothing: antialiased;
           padding-bottom: env(safe-area-inset-bottom, 0px);
         }
-        a { color: inherit; text-decoration: none; }
-        button, input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; border: none; background: none; }
-        button { cursor: pointer; display: flex; align-items: center; justify-content: center; }
-        svg { width: 20px; height: 20px; fill: currentColor; flex-shrink: 0; }
-    
+
+        a {
+          color: inherit;
+          text-decoration: none;
+        }
+
+        button,
+        input,
+        select,
+        textarea {
+          font-family: inherit;
+          font-size: inherit;
+          color: inherit;
+          border: none;
+          background: none;
+        }
+
+        button {
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        svg {
+          width: 20px;
+          height: 20px;
+          fill: currentColor;
+          flex-shrink: 0;
+        }
+
         .app-topbar {
           height: 56px;
           background: var(--md-sys-color-surface);
@@ -3572,9 +3989,26 @@ HTACCESS;
           gap: 0.6rem;
           flex-shrink: 0;
         }
-        .topbar-left, .topbar-right { display: flex; align-items: center; gap: 0.4rem; }
-        .topbar-center { flex: 1; display: flex; justify-content: center; max-width: 540px; }
-    
+
+        .topbar-left,
+        .topbar-right {
+          display: flex;
+          align-items: center;
+          gap: 0.4rem;
+        }
+
+        .topbar-center {
+          flex: 1;
+          display: flex;
+          justify-content: center;
+          max-width: 540px;
+        }
+
+        .topbar-left {
+          min-width: 0;
+          max-width: 50%;
+        }
+
         .brand {
           font-weight: 700;
           font-size: 1.05rem;
@@ -3583,9 +4017,12 @@ HTACCESS;
           align-items: center;
           gap: 0.5rem;
           white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          min-width: 0;
           margin-left: 0.2rem;
         }
-    
+
         .subbar-path {
           height: 36px;
           background: var(--md-sys-color-surface-container-low);
@@ -3599,6 +4036,7 @@ HTACCESS;
           flex-shrink: 0;
           border-bottom: 1px solid var(--md-sys-color-outline-variant);
         }
+
         .breadcrumbs {
           display: flex;
           align-items: center;
@@ -3608,21 +4046,41 @@ HTACCESS;
           scrollbar-width: none;
           width: 100%;
         }
-        .breadcrumbs::-webkit-scrollbar { display: none; }
+
+        .breadcrumbs::-webkit-scrollbar {
+          display: none;
+        }
+
         .bc-item {
-          padding: 0.2rem 0.5rem;
-          border-radius: 8px;
-          color: var(--md-sys-color-on-surface-variant);
+          padding: 0.2rem 0.55rem;
+          border-radius: 6px;
+          color: #aaaaaa;
           font-weight: 500;
-          max-width: 140px;
+          max-width: 160px;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+          text-decoration: none;
+          transition: background 0.15s ease, color 0.15s ease;
         }
-        .bc-item:hover { background: var(--md-sys-color-surface-container-high); color: var(--md-sys-color-on-surface); }
-        .bc-item.active { color: var(--md-sys-color-primary); font-weight: 700; background: var(--md-sys-color-surface-container); }
-        .bc-sep { color: var(--md-sys-color-outline); font-size: 0.75rem; }
-    
+
+        .bc-item:hover {
+          background: #1c1c1c;
+          color: #ffffff;
+        }
+
+        .bc-item.active {
+          background: #ff0000 !important;
+          color: #ffffff !important;
+          font-weight: 700;
+          border-radius: 6px;
+        }
+
+        .bc-sep {
+          color: var(--md-sys-color-outline);
+          font-size: 0.75rem;
+        }
+
         .search-box {
           position: relative;
           display: flex;
@@ -3636,11 +4094,13 @@ HTACCESS;
           transition: all 0.2s ease;
           border: 1px solid transparent;
         }
+
         .search-box:focus-within {
           background: var(--md-sys-color-surface-container-highest);
           border-color: var(--md-sys-color-primary);
           box-shadow: 0 0 0 1px var(--md-sys-color-primary);
         }
+
         .search-box input {
           width: 100%;
           height: 100%;
@@ -3649,7 +4109,13 @@ HTACCESS;
           color: var(--md-sys-color-on-surface);
           background: transparent;
         }
-        .search-box svg { color: var(--md-sys-color-on-surface-variant); width: 19px; height: 19px; }
+
+        .search-box svg {
+          color: var(--md-sys-color-on-surface-variant);
+          width: 19px;
+          height: 19px;
+        }
+
         .search-adv-btn {
           width: 28px;
           height: 28px;
@@ -3663,10 +4129,13 @@ HTACCESS;
           transition: all 0.15s ease;
           position: relative;
         }
-        .search-adv-btn:hover, .search-adv-btn.active {
+
+        .search-adv-btn:hover,
+        .search-adv-btn.active {
           color: var(--md-sys-color-primary);
           background: var(--md-sys-color-surface-container-highest);
         }
+
         .search-adv-btn.active::after {
           content: '';
           position: absolute;
@@ -3677,6 +4146,7 @@ HTACCESS;
           background: var(--md-sys-color-primary);
           border-radius: 50%;
         }
+
         .trash-view-wrapper {
           grid-column: 1 / -1;
           width: 100%;
@@ -3692,6 +4162,7 @@ HTACCESS;
           grid-template-columns: 1fr 1fr;
           gap: 0.65rem;
         }
+
         @media (max-width: 540px) {
           .br-grid {
             grid-template-columns: 1fr;
@@ -3710,6 +4181,7 @@ HTACCESS;
           border-radius: 14px;
           padding: 0.45rem 0.65rem;
         }
+
         .br-segmented-control {
           display: flex;
           background: var(--md-sys-color-surface-container-highest);
@@ -3717,15 +4189,18 @@ HTACCESS;
           padding: 2px;
           gap: 2px;
         }
+
         .br-chip-label {
           display: flex;
           align-items: center;
           cursor: pointer;
           user-select: none;
         }
+
         .br-chip-label input {
           display: none;
         }
+
         .br-chip-label span {
           padding: 0.3rem 0.65rem;
           font-size: 0.76rem;
@@ -3734,17 +4209,20 @@ HTACCESS;
           border-radius: 8px;
           transition: all 0.15s ease;
         }
-        .br-chip-label input:checked + span {
+
+        .br-chip-label input:checked+span {
           background: var(--md-sys-color-primary);
           color: var(--md-sys-color-on-primary);
           font-weight: 600;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
         }
+
         .br-checkbox-group {
           display: flex;
           align-items: center;
           gap: 0.6rem;
         }
+
         .br-check-pill {
           display: inline-flex;
           align-items: center;
@@ -3755,6 +4233,7 @@ HTACCESS;
           cursor: pointer;
           user-select: none;
         }
+
         .br-check-pill input[type="checkbox"] {
           accent-color: var(--md-sys-color-primary);
           width: 15px;
@@ -3770,16 +4249,18 @@ HTACCESS;
           border-radius: 12px;
           background: var(--md-sys-color-surface-container-lowest);
         }
+
         .batch-rename-table {
           width: 100%;
           border-collapse: collapse;
-          font-size: 0.8rem;
+          font-size: 0.9rem;
         }
         .batch-rename-table th, .batch-rename-table td {
-          padding: 0.45rem 0.75rem;
+          padding: 0.6rem 0.95rem;
           border-bottom: 1px solid var(--md-sys-color-surface-container-high);
           text-align: left;
         }
+
         .batch-rename-table th {
           background: var(--md-sys-color-surface-container-high);
           color: var(--md-sys-color-primary);
@@ -3790,20 +4271,24 @@ HTACCESS;
           padding-top: 0.4rem;
           padding-bottom: 0.4rem;
         }
+
         .batch-rename-table tr:last-child td {
           border-bottom: none;
         }
+
         .br-preview-new {
           font-weight: 600;
           color: var(--md-sys-color-on-surface);
         }
+
         .br-preview-new.modified {
           color: #7ee787;
         }
+
         .br-preview-new.collision {
           color: #ff7b72;
         }
-    
+
         .btn-icon {
           width: 40px;
           height: 40px;
@@ -3812,9 +4297,17 @@ HTACCESS;
           transition: all 0.15s ease;
           position: relative;
         }
-        .btn-icon:hover { background: var(--md-sys-color-surface-container-high); color: var(--md-sys-color-on-surface); }
-        .btn-icon.active { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
-    
+
+        .btn-icon:hover {
+          background: var(--md-sys-color-surface-container-high);
+          color: var(--md-sys-color-on-surface);
+        }
+
+        .btn-icon.active {
+          background: var(--md-sys-color-secondary-container);
+          color: var(--md-sys-color-on-secondary-container);
+        }
+
         .btn-primary {
           display: flex;
           align-items: center;
@@ -3829,8 +4322,11 @@ HTACCESS;
           white-space: nowrap;
           box-shadow: var(--md-elevation-1);
         }
-        .btn-primary:hover { opacity: 0.9; }
-    
+
+        .btn-primary:hover {
+          opacity: 0.9;
+        }
+
         .app-body {
           display: flex;
           flex: 1;
@@ -3838,7 +4334,7 @@ HTACCESS;
           position: relative;
           min-height: 0;
         }
-    
+
         .sidebar-backdrop {
           position: fixed;
           inset: 0;
@@ -3847,8 +4343,11 @@ HTACCESS;
           z-index: 140;
           display: none;
         }
-        .sidebar-backdrop.active { display: block; }
-    
+
+        .sidebar-backdrop.active {
+          display: block;
+        }
+
         .sidebar {
           width: var(--sidebar-width, 280px);
           background: var(--md-sys-color-surface-container-low);
@@ -3861,12 +4360,15 @@ HTACCESS;
           border-right: 1px solid var(--md-sys-color-outline-variant);
           position: relative;
         }
+
         .sidebar.collapsed {
           margin-left: calc(-1 * var(--sidebar-width, 280px));
         }
+
         .sidebar-section {
           padding: 1rem;
         }
+
         .sidebar-title {
           font-size: 0.75rem;
           text-transform: uppercase;
@@ -3876,71 +4378,98 @@ HTACCESS;
           margin-bottom: 0.6rem;
           padding-left: 0.5rem;
         }
-    
-        .tree-node-row {
-        display: flex;
-        align-items: center;
-        gap: 0.2rem;
-        margin-bottom: 0.15rem;
-        position: relative;
-      }
-      .tree-toggle {
-        width: 24px;
-        height: 24px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        color: var(--md-sys-color-outline);
-        border-radius: 6px;
-        flex-shrink: 0;
-        transition: transform 0.15s ease, color 0.15s ease;
-      }
-      .tree-toggle:hover {
-        color: var(--md-sys-color-on-surface);
-        background: var(--md-sys-color-surface-container-high);
-      }
-      .tree-toggle svg {
-        width: 14px;
-        height: 14px;
-        transition: transform 0.2s ease;
-      }
-      .tree-branch.collapsed > .tree-node-row .tree-toggle svg {
-        transform: rotate(-90deg);
-      }
-      .tree-branch.collapsed > .tree-children {
-        display: none;
-      }
-      .tree-spacer {
-        width: 24px;
-        height: 24px;
-        flex-shrink: 0;
-      }
-      .tree-node-row .tree-node {
-        flex: 1;
-        margin-bottom: 0;
-        min-width: 0;
-      }
 
-      .tree-node {
-        display: flex;
-        align-items: center;
-        justify-content: flex-start;
-        gap: 0.6rem;
-        padding: 0.45rem 0.75rem;
-        border-radius: 20px;
-        font-size: 0.85rem;
-        color: var(--md-sys-color-on-surface-variant);
-        cursor: pointer;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      .tree-node svg { margin: 0; flex-shrink: 0; width: 18px; height: 18px; }
-      .tree-node:hover { background: var(--md-sys-color-surface-container-high); color: var(--md-sys-color-on-surface); }
-      .tree-node.active { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); font-weight: 600; }
-    
-        .filter-group { display: flex; flex-direction: column; gap: 0.2rem; }
+        .tree-node-row {
+          display: flex;
+          align-items: center;
+          gap: 0.2rem;
+          margin-bottom: 0.15rem;
+          position: relative;
+        }
+
+        .tree-toggle {
+          width: 24px;
+          height: 24px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          color: var(--md-sys-color-outline);
+          border-radius: 6px;
+          flex-shrink: 0;
+          transition: transform 0.15s ease, color 0.15s ease;
+        }
+
+        .tree-toggle:hover {
+          color: var(--md-sys-color-on-surface);
+          background: var(--md-sys-color-surface-container-high);
+        }
+
+        .tree-toggle svg {
+          width: 14px;
+          height: 14px;
+          transition: transform 0.2s ease;
+        }
+
+        .tree-branch.collapsed>.tree-node-row .tree-toggle svg {
+          transform: rotate(-90deg);
+        }
+
+        .tree-branch.collapsed>.tree-children {
+          display: none;
+        }
+
+        .tree-spacer {
+          width: 24px;
+          height: 24px;
+          flex-shrink: 0;
+        }
+
+        .tree-node-row .tree-node {
+          flex: 1;
+          margin-bottom: 0;
+          min-width: 0;
+        }
+
+        .tree-node {
+          display: flex;
+          align-items: center;
+          justify-content: flex-start;
+          gap: 0.6rem;
+          padding: 0.45rem 0.75rem;
+          border-radius: 20px;
+          font-size: 0.85rem;
+          color: var(--md-sys-color-on-surface-variant);
+          cursor: pointer;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .tree-node svg {
+          margin: 0;
+          flex-shrink: 0;
+          width: 18px;
+          height: 18px;
+        }
+
+        .tree-node:hover {
+          background: var(--md-sys-color-surface-container-high);
+          color: var(--md-sys-color-on-surface);
+        }
+
+        .tree-node.active {
+          background: var(--md-sys-color-secondary-container);
+          color: var(--md-sys-color-on-secondary-container);
+          font-weight: 600;
+        }
+
+        .filter-group {
+          display: flex;
+          flex-direction: column;
+          gap: 0.2rem;
+        }
+
         .filter-item {
           display: flex;
           align-items: center;
@@ -4435,19 +4964,19 @@ HTACCESS;
           padding: 0.8rem;
         }
         .shortcuts-group-title {
-          font-size: 0.75rem;
+          font-size: 0.85rem;
           font-weight: 700;
           text-transform: uppercase;
           color: var(--md-sys-color-primary);
           letter-spacing: 0.6px;
-          margin-bottom: 0.6rem;
+          margin-bottom: 0.75rem;
         }
         .shortcut-row {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          padding: 0.3rem 0;
-          font-size: 0.82rem;
+          padding: 0.45rem 0;
+          font-size: 0.92rem;
           border-bottom: 1px solid var(--md-sys-color-surface-container-high);
         }
         .shortcut-row:last-child { border-bottom: none; }
@@ -4455,11 +4984,11 @@ HTACCESS;
           background: var(--md-sys-color-surface-container-highest);
           border: 1px solid var(--md-sys-color-outline-variant);
           color: var(--md-sys-color-on-surface);
-          padding: 0.15rem 0.45rem;
+          padding: 0.2rem 0.55rem;
           border-radius: 6px;
           font-family: 'JetBrains Mono', monospace;
-          font-size: 0.75rem;
-          font-weight: 600;
+          font-size: 0.82rem;
+          font-weight: 700;
           box-shadow: 0 1px 2px rgba(0,0,0,0.2);
         }
 
@@ -4737,7 +5266,7 @@ HTACCESS;
           margin: auto;
         }
         .type-icon svg { width: 38px; height: 38px; }
-        .type-folder { color: #f59e0b; }
+        .type-folder { color: #ff0000; }
     
         .center-state {
           display: flex;
@@ -5338,19 +5867,30 @@ HTACCESS;
           .lightbox-nav.next { right: 0.6rem; }
         }
     
-        .modal-backdrop {
-          position: fixed;
-          inset: 0;
-          background: rgba(0, 0, 0, 0.55);
-          backdrop-filter: blur(4px);
+        .modal-backdrop,
+        #modal-backdrop {
+          position: fixed !important;
+          inset: 0 !important;
+          background: rgba(0, 0, 0, 0.8) !important;
+          backdrop-filter: blur(6px) !important;
+          -webkit-backdrop-filter: blur(6px) !important;
           z-index: 100005 !important;
-          display: none;
-          align-items: center;
-          justify-content: center;
-          padding: 1rem;
+          display: none !important;
+          align-items: center !important;
+          justify-content: center !important;
+          padding: 1rem !important;
+          opacity: 1 !important;
+          visibility: visible !important;
         }
-        .modal-backdrop.active { display: flex; }
-    
+
+        .modal-backdrop.active,
+        #modal-backdrop.active {
+          display: flex !important;
+          opacity: 1 !important;
+          visibility: visible !important;
+          pointer-events: auto !important;
+        }
+
         .modal-box {
           background: var(--md-sys-color-surface-container);
           border: 1px solid var(--md-sys-color-outline-variant);
@@ -5362,13 +5902,38 @@ HTACCESS;
           display: flex;
           flex-direction: column;
         }
+
         .modal-box.large {
           max-width: 95vw;
           width: 95vw;
           height: 92dvh;
           border-radius: 20px;
         }
-        
+        .clipboard-bar {
+          position: fixed;
+          bottom: calc(5.2rem + env(safe-area-inset-bottom, 0px));
+          left: 50%;
+          transform: translateX(-50%) translateY(200%);
+          background: var(--md-sys-color-surface-container-highest);
+          border: 1px solid var(--md-sys-color-primary);
+          padding: 0.4rem 0.9rem;
+          border-radius: 32px;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.85);
+          display: flex;
+          align-items: center;
+          gap: 0.6rem;
+          z-index: 5000;
+          opacity: 0;
+          visibility: hidden;
+          pointer-events: none;
+          transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease, visibility 0.2s;
+        }
+        .clipboard-bar.active {
+          transform: translateX(-50%) translateY(0);
+          opacity: 1;
+          visibility: visible;
+          pointer-events: auto;
+        }
         .editor-modal-header {
           display: flex;
           align-items: center;
@@ -5954,87 +6519,197 @@ HTACCESS;
           height: 100%;
         }
         .modal-header {
-          padding: 1.2rem 1.4rem 0.8rem 1.4rem;
+          padding: 1.25rem 1.5rem 0.85rem 1.5rem;
           display: flex;
           align-items: center;
           justify-content: space-between;
           font-weight: 700;
-          font-size: 1.1rem;
+          font-size: 1.18rem;
           border-bottom: 1px solid var(--md-sys-color-outline-variant);
-          gap: 0.75rem;
+          gap: 0.8rem;
           min-width: 0;
         }
-        .modal-header > span, #details-modal-title {
+
+        .modal-header > span,
+        #details-modal-title,
+        #share-modal-title {
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
           min-width: 0;
           flex: 1;
+          color: #ffffff;
+          font-size: 1.18rem !important;
+          font-weight: 700 !important;
         }
+
         .modal-content {
-          padding: 1rem 1.4rem 1.2rem 1.4rem;
+          padding: 1.25rem 1.5rem 1.35rem 1.5rem;
           overflow-y: auto;
           flex: 1;
+          font-size: 0.96rem;
+          line-height: 1.55;
         }
+
+        #modal-share #share-modal-filename {
+          font-size: 1.18rem !important;
+          font-weight: 700 !important;
+          color: #ffffff !important;
+          margin: 0.45rem auto 0.25rem auto !important;
+          text-align: center !important;
+          width: 100% !important;
+          word-break: break-all !important;
+          display: block !important;
+        }
+
+        #modal-share #share-modal-filename {
+          font-size: 1.18rem !important;
+          font-weight: 700 !important;
+          color: #ffffff !important;
+          margin: 0.45rem auto 0.25rem auto !important;
+          text-align: center !important;
+          width: 100% !important;
+          word-break: break-all !important;
+          display: block !important;
+        }
+
+        #modal-share p {
+          font-size: 0.9rem !important;
+          color: var(--md-sys-color-on-surface-variant) !important;
+          margin: 0.35rem auto 0 auto !important;
+          text-align: center !important;
+          width: 100% !important;
+        }
+
+        #modal-share #share-link-input {
+          font-size: 0.98rem !important;
+          font-weight: 500 !important;
+          padding: 0.5rem 0.6rem !important;
+          color: #ffffff !important;
+        }
+
+        #modal-share #share-copy-btn {
+          font-size: 0.9rem !important;
+          font-weight: 700 !important;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          gap: 0.35rem !important;
+          height: 36px !important;
+          padding: 0 1.05rem !important;
+          flex-shrink: 0 !important;
+        }
+
+        #modal-share #share-native-btn {
+          font-size: 0.92rem !important;
+          font-weight: 600 !important;
+          padding: 0.6rem 1rem !important;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          gap: 0.4rem !important;
+        }
+
         .modal-footer {
-          padding: 0.8rem 1.4rem 1.2rem 1.4rem;
+          padding: 0.9rem 1.5rem 1.25rem 1.5rem;
           display: flex;
           justify-content: flex-end;
-          gap: 0.5rem;
+          gap: 0.65rem;
           border-top: 1px solid var(--md-sys-color-outline-variant);
         }
-    
-        .details-section {
-          margin-bottom: 1.2rem;
+
+        .modal-footer .btn-primary {
+          font-size: 0.92rem;
+          height: 40px;
+          padding: 0.48rem 1.25rem;
+          border-radius: 20px;
+          font-weight: 700;
         }
+
+        .details-section {
+          margin-bottom: 1.25rem;
+        }
+
         .details-title {
           display: flex;
           align-items: center;
           gap: 0.5rem;
-          font-size: 0.85rem;
+          font-size: 0.92rem;
           font-weight: 700;
-          color: var(--md-sys-color-primary);
+          color: #ff0000;
           text-transform: uppercase;
-          letter-spacing: 0.6px;
-          margin-bottom: 0.6rem;
+          letter-spacing: 0.55px;
+          margin-bottom: 0.65rem;
         }
+
         .details-grid {
           display: flex;
           flex-direction: column;
-          gap: 0.35rem;
+          gap: 0.4rem;
           background: var(--md-sys-color-surface-container-low);
-          padding: 0.6rem 0.85rem;
+          padding: 0.8rem 1rem;
           border-radius: 16px;
           border: 1px solid var(--md-sys-color-outline-variant);
         }
+
         .details-row {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          font-size: 0.85rem;
-          padding: 0.3rem 0;
+          font-size: 0.92rem;
+          padding: 0.4rem 0;
           border-bottom: 1px solid var(--md-sys-color-surface-container-highest);
         }
-        .details-row:last-child { border-bottom: none; }
-        .details-label { color: var(--md-sys-color-on-surface-variant); font-size: 0.8rem; }
-        .details-value { font-weight: 500; color: var(--md-sys-color-on-surface); text-align: right; word-break: break-all; }
-    
-        .form-group { margin-bottom: 1rem; }
-        .form-label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--md-sys-color-primary); margin-bottom: 0.4rem; }
-        .form-group { margin-bottom: 1rem; }
-        .form-label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--md-sys-color-primary); margin-bottom: 0.4rem; }
+
+        .details-row:last-child {
+          border-bottom: none;
+        }
+
+        .details-label {
+          color: var(--md-sys-color-on-surface-variant);
+          font-size: 0.86rem;
+          font-weight: 500;
+        }
+
+        .details-value {
+          font-weight: 600;
+          color: #ffffff;
+          text-align: right;
+          word-break: break-all;
+          font-size: 0.92rem;
+        }
+
+        .form-group {
+          margin-bottom: 1.15rem;
+        }
+
+        .form-label {
+          display: block;
+          font-size: 0.86rem;
+          font-weight: 700;
+          color: #ff0000;
+          margin-bottom: 0.4rem;
+          letter-spacing: 0.3px;
+        }
+
         .form-input {
           width: 100%;
           background: var(--md-sys-color-surface-container-high);
-          border: 1px solid var(--md-sys-color-outline-variant);
+          border: 1px solid rgba(255, 255, 255, 0.2) !important;
           border-radius: 12px;
-          padding: 0.65rem 0.85rem;
-          color: var(--md-sys-color-on-surface);
+          padding: 0.7rem 0.9rem;
+          color: #ffffff;
           outline: none;
-          font-size: 0.9rem;
+          font-size: 0.96rem;
           box-sizing: border-box;
+          transition: border-color 0.15s ease, background-color 0.15s ease;
         }
-        .form-input:focus { border-color: var(--md-sys-color-primary); }
+
+        .form-input:focus {
+          border-color: #ff0000 !important;
+          box-shadow: none !important;
+          background-color: var(--md-sys-color-surface-container-highest);
+        }
         select.form-input,
         input[type="date"].form-input {
           position: relative;
@@ -6239,28 +6914,28 @@ HTACCESS;
           flex: 1 1 auto;
         }
         .version-date {
-          font-size: 0.82rem;
-          font-weight: 600;
+          font-size: 0.95rem;
+          font-weight: 700;
           color: var(--md-sys-color-on-surface);
           display: flex;
           align-items: center;
-          gap: 0.35rem;
+          gap: 0.45rem;
           white-space: nowrap;
         }
         .version-meta {
           display: flex;
           align-items: center;
-          gap: 0.45rem;
-          font-size: 0.72rem;
+          gap: 0.55rem;
+          font-size: 0.85rem;
           color: var(--md-sys-color-on-surface-variant);
           white-space: nowrap;
         }
         .version-badge {
           background: var(--md-sys-color-surface-container-highest);
           color: var(--md-sys-color-primary);
-          padding: 0.1rem 0.5rem;
+          padding: 0.15rem 0.6rem;
           border-radius: 6px;
-          font-size: 0.7rem;
+          font-size: 0.78rem;
           font-weight: 700;
         }
         .version-actions {
@@ -6715,7 +7390,7 @@ HTACCESS;
               <div class="filter-item" id="nav-trash" onclick="app.switchDriveSection('trash')">
                 <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg> Trash Bin</span>
               </div>
-              <a href="./" class="filter-item" style="color:var(--md-sys-color-primary); text-decoration:none; margin-top:0.25rem;">
+              <a href="./" class="filter-item">
                 <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg> Back to Music</span>
               </a>
             </div>
@@ -6871,6 +7546,18 @@ HTACCESS;
         </div>
       </div>
     
+      <!-- Floating Paste Indicator Bar -->
+      <div class="clipboard-bar" id="drive-clipboard-bar">
+        <span style="font-size:0.85rem; font-weight:700; color:var(--md-sys-color-primary);" id="drive-clipboard-txt">1 item ready</span>
+        <div style="width:1px; height:18px; background:var(--md-sys-color-outline-variant);"></div>
+        <button class="btn-primary" id="btn-drive-clipboard-paste" style="height:32px; padding:0 0.85rem; font-size:0.8rem;">
+          <svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:4px;"><path d="M19 2h-4.18C14.4.84 13.3 0 12 0c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 18H5V4h2v3h10V4h2v16z"/></svg> Paste Here
+        </button>
+        <button class="btn-icon" id="btn-drive-clipboard-cancel" title="Clear Clipboard" style="width:30px; height:30px;">
+          <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </div>
+
       <div class="dropdown-menu" id="dropdown-sort">
         <div class="dm-item" data-sort="name_asc">
           <svg viewBox="0 0 24 24"><path d="M9.25 5v14l-4.5-4.5 1.41-1.41L8 14.92V5h1.25zm11.75 0v2h-8V5h8zm-2 6v2h-6v-2h6zm-2 6v2h-4v-2h4z"/></svg>
@@ -7071,28 +7758,28 @@ HTACCESS;
         <div class="modal-box" id="modal-share" style="display:none; max-width: 420px;">
           <div class="modal-header">
             <div style="display:flex; align-items:center; gap:0.5rem; overflow:hidden;">
-              <svg viewBox="0 0 24 24" style="width:20px;height:20px;color:var(--md-sys-color-primary);"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>
-              <span id="share-modal-title" style="font-weight:700; font-size:1rem;">Share Link</span>
+              <svg viewBox="0 0 24 24" style="width:20px;height:20px;color:#ff0000;flex-shrink:0;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>
+              <span id="share-modal-title" style="font-weight:700; font-size:1rem; color:#ffffff;">Share Link</span>
             </div>
             <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
           </div>
-          <div class="modal-content" style="padding: 1.5rem;">
-            <div style="text-align:center; margin-bottom: 1.5rem;">
-              <div style="width: 64px; height: 64px; background: var(--md-sys-color-surface-container-high); color: var(--md-sys-color-primary); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 1rem auto; border: 1px solid var(--md-sys-color-outline-variant);">
-                <svg viewBox="0 0 24 24" style="width: 32px; height: 32px;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>
+          <div class="modal-content" style="padding: 1.4rem 1.6rem 1.6rem 1.6rem; display: flex; flex-direction: column; align-items: center; text-align: center;">
+            <div style="text-align: center; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; margin-bottom: 2rem;">
+              <div style="width: 64px; height: 64px; background: rgba(255, 0, 0, 0.15); color: #ff0000; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 0.95rem auto; border: 1px solid rgba(255, 0, 0, 0.3); flex-shrink: 0;">
+                <svg viewBox="0 0 24 24" style="width: 30px; height: 30px; fill: currentColor;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>
               </div>
-              <h5 style="margin:0; font-weight:700; color:var(--md-sys-color-on-surface); word-break: break-all;" id="share-modal-filename">filename.ext</h5>
-              <p style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); margin-top:0.5rem;">Anyone with this link can access the file.</p>
+              <h5 style="margin: 0 auto; font-weight: 700; color: #ffffff; width: 100%; word-break: break-all; text-align: center;" id="share-modal-filename">filename.ext</h5>
+              <p style="color: var(--md-sys-color-on-surface-variant); margin: 0.45rem auto 0 auto; text-align: center; width: 100%;">Anyone with this link can access the file.</p>
             </div>
-            <div class="form-group" style="margin:0;">
-              <div style="display:flex; align-items:center; background: var(--md-sys-color-surface-container-low); border: 1px solid var(--md-sys-color-outline-variant); border-radius: 12px; padding: 0.3rem; gap: 0.4rem;">
-                <input type="text" id="share-link-input" class="form-input" style="border:none !important; background:transparent !important; box-shadow:none !important; flex:1; padding:0.5rem; color:var(--md-sys-color-on-surface);" readonly>
-                <button class="btn-primary" id="share-copy-btn" style="height:36px; padding:0 1rem; border-radius:10px;"><svg viewBox="0 0 24 24" style="width:16px;height:16px;margin-right:0.3rem;"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg> Copy</button>
+            <div class="form-group" style="margin: 0; width: 100%;">
+              <div style="display: flex; align-items: center; justify-content: space-between; background: var(--md-sys-color-surface-container-low); border: 1px solid var(--md-sys-color-outline-variant); border-radius: 14px; padding: 0.3rem 0.35rem 0.3rem 0.75rem; gap: 0.5rem; width: 100%; min-height: 46px;">
+                <input type="text" id="share-link-input" class="form-input" style="border: none !important; background: transparent !important; box-shadow: none !important; flex: 1; padding: 0.35rem 0.2rem; color: #ffffff; min-width: 0;" readonly>
+                <button class="btn-primary" id="share-copy-btn" style="height: 36px; padding: 0 1.05rem; border-radius: 10px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem;"><svg viewBox="0 0 24 24" style="width: 15px; height: 15px; fill: currentColor; margin: 0;"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg><span>Copy</span></button>
               </div>
             </div>
-            <div style="display:none; justify-content:center; margin-top:1.2rem;" id="share-native-container">
-              <button class="btn-primary" id="share-native-btn" style="background:transparent !important; color:var(--md-sys-color-on-surface) !important; border:1px solid var(--md-sys-color-outline-variant) !important; width:100%; justify-content:center;">
-                <svg viewBox="0 0 24 24" style="width:16px;height:16px;margin-right:0.4rem;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg> Share via Device Apps
+            <div style="display: none; justify-content: center; margin-top: 1.25rem; width: 100%;" id="share-native-container">
+              <button class="btn-primary" id="share-native-btn" style="background: transparent !important; color: #ffffff !important; border: 1px solid rgba(255, 255, 255, 0.2) !important; width: 100%; justify-content: center; display: inline-flex; align-items: center; gap: 0.4rem;">
+                <svg viewBox="0 0 24 24" style="width: 15px; height: 15px; fill: currentColor; margin: 0;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg><span>Share via Device Apps</span>
               </button>
             </div>
           </div>
@@ -7119,7 +7806,7 @@ HTACCESS;
         </div>
 
         <!-- Advanced Batch Rename Modal -->
-        <div class="modal-box" id="modal-batch-rename" style="display:none; max-width:600px; max-height:90dvh;">
+        <div class="modal-box" id="modal-batch-rename" style="display:none; max-width:750px; max-height:92dvh;">
           <div class="modal-header">
             <div style="display:flex; align-items:center; gap:0.5rem; overflow:hidden;">
               <svg viewBox="0 0 24 24" style="width:20px;height:20px;color:var(--md-sys-color-primary);"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
@@ -7186,7 +7873,7 @@ HTACCESS;
         </div>
 
         <!-- Advanced Search Modal -->
-        <div class="modal-box" id="modal-advanced-search" style="display:none; max-width:460px;">
+        <div class="modal-box" id="modal-advanced-search" style="display:none; max-width:580px;">
           <div class="modal-header">
             <span>Advanced Search & Filters</span>
             <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
@@ -7414,7 +8101,7 @@ HTACCESS;
         </div>
 
         <!-- Archive Inspector Modal (Like TinyFileManager) -->
-        <div class="modal-box large" id="modal-archive-preview" style="display:none; max-width:900px; height:85dvh;">
+        <div class="modal-box large" id="modal-archive-preview" style="display:none; max-width:1050px; height:88dvh;">
           <div class="modal-header">
             <div style="display:flex; align-items:center; gap:0.6rem; overflow:hidden;">
               <svg viewBox="0 0 24 24" style="width:22px;height:22px;color:#fde293;"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>
@@ -7475,7 +8162,7 @@ HTACCESS;
         </div>
 
         <!-- Version History Modal -->
-        <div class="modal-box" id="modal-versions" style="display:none; max-width:560px;">
+        <div class="modal-box" id="modal-versions" style="display:none; max-width:720px;">
           <div class="modal-header">
             <div style="display:flex; flex-direction:column; gap:0.15rem; overflow:hidden;">
               <span style="font-weight:700; font-size:1.05rem;">Version History</span>
@@ -7502,7 +8189,7 @@ HTACCESS;
         </div>
 
         <!-- Diff Preview Modal -->
-        <div class="modal-box large" id="modal-diff" style="display:none; max-width:860px; height:85dvh;">
+        <div class="modal-box large" id="modal-diff" style="display:none; max-width:1080px; height:90dvh;">
           <div class="modal-header">
             <div style="display:flex; flex-direction:column; gap:0.15rem;">
               <span style="font-weight:700; font-size:1.05rem;" id="diff-modal-title">Diff Preview</span>
@@ -7655,7 +8342,7 @@ HTACCESS;
           </div>
         </div>
 
-        <div class="modal-box" id="modal-details" style="display:none;">
+        <div class="modal-box" id="modal-details" style="display:none; max-width: 720px;">
           <div class="modal-header">
             <span id="details-modal-title">Item Information</span>
             <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
@@ -10067,7 +10754,7 @@ HTACCESS;
     
             const segments = decoded.split('/');
             const lastSegment = segments[segments.length - 1];
-            const isFilePath = /\.[a-zA-Z0-9]{1,8}$/.test(lastSegment);
+            const isFilePath = !lastSegment.startsWith('.') && /\.[a-zA-Z0-9]{1,8}$/.test(lastSegment);
 
             if (isFilePath) {
               const dirPath = segments.slice(0, -1).join('/');
@@ -10721,7 +11408,7 @@ HTACCESS;
                     <img src="?access=user&action=thumb&f=${encodeURIComponent(item.path)}" alt="" loading="lazy" decoding="async" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity 0.2s; z-index:3;" onload="this.style.opacity='1'; this.closest('.file-card')?.classList.add('has-image');" onerror="this.remove();">
                   `;
                 } else if (item.type === 'archive') {
-                  thumbHtml = `<div class="type-icon" style="color:#fde293;"><svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg></div>`;
+                  thumbHtml = `<div class="type-icon" style="color:#ff0000;"><svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg></div>`;
                 } else {
                   thumbHtml = `<div class="type-icon" style="color:#80cbc4;"><svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg></div>`;
                 }
@@ -12707,6 +13394,7 @@ HTACCESS;
             if (confirm(`Restore "${originalName}" to its original location?`)) {
               this.api('trash_restore', { trash_id: trashId }, () => {
                 this.toast('Item restored');
+                this.fetchStorageInfo();
                 this.loadTrash();
               });
             }
@@ -12716,6 +13404,7 @@ HTACCESS;
             if (confirm(`Permanently delete "${originalName}"? This action cannot be undone.`)) {
               this.api('trash_delete', { trash_id: trashId }, () => {
                 this.toast('Item deleted permanently');
+                this.fetchStorageInfo();
                 this.loadTrash();
               });
             }
@@ -12725,6 +13414,7 @@ HTACCESS;
             if (confirm('Permanently delete all items in trash? This cannot be undone.')) {
               this.api('trash_empty', {}, () => {
                 this.toast('Trash emptied');
+                this.fetchStorageInfo();
                 this.loadTrash();
               });
             }
@@ -13004,21 +13694,43 @@ HTACCESS;
 
           createShareLink(path) {
             this.api('share_create', { f: path }, (res) => {
-              const url = `${window.location.origin}${window.location.pathname}?share=${res.token}`;
+              const currentScript = window.location.pathname;
+              const url = `${window.location.origin}${currentScript}?access=user&page=drive&share=${res.token}`;
               this.showShareModal(url, path.split('/').pop());
             });
+          }
+
+          updateClipboardUI() {
+            const bar = document.getElementById('drive-clipboard-bar');
+            const txt = document.getElementById('drive-clipboard-txt');
+            if (!bar) return;
+            if (this.clipboard && this.clipboard.items && this.clipboard.items.length > 0) {
+              const count = this.clipboard.items.length;
+              const op = this.clipboard.operation === 'cut' ? 'Cut' : 'Copied';
+              if (txt) txt.innerText = `${count} item(s) ${op}`;
+              bar.classList.add('active');
+            } else {
+              bar.classList.remove('active');
+            }
           }
 
           setClipboard(operation) {
             const items = this.selectedItems.size ? Array.from(this.selectedItems) : [];
             if (!items.length) return;
             this.clipboard = { operation, items };
+            this.updateClipboardUI();
             this.toast(`${items.length} item(s) marked to ${operation}`);
           }
 
           setClipboardSingle(operation, path) {
             this.clipboard = { operation, items: [path] };
+            this.updateClipboardUI();
             this.toast(`Marked to ${operation}`);
+          }
+
+          clearClipboard() {
+            this.clipboard = null;
+            this.updateClipboardUI();
           }
 
           pasteClipboard() {
@@ -13033,6 +13745,7 @@ HTACCESS;
             }, () => {
               this.toast('Pasted successfully');
               if (this.clipboard.operation === 'cut') this.clipboard = null;
+              this.updateClipboardUI();
               this.refresh();
             });
           }
@@ -13080,6 +13793,7 @@ HTACCESS;
             if (type === 'folder') {
               addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Preview / Open', () => this.navigate(path));
               addItem('<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>', 'Open in a new tab', () => this.openInNewTab(path, 'folder'));
+              addItem('<svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>', 'Public Folder Link', () => this.createShareLink(path));
               addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => this.downloadZipWithProgress(`?action=download_zip&dir=${encodeURIComponent(path)}`, null, `${name}.zip`));
               addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>', 'Compress to ZIP', () => {
                 this.showInputModal('Compress Folder', 'Archive Filename (.zip)', `${name}.zip`, (zipName) => {
@@ -15173,8 +15887,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
             html, body { height: 100dvh; max-height: 100dvh; overflow: hidden; background: #050505; color: #f1f1f1; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; }
             .topbar { height: 50px; flex-shrink: 0; background: #101010; border-bottom: 1px solid #222; display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; z-index: 100; gap: 0.5rem; }
-            .topbar-title { font-weight: 700; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 0.5rem; }
-            .topbar-actions { display: flex; align-items: center; gap: 0.5rem; }
+          .topbar-title { font-weight: 700; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 0.5rem; min-width: 0; flex: 1; }
+          .topbar-title span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; display: inline-block; }
+          .topbar-actions { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
             .subbar-path { height: 38px; flex-shrink: 0; background: #0c0c0c; border-bottom: 1px solid #1c1c1c; display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; font-size: 0.78rem; overflow-x: auto; white-space: nowrap; scrollbar-width: none; gap: 0.8rem; }
             .subbar-path::-webkit-scrollbar { display: none; }
             .breadcrumbs { display: flex; align-items: center; gap: 0.35rem; }
@@ -15325,10 +16040,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         $totalSize = 0;
 
         foreach ($scanned as $item) {
-          if ($item === '.' || $item === '..' || substr($item, 0, 1) === '.') continue;
+          if ($item === '.' || $item === '..') continue;
           if (preg_match('/\.(part|crdownload|tmp|swp)$/i', $item)) continue;
           $itemPath = $fullPath . DIRECTORY_SEPARATOR . $item;
-          if ($itemPath === realpath($driveConfig['cache_dir'])) continue;
+          // Keep only root .git and the root cache directory skipped, allow user dot folders (.drive_trash_bin, .file_version, etc.)
+          if ($item === '.git' || ($itemPath === realpath($driveConfig['cache_dir']) && $fullPath === realpath($driveConfig['root_dir']))) continue;
 
           $itemRel = $relDir ? ($relDir . '/' . $item) : $item;
           $mtime = @filemtime($itemPath);
@@ -15336,7 +16052,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           if (is_dir($itemPath)) {
             $validItems = 0;
             foreach (@scandir($itemPath) ?: [] as $subEntry) {
-              if ($subEntry === '.' || $subEntry === '..' || $subEntry[0] === '.' || in_array($subEntry, ['.git', '.gallery_cache', '.drive_trash_bin', '.file_version']) || preg_match('/\.(part|crdownload|tmp|swp)$/i', $subEntry)) {
+              if ($subEntry === '.' || $subEntry === '..' || $subEntry === '.git' || preg_match('/\.(part|crdownload|tmp|swp)$/i', $subEntry)) {
                 continue;
               }
               $validItems++;
@@ -15410,10 +16126,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
         $flags = FilesystemIterator::SKIP_DOTS | FilesystemIterator::FOLLOW_SYMLINKS;
         $dirIterator = new RecursiveDirectoryIterator($fullPath, $flags);
-        $filterIterator = new RecursiveCallbackFilterIterator($dirIterator, function ($current) use ($cacheReal, $trashReal) {
+        $filterIterator = new RecursiveCallbackFilterIterator($dirIterator, function ($current) use ($cacheReal) {
           $path = $current->getPathname();
           $filename = $current->getFilename();
-          if ($filename[0] === '.' || ($cacheReal && strpos($path, $cacheReal) === 0) || ($trashReal && strpos($path, $trashReal) === 0)) {
+          if ($filename === '.git' || $filename === 'node_modules' || ($cacheReal && strpos($path, $cacheReal) === 0)) {
             return false;
           }
           return true;
@@ -15540,14 +16256,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
       if ($driveAction === 'tree') {
         function driveBuildTree($base, $currentRel = '', $depth = 0) {
-          if ($depth > 3) return [];
+          if ($depth > 4) return [];
           $realBase = driveSafePath($base, $currentRel);
           if (!$realBase || !is_dir($realBase)) return [];
           $items = @scandir($realBase) ?: [];
           $nodes = [];
-          $skipDirs = ['.git', '.gallery_cache', '.drive_trash_bin', '.file_version', 'node_modules', 'vendor'];
+          $skipDirs = ['.git', 'node_modules', 'vendor'];
           foreach ($items as $item) {
-            if ($item === '.' || $item === '..' || $item[0] === '.' || in_array($item, $skipDirs)) continue;
+            if ($item === '.' || $item === '..' || in_array($item, $skipDirs)) continue;
             $full = $realBase . DIRECTORY_SEPARATOR . $item;
             if (!is_dir($full)) continue;
             $rel = $currentRel ? ($currentRel . '/' . $item) : $item;
@@ -16381,7 +17097,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           $name = basename($src);
           $dest = $targetDir . DIRECTORY_SEPARATOR . $name;
 
-          if (file_exists($dest) && $src !== $dest) {
+          if (file_exists($dest)) {
             $ext = pathinfo($name, PATHINFO_EXTENSION);
             $baseName = pathinfo($name, PATHINFO_FILENAME);
             $counter = 1;
@@ -17763,6 +18479,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-prompt.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-beautify.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/nord.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/search/searchcursor.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/xml/xml.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/htmlmixed/htmlmixed.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/markdown/markdown.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/php/php.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/clike/clike.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js" defer></script>
+    <script type="module">
+      import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.esm.min.mjs';
+      mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+      window.mermaid = mermaid;
+      window.dispatchEvent(new Event('mermaidLoaded'));
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/docx-preview@0.1.15/dist/docx-preview.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/diff_match_patch/20121119/diff_match_patch.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
@@ -20017,6 +20757,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   "email" => $u["email"] ?? "Anonymous",
                   "count" => 0,
                   "size" => 0,
+                  "drive_count" => 0,
+                  "drive_size" => 0,
+                  "total_size" => 0,
                 ];
               }
   
@@ -20050,8 +20793,58 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
               }
   
+              // Scan all Users' Cloud Drives in users_drive/
+              $total_drive_files = 0;
+              $total_drive_size = 0;
+              $users_drive_base = MUSIC_DIR . '/users_drive';
+  
+              if (is_dir($users_drive_base)) {
+                foreach (glob($users_drive_base . '/user_*_folder', GLOB_ONLYDIR) as $uFolder) {
+                  if (preg_match('/user_(\d+)_folder$/', $uFolder, $matches)) {
+                    $uid = (int)$matches[1];
+                    $u_files = 0;
+                    $u_size = 0;
+                    $cacheReal = realpath($uFolder . '/.gallery_cache');
+  
+                    $queue = [$uFolder];
+                    while (!empty($queue)) {
+                      $currentDir = array_shift($queue);
+                      $dh = @opendir($currentDir);
+                      if (!$dh) continue;
+                      while (($entry = @readdir($dh)) !== false) {
+                        if ($entry === '.' || $entry === '..') continue;
+                        $full = $currentDir . DIRECTORY_SEPARATOR . $entry;
+                        if ($cacheReal && strpos($full, $cacheReal) === 0) continue;
+                        if (is_dir($full)) {
+                          $queue[] = $full;
+                        } else {
+                          $sz = @filesize($full);
+                          if ($sz !== false) {
+                            $u_files++;
+                            $u_size += $sz;
+                          }
+                        }
+                      }
+                      @closedir($dh);
+                    }
+  
+                    if (isset($artist_stats[$uid])) {
+                      $artist_stats[$uid]["drive_count"] = $u_files;
+                      $artist_stats[$uid]["drive_size"] = $u_size;
+                    }
+                    $total_drive_files += $u_files;
+                    $total_drive_size += $u_size;
+                  }
+                }
+              }
+  
+              foreach ($artist_stats as &$as) {
+                $as["total_size"] = $as["size"] + $as["drive_size"];
+              }
+              unset($as);
+  
               usort($artist_stats, function ($a, $b) {
-                return $b["size"] <=> $a["size"];
+                return $b["total_size"] <=> $a["total_size"];
               });
   
               $storage_page = isset($_GET["p"]) ? max(1, (int) $_GET["p"]) : 1;
@@ -20064,7 +20857,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
               $paged_artist_stats = array_slice($artist_stats, $storage_offset, ADMIN_PAGE_SIZE);
               
-              $app_assets_total = $total_audio_size + $non_audio_size + $db_size;
+              $app_assets_total = $total_audio_size + $total_drive_size + $non_audio_size + $db_size;
               $other_used = max(0, $disk_used - $app_assets_total);
             ?>
             <div class="row g-4 mb-4">
@@ -20103,59 +20896,46 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <i class="bi bi-music-note-list text-danger me-2"></i> App Assets
                     </h5>
                     <div class="row g-3">
-                      <div class="col-sm-6 col-md-4">
+                      <div class="col-6 col-md-4">
                         <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
                           <i class="bi bi-file-music fs-3 text-danger mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white">
-                            <?php echo number_format($total_songs); ?>
-                          </div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">
-                            Audio Files
-                          </div>
+                          <div class="fs-5 fw-bold text-white"><?php echo number_format($total_songs); ?></div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">Music Tracks</div>
                         </div>
                       </div>
-                      <div class="col-sm-6 col-md-4">
+                      <div class="col-6 col-md-4">
                         <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
-                          <i class="bi bi-hdd-stack fs-3 text-warning mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white">
-                            <?php echo format_storage_bytes($total_audio_size); ?>
-                          </div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">
-                            Audio Storage
-                          </div>
+                          <i class="bi bi-hdd-stack fs-3 text-danger mb-2 d-block"></i>
+                          <div class="fs-5 fw-bold text-white"><?php echo format_storage_bytes($total_audio_size); ?></div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">Music Storage</div>
                         </div>
                       </div>
-                      <div class="col-sm-6 col-md-4">
+                      <div class="col-6 col-md-4">
+                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
+                          <i class="bi bi-cloud-arrow-up fs-3 text-warning mb-2 d-block"></i>
+                          <div class="fs-5 fw-bold text-white"><?php echo number_format($total_drive_files); ?></div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">User Drive Files</div>
+                        </div>
+                      </div>
+                      <div class="col-6 col-md-4">
+                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
+                          <i class="bi bi-hdd-rack fs-3 text-warning mb-2 d-block"></i>
+                          <div class="fs-5 fw-bold text-white"><?php echo format_storage_bytes($total_drive_size); ?></div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">User Drive Storage</div>
+                        </div>
+                      </div>
+                      <div class="col-6 col-md-4">
                         <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
                           <i class="bi bi-database fs-3 text-info mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white">
-                            <?php echo format_storage_bytes($db_size); ?>
-                          </div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">
-                            Database Size
-                          </div>
+                          <div class="fs-5 fw-bold text-white"><?php echo format_storage_bytes($db_size); ?></div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">Database Size</div>
                         </div>
                       </div>
-                      <div class="col-sm-6 col-md-6">
+                      <div class="col-6 col-md-4">
                         <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
                           <i class="bi bi-files fs-3 text-success mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white">
-                            <?php echo number_format($non_audio_count); ?>
-                          </div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">
-                            Non-Audio Files (Images, Zips)
-                          </div>
-                        </div>
-                      </div>
-                      <div class="col-sm-12 col-md-6">
-                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
-                          <i class="bi bi-server fs-3 text-success mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white">
-                            <?php echo format_storage_bytes($non_audio_size); ?>
-                          </div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">
-                            Non-Audio Storage
-                          </div>
+                          <div class="fs-5 fw-bold text-white"><?php echo format_storage_bytes($non_audio_size); ?></div>
+                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">Assets & Images</div>
                         </div>
                       </div>
                     </div>
@@ -20178,7 +20958,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <div class="admin-card">
               <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex align-items-center gap-2">
                 <i class="bi bi-people-fill text-danger"></i>
-                <h5 class="m-0 text-white fw-bold fs-6">User Storage Footprint</h5>
+                <h5 class="m-0 text-white fw-bold fs-6">User Storage Footprint (Music + Cloud Drive)</h5>
               </div>
               <div class="table-responsive">
                 <table class="admin-table">
@@ -20187,8 +20967,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <th style="width: 60px;">#</th>
                       <th>Artist / User</th>
                       <th>Email</th>
-                      <th class="text-center">Audio Files</th>
-                      <th class="text-end">Total Size</th>
+                      <th class="text-center">Music Tracks</th>
+                      <th class="text-center">Cloud Drive</th>
+                      <th class="text-end">Total Storage</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -20197,12 +20978,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <td class="text-secondary fw-bold font-monospace"><?php echo $rank++; ?></td>
                       <td class="fw-bold text-info"><?php echo htmlspecialchars($stat['name']); ?></td>
                       <td class="text-secondary small"><?php echo htmlspecialchars($stat['email']); ?></td>
-                      <td class="text-center text-white fw-bold font-monospace"><?php echo number_format($stat['count']); ?></td>
-                      <td class="text-end text-warning fw-bold font-monospace"><?php echo format_storage_bytes($stat['size']); ?></td>
+                      <td class="text-center text-white font-monospace">
+                        <div><?php echo number_format($stat['count']); ?> files</div>
+                        <small class="text-secondary"><?php echo format_storage_bytes($stat['size']); ?></small>
+                      </td>
+                      <td class="text-center text-warning font-monospace">
+                        <div><?php echo number_format($stat['drive_count']); ?> files</div>
+                        <small class="text-secondary"><?php echo format_storage_bytes($stat['drive_size']); ?></small>
+                      </td>
+                      <td class="text-end text-white fw-bold font-monospace"><?php echo format_storage_bytes($stat['total_size']); ?></td>
                     </tr>
                     <?php endforeach; ?>
                     <?php if(empty($paged_artist_stats)): ?>
-                    <tr><td colspan="5" class="text-center py-5 text-secondary">No users found.</td></tr>
+                    <tr><td colspan="6" class="text-center py-5 text-secondary">No users found.</td></tr>
                     <?php endif; ?>
                   </tbody>
                 </table>
@@ -20239,10 +21027,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 window.diskPieChart = new Chart(ctxPie, {
                   type: 'doughnut',
                   data: {
-                    labels: ['PHP Music Assets', 'Other Used Space', 'Free Space'],
+                    labels: ['Music Tracks', 'User Cloud Drives', 'DB & Assets', 'Other Server Used', 'Free Space'],
                     datasets: [{
-                      data: [<?php echo $app_assets_total; ?>, <?php echo $other_used; ?>, <?php echo $disk_free; ?>],
-                      backgroundColor: ['#ff3b30', '#404040', '#198754'],
+                      data: [<?php echo $total_audio_size; ?>, <?php echo $total_drive_size; ?>, <?php echo ($db_size + $non_audio_size); ?>, <?php echo $other_used; ?>, <?php echo $disk_free; ?>],
+                      backgroundColor: ['#ff3b30', '#f59e0b', '#00bcd4', '#404040', '#198754'],
                       borderColor: '#121212',
                       borderWidth: 2
                     }]
@@ -20271,7 +21059,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <?php
                   $top_users = array_slice($artist_stats, 0, 10);
                   $user_labels = array_map(function($u) { return htmlspecialchars($u['name']); }, $top_users);
-                  $user_data = array_map(function($u) { return $u['size']; }, $top_users);
+                  $user_data = array_map(function($u) { return $u['total_size']; }, $top_users);
                 ?>
   
                 const ctxBar = document.getElementById('usersBarChart').getContext('2d');
@@ -23914,7 +24702,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 enableBasicAutocompletion: true,
                 enableLiveAutocompletion: true,
                 wrap: savedWrap,
-                enableAutoIndent: false // Disables auto-indent recalculation
+                enableAutoIndent: false, // Disables auto-indent recalculation
+                showFoldWidgets: true,
+                foldStyle: "markbegin"
               });
 
               // Intercept internal Ace paste event to preserve original raw indentation
@@ -24432,7 +25222,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   try {
                     const res = await fetch(`?access=admin&page=drive&api=true&action=list&path=${encodeURIComponent(folderPath)}`);
                     const data = await res.json();
-                    if (data && data.success && data.files) {
+                    if (data && !data.error && data.files) {
                       const mediaFiles = data.files.filter(f => mediaExts.includes(f.ext));
                       const currIdx = mediaFiles.findIndex(f => f.path === currentPath);
                       if (currIdx !== -1) {
@@ -24613,7 +25403,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 try {
                   const res = await fetch(`?access=admin&page=drive&api=true&action=list&path=${encodeURIComponent(path)}`);
                   const data = await res.json();
-                  if(data && data.success) renderTree(data, path);
+                  if (data && (data.folders || data.files)) renderTree(data, path);
                 } catch(e) {
                   treeEl.innerHTML = '<div class="text-danger p-2">Error loading files</div>';
                 }
@@ -24634,10 +25424,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   if(f.ext === 'php') icon = 'bi-filetype-php text-primary';
                   if(f.ext === 'js' || f.ext === 'json') icon = 'bi-filetype-js text-warning';
                   if(f.ext === 'css') icon = 'bi-filetype-css text-info';
-                  if(f.isImage) icon = 'bi-image text-success';
+                  if(f.type === 'image') icon = 'bi-image text-success';
                   if(['mp4','webm','mp3','wav','ogg'].includes(f.ext)) icon = 'bi-play-circle text-danger';
   
-                  html += `<div class="ide-tree-item ide-file-item" data-path="${f.path}" data-name="${f.name}" data-ext="${f.ext}" data-size="${f.size}" data-formatsize="${f.formatSize}"><i class="bi ${icon}"></i> ${f.name}</div>`;
+                  html += `<div class="ide-tree-item ide-file-item" data-path="${f.path}" data-name="${f.name}" data-ext="${f.ext}" data-size="${f.size}" data-formatsize="${f.size_fmt}"><i class="bi ${icon}"></i> ${f.name}</div>`;
                 });
                 treeEl.innerHTML = html;
   
@@ -24829,7 +25619,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
                   let data;
                   try {
-                    const res = await fetch(`?access=admin&page=drive&api=true&action=read&file=${encodeURIComponent(path)}&t=${Date.now()}`);
+                    const res = await fetch(`?access=admin&page=drive&api=true&action=read_text&f=${encodeURIComponent(path)}&t=${Date.now()}`);
                     if (!res.ok) throw new Error(`HTTP ${res.status}`);
                     data = await res.json();
                   } catch (fetchErr) {
@@ -24837,7 +25627,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     return;
                   }
   
-                  if (data && data.success) {
+                  if (data && (data.success || data.content !== undefined)) {
                     if (path !== activeTabPath) {
                       termLog(`Discarded stale buffer for ${path} (Switched tabs).`);
                       return;
@@ -24968,17 +25758,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const data = await res.json();
 
                   if (data && data.success) {
-                    const currentData = { content: data.current || '' };
-                    const oldData = { content: data.version || '' };
-  
-                  if (currentData && currentData.success && oldData && oldData.success) {
                     if (typeof diff_match_patch !== 'undefined') {
                       const dmp = new diff_match_patch();
-                      const diffs = dmp.diff_main(oldData.content || '', currentData.content || '');
+                      const diffs = dmp.diff_main(data.version || '', data.current || '');
                       dmp.diff_cleanupSemantic(diffs);
-  
+
                       const escapeHTML = str => (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  
+
                       let diffHtml = '';
                       diffs.forEach(diff => {
                         const op = diff[0];
@@ -24991,13 +25777,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                           diffHtml += text;
                         }
                       });
-  
+
                       diffBody.innerHTML = diffHtml || '<span class="text-secondary">Files are identical. No differences found.</span>';
                     } else {
                       diffBody.innerHTML = '<div class="alert alert-danger m-0">Diff match patch library is not loaded.</div>';
                     }
                   } else {
-                    diffBody.innerHTML = `<div class="alert alert-danger m-0">Failed to read version contents.</div>`;
+                    diffBody.innerHTML = `<div class="alert alert-danger m-0">Failed to read version contents: ${data?.error || 'Unknown error'}</div>`;
                   }
                 } catch (e) {
                   diffBody.innerHTML = `<div class="alert alert-danger m-0">Error calculating diff: ${e.message}</div>`;
@@ -25333,11 +26119,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               const driveFetch = async (action, body, reqPath = '') => {
                 try {
-                  body.csrf_token = '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>';
-                  const res = await fetch(`?access=admin&page=drive&api=true&action=${action}&path=${encodeURIComponent(reqPath)}`, {
+                  const csrfToken = '<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>';
+                  const fd = new FormData();
+                  fd.append('action', action);
+                  fd.append('csrf_token', csrfToken);
+                  fd.append('f', reqPath || body.file || body.item || '');
+                  fd.append('file', reqPath || body.file || body.item || '');
+                  for (let k in body) {
+                    if (Array.isArray(body[k])) {
+                      body[k].forEach(val => fd.append(`${k}[]`, val));
+                    } else if (k !== 'csrf_token' && k !== 'action') {
+                      fd.append(k, body[k]);
+                    }
+                  }
+                  const res = await fetch(`?access=admin&page=drive&action=${action}&f=${encodeURIComponent(reqPath)}`, {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': body.csrf_token},
-                    body: JSON.stringify(body)
+                    body: fd
                   });
                   if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
                   return await res.json();
@@ -26716,11 +27513,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   treeEl.innerHTML = '<div class="text-center mt-4 text-secondary"><i class="spinner-border spinner-border-sm"></i> Searching entire workspace...</div>';
   
                   try {
-                    const res = await fetch(`?access=admin&page=drive&api=true&action=search_drive&q=${encodeURIComponent(q)}`);
+                    const res = await fetch(`?access=admin&page=drive&api=true&action=search&q=${encodeURIComponent(q)}`);
                     if (!res.ok) throw new Error('Network error');
                     const data = await res.json();
   
-                    if (data && data.success) {
+                    if (data && !data.error) {
                       if (data.folders.length === 0 && data.files.length === 0) {
                         treeEl.innerHTML = '<div class="text-secondary p-2 text-center mt-3">No files found matching your search.</div>';
                         return;
@@ -27956,6 +28753,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               max-width: 540px;
             }
 
+            .topbar-left {
+              min-width: 0;
+              max-width: 50%;
+            }
+
             .brand {
               font-weight: 700;
               font-size: 1.05rem;
@@ -27964,6 +28766,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               align-items: center;
               gap: 0.5rem;
               white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              min-width: 0;
               margin-left: 0.2rem;
             }
 
@@ -29246,6 +30051,32 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               visibility: hidden;
               pointer-events: none;
               transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease, visibility 0.2s;
+            }
+
+            .admin-drive-clipboard-bar {
+              position: fixed;
+              bottom: calc(5.2rem + env(safe-area-inset-bottom, 0px));
+              left: 50%;
+              transform: translateX(-50%) translateY(200%);
+              background: var(--md-sys-color-surface-container-highest);
+              border: 1px solid #ff0000;
+              padding: 0.4rem 0.9rem;
+              border-radius: 32px;
+              box-shadow: 0 10px 30px rgba(0, 0, 0, 0.85);
+              display: flex;
+              align-items: center;
+              gap: 0.6rem;
+              z-index: 5000;
+              opacity: 0;
+              visibility: hidden;
+              pointer-events: none;
+              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease, visibility 0.2s;
+            }
+            .admin-drive-clipboard-bar.active {
+              transform: translateX(-50%) translateY(0);
+              opacity: 1;
+              visibility: visible;
+              pointer-events: auto;
             }
 
             .batch-bar.active {
@@ -31669,6 +32500,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <span>Reset Layout Defaults</span>
                 </button>
               </div>
+            </div>
+
+           <!-- Floating Paste Indicator Bar -->
+            <div class="admin-drive-clipboard-bar" id="admin-drive-clipboard-bar">
+              <span style="font-size:0.85rem; font-weight:700; color:#ff0000;" id="admin-drive-clipboard-txt">1 item ready</span>
+              <div style="width:1px; height:18px; background:var(--md-sys-color-outline-variant);"></div>
+              <button class="btn-primary" id="btn-admin-clipboard-paste" style="height:32px; padding:0 0.85rem; font-size:0.8rem;">
+                <svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:4px;"><path d="M19 2h-4.18C14.4.84 13.3 0 12 0c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 18H5V4h2v3h10V4h2v16z"/></svg> Paste Here
+              </button>
+              <button class="btn-icon" id="btn-admin-clipboard-cancel" title="Clear Clipboard" style="width:30px; height:30px;">
+                <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+              </button>
             </div>
 
             <!-- Sort Dropdown -->
@@ -34387,6 +35230,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 document.getElementById('dbm-cut')?.addEventListener('click', () => {
                   dropdownBatchMore?.classList.remove('active');
                   this.setClipboard('cut');
+                });
+
+                document.getElementById('btn-admin-clipboard-paste')?.addEventListener('click', () => {
+                  this.pasteClipboard();
+                });
+
+                document.getElementById('btn-admin-clipboard-cancel')?.addEventListener('click', () => {
+                  this.clearClipboard();
+                });
+    
+                document.getElementById('btn-drive-clipboard-paste')?.addEventListener('click', () => {
+                  this.pasteClipboard();
+                });
+    
+                document.getElementById('btn-drive-clipboard-cancel')?.addEventListener('click', () => {
+                  this.clearClipboard();
                 });
 
                 // Batch Rename Inputs Live Listener
@@ -37796,16 +38655,37 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
               }
 
+              updateClipboardUI() {
+                const bar = document.getElementById('admin-drive-clipboard-bar');
+                const txt = document.getElementById('admin-drive-clipboard-txt');
+                if (!bar) return;
+                if (this.clipboard && this.clipboard.items && this.clipboard.items.length > 0) {
+                  const count = this.clipboard.items.length;
+                  const op = this.clipboard.operation === 'cut' ? 'Cut' : 'Copied';
+                  if (txt) txt.innerText = `${count} item(s) ${op}`;
+                  bar.classList.add('active');
+                } else {
+                  bar.classList.remove('active');
+                }
+              }
+
               setClipboard(operation) {
                 const items = this.selectedItems.size ? Array.from(this.selectedItems) : [];
                 if (!items.length) return;
                 this.clipboard = { operation, items };
+                this.updateClipboardUI();
                 this.toast(`${items.length} item(s) marked to ${operation}`);
               }
 
               setClipboardSingle(operation, path) {
                 this.clipboard = { operation, items: [path] };
+                this.updateClipboardUI();
                 this.toast(`Marked to ${operation}`);
+              }
+
+              clearClipboard() {
+                this.clipboard = null;
+                this.updateClipboardUI();
               }
 
               pasteClipboard() {
@@ -37820,6 +38700,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }, () => {
                   this.toast('Pasted successfully');
                   if (this.clipboard.operation === 'cut') this.clipboard = null;
+                  this.updateClipboardUI();
                   this.refresh();
                 });
               }
@@ -38930,9 +39811,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             window.uploadManager = new UploadManager();
             window.mangaViewer = new MangaViewer();
             window.lightbox = new LightboxViewer();
-            window.app = new GalleryApp();
-        
-            document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => window.app.closeModals()));
+
+            window.closeIdeModals = () => {
+              if (typeof window.resetImageEditorSession === 'function') window.resetImageEditorSession();
+              document.querySelectorAll('.modal-box').forEach(m => m.style.display = 'none');
+              const mb = document.getElementById('modal-backdrop');
+              if (mb) mb.classList.remove('active');
+            };
+
+            document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', window.closeIdeModals));
           </script>
 
         <?php else: ?>
@@ -57836,7 +58723,7 @@ function perform_cover_scan($db) {
               <i class="bi bi-person-fill"></i>
               <span>My Profile</span>
             </a>
-            <a href="?access=user" target="_blank" rel="noopener noreferrer" class="nav-link">
+            <a href="?access=user&page=drive" target="_blank" rel="noopener noreferrer" class="nav-link">
               <i class="bi bi-hdd-rack-fill"></i>
               <span>My Drive</span>
             </a>
