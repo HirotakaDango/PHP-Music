@@ -499,7 +499,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '10.2');
+define('APP_VERSION', '10.3');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1209,10 +1209,13 @@ HTACCESS;
     $realTarget = realpath($targetPath);
     if ($realTarget === false) {
       $check = normalizePath($targetPath);
-      if (strpos($check . DIRECTORY_SEPARATOR, $realBase . DIRECTORY_SEPARATOR) === 0 || $check === $realBase) return $check;
+      $normBase = normalizePath($realBase);
+      if (stripos($check . DIRECTORY_SEPARATOR, $normBase . DIRECTORY_SEPARATOR) === 0 || strcasecmp($check, $normBase) === 0) return $check;
       return false;
     }
-    if (strpos($realTarget . DIRECTORY_SEPARATOR, $realBase . DIRECTORY_SEPARATOR) !== 0 && $realTarget !== $realBase) return false;
+    $normTarget = normalizePath($realTarget);
+    $normBase = normalizePath($realBase);
+    if (stripos($normTarget . DIRECTORY_SEPARATOR, $normBase . DIRECTORY_SEPARATOR) !== 0 && strcasecmp($normTarget, $normBase) !== 0) return false;
     return $realTarget;
   }
 
@@ -3427,13 +3430,20 @@ HTACCESS;
 
     if ($action === 'unzip') {
       if (!$config['allow_zip']) jsonResponse(['error' => 'Extraction disabled'], 403);
+      @ini_set('memory_limit', '1024M');
+      if (function_exists('set_time_limit')) @set_time_limit(0);
+
       $file = findRealFile($config['root_dir'], $_POST['f'] ?? '');
       if (!$file || !is_file($file)) jsonResponse(['error' => 'Archive not found'], 404);
 
       $destDir = dirname($file);
       $toFolder = !empty($_POST['to_folder']) || !empty($_POST['to_subfolder']);
       if ($toFolder) {
-        $baseArchiveName = pathinfo($file, PATHINFO_FILENAME);
+        $baseArchiveName = basename($file);
+        $baseArchiveName = preg_replace('/\.(tar\.(gz|bz2|xz)|zip|tar|tgz|tbz2|tbz|gz|rar|7z|apk|epub)$/i', '', $baseArchiveName);
+        $baseArchiveName = rtrim($baseArchiveName, " .\t\n\r\0\x0B");
+        if ($baseArchiveName === '') $baseArchiveName = 'extracted_archive';
+
         $targetSubfolder = $destDir . DIRECTORY_SEPARATOR . $baseArchiveName;
         $counter = 1;
         while (file_exists($targetSubfolder)) {
@@ -3446,195 +3456,196 @@ HTACCESS;
         $destDir = $targetSubfolder;
       }
 
-      $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+      $realDest = realpath($destDir);
+      if (!$realDest) {
+        @mkdir($destDir, 0777, true);
+        $realDest = realpath($destDir) ?: $destDir;
+      }
 
-      if ($ext === 'zip' && class_exists('ZipArchive')) {
-        $zip = new ZipArchive();
-        if ($zip->open($file) === true) {
-          $dirMap = [];
-          for ($i = 0; $i < $zip->numFiles; $i++) {
-            $entryName = $zip->getNameIndex($i);
-            $clean = ltrim(str_replace(['\\', '..'], ['/', ''], $entryName), '/');
-            if ($clean === '') continue;
-            $parts = explode('/', $clean);
-            $top = $parts[0];
-            if (!isset($dirMap[$top])) {
-              $checkPath = $destDir . DIRECTORY_SEPARATOR . $top;
-              if (file_exists($checkPath)) {
-                $fExt = pathinfo($top, PATHINFO_EXTENSION);
-                $fBase = pathinfo($top, PATHINFO_FILENAME);
-                $cnt = 1;
-                $newTop = $top;
-                while (file_exists($destDir . DIRECTORY_SEPARATOR . $newTop)) {
-                  $newTop = $fExt ? "{$fBase}_({$cnt}).{$fExt}" : "{$fBase}_({$cnt})";
-                  $cnt++;
+      $lowerName = strtolower(basename($file));
+      $isZip = str_ends_with($lowerName, '.zip') || str_ends_with($lowerName, '.apk') || str_ends_with($lowerName, '.epub');
+      $isTarGz = str_ends_with($lowerName, '.tar.gz') || str_ends_with($lowerName, '.tgz');
+      $isTarBz2 = str_ends_with($lowerName, '.tar.bz2') || str_ends_with($lowerName, '.tbz2') || str_ends_with($lowerName, '.tbz');
+      $isTar = str_ends_with($lowerName, '.tar') || $isTarGz || $isTarBz2;
+      $isRar = str_ends_with($lowerName, '.rar');
+      $is7z = str_ends_with($lowerName, '.7z');
+      $isGz = str_ends_with($lowerName, '.gz') && !$isTarGz;
+      $extractedSuccess = false;
+
+      // 1. Primary Engine: ZipArchive
+      if ($isZip || (!$isTar && !$isRar && !$is7z && !$isGz)) {
+        if (class_exists('ZipArchive')) {
+          $zip = new ZipArchive();
+          if ($zip->open($file) === true) {
+            $extractedCount = 0;
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+              $entryName = $zip->getNameIndex($i);
+              if ($entryName === false || $entryName === '') continue;
+
+              $normalizedEntry = str_replace('\\', '/', $entryName);
+              $isDir = str_ends_with($normalizedEntry, '/');
+
+              $entryParts = explode('/', $normalizedEntry);
+              $safeParts = [];
+              foreach ($entryParts as $part) {
+                if ($part === '' || $part === '.') continue;
+                if ($part === '..') continue;
+                if (DIRECTORY_SEPARATOR === '\\') {
+                  $part = preg_replace('/[\:*?"<>|]/', '_', $part);
+                  $part = rtrim($part, " .");
                 }
-                $dirMap[$top] = $newTop;
+                if ($part !== '') $safeParts[] = $part;
+              }
+              if (empty($safeParts)) continue;
+
+              $targetFullPath = $realDest . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $safeParts);
+
+              if ($isDir) {
+                if (!is_dir($targetFullPath)) @mkdir($targetFullPath, 0777, true);
               } else {
-                $dirMap[$top] = $top;
-              }
-            }
-          }
+                $targetParent = dirname($targetFullPath);
+                if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
 
-          for ($i = 0; $i < $zip->numFiles; $i++) {
-            $entryName = $zip->getNameIndex($i);
-            $cleanEntry = ltrim(str_replace(['\\', '..'], ['/', ''], $entryName), '/');
-            if ($cleanEntry === '') continue;
-
-            $parts = explode('/', $cleanEntry);
-            if (isset($dirMap[$parts[0]])) {
-              $parts[0] = $dirMap[$parts[0]];
-              $cleanEntry = implode('/', $parts);
-            }
-
-            $isDir = substr($entryName, -1) === '/';
-            $target = $destDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cleanEntry);
-
-            if ($isDir) {
-              if (!is_dir($target)) @mkdir($target, 0777, true);
-            } else {
-              $targetParent = dirname($target);
-              if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
-
-              if (file_exists($target)) {
-                $fExt = pathinfo($target, PATHINFO_EXTENSION);
-                $fBase = pathinfo($target, PATHINFO_FILENAME);
-                $cnt = 1;
-                while (file_exists($target)) {
-                  $target = $targetParent . DIRECTORY_SEPARATOR . "{$fBase}_({$cnt})" . ($fExt ? ".{$fExt}" : '');
-                  $cnt++;
-                }
-              }
-
-              $stream = $zip->getStream($entryName);
-              if ($stream) {
-                $out = @fopen($target, 'wb');
-                if ($out) {
-                  while (!feof($stream)) {
-                    fwrite($out, fread($stream, 65536));
+                $written = false;
+                $stream = @$zip->getStream($entryName);
+                if ($stream) {
+                  $out = @fopen($targetFullPath, 'wb');
+                  if ($out) {
+                    while (!feof($stream)) {
+                      $buf = fread($stream, 524288);
+                      if ($buf === false || $buf === '') break;
+                      fwrite($out, $buf);
+                    }
+                    fclose($out);
+                    $written = true;
                   }
-                  fclose($out);
+                  fclose($stream);
                 }
-                fclose($stream);
+
+                if (!$written) {
+                  $content = @$zip->getFromIndex($i);
+                  if ($content !== false) {
+                    @file_put_contents($targetFullPath, $content);
+                    $written = true;
+                  }
+                }
+
+                if (!$written) {
+                  @$zip->extractTo($realDest, $entryName);
+                }
+
+                if (file_exists($targetFullPath)) $extractedCount++;
               }
             }
+            $zip->close();
+            if ($extractedCount > 0) $extractedSuccess = true;
           }
-          $zip->close();
-          logDriveActivity($config['meta_file'], 'modified', $destDir, 'Extracted ZIP archive');
-          jsonResponse(['success' => true]);
         }
-      } elseif (in_array($ext, ['tar', 'gz', 'tgz']) && class_exists('PharData')) {
+      }
+
+      // 2. Primary Engine: PharData (.tar, .tar.gz, .tgz, .tar.bz2)
+      if (!$extractedSuccess && ($isTar || $isTarGz || $isTarBz2) && class_exists('PharData')) {
         try {
           $phar = new PharData($file);
-          $dirMap = [];
-          foreach (new RecursiveIteratorIterator($phar, RecursiveIteratorIterator::SELF_FIRST) as $item) {
-            $subPath = ltrim(str_replace(['\\', '..'], ['/', ''], $item->getPathname()), '/');
-            $rel = substr($subPath, strlen(realpath($file)));
-            $cleanRel = ltrim(str_replace(['\\', '..'], ['/', ''], $rel), '/');
-            if ($cleanRel === '') continue;
-            $parts = explode('/', $cleanRel);
-            $top = $parts[0];
-            if (!isset($dirMap[$top])) {
-              $checkPath = $destDir . DIRECTORY_SEPARATOR . $top;
-              if (file_exists($checkPath)) {
-                $fExt = pathinfo($top, PATHINFO_EXTENSION);
-                $fBase = pathinfo($top, PATHINFO_FILENAME);
-                $cnt = 1;
-                $newTop = $top;
-                while (file_exists($destDir . DIRECTORY_SEPARATOR . $newTop)) {
-                  $newTop = $fExt ? "{$fBase}_({$cnt}).{$fExt}" : "{$fBase}_({$cnt})";
-                  $cnt++;
-                }
-                $dirMap[$top] = $newTop;
-              } else {
-                $dirMap[$top] = $top;
+          if ($phar->extractTo($realDest, null, true)) {
+            $extractedSuccess = true;
+          }
+        } catch (Exception $e) {
+          try {
+            if ($isTarGz) {
+              $phar = new PharData($file);
+              $tarPhar = $phar->decompress();
+              if ($tarPhar->extractTo($realDest, null, true)) {
+                $extractedSuccess = true;
               }
             }
+          } catch (Exception $ex) {}
+        }
+      }
+
+      // 3. Primary Engine: gzopen (.gz single file)
+      if (!$extractedSuccess && $isGz && function_exists('gzopen')) {
+        $outName = pathinfo($file, PATHINFO_FILENAME);
+        $targetPath = $realDest . DIRECTORY_SEPARATOR . $outName;
+        $gz = @gzopen($file, 'rb');
+        $out = @fopen($targetPath, 'wb');
+        if ($gz && $out) {
+          while (!gzeof($gz)) {
+            $chunk = gzread($gz, 524288);
+            if ($chunk === false || $chunk === '') break;
+            fwrite($out, $chunk);
           }
+          gzclose($gz);
+          fclose($out);
+          $extractedSuccess = true;
+        }
+        if ($gz) @gzclose($gz);
+        if ($out) @fclose($out);
+      }
 
-          foreach (new RecursiveIteratorIterator($phar, RecursiveIteratorIterator::SELF_FIRST) as $item) {
-            $subPath = ltrim(str_replace(['\\', '..'], ['/', ''], $item->getPathname()), '/');
-            $rel = substr($subPath, strlen(realpath($file)));
-            $cleanRel = ltrim(str_replace(['\\', '..'], ['/', ''], $rel), '/');
-            if ($cleanRel === '') continue;
-
-            $parts = explode('/', $cleanRel);
-            if (isset($dirMap[$parts[0]])) {
-              $parts[0] = $dirMap[$parts[0]];
-              $cleanRel = implode('/', $parts);
-            }
-
-            $target = $destDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cleanRel);
-
-            if ($item->isDir()) {
-              if (!is_dir($target)) @mkdir($target, 0777, true);
-            } else {
-              $targetParent = dirname($target);
-              if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
-
-              if (file_exists($target)) {
-                $fExt = pathinfo($target, PATHINFO_EXTENSION);
-                $fBase = pathinfo($target, PATHINFO_FILENAME);
-                $cnt = 1;
-                while (file_exists($target)) {
-                  $target = $targetParent . DIRECTORY_SEPARATOR . "{$fBase}_({$cnt})" . ($fExt ? ".{$fExt}" : '');
-                  $cnt++;
-                }
-              }
-              @copy($item->getPathname(), $target);
-            }
-          }
-          logDriveActivity($config['meta_file'], 'modified', $destDir, 'Extracted TAR archive');
-          jsonResponse(['success' => true]);
-        } catch (Exception $e) {}
-      } elseif ($ext === 'rar' && class_exists('RarArchive')) {
+      // 4. Primary Engine: RarArchive (.rar)
+      if (!$extractedSuccess && $isRar && class_exists('RarArchive')) {
         $rar = @RarArchive::open($file);
         if ($rar) {
           $entries = @$rar->getEntries();
           if ($entries) {
             foreach ($entries as $entry) {
-              $cleanEntry = ltrim(str_replace(['\\', '..'], ['/', ''], $entry->getName()), '/');
-              if ($cleanEntry === '') continue;
+              $entryName = str_replace('\\', '/', $entry->getName());
+              $parts = explode('/', $entryName);
+              $safeParts = array_filter($parts, fn($p) => $p !== '' && $p !== '.' && $p !== '..');
+              if (empty($safeParts)) continue;
 
-              $target = $destDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cleanEntry);
-
+              $targetFullPath = $realDest . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $safeParts);
               if ($entry->isDirectory()) {
-                if (!is_dir($target)) @mkdir($target, 0777, true);
+                if (!is_dir($targetFullPath)) @mkdir($targetFullPath, 0777, true);
               } else {
-                $targetParent = dirname($target);
+                $targetParent = dirname($targetFullPath);
                 if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
-
-                if (file_exists($target)) {
-                  $fExt = pathinfo($target, PATHINFO_EXTENSION);
-                  $fBase = pathinfo($target, PATHINFO_FILENAME);
-                  $cnt = 1;
-                  while (file_exists($target)) {
-                    $target = $targetParent . DIRECTORY_SEPARATOR . "{$fBase}_({$cnt})" . ($fExt ? ".{$fExt}" : '');
-                    $cnt++;
-                  }
-                }
-
-                $stream = @$entry->getStream();
-                if ($stream) {
-                  $out = @fopen($target, 'wb');
-                  if ($out) {
-                    while (!feof($stream)) {
-                      fwrite($out, fread($stream, 65536));
-                    }
-                    fclose($out);
-                  }
-                  fclose($stream);
-                }
+                @$entry->extract($targetParent, basename($targetFullPath));
               }
             }
+            $rar->close();
+            $extractedSuccess = true;
           }
-          $rar->close();
-          logDriveActivity($config['meta_file'], 'modified', $destDir, 'Extracted RAR archive');
-          jsonResponse(['success' => true]);
+          @$rar->close();
         }
       }
 
-      jsonResponse(['error' => 'Failed to extract archive format'], 500);
+      // 5. Universal CLI Fallback (7z, 7za, unzip, tar, unrar)
+      if (!$extractedSuccess && function_exists('exec') && !ini_get('safe_mode')) {
+        $escFile = escapeshellarg($file);
+        $escDest = escapeshellarg($realDest);
+
+        @exec("7z x -y -o{$escDest} {$escFile} 2>&1", $out7z, $ret7z);
+        if ($ret7z === 0) $extractedSuccess = true;
+
+        if (!$extractedSuccess) {
+          @exec("7za x -y -o{$escDest} {$escFile} 2>&1", $out7za, $ret7za);
+          if ($ret7za === 0) $extractedSuccess = true;
+        }
+
+        if (!$extractedSuccess && $isZip) {
+          @exec("unzip -o -q {$escFile} -d {$escDest} 2>&1", $outUnzip, $retUnzip);
+          if ($retUnzip === 0) $extractedSuccess = true;
+        }
+
+        if (!$extractedSuccess && $isTar) {
+          @exec("tar -xf {$escFile} -C {$escDest} 2>&1", $outTar, $retTar);
+          if ($retTar === 0) $extractedSuccess = true;
+        }
+
+        if (!$extractedSuccess && $isRar) {
+          @exec("unrar x -y -o+ {$escFile} {$escDest}/ 2>&1", $outRar, $retRar);
+          if ($retRar === 0) $extractedSuccess = true;
+        }
+      }
+
+      if ($extractedSuccess) {
+        logDriveActivity($config['meta_file'], 'modified', $destDir, 'Extracted archive');
+        jsonResponse(['success' => true]);
+      }
+
+      jsonResponse(['error' => 'Failed to extract archive. Format may be unsupported or corrupted.'], 500);
     }
 
     if ($action === 'download_zip') {
@@ -5172,11 +5183,11 @@ HTACCESS;
         }
         .file-star-btn:hover {
           background: rgba(0, 0, 0, 0.85);
-          color: #f59e0b;
+          color: #ff0000;
           transform: scale(1.1);
         }
         .file-star-btn.active {
-          color: #f59e0b;
+          color: #ff0000;
           background: rgba(0, 0, 0, 0.75);
           display: flex !important;
         }
@@ -5870,15 +5881,23 @@ HTACCESS;
         .modal-backdrop,
         #modal-backdrop {
           position: fixed !important;
-          inset: 0 !important;
+          top: 0 !important;
+          left: 0 !important;
+          right: 0 !important;
+          bottom: 0 !important;
+          width: 100vw !important;
+          height: 100vh !important;
+          height: 100dvh !important;
           background: rgba(0, 0, 0, 0.8) !important;
-          backdrop-filter: blur(6px) !important;
-          -webkit-backdrop-filter: blur(6px) !important;
+          backdrop-filter: blur(8px) !important;
+          -webkit-backdrop-filter: blur(8px) !important;
           z-index: 100005 !important;
           display: none !important;
           align-items: center !important;
           justify-content: center !important;
           padding: 1rem !important;
+          margin: 0 !important;
+          box-sizing: border-box !important;
           opacity: 1 !important;
           visibility: visible !important;
         }
@@ -5901,6 +5920,8 @@ HTACCESS;
           overflow: hidden;
           display: flex;
           flex-direction: column;
+          margin: auto !important;
+          box-sizing: border-box !important;
         }
 
         .modal-box.large {
@@ -5908,31 +5929,48 @@ HTACCESS;
           width: 95vw;
           height: 92dvh;
           border-radius: 20px;
+          margin: auto !important;
         }
+
         .clipboard-bar {
-          position: fixed;
-          bottom: calc(5.2rem + env(safe-area-inset-bottom, 0px));
-          left: 50%;
-          transform: translateX(-50%) translateY(200%);
-          background: var(--md-sys-color-surface-container-highest);
-          border: 1px solid var(--md-sys-color-primary);
-          padding: 0.4rem 0.9rem;
-          border-radius: 32px;
-          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.85);
-          display: flex;
-          align-items: center;
-          gap: 0.6rem;
-          z-index: 5000;
-          opacity: 0;
-          visibility: hidden;
-          pointer-events: none;
-          transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease, visibility 0.2s;
+          position: fixed !important;
+          bottom: calc(5.2rem + env(safe-area-inset-bottom, 0px)) !important;
+          left: 50% !important;
+          transform: translateX(-50%) translateY(200%) !important;
+          background: var(--md-sys-color-surface-container-highest) !important;
+          border: 1px solid var(--md-sys-color-primary) !important;
+          padding: 0.35rem 0.75rem !important;
+          border-radius: 32px !important;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.85) !important;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          gap: 0.55rem !important;
+          width: max-content !important;
+          max-width: calc(100vw - 2rem) !important;
+          white-space: nowrap !important;
+          z-index: 5000 !important;
+          opacity: 0 !important;
+          visibility: hidden !important;
+          pointer-events: none !important;
+          transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease, visibility 0.2s !important;
         }
+
         .clipboard-bar.active {
-          transform: translateX(-50%) translateY(0);
-          opacity: 1;
-          visibility: visible;
-          pointer-events: auto;
+          transform: translateX(-50%) translateY(0) !important;
+          opacity: 1 !important;
+          visibility: visible !important;
+          pointer-events: auto !important;
+        }
+
+        .clipboard-bar span,
+        #drive-clipboard-txt {
+          white-space: nowrap !important;
+          font-size: 0.82rem !important;
+          font-weight: 700 !important;
+          color: var(--md-sys-color-primary) !important;
+          flex-shrink: 0 !important;
+          display: inline-block !important;
         }
         .editor-modal-header {
           display: flex;
@@ -6080,23 +6118,25 @@ HTACCESS;
         }
 
         @media (max-width: 768px) {
-          .modal-backdrop {
-            padding: 0 !important;
+          .modal-backdrop,
+          #modal-backdrop {
+            padding: 1rem !important;
           }
           .modal-box:not(.large) {
-            max-width: calc(100vw - 2rem);
-            margin: 1rem;
+            max-width: min(480px, calc(100vw - 2rem)) !important;
+            width: calc(100vw - 2rem) !important;
+            margin: 0 auto !important;
           }
           .modal-box.large {
-            position: fixed;
-            inset: 0;
-            max-width: 100vw;
-            width: 100vw;
-            height: 100dvh;
-            max-height: 100dvh;
-            border-radius: 0;
-            margin: 0;
-            border: none;
+            position: fixed !important;
+            inset: 0 !important;
+            max-width: 100vw !important;
+            width: 100vw !important;
+            height: 100dvh !important;
+            max-height: 100dvh !important;
+            border-radius: 0 !important;
+            margin: 0 !important;
+            border: none !important;
           }
           .editor-header-actions .desktop-split-btn,
           .editor-header-actions .desktop-present-btn {
@@ -8104,7 +8144,7 @@ HTACCESS;
         <div class="modal-box large" id="modal-archive-preview" style="display:none; max-width:1050px; height:88dvh;">
           <div class="modal-header">
             <div style="display:flex; align-items:center; gap:0.6rem; overflow:hidden;">
-              <svg viewBox="0 0 24 24" style="width:22px;height:22px;color:#fde293;"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>
+              <svg viewBox="0 0 24 24" style="width:22px;height:22px;color:#ff0000;"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>
               <span id="archive-preview-title" style="font-weight:700; font-size:1.05rem;">Archive Contents</span>
             </div>
             <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
@@ -8523,8 +8563,6 @@ HTACCESS;
             fd.append('dir', targetDir);
 
             fetch('?access=user', { method: 'POST', body: fd })
-
-            fetch('', { method: 'POST', body: fd })
               .then(r => r.json())
               .then(res => {
                 if (res.success) {
@@ -10333,6 +10371,14 @@ HTACCESS;
               this.setClipboard('cut');
             });
 
+            document.getElementById('btn-drive-clipboard-paste')?.addEventListener('click', () => {
+              this.pasteClipboard();
+            });
+
+            document.getElementById('btn-drive-clipboard-cancel')?.addEventListener('click', () => {
+              this.clearClipboard();
+            });
+
             // Batch Rename Inputs Live Listener
             ['br-find', 'br-replace', 'br-prefix', 'br-suffix', 'br-case', 'br-regex'].forEach(id => {
               document.getElementById(id)?.addEventListener('input', () => this.updateBatchRenamePreview());
@@ -10663,7 +10709,7 @@ HTACCESS;
                   fd.append(k, data[k]);
                 }
               }
-              const res = await fetch('', { method: 'POST', body: fd });
+              const res = await fetch('?access=user', { method: 'POST', body: fd });
               const json = await res.json();
               clearInterval(interval);
               const pctEl = document.getElementById(`${toastId}_pct`);
@@ -10707,13 +10753,17 @@ HTACCESS;
               if (pathParam && fileParam) {
                 const cleanP = pathParam.replace(/^\/+|\/+$/g, '');
                 const cleanF = fileParam.replace(/^\/+|\/+$/g, '');
-                target = cleanP ? `${cleanP}/${cleanF}` : cleanF;
+                if (cleanP && cleanF.startsWith(cleanP + '/')) {
+                  target = cleanF;
+                } else {
+                  target = cleanP ? `${cleanP}/${cleanF}` : cleanF;
+                }
               } else {
                 target = (pathParam || fileParam).replace(/^\/+|\/+$/g, '');
               }
 
               if (target) {
-                const cleanUrl = window.location.pathname + '#/' + encodeURI(target);
+                const cleanUrl = window.location.pathname + '?access=user&page=drive#/' + encodeURI(target);
                 window.history.replaceState(null, '', cleanUrl);
               }
             }
@@ -12847,7 +12897,7 @@ HTACCESS;
 
           async loadStarredSet() {
             try {
-              const res = await fetch('?action=starred_list');
+              const res = await fetch('?access=user&action=starred_list');
               const data = await res.json();
               this.starredSet = new Set(data.starred_paths || []);
             } catch(e) {}
@@ -13357,7 +13407,7 @@ HTACCESS;
             toRender.forEach(t => {
               const d = t.trashed_at ? new Date(t.trashed_at * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
               const icon = t.is_dir
-                ? '<svg viewBox="0 0 16 16" style="width:22px;height:22px;color:#f59e0b;flex-shrink:0;"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>'
+                ? '<svg viewBox="0 0 16 16" style="width:22px;height:22px;color:#ff0000;flex-shrink:0;"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>'
                 : '<svg viewBox="0 0 24 24" style="width:22px;height:22px;color:var(--md-sys-color-primary);flex-shrink:0;"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>';
 
               const safeName = this.escapeHtml(t.original_name);
@@ -13703,14 +13753,29 @@ HTACCESS;
           updateClipboardUI() {
             const bar = document.getElementById('drive-clipboard-bar');
             const txt = document.getElementById('drive-clipboard-txt');
+            const pasteBtn = document.getElementById('btn-drive-clipboard-paste');
+            if (pasteBtn) {
+              pasteBtn.disabled = false;
+              pasteBtn.innerHTML = `<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:4px;"><path d="M19 2h-4.18C14.4.84 13.3 0 12 0c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 18H5V4h2v3h10V4h2v16z"/></svg> Paste Here`;
+            }
             if (!bar) return;
             if (this.clipboard && this.clipboard.items && this.clipboard.items.length > 0) {
               const count = this.clipboard.items.length;
-              const op = this.clipboard.operation === 'cut' ? 'Cut' : 'Copied';
+              const op = this.clipboard.operation === 'cut' ? 'Cut (Move)' : 'Copied';
               if (txt) txt.innerText = `${count} item(s) ${op}`;
               bar.classList.add('active');
+
+              this.container.querySelectorAll('.file-card').forEach(card => {
+                const p = card.dataset.path;
+                if (this.clipboard.operation === 'cut' && this.clipboard.items.includes(p)) {
+                  card.style.opacity = '0.45';
+                } else {
+                  card.style.opacity = '';
+                }
+              });
             } else {
               bar.classList.remove('active');
+              this.container.querySelectorAll('.file-card').forEach(card => card.style.opacity = '');
             }
           }
 
@@ -13719,35 +13784,55 @@ HTACCESS;
             if (!items.length) return;
             this.clipboard = { operation, items };
             this.updateClipboardUI();
-            this.toast(`${items.length} item(s) marked to ${operation}`);
+            const opLabel = operation === 'cut' ? 'Cut (Move)' : 'Copied';
+            this.toast(`${items.length} item(s) ${opLabel.toLowerCase()} to clipboard`);
           }
 
           setClipboardSingle(operation, path) {
             this.clipboard = { operation, items: [path] };
             this.updateClipboardUI();
-            this.toast(`Marked to ${operation}`);
+            const opLabel = operation === 'cut' ? 'Cut (Move)' : 'Copied';
+            this.toast(`${path.split('/').pop()} marked to ${opLabel.toLowerCase()}`);
           }
 
           clearClipboard() {
             this.clipboard = null;
             this.updateClipboardUI();
+            this.toast('Clipboard cleared');
           }
 
-          pasteClipboard() {
-            if (!this.clipboard || !this.clipboard.items.length) {
+          pasteClipboardInto(targetPath) {
+            if (!this.clipboard || !this.clipboard.items || !this.clipboard.items.length) {
               this.toast('Clipboard is empty');
               return;
             }
-            this.api('clipboard_paste', {
-              target_dir: this.currentPath || '',
-              operation: this.clipboard.operation,
+
+            const count = this.clipboard.items.length;
+            const op = this.clipboard.operation === 'cut' ? 'cut' : 'copy';
+            const opLabel = op === 'cut' ? 'Moving' : 'Copying';
+            const targetFolder = targetPath ? targetPath.split('/').pop() : 'Root';
+
+            const pasteBtn = document.getElementById('btn-drive-clipboard-paste');
+            if (pasteBtn) {
+              pasteBtn.disabled = true;
+              pasteBtn.textContent = `${opLabel}...`;
+            }
+
+            this.runServerTaskWithProgress(`${opLabel} ${count} item(s) to "${targetFolder}"`, 'clipboard_paste', {
+              target_dir: targetPath || '',
+              operation: op,
               items: this.clipboard.items
-            }, () => {
-              this.toast('Pasted successfully');
-              if (this.clipboard.operation === 'cut') this.clipboard = null;
+            }, (res) => {
+              this.toast(`${op === 'cut' ? 'Moved' : 'Copied'} ${res.processed || count} item(s) successfully`);
+              if (op === 'cut') this.clipboard = null;
               this.updateClipboardUI();
               this.refresh();
+              if (pasteBtn) pasteBtn.disabled = false;
             });
+          }
+
+          pasteClipboard() {
+            this.pasteClipboardInto(this.currentPath || '');
           }
 
           copyDirectUrl(path) {
@@ -13787,10 +13872,19 @@ HTACCESS;
             };
 
             const starSvg = isStarred
-              ? '<svg viewBox="0 0 24 24" style="color:#f59e0b;"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>'
+              ? '<svg viewBox="0 0 24 24" style="color:#ff0000;"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>'
               : '<svg viewBox="0 0 24 24"><path d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>';
 
             if (type === 'folder') {
+              if (this.clipboard && this.clipboard.items && this.clipboard.items.length > 0) {
+                const op = this.clipboard.operation === 'cut' ? 'Move' : 'Paste';
+                addItem('<svg viewBox="0 0 24 24"><path d="M19 2h-4.18C14.4.84 13.3 0 12 0c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 18H5V4h2v3h10V4h2v16z"/></svg>', `${op} into this folder`, () => {
+                  this.pasteClipboardInto(path);
+                });
+                const sep = document.createElement('div');
+                sep.className = 'dm-sep';
+                this.contextMenu.appendChild(sep);
+              }
               addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Preview / Open', () => this.navigate(path));
               addItem('<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>', 'Open in a new tab', () => this.openInNewTab(path, 'folder'));
               addItem('<svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>', 'Public Folder Link', () => this.createShareLink(path));
@@ -13984,7 +14078,7 @@ HTACCESS;
 
                 res.entries.forEach(e => {
                   const icon = e.is_dir
-                    ? '<svg viewBox="0 0 16 16" style="width:16px;height:16px;color:#f59e0b;vertical-align:middle;margin-right:6px;"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14z"/></svg>'
+                    ? '<svg viewBox="0 0 16 16" style="width:16px;height:16px;color:#ff0000;vertical-align:middle;margin-right:6px;"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14z"/></svg>'
                     : '<svg viewBox="0 0 24 24" style="width:16px;height:16px;color:var(--md-sys-color-primary);vertical-align:middle;margin-right:6px;"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>';
 
                   html += `
@@ -14150,7 +14244,7 @@ HTACCESS;
             if (pctEl) pctEl.innerText = `${storage.pct || 0}% used`;
             if (barEl) {
               barEl.style.width = `${storage.pct || 0}%`;
-              barEl.style.background = storage.pct >= 90 ? 'var(--md-sys-color-error)' : (storage.pct >= 75 ? '#f59e0b' : 'var(--md-sys-color-primary)');
+              barEl.style.background = storage.pct >= 90 ? 'var(--md-sys-color-error)' : (storage.pct >= 75 ? '#ff0000' : 'var(--md-sys-color-primary)');
             }
           }
 
@@ -15048,10 +15142,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         $realTarget = realpath($targetPath);
         if ($realTarget === false) {
           $check = driveNormalizePath($targetPath);
-          if (strpos($check, $realBase) === 0) return $check;
+          $normBase = driveNormalizePath($realBase);
+          if (stripos($check . DIRECTORY_SEPARATOR, $normBase . DIRECTORY_SEPARATOR) === 0 || strcasecmp($check, $normBase) === 0) return $check;
           return false;
         }
-        if (strpos($realTarget, $realBase) !== 0) return $realBase;
+        $normTarget = driveNormalizePath($realTarget);
+        $normBase = driveNormalizePath($realBase);
+        if (stripos($normTarget . DIRECTORY_SEPARATOR, $normBase . DIRECTORY_SEPARATOR) !== 0 && strcasecmp($normTarget, $normBase) !== 0) return $realBase;
         return $realTarget;
       }
     }
@@ -17085,6 +17182,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       }
 
       if ($driveAction === 'clipboard_paste') {
+        @ini_set('memory_limit', '512M');
+        if (function_exists('set_time_limit')) @set_time_limit(0);
+
         $targetDir = driveSafePath($driveConfig['root_dir'], $_POST['target_dir'] ?? '');
         $op = $_POST['operation'] ?? 'copy';
         $items = $_POST['items'] ?? [];
@@ -17477,13 +17577,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       }
 
       if ($driveAction === 'unzip') {
+        @ini_set('memory_limit', '1024M');
+        if (function_exists('set_time_limit')) @set_time_limit(0);
+
         $file = driveFindRealFile($driveConfig['root_dir'], $_POST['f'] ?? '');
         if (!$file || !is_file($file)) driveJsonResponse(['error' => 'Archive not found'], 404);
 
         $destDir = dirname($file);
         $toFolder = !empty($_POST['to_folder']) || !empty($_POST['to_subfolder']);
         if ($toFolder) {
-          $baseArchiveName = pathinfo($file, PATHINFO_FILENAME);
+          $baseArchiveName = basename($file);
+          $baseArchiveName = preg_replace('/\.(tar\.(gz|bz2|xz)|zip|tar|tgz|tbz2|tbz|gz|rar|7z|apk|epub)$/i', '', $baseArchiveName);
+          $baseArchiveName = rtrim($baseArchiveName, " .\t\n\r\0\x0B");
+          if ($baseArchiveName === '') $baseArchiveName = 'extracted_archive';
+
           $targetSubfolder = $destDir . DIRECTORY_SEPARATOR . $baseArchiveName;
           $counter = 1;
           while (file_exists($targetSubfolder)) {
@@ -17496,195 +17603,196 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           $destDir = $targetSubfolder;
         }
 
-        $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+        $realDest = realpath($destDir);
+        if (!$realDest) {
+          @mkdir($destDir, 0777, true);
+          $realDest = realpath($destDir) ?: $destDir;
+        }
 
-        if ($ext === 'zip' && class_exists('ZipArchive')) {
-          $zip = new ZipArchive();
-          if ($zip->open($file) === true) {
-            $dirMap = [];
-            for ($i = 0; $i < $zip->numFiles; $i++) {
-              $entryName = $zip->getNameIndex($i);
-              $clean = ltrim(str_replace(['\\', '..'], ['/', ''], $entryName), '/');
-              if ($clean === '') continue;
-              $parts = explode('/', $clean);
-              $top = $parts[0];
-              if (!isset($dirMap[$top])) {
-                $checkPath = $destDir . DIRECTORY_SEPARATOR . $top;
-                if (file_exists($checkPath)) {
-                  $fExt = pathinfo($top, PATHINFO_EXTENSION);
-                  $fBase = pathinfo($top, PATHINFO_FILENAME);
-                  $cnt = 1;
-                  $newTop = $top;
-                  while (file_exists($destDir . DIRECTORY_SEPARATOR . $newTop)) {
-                    $newTop = $fExt ? "{$fBase}_({$cnt}).{$fExt}" : "{$fBase}_({$cnt})";
-                    $cnt++;
+        $lowerName = strtolower(basename($file));
+        $isZip = str_ends_with($lowerName, '.zip') || str_ends_with($lowerName, '.apk') || str_ends_with($lowerName, '.epub');
+        $isTarGz = str_ends_with($lowerName, '.tar.gz') || str_ends_with($lowerName, '.tgz');
+        $isTarBz2 = str_ends_with($lowerName, '.tar.bz2') || str_ends_with($lowerName, '.tbz2') || str_ends_with($lowerName, '.tbz');
+        $isTar = str_ends_with($lowerName, '.tar') || $isTarGz || $isTarBz2;
+        $isRar = str_ends_with($lowerName, '.rar');
+        $is7z = str_ends_with($lowerName, '.7z');
+        $isGz = str_ends_with($lowerName, '.gz') && !$isTarGz;
+        $extractedSuccess = false;
+
+        // 1. Primary Engine: ZipArchive
+        if ($isZip || (!$isTar && !$isRar && !$is7z && !$isGz)) {
+          if (class_exists('ZipArchive')) {
+            $zip = new ZipArchive();
+            if ($zip->open($file) === true) {
+              $extractedCount = 0;
+              for ($i = 0; $i < $zip->numFiles; $i++) {
+                $entryName = $zip->getNameIndex($i);
+                if ($entryName === false || $entryName === '') continue;
+
+                $normalizedEntry = str_replace('\\', '/', $entryName);
+                $isDir = str_ends_with($normalizedEntry, '/');
+
+                $entryParts = explode('/', $normalizedEntry);
+                $safeParts = [];
+                foreach ($entryParts as $part) {
+                  if ($part === '' || $part === '.') continue;
+                  if ($part === '..') continue;
+                  if (DIRECTORY_SEPARATOR === '\\') {
+                    $part = preg_replace('/[\:*?"<>|]/', '_', $part);
+                    $part = rtrim($part, " .");
                   }
-                  $dirMap[$top] = $newTop;
+                  if ($part !== '') $safeParts[] = $part;
+                }
+                if (empty($safeParts)) continue;
+
+                $targetFullPath = $realDest . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $safeParts);
+
+                if ($isDir) {
+                  if (!is_dir($targetFullPath)) @mkdir($targetFullPath, 0777, true);
                 } else {
-                  $dirMap[$top] = $top;
-                }
-              }
-            }
+                  $targetParent = dirname($targetFullPath);
+                  if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
 
-            for ($i = 0; $i < $zip->numFiles; $i++) {
-              $entryName = $zip->getNameIndex($i);
-              $cleanEntry = ltrim(str_replace(['\\', '..'], ['/', ''], $entryName), '/');
-              if ($cleanEntry === '') continue;
-
-              $parts = explode('/', $cleanEntry);
-              if (isset($dirMap[$parts[0]])) {
-                $parts[0] = $dirMap[$parts[0]];
-                $cleanEntry = implode('/', $parts);
-              }
-
-              $isDir = substr($entryName, -1) === '/';
-              $target = $destDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cleanEntry);
-
-              if ($isDir) {
-                if (!is_dir($target)) @mkdir($target, 0777, true);
-              } else {
-                $targetParent = dirname($target);
-                if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
-
-                if (file_exists($target)) {
-                  $fExt = pathinfo($target, PATHINFO_EXTENSION);
-                  $fBase = pathinfo($target, PATHINFO_FILENAME);
-                  $cnt = 1;
-                  while (file_exists($target)) {
-                    $target = $targetParent . DIRECTORY_SEPARATOR . "{$fBase}_({$cnt})" . ($fExt ? ".{$fExt}" : '');
-                    $cnt++;
-                  }
-                }
-
-                $stream = $zip->getStream($entryName);
-                if ($stream) {
-                  $out = @fopen($target, 'wb');
-                  if ($out) {
-                    while (!feof($stream)) {
-                      fwrite($out, fread($stream, 65536));
+                  $written = false;
+                  $stream = @$zip->getStream($entryName);
+                  if ($stream) {
+                    $out = @fopen($targetFullPath, 'wb');
+                    if ($out) {
+                      while (!feof($stream)) {
+                        $buf = fread($stream, 524288);
+                        if ($buf === false || $buf === '') break;
+                        fwrite($out, $buf);
+                      }
+                      fclose($out);
+                      $written = true;
                     }
-                    fclose($out);
+                    fclose($stream);
                   }
-                  fclose($stream);
+
+                  if (!$written) {
+                    $content = @$zip->getFromIndex($i);
+                    if ($content !== false) {
+                      @file_put_contents($targetFullPath, $content);
+                      $written = true;
+                    }
+                  }
+
+                  if (!$written) {
+                    @$zip->extractTo($realDest, $entryName);
+                  }
+
+                  if (file_exists($targetFullPath)) $extractedCount++;
                 }
               }
+              $zip->close();
+              if ($extractedCount > 0) $extractedSuccess = true;
             }
-            $zip->close();
-            driveLogActivity($driveConfig['meta_file'], 'modified', $destDir, 'Extracted ZIP archive');
-            driveJsonResponse(['success' => true]);
           }
-        } elseif (in_array($ext, ['tar', 'gz', 'tgz']) && class_exists('PharData')) {
+        }
+
+        // 2. Primary Engine: PharData (.tar, .tar.gz, .tgz, .tar.bz2)
+        if (!$extractedSuccess && ($isTar || $isTarGz || $isTarBz2) && class_exists('PharData')) {
           try {
             $phar = new PharData($file);
-            $dirMap = [];
-            foreach (new RecursiveIteratorIterator($phar, RecursiveIteratorIterator::SELF_FIRST) as $item) {
-              $subPath = ltrim(str_replace(['\\', '..'], ['/', ''], $item->getPathname()), '/');
-              $rel = substr($subPath, strlen(realpath($file)));
-              $cleanRel = ltrim(str_replace(['\\', '..'], ['/', ''], $rel), '/');
-              if ($cleanRel === '') continue;
-              $parts = explode('/', $cleanRel);
-              $top = $parts[0];
-              if (!isset($dirMap[$top])) {
-                $checkPath = $destDir . DIRECTORY_SEPARATOR . $top;
-                if (file_exists($checkPath)) {
-                  $fExt = pathinfo($top, PATHINFO_EXTENSION);
-                  $fBase = pathinfo($top, PATHINFO_FILENAME);
-                  $cnt = 1;
-                  $newTop = $top;
-                  while (file_exists($destDir . DIRECTORY_SEPARATOR . $newTop)) {
-                    $newTop = $fExt ? "{$fBase}_({$cnt}).{$fExt}" : "{$fBase}_({$cnt})";
-                    $cnt++;
-                  }
-                  $dirMap[$top] = $newTop;
-                } else {
-                  $dirMap[$top] = $top;
+            if ($phar->extractTo($realDest, null, true)) {
+              $extractedSuccess = true;
+            }
+          } catch (Exception $e) {
+            try {
+              if ($isTarGz) {
+                $phar = new PharData($file);
+                $tarPhar = $phar->decompress();
+                if ($tarPhar->extractTo($realDest, null, true)) {
+                  $extractedSuccess = true;
                 }
               }
+            } catch (Exception $ex) {}
+          }
+        }
+
+        // 3. Primary Engine: gzopen (.gz single file)
+        if (!$extractedSuccess && $isGz && function_exists('gzopen')) {
+          $outName = pathinfo($file, PATHINFO_FILENAME);
+          $targetPath = $realDest . DIRECTORY_SEPARATOR . $outName;
+          $gz = @gzopen($file, 'rb');
+          $out = @fopen($targetPath, 'wb');
+          if ($gz && $out) {
+            while (!gzeof($gz)) {
+              $chunk = gzread($gz, 524288);
+              if ($chunk === false || $chunk === '') break;
+              fwrite($out, $chunk);
             }
+            gzclose($gz);
+            fclose($out);
+            $extractedSuccess = true;
+          }
+          if ($gz) @gzclose($gz);
+          if ($out) @fclose($out);
+        }
 
-            foreach (new RecursiveIteratorIterator($phar, RecursiveIteratorIterator::SELF_FIRST) as $item) {
-              $subPath = ltrim(str_replace(['\\', '..'], ['/', ''], $item->getPathname()), '/');
-              $rel = substr($subPath, strlen(realpath($file)));
-              $cleanRel = ltrim(str_replace(['\\', '..'], ['/', ''], $rel), '/');
-              if ($cleanRel === '') continue;
-
-              $parts = explode('/', $cleanRel);
-              if (isset($dirMap[$parts[0]])) {
-                $parts[0] = $dirMap[$parts[0]];
-                $cleanRel = implode('/', $parts);
-              }
-
-              $target = $destDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cleanRel);
-
-              if ($item->isDir()) {
-                if (!is_dir($target)) @mkdir($target, 0777, true);
-              } else {
-                $targetParent = dirname($target);
-                if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
-
-                if (file_exists($target)) {
-                  $fExt = pathinfo($target, PATHINFO_EXTENSION);
-                  $fBase = pathinfo($target, PATHINFO_FILENAME);
-                  $cnt = 1;
-                  while (file_exists($target)) {
-                    $target = $targetParent . DIRECTORY_SEPARATOR . "{$fBase}_({$cnt})" . ($fExt ? ".{$fExt}" : '');
-                    $cnt++;
-                  }
-                }
-                @copy($item->getPathname(), $target);
-              }
-            }
-            driveLogActivity($driveConfig['meta_file'], 'modified', $destDir, 'Extracted TAR archive');
-            driveJsonResponse(['success' => true]);
-          } catch (Exception $e) {}
-        } elseif ($ext === 'rar' && class_exists('RarArchive')) {
+        // 4. Primary Engine: RarArchive (.rar)
+        if (!$extractedSuccess && $isRar && class_exists('RarArchive')) {
           $rar = @RarArchive::open($file);
           if ($rar) {
             $entries = @$rar->getEntries();
             if ($entries) {
               foreach ($entries as $entry) {
-                $cleanEntry = ltrim(str_replace(['\\', '..'], ['/', ''], $entry->getName()), '/');
-                if ($cleanEntry === '') continue;
+                $entryName = str_replace('\\', '/', $entry->getName());
+                $parts = explode('/', $entryName);
+                $safeParts = array_filter($parts, fn($p) => $p !== '' && $p !== '.' && $p !== '..');
+                if (empty($safeParts)) continue;
 
-                $target = $destDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cleanEntry);
-
+                $targetFullPath = $realDest . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $safeParts);
                 if ($entry->isDirectory()) {
-                  if (!is_dir($target)) @mkdir($target, 0777, true);
+                  if (!is_dir($targetFullPath)) @mkdir($targetFullPath, 0777, true);
                 } else {
-                  $targetParent = dirname($target);
+                  $targetParent = dirname($targetFullPath);
                   if (!is_dir($targetParent)) @mkdir($targetParent, 0777, true);
-
-                  if (file_exists($target)) {
-                    $fExt = pathinfo($target, PATHINFO_EXTENSION);
-                    $fBase = pathinfo($target, PATHINFO_FILENAME);
-                    $cnt = 1;
-                    while (file_exists($target)) {
-                      $target = $targetParent . DIRECTORY_SEPARATOR . "{$fBase}_({$cnt})" . ($fExt ? ".{$fExt}" : '');
-                      $cnt++;
-                    }
-                  }
-
-                  $stream = @$entry->getStream();
-                  if ($stream) {
-                    $out = @fopen($target, 'wb');
-                    if ($out) {
-                      while (!feof($stream)) {
-                        fwrite($out, fread($stream, 65536));
-                      }
-                      fclose($out);
-                    }
-                    fclose($stream);
-                  }
+                  @$entry->extract($targetParent, basename($targetFullPath));
                 }
               }
+              $rar->close();
+              $extractedSuccess = true;
             }
-            $rar->close();
-            driveLogActivity($driveConfig['meta_file'], 'modified', $destDir, 'Extracted RAR archive');
-            driveJsonResponse(['success' => true]);
+            @$rar->close();
           }
         }
 
-        driveJsonResponse(['error' => 'Failed to extract archive format'], 500);
+        // 5. Universal CLI Fallback (7z, 7za, unzip, tar, unrar)
+        if (!$extractedSuccess && function_exists('exec') && !ini_get('safe_mode')) {
+          $escFile = escapeshellarg($file);
+          $escDest = escapeshellarg($realDest);
+
+          @exec("7z x -y -o{$escDest} {$escFile} 2>&1", $out7z, $ret7z);
+          if ($ret7z === 0) $extractedSuccess = true;
+
+          if (!$extractedSuccess) {
+            @exec("7za x -y -o{$escDest} {$escFile} 2>&1", $out7za, $ret7za);
+            if ($ret7za === 0) $extractedSuccess = true;
+          }
+
+          if (!$extractedSuccess && $isZip) {
+            @exec("unzip -o -q {$escFile} -d {$escDest} 2>&1", $outUnzip, $retUnzip);
+            if ($retUnzip === 0) $extractedSuccess = true;
+          }
+
+          if (!$extractedSuccess && $isTar) {
+            @exec("tar -xf {$escFile} -C {$escDest} 2>&1", $outTar, $retTar);
+            if ($retTar === 0) $extractedSuccess = true;
+          }
+
+          if (!$extractedSuccess && $isRar) {
+            @exec("unrar x -y -o+ {$escFile} {$escDest}/ 2>&1", $outRar, $retRar);
+            if ($retRar === 0) $extractedSuccess = true;
+          }
+        }
+
+        if ($extractedSuccess) {
+          driveLogActivity($driveConfig['meta_file'], 'modified', $destDir, 'Extracted archive');
+          driveJsonResponse(['success' => true]);
+        }
+
+        driveJsonResponse(['error' => 'Failed to extract archive. Format may be unsupported or corrupted.'], 500);
       }
 
       if ($driveAction === 'download_zip') {
@@ -18848,9 +18956,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       }
 
       .admin-badge-warning {
-        background: color-mix(in srgb, #f59e0b 18%, transparent);
+        background: color-mix(in srgb, #ff0000 18%, transparent);
         color: #fbbf24;
-        border: 1px solid color-mix(in srgb, #f59e0b 35%, transparent);
+        border: 1px solid color-mix(in srgb, #ff0000 35%, transparent);
       }
 
       .admin-badge-info {
@@ -19305,7 +19413,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
       .api-badge-post {
         background: rgba(245, 158, 11, 0.1) !important;
-        color: #f59e0b !important;
+        color: #ff0000 !important;
         border: 1px solid rgba(245, 158, 11, 0.2) !important;
         font-weight: 700;
         letter-spacing: 0.5px;
@@ -21030,7 +21138,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     labels: ['Music Tracks', 'User Cloud Drives', 'DB & Assets', 'Other Server Used', 'Free Space'],
                     datasets: [{
                       data: [<?php echo $total_audio_size; ?>, <?php echo $total_drive_size; ?>, <?php echo ($db_size + $non_audio_size); ?>, <?php echo $other_used; ?>, <?php echo $disk_free; ?>],
-                      backgroundColor: ['#ff3b30', '#f59e0b', '#00bcd4', '#404040', '#198754'],
+                      backgroundColor: ['#ff3b30', '#ff0000', '#00bcd4', '#404040', '#198754'],
                       borderColor: '#121212',
                       borderWidth: 2
                     }]
@@ -24702,14 +24810,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 enableBasicAutocompletion: true,
                 enableLiveAutocompletion: true,
                 wrap: savedWrap,
-                enableAutoIndent: false, // Disables auto-indent recalculation
+                enableAutoIndent: true,
                 showFoldWidgets: true,
                 foldStyle: "markbegin"
               });
 
               // Intercept internal Ace paste event to preserve original raw indentation
               aceEditor.on("paste", function(e) {
-                // Strip auto-indent recalculations applied by language mode
                 e.text = e.text.replace(/\r\n/g, "\n");
               });
   
@@ -25472,10 +25579,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   });
                 });
   
-                treeEl.querySelectorAll('.ide-tree-item').forEach(i => i.classList.remove('active'));
+                treeEl.querySelectorAll('.ide-tree-item').forEach(i => {
+                  i.classList.remove('active');
+                  i.classList.remove('selected');
+                });
                 if (activeTabPath) {
-                  const activeEl = treeEl.querySelector(`[data-path="${activeTabPath}"]`);
-                  if(activeEl) activeEl.classList.add('active');
+                  window.ideSelectedItems.clear();
+                  window.ideSelectedItems.add(activeTabPath);
+                  const safePath = activeTabPath.replace(/"/g, '\\"');
+                  const activeEl = treeEl.querySelector(`[data-path="${safePath}"]`);
+                  if (activeEl) {
+                    activeEl.classList.add('active');
+                    activeEl.classList.add('selected');
+                  }
                 }
                 window.updateIdeSelectionUI();
               };
@@ -25520,10 +25636,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
   
                 if (treeEl) {
-                  treeEl.querySelectorAll('.ide-tree-item').forEach(i => i.classList.remove('active'));
+                  treeEl.querySelectorAll('.ide-tree-item').forEach(i => {
+                    i.classList.remove('active');
+                    i.classList.remove('selected');
+                  });
+                  window.ideSelectedItems.clear();
+                  window.ideSelectedItems.add(path);
                   const safePath = path.replace(/"/g, '\\"');
                   const activeEl = treeEl.querySelector(`[data-path="${safePath}"]`);
-                  if(activeEl) activeEl.classList.add('active');
+                  if (activeEl) {
+                    activeEl.classList.add('active');
+                    activeEl.classList.add('selected');
+                  }
+                  window.updateIdeSelectionUI();
                 }
                 document.getElementById('ide-status-bar').style.display = 'flex';
                 setTimeout(updateIDEStatusBar, 100);
@@ -29970,12 +30095,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             .file-star-btn:hover {
               background: rgba(0, 0, 0, 0.9);
-              color: #f59e0b;
+              color: #ff0000;
               transform: scale(1.1);
             }
 
             .file-star-btn.active {
-              color: #f59e0b;
+              color: #ff0000;
               background: rgba(0, 0, 0, 0.8);
               display: flex !important;
             }
@@ -30051,32 +30176,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               visibility: hidden;
               pointer-events: none;
               transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease, visibility 0.2s;
-            }
-
-            .admin-drive-clipboard-bar {
-              position: fixed;
-              bottom: calc(5.2rem + env(safe-area-inset-bottom, 0px));
-              left: 50%;
-              transform: translateX(-50%) translateY(200%);
-              background: var(--md-sys-color-surface-container-highest);
-              border: 1px solid #ff0000;
-              padding: 0.4rem 0.9rem;
-              border-radius: 32px;
-              box-shadow: 0 10px 30px rgba(0, 0, 0, 0.85);
-              display: flex;
-              align-items: center;
-              gap: 0.6rem;
-              z-index: 5000;
-              opacity: 0;
-              visibility: hidden;
-              pointer-events: none;
-              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease, visibility 0.2s;
-            }
-            .admin-drive-clipboard-bar.active {
-              transform: translateX(-50%) translateY(0);
-              opacity: 1;
-              visibility: visible;
-              pointer-events: auto;
             }
 
             .batch-bar.active {
@@ -30800,15 +30899,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .modal-backdrop,
             #modal-backdrop {
               position: fixed !important;
-              inset: 0 !important;
+              top: 0 !important;
+              left: 0 !important;
+              right: 0 !important;
+              bottom: 0 !important;
+              width: 100vw !important;
+              height: 100vh !important;
+              height: 100dvh !important;
               background: rgba(0, 0, 0, 0.8) !important;
-              backdrop-filter: blur(6px) !important;
-              -webkit-backdrop-filter: blur(6px) !important;
+              backdrop-filter: blur(8px) !important;
+              -webkit-backdrop-filter: blur(8px) !important;
               z-index: 100005 !important;
               display: none !important;
               align-items: center !important;
               justify-content: center !important;
               padding: 1rem !important;
+              margin: 0 !important;
+              box-sizing: border-box !important;
               opacity: 1 !important;
               visibility: visible !important;
             }
@@ -30831,6 +30938,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               overflow: hidden;
               display: flex;
               flex-direction: column;
+              margin: auto !important;
+              box-sizing: border-box !important;
             }
 
             .modal-box.large {
@@ -30838,6 +30947,48 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               width: 95vw;
               height: 92dvh;
               border-radius: 20px;
+              margin: auto !important;
+            }
+
+            .admin-drive-clipboard-bar {
+              position: fixed !important;
+              bottom: calc(5.2rem + env(safe-area-inset-bottom, 0px)) !important;
+              left: 50% !important;
+              transform: translateX(-50%) translateY(200%) !important;
+              background: var(--md-sys-color-surface-container-highest) !important;
+              border: 1px solid #ff0000 !important;
+              padding: 0.35rem 0.75rem !important;
+              border-radius: 32px !important;
+              box-shadow: 0 10px 30px rgba(0, 0, 0, 0.85) !important;
+              display: inline-flex !important;
+              align-items: center !important;
+              justify-content: center !important;
+              gap: 0.55rem !important;
+              width: max-content !important;
+              max-width: calc(100vw - 2rem) !important;
+              white-space: nowrap !important;
+              z-index: 5000 !important;
+              opacity: 0 !important;
+              visibility: hidden !important;
+              pointer-events: none !important;
+              transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease, visibility 0.2s !important;
+            }
+
+            .admin-drive-clipboard-bar.active {
+              transform: translateX(-50%) translateY(0) !important;
+              opacity: 1 !important;
+              visibility: visible !important;
+              pointer-events: auto !important;
+            }
+
+            .admin-drive-clipboard-bar span,
+            #admin-drive-clipboard-txt {
+              white-space: nowrap !important;
+              font-size: 0.82rem !important;
+              font-weight: 700 !important;
+              color: #ff0000 !important;
+              flex-shrink: 0 !important;
+              display: inline-block !important;
             }
 
             .editor-modal-header {
@@ -36325,7 +36476,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         <img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}" alt="" loading="lazy" decoding="async" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity 0.2s; z-index:3;" onload="this.style.opacity='1'; this.closest('.file-card')?.classList.add('has-image');" onerror="this.remove();">
                       `;
                     } else if (item.type === 'archive') {
-                      thumbHtml = `<div class="type-icon" style="color:#f59e0b;"><svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg></div>`;
+                      thumbHtml = `<div class="type-icon" style="color:#ff0000;"><svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg></div>`;
                     } else {
                       thumbHtml = `<div class="type-icon" style="color:#60a5fa;"><svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg></div>`;
                     }
@@ -38658,14 +38809,29 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               updateClipboardUI() {
                 const bar = document.getElementById('admin-drive-clipboard-bar');
                 const txt = document.getElementById('admin-drive-clipboard-txt');
+                const pasteBtn = document.getElementById('btn-admin-clipboard-paste');
+                if (pasteBtn) {
+                  pasteBtn.disabled = false;
+                  pasteBtn.innerHTML = `<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:4px;"><path d="M19 2h-4.18C14.4.84 13.3 0 12 0c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 18H5V4h2v3h10V4h2v16z"/></svg> Paste Here`;
+                }
                 if (!bar) return;
                 if (this.clipboard && this.clipboard.items && this.clipboard.items.length > 0) {
                   const count = this.clipboard.items.length;
-                  const op = this.clipboard.operation === 'cut' ? 'Cut' : 'Copied';
+                  const op = this.clipboard.operation === 'cut' ? 'Cut (Move)' : 'Copied';
                   if (txt) txt.innerText = `${count} item(s) ${op}`;
                   bar.classList.add('active');
+
+                  this.container.querySelectorAll('.file-card').forEach(card => {
+                    const p = card.dataset.path;
+                    if (this.clipboard.operation === 'cut' && this.clipboard.items.includes(p)) {
+                      card.style.opacity = '0.45';
+                    } else {
+                      card.style.opacity = '';
+                    }
+                  });
                 } else {
                   bar.classList.remove('active');
+                  this.container.querySelectorAll('.file-card').forEach(card => card.style.opacity = '');
                 }
               }
 
@@ -38674,34 +38840,50 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (!items.length) return;
                 this.clipboard = { operation, items };
                 this.updateClipboardUI();
-                this.toast(`${items.length} item(s) marked to ${operation}`);
+                const opLabel = operation === 'cut' ? 'Cut (Move)' : 'Copied';
+                this.toast(`${items.length} item(s) ${opLabel.toLowerCase()} to clipboard`);
               }
 
               setClipboardSingle(operation, path) {
                 this.clipboard = { operation, items: [path] };
                 this.updateClipboardUI();
-                this.toast(`Marked to ${operation}`);
+                const opLabel = operation === 'cut' ? 'Cut (Move)' : 'Copied';
+                this.toast(`${path.split('/').pop()} marked to ${opLabel.toLowerCase()}`);
               }
 
               clearClipboard() {
                 this.clipboard = null;
                 this.updateClipboardUI();
+                this.toast('Clipboard cleared');
               }
 
               pasteClipboard() {
-                if (!this.clipboard || !this.clipboard.items.length) {
+                if (!this.clipboard || !this.clipboard.items || !this.clipboard.items.length) {
                   this.toast('Clipboard is empty');
                   return;
                 }
-                this.api('clipboard_paste', {
+
+                const count = this.clipboard.items.length;
+                const op = this.clipboard.operation === 'cut' ? 'cut' : 'copy';
+                const opLabel = op === 'cut' ? 'Moving' : 'Copying';
+                const targetFolder = this.currentPath ? this.currentPath.split('/').pop() : 'Root';
+
+                const pasteBtn = document.getElementById('btn-admin-clipboard-paste');
+                if (pasteBtn) {
+                  pasteBtn.disabled = true;
+                  pasteBtn.textContent = `${opLabel}...`;
+                }
+
+                this.runServerTaskWithProgress(`${opLabel} ${count} item(s) to "${targetFolder}"`, 'clipboard_paste', {
                   target_dir: this.currentPath || '',
-                  operation: this.clipboard.operation,
+                  operation: op,
                   items: this.clipboard.items
-                }, () => {
-                  this.toast('Pasted successfully');
-                  if (this.clipboard.operation === 'cut') this.clipboard = null;
+                }, (res) => {
+                  this.toast(`${op === 'cut' ? 'Moved' : 'Copied'} ${res.processed || count} item(s) successfully`);
+                  if (op === 'cut') this.clipboard = null;
                   this.updateClipboardUI();
                   this.refresh();
+                  if (pasteBtn) pasteBtn.disabled = false;
                 });
               }
 
@@ -38737,7 +38919,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 };
 
                 const starSvg = isStarred
-                  ? '<svg viewBox="0 0 24 24" style="color:#f59e0b;"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>'
+                  ? '<svg viewBox="0 0 24 24" style="color:#ff0000;"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>'
                   : '<svg viewBox="0 0 24 24"><path d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>';
 
                 const addDeleteAction = () => {
@@ -39811,6 +39993,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             window.uploadManager = new UploadManager();
             window.mangaViewer = new MangaViewer();
             window.lightbox = new LightboxViewer();
+            window.app = new GalleryApp();
 
             window.closeIdeModals = () => {
               if (typeof window.resetImageEditorSession === 'function') window.resetImageEditorSession();
@@ -39819,7 +40002,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               if (mb) mb.classList.remove('active');
             };
 
-            document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', window.closeIdeModals));
+            document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => {
+              if (window.app) window.app.closeModals();
+              else window.closeIdeModals();
+            }));
           </script>
 
         <?php else: ?>
@@ -39830,7 +40016,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <h1 class="content-title m-0 fw-bold">User Management</h1>
                 <form method="POST" action="" class="m-0">
                   <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                  <button type="submit" name="reset_opcache" class="admin-btn-pill" style="height: 32px; font-size: 0.78rem; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);" title="Clear PHP OPcache"><i class="bi bi-lightning-charge-fill"></i> Reset OPcache</button>
+                  <button type="submit" name="reset_opcache" class="admin-btn-pill" style="height: 32px; font-size: 0.78rem; color: #fbbf24; border-color: color-mix(in srgb, #ff0000 30%, transparent);" title="Clear PHP OPcache"><i class="bi bi-lightning-charge-fill"></i> Reset OPcache</button>
                 </form>
               </div>
               <div class="small text-secondary mt-1">Manage accounts, upload privileges, permissions, and roles</div>
@@ -56814,7 +57000,7 @@ function perform_cover_scan($db) {
 
       .rg-diff-btn[data-diff="hard"].active {
         background-color: #78350F;
-        border-color: #f59e0b;
+        border-color: #ff0000;
         color: #FCD34D;
       }
 
@@ -71549,30 +71735,30 @@ SOFTWARE.</div>
     
         const buildPlaylistModalContent = (playlists) => {
           let html = `
-                  <div class="mb-3 d-flex gap-2">
-                    <input type="text" id="quick-create-playlist-input" class="form-control bg-transparent text-white border-secondary" placeholder="New Playlist Name">
-                    <button class="btn btn-danger" id="quick-create-playlist-btn"><i class="bi bi-plus"></i></button>
-                  </div>
-                `;
+            <div class="mb-3 d-flex gap-2">
+              <input type="text" id="quick-create-playlist-input" class="form-control bg-transparent text-white border-secondary" placeholder="New Playlist Name">
+              <button class="btn btn-danger" id="quick-create-playlist-btn"><i class="bi bi-plus"></i></button>
+            </div>
+          `;
           if (playlists && playlists.length > 0) {
             html += `
-                    <div class="list-group list-group-flush">
-                      ${playlists
-                        .map(
-                          (p) => `
-                        <button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-3 add-to-playlist-item my-1 p-2 rounded ${p.is_added == 1 ? "bg-secondary text-white border-0 opacity-75" : "bg-transparent text-white border border-secondary"}" data-playlist-id="${p.id}" data-public-id="${p.public_id}" data-is-added="${p.is_added || 0}">
-                          <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}" class="rounded" style="width: 48px; height: 48px; object-fit: cover; background-color: var(--ytm-surface-2);">
-                          <div class="d-flex flex-column flex-grow-1 text-start overflow-hidden">
-                            <span class="text-truncate fw-medium">${escapeHTML(p.name)}</span>
-                            <span class="small ${p.is_added == 1 ? "text-white-50" : "text-secondary"}">${p.song_count} songs</span>
-                          </div>
-                          ${p.is_added == 1 ? '<i class="bi bi-check-circle-fill text-success fs-5"></i>' : '<i class="bi bi-plus-circle fs-5"></i>'}
-                        </button>
-                      `,
-                        )
-                        .join("")}
+              <div class="list-group list-group-flush">
+                ${playlists
+                  .map(
+                    (p) => `
+                  <button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-3 add-to-playlist-item my-1 p-2 rounded ${p.is_added == 1 ? "bg-secondary text-white border-0 opacity-75" : "bg-transparent text-white border border-secondary"}" data-playlist-id="${p.id}" data-public-id="${p.public_id}" data-is-added="${p.is_added || 0}">
+                    <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}" class="rounded" style="width: 48px; height: 48px; object-fit: cover; background-color: var(--ytm-surface-2);">
+                    <div class="d-flex flex-column flex-grow-1 text-start overflow-hidden">
+                      <span class="text-truncate fw-medium">${escapeHTML(p.name)}</span>
+                      <span class="small ${p.is_added == 1 ? "text-white-50" : "text-secondary"}">${p.song_count} songs</span>
                     </div>
-                  `;
+                    ${p.is_added == 1 ? '<i class="bi bi-check-circle-fill text-success fs-5"></i>' : '<i class="bi bi-plus-circle fs-5"></i>'}
+                  </button>
+                `,
+                  )
+                  .join("")}
+              </div>
+            `;
           } else {
             html += `<p class="text-secondary text-center p-4">No playlists found. Create one above!</p>`;
           }
@@ -71689,10 +71875,10 @@ SOFTWARE.</div>
           let playButtonHTML = "";
           if (songsList && songsList.length > 0) {
             playButtonHTML = `
-                    <button class="btn btn-danger d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-4 py-2 fw-bold me-2 shadow-lg border border-danger" onclick="const f=document.querySelector('.song-list .song-item'); if(f){f.click();}" style="font-size: 0.85rem; height: 38px;">
-                      <i class="bi bi-play-fill fs-5"></i> Play
-                    </button>
-                  `;
+              <button class="btn btn-danger d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-4 py-2 fw-bold me-2 shadow-lg border border-danger" onclick="const f=document.querySelector('.song-list .song-item'); if(f){f.click();}" style="font-size: 0.85rem; height: 38px;">
+                <i class="bi bi-play-fill fs-5"></i> Play
+              </button>
+            `;
           }
 
           let shareId = "";
@@ -71743,9 +71929,10 @@ SOFTWARE.</div>
               shareArtistName = songsList[0].artist;
             }
             shareButtonHTML = `
-                    <button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold share-view-btn border-secondary" title="Share ${type}" data-share-type="${type}" data-share-id="${shareId}" data-share-name="${shareName}" data-artist-id="${artistIdForShare}" data-artist-name="${encodeURIComponent(shareArtistName)}" data-image-url="${details.image_url}" style="font-size: 0.85rem; height: 38px;">
-                      <i class="bi bi-share-fill"></i> <span class="d-none d-md-inline">Share</span>
-                    </button>`;
+              <button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold share-view-btn border-secondary" title="Share ${type}" data-share-type="${type}" data-share-id="${shareId}" data-share-name="${shareName}" data-artist-id="${artistIdForShare}" data-artist-name="${encodeURIComponent(shareArtistName)}" data-image-url="${details.image_url}" style="font-size: 0.85rem; height: 38px;">
+                <i class="bi bi-share-fill"></i> <span class="d-none d-md-inline">Share</span>
+              </button>
+            `;
           }
 
           let followButtonHTML = "";
@@ -71785,36 +71972,36 @@ SOFTWARE.</div>
                 : "";
 
           const headerHTML = `
-                  <div id="dynamic-view-header" class="view-details-header position-relative overflow-hidden" style="min-height: 250px; background-color: var(--ytm-surface);">
-                    ${(type === "profile" || type === "artist") && details.background_url ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.background_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(8px); transform: scale(1.1); z-index: 0;"></div>` : ""}
-                    ${type !== "profile" && type !== "artist" ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.image_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(40px); transform: scale(1.2); z-index: 0; opacity: 0.5;"></div>` : ""}
-                    <div class="d-flex flex-column flex-md-row align-items-center align-items-md-end gap-4 position-relative w-100" style="z-index: 1;">
-                      <img src="${type === "profile" || type === "artist" ? details.image_url + (details.image_url.includes("?") ? "&" : "?") + "t=" + new Date().getTime() : details.image_url}" alt="${escapeHTML(details.name)}" class="${type === "profile" || type === "artist" ? "rounded-circle shadow-lg my-auto" : "rounded shadow-lg my-auto"}" style="width: 180px; height: 180px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); aspect-ratio: 1/1; object-fit: cover; object-position: center; flex-shrink: 0;">
-                      <div class="d-flex flex-column align-items-center align-items-md-start text-center text-md-start flex-grow-1" style="min-width: 0; width: 100%;">
-                        <div class="text-uppercase fw-bold mb-1" style="letter-spacing: 1px; font-size: 0.8rem; color: rgba(255,255,255,0.9); text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${typeText}</div>
-                        <div class="marquee-container w-100 mb-2">
-                          <h1 class="fw-bolder text-white m-0 marquee-content header-title-marquee text-truncate" style="font-size: clamp(1.8rem, 4vw, 3rem); line-height: 1.1; letter-spacing: -1px; text-shadow: 0 4px 12px rgba(0,0,0,0.6); max-width: 100%;">${escapeHTML(details.name)}</h1>
-                        </div>
-                        ${avgMonthlyHTML}
-                        <div class="stats mb-2" style="color: rgba(255,255,255,0.7); font-size: 0.85rem; font-weight: 500; text-shadow: 0 1px 3px rgba(0,0,0,0.5);">${finalStatsText}</div>
-                        ${bioHTML}
-                        <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-md-start gap-2 mt-3 w-100">
-                          ${playButtonHTML}
-                          ${followButtonHTML}
-                          ${messageButtonHTML}
-                          ${blockButtonHTML}
-                          ${reportButtonHTML}
-                          ${copyButtonHTML}
-                          ${shareButtonHTML}
-                          ${downloadButtonHTML}
-                          ${downloadExportPlaylistZipButtonHTML}
-                        </div>
-                      </div>
-                    </div>
-                    <div style="position: absolute; bottom: 0; left: 0; right: 0; height: 120px; background: linear-gradient(to top, var(--ytm-bg), transparent); z-index: 0;"></div>
+            <div id="dynamic-view-header" class="view-details-header position-relative overflow-hidden" style="min-height: 250px; background-color: var(--ytm-surface);">
+              ${(type === "profile" || type === "artist") && details.background_url ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.background_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(8px); transform: scale(1.1); z-index: 0;"></div>` : ""}
+              ${type !== "profile" && type !== "artist" ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.image_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(40px); transform: scale(1.2); z-index: 0; opacity: 0.5;"></div>` : ""}
+              <div class="d-flex flex-column flex-md-row align-items-center align-items-md-end gap-4 position-relative w-100" style="z-index: 1;">
+                <img src="${type === "profile" || type === "artist" ? details.image_url + (details.image_url.includes("?") ? "&" : "?") + "t=" + new Date().getTime() : details.image_url}" alt="${escapeHTML(details.name)}" class="${type === "profile" || type === "artist" ? "rounded-circle shadow-lg my-auto" : "rounded shadow-lg my-auto"}" style="width: 180px; height: 180px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); aspect-ratio: 1/1; object-fit: cover; object-position: center; flex-shrink: 0;">
+                <div class="d-flex flex-column align-items-center align-items-md-start text-center text-md-start flex-grow-1" style="min-width: 0; width: 100%;">
+                  <div class="text-uppercase fw-bold mb-1" style="letter-spacing: 1px; font-size: 0.8rem; color: rgba(255,255,255,0.9); text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${typeText}</div>
+                  <div class="marquee-container w-100 mb-2">
+                    <h1 class="fw-bolder text-white m-0 marquee-content header-title-marquee text-truncate" style="font-size: clamp(1.8rem, 4vw, 3rem); line-height: 1.1; letter-spacing: -1px; text-shadow: 0 4px 12px rgba(0,0,0,0.6); max-width: 100%;">${escapeHTML(details.name)}</h1>
                   </div>
-                  <div id="recommendation-alert-container"></div>
-                `;
+                  ${avgMonthlyHTML}
+                  <div class="stats mb-2" style="color: rgba(255,255,255,0.7); font-size: 0.85rem; font-weight: 500; text-shadow: 0 1px 3px rgba(0,0,0,0.5);">${finalStatsText}</div>
+                  ${bioHTML}
+                  <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-md-start gap-2 mt-3 w-100">
+                    ${playButtonHTML}
+                    ${followButtonHTML}
+                    ${messageButtonHTML}
+                    ${blockButtonHTML}
+                    ${reportButtonHTML}
+                    ${copyButtonHTML}
+                    ${shareButtonHTML}
+                    ${downloadButtonHTML}
+                    ${downloadExportPlaylistZipButtonHTML}
+                  </div>
+                </div>
+              </div>
+              <div style="position: absolute; bottom: 0; left: 0; right: 0; height: 120px; background: linear-gradient(to top, var(--ytm-bg), transparent); z-index: 0;"></div>
+            </div>
+            <div id="recommendation-alert-container"></div>
+          `;
           contentArea.insertAdjacentHTML("afterbegin", headerHTML);
 
           const headerMarqueeEl = contentArea.querySelector(".header-title-marquee");
@@ -72002,118 +72189,118 @@ SOFTWARE.</div>
               details.recommended_artists.length > 0
             ) {
               recommendedSidebarHTML += `
-                      <div class="d-flex flex-column" style="min-height: 0; flex: 1 1 40%;">
-                        <h6 class="text-white fw-bold border-bottom border-secondary pb-2 mb-2 text-uppercase d-flex align-items-center gap-2" style="letter-spacing: 1px; font-size: 0.85rem;"><i class="bi bi-stars text-warning fs-5"></i> Similar Artists</h6>
-                        <div class="list-group list-group-flush bg-transparent overflow-auto modern-custom-scroll" style="padding-right: 4px; flex-grow: 1;">
-                          ${details.recommended_artists
-                            .map(
-                              (a) => `
-                            <div class="list-group-item list-group-item-action bg-transparent text-white border-0 rounded px-2 py-2 mb-1 d-flex align-items-center gap-3 user-profile-link" data-userid="${a.id}" data-artist="${encodeURIComponent(a.artist)}" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.08)'" onmouseout="this.style.backgroundColor='transparent'">
-                              <img src="?action=get_profile_picture&id=${a.id}" class="rounded-circle shadow-sm" style="width: 48px; height: 48px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
-                              <div class="fw-bold text-truncate" style="font-size: 0.95rem;">${escapeHTML(a.artist)}</div>
-                            </div>
-                          `,
-                            )
-                            .join("")}
-                        </div>
+                <div class="d-flex flex-column" style="min-height: 0; flex: 1 1 40%;">
+                  <h6 class="text-white fw-bold border-bottom border-secondary pb-2 mb-2 text-uppercase d-flex align-items-center gap-2" style="letter-spacing: 1px; font-size: 0.85rem;"><i class="bi bi-stars text-warning fs-5"></i> Similar Artists</h6>
+                  <div class="list-group list-group-flush bg-transparent overflow-auto modern-custom-scroll" style="padding-right: 4px; flex-grow: 1;">
+                    ${details.recommended_artists
+                      .map(
+                        (a) => `
+                      <div class="list-group-item list-group-item-action bg-transparent text-white border-0 rounded px-2 py-2 mb-1 d-flex align-items-center gap-3 user-profile-link" data-userid="${a.id}" data-artist="${encodeURIComponent(a.artist)}" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.08)'" onmouseout="this.style.backgroundColor='transparent'">
+                        <img src="?action=get_profile_picture&id=${a.id}" class="rounded-circle shadow-sm" style="width: 48px; height: 48px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
+                        <div class="fw-bold text-truncate" style="font-size: 0.95rem;">${escapeHTML(a.artist)}</div>
                       </div>
-                    `;
+                    `,
+                      )
+                      .join("")}
+                  </div>
+                </div>
+              `;
             }
             if (details.recommended_songs && details.recommended_songs.length > 0) {
               recommendedSidebarHTML += `
-                      <div class="d-flex flex-column" style="min-height: 0; flex: 1 1 60%;">
-                        <h6 class="text-white fw-bold border-bottom border-secondary pb-2 mb-2 text-uppercase d-flex align-items-center gap-2" style="letter-spacing: 1px; font-size: 0.85rem;"><i class="bi bi-fire text-danger fs-5"></i> Popular Tracks</h6>
-                        <div class="list-group list-group-flush bg-transparent overflow-auto modern-custom-scroll" style="padding-right: 4px; flex-grow: 1;">
-                          ${details.recommended_songs
-                            .map(
-                              (s) => `
-                            <div class="list-group-item list-group-item-action bg-transparent text-white border-0 rounded px-2 py-2 mb-1 d-flex align-items-center gap-3 top-result-card" data-song-id="${s.id}" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.08)'" onmouseout="this.style.backgroundColor='transparent'">
-                              <img src="?action=get_image&id=${s.id}&v=${s.last_modified || 0}" class="rounded shadow-sm" style="width: 48px; height: 48px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
-                              <div class="d-flex flex-column text-truncate justify-content-center">
-                                <div class="fw-bold text-truncate" style="font-size: 0.95rem;">${escapeHTML(s.title)}</div>
-                                <div class="text-secondary text-truncate" style="font-size: 0.8rem;">${escapeHTML(s.artist)}</div>
-                              </div>
-                            </div>
-                          `,
-                            )
-                            .join("")}
+                <div class="d-flex flex-column" style="min-height: 0; flex: 1 1 60%;">
+                  <h6 class="text-white fw-bold border-bottom border-secondary pb-2 mb-2 text-uppercase d-flex align-items-center gap-2" style="letter-spacing: 1px; font-size: 0.85rem;"><i class="bi bi-fire text-danger fs-5"></i> Popular Tracks</h6>
+                  <div class="list-group list-group-flush bg-transparent overflow-auto modern-custom-scroll" style="padding-right: 4px; flex-grow: 1;">
+                    ${details.recommended_songs
+                      .map(
+                        (s) => `
+                      <div class="list-group-item list-group-item-action bg-transparent text-white border-0 rounded px-2 py-2 mb-1 d-flex align-items-center gap-3 top-result-card" data-song-id="${s.id}" style="cursor: pointer; transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255,255,255,0.08)'" onmouseout="this.style.backgroundColor='transparent'">
+                        <img src="?action=get_image&id=${s.id}&v=${s.last_modified || 0}" class="rounded shadow-sm" style="width: 48px; height: 48px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
+                        <div class="d-flex flex-column text-truncate justify-content-center">
+                          <div class="fw-bold text-truncate" style="font-size: 0.95rem;">${escapeHTML(s.title)}</div>
+                          <div class="text-secondary text-truncate" style="font-size: 0.8rem;">${escapeHTML(s.artist)}</div>
                         </div>
                       </div>
-                    `;
+                    `,
+                      )
+                      .join("")}
+                  </div>
+                </div>
+              `;
             }
     
             let tabsHTML = `
-                    <div class="row mt-4">
-                      <div class="col-12 col-lg-8">
-                        <ul class="nav nav-tabs mb-3" id="artistTabs" role="tablist">
-                          <li class="nav-item" role="presentation">
-                            <button class="nav-link active" id="songs-tab" data-bs-toggle="tab" data-bs-target="#songs-pane" type="button" role="tab">All Songs</button>
-                          </li>
-                          ${
-                            isUser
-                              ? `
-                          <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="playlists-tab" data-bs-toggle="tab" data-bs-target="#playlists-pane" type="button" role="tab">Playlists</button>
-                          </li>
-                          <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="blogs-tab" data-bs-toggle="tab" data-bs-target="#blogs-pane" type="button" role="tab">Blogs</button>
-                          </li>
-                          <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="arts-tab" data-bs-toggle="tab" data-bs-target="#arts-pane" type="button" role="tab">Artworks</button>
-                          </li>`
-                              : ""
-                          }
-                        </ul>
-                        <div class="tab-content" id="artistTabsContent">
-                          <div class="tab-pane fade show active" id="songs-pane" role="tabpanel"></div>
-                          ${
-                            isUser
-                              ? `
-                          <div class="tab-pane fade" id="playlists-pane" role="tabpanel">
-                            ${
-                              hasPlaylists
-                                ? `
-                            <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 g-4">
-                              ${details.playlists
-                                .map(
-                                  (p) => `
-                                <div class="col">
-                                  <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
-                                    ${currentUser && (currentUser.id == details.user_id || currentUser.status === "super_admin" || currentUser.is_admin == 1) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${details.user_id}"><i class="bi bi-three-dots-vertical"></i></button>` : ""}
-                                    <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
-                                      <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
-                                      ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ""}
-                                    </div>
-                                    <div class="card-body px-0 py-2">
-                                      <h5 class="card-title fs-6 fw-normal text-truncate">${escapeHTML(p.name)}</h5>
-                                    </div>
-                                  </div>
-                                </div>
-                              `,
-                                )
-                                .join("")}
+              <div class="row mt-4">
+                <div class="col-12 col-lg-8">
+                  <ul class="nav nav-tabs mb-3" id="artistTabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                      <button class="nav-link active" id="songs-tab" data-bs-toggle="tab" data-bs-target="#songs-pane" type="button" role="tab">All Songs</button>
+                    </li>
+                    ${
+                      isUser
+                        ? `
+                    <li class="nav-item" role="presentation">
+                      <button class="nav-link" id="playlists-tab" data-bs-toggle="tab" data-bs-target="#playlists-pane" type="button" role="tab">Playlists</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                      <button class="nav-link" id="blogs-tab" data-bs-toggle="tab" data-bs-target="#blogs-pane" type="button" role="tab">Blogs</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                      <button class="nav-link" id="arts-tab" data-bs-toggle="tab" data-bs-target="#arts-pane" type="button" role="tab">Artworks</button>
+                    </li>`
+                        : ""
+                    }
+                  </ul>
+                  <div class="tab-content" id="artistTabsContent">
+                    <div class="tab-pane fade show active" id="songs-pane" role="tabpanel"></div>
+                    ${
+                      isUser
+                        ? `
+                    <div class="tab-pane fade" id="playlists-pane" role="tabpanel">
+                      ${
+                        hasPlaylists
+                          ? `
+                      <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 g-4">
+                        ${details.playlists
+                          .map(
+                            (p) => `
+                          <div class="col">
+                            <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-playlist="${encodeURIComponent(p.public_id)}" style="cursor: pointer;">
+                              ${currentUser && (currentUser.id == details.user_id || currentUser.status === "super_admin" || currentUser.is_admin == 1) ? `<button class="playlist-more-btn" data-public-id="${p.public_id}" data-name="${escapeHTML(p.name)}" data-is-collab="${p.is_collaborative || 0}" data-is-private="${p.is_private || 0}" data-owner-id="${details.user_id}"><i class="bi bi-three-dots-vertical"></i></button>` : ""}
+                              <div style="position: relative; display: block; border-radius: 6px; overflow: hidden;">
+                                <img src="?action=get_image&id=${p.image_id || 0}&v=${p.image_v || 0}" class="card-img-top" alt="${escapeHTML(p.name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
+                                ${p.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-2 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.75rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(p.song_count)}</div>` : ""}
+                              </div>
+                              <div class="card-body px-0 py-2">
+                                <h5 class="card-title fs-6 fw-normal text-truncate">${escapeHTML(p.name)}</h5>
+                              </div>
                             </div>
-                            `
-                                : `<div class="text-center p-5 text-secondary">No playlists found.</div>`
-                            }
                           </div>
-                          <div class="tab-pane fade" id="blogs-pane" role="tabpanel">
-                             <div class="text-center p-5 text-secondary" id="artist-blogs-loader"><span class="spinner-border spinner-border-sm"></span> Loading blogs...</div>
-                          </div>
-                          <div class="tab-pane fade" id="arts-pane" role="tabpanel">
-                             <div class="text-center p-5 text-secondary" id="artist-arts-loader"><span class="spinner-border spinner-border-sm"></span> Loading images...</div>
-                          </div>`
-                              : ""
-                          }
-                        </div>
+                        `,
+                          )
+                          .join("")}
                       </div>
-                      <div class="col-12 col-lg-4 d-none d-lg-block">
-                        <div class="p-3 rounded shadow-sm sticky-top d-flex flex-column gap-3" style="top: 100px; height: calc(100vh - 210px); background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
-                          ${recommendedSidebarHTML || '<div class="text-center text-secondary small m-auto">No recommendations yet.</div>'}
-                        </div>
-                      </div>
+                      `
+                          : `<div class="text-center p-5 text-secondary">No playlists found.</div>`
+                      }
                     </div>
-                  `;
+                    <div class="tab-pane fade" id="blogs-pane" role="tabpanel">
+                       <div class="text-center p-5 text-secondary" id="artist-blogs-loader"><span class="spinner-border spinner-border-sm"></span> Loading blogs...</div>
+                    </div>
+                    <div class="tab-pane fade" id="arts-pane" role="tabpanel">
+                       <div class="text-center p-5 text-secondary" id="artist-arts-loader"><span class="spinner-border spinner-border-sm"></span> Loading images...</div>
+                    </div>`
+                        : ""
+                    }
+                  </div>
+                </div>
+                <div class="col-12 col-lg-4 d-none d-lg-block">
+                  <div class="p-3 rounded shadow-sm sticky-top d-flex flex-column gap-3" style="top: 100px; height: calc(100vh - 210px); background-color: var(--ytm-surface-2); border: 1px solid rgba(255,255,255,0.05);">
+                    ${recommendedSidebarHTML || '<div class="text-center text-secondary small m-auto">No recommendations yet.</div>'}
+                  </div>
+                </div>
+              </div>
+            `;
             contentArea.insertAdjacentHTML("beforeend", tabsHTML);
             window.artistPlaylistsData = details.playlists || [];
           }
@@ -72173,15 +72360,15 @@ SOFTWARE.</div>
             if (currentPage === 1) {
               if (currentView.type === "get_songs") {
                 targetContainer.innerHTML = `
-                        <div class="d-flex flex-column align-items-center justify-content-center text-secondary w-100" style="height: 60vh;">
-                          <i class="bi bi-hdd-stack text-warning mb-3" style="font-size: 5rem;"></i>
-                          <h3 class="fw-bold text-white">Database is Empty!</h3>
-                          <p class="text-secondary mt-2 text-center" style="max-width: 400px;">There are no songs in the system. The admin must run a Full Library Scan to populate the database.</p>
-                          <button class="btn btn-danger fw-bold px-4 py-2 mt-3" data-bs-toggle="modal" data-bs-target="#full-scan-modal">
-                            <i class="bi bi-search me-2"></i>Scan Library Now
-                          </button>
-                        </div>
-                      `;
+                  <div class="d-flex flex-column align-items-center justify-content-center text-secondary w-100" style="height: 60vh;">
+                    <i class="bi bi-hdd-stack text-warning mb-3" style="font-size: 5rem;"></i>
+                    <h3 class="fw-bold text-white">Database is Empty!</h3>
+                    <p class="text-secondary mt-2 text-center" style="max-width: 400px;">There are no songs in the system. The admin must run a Full Library Scan to populate the database.</p>
+                    <button class="btn btn-danger fw-bold px-4 py-2 mt-3" data-bs-toggle="modal" data-bs-target="#full-scan-modal">
+                      <i class="bi bi-search me-2"></i>Scan Library Now
+                    </button>
+                  </div>
+                `;
               } else {
                 targetContainer.insertAdjacentHTML(
                   "beforeend",
@@ -72199,9 +72386,11 @@ SOFTWARE.</div>
             songList = document.createElement("div");
             songList.className = "song-list";
             const isHistory = currentView.type === "get_history";
-            const header = `<div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) ${isHistory ? "minmax(0, 2fr)" : ""} 80px 40px;">
-                    <div>&nbsp;</div><div>Title</div><div>Artist</div><div>Album</div><div>Views</div>${isHistory ? "<div>Played</div>" : ""}<div>Time</div><div>&nbsp;</div>
-                  </div>`;
+            const header = `
+              <div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) ${isHistory ? "minmax(0, 2fr)" : ""} 80px 40px;">
+                <div>&nbsp;</div><div>Title</div><div>Artist</div><div>Album</div><div>Views</div>${isHistory ? "<div>Played</div>" : ""}<div>Time</div><div>&nbsp;</div>
+              </div>
+            `;
             targetContainer.insertAdjacentHTML("beforeend", header);
             targetContainer.appendChild(songList);
           }
@@ -72219,44 +72408,44 @@ SOFTWARE.</div>
                 : "";
               const coverSvg = getSvgPlaceholder(song.title || "Unknown");
               return `
-                  <div class="song-item py-md-3 ${isNowPlaying ? "now-playing" : ""} ${isHistory ? "history-item" : ""}"
-                    data-song-id="${song.id}"
-                    data-is-favorite="${song.is_favorite == 1 ? "1" : "0"}"
-                    data-is-collaborative="${song.is_collaborative == 1 ? "1" : "0"}"
-                    data-song-title="${escapeAttr(song.title)}"
-                    data-song-artist="${escapeAttr(song.artist)}"
-                    data-song-album="${escapeAttr(song.album)}"
-                    data-song-genre="${escapeAttr(song.genre)}"
-                    data-song-user-id="${song.user_id}">
-                    <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
-                      <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
-                      <i class="bi bi-soundwave playing-icon"></i>
-                    </div>
-                    <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ""}${escapeHTML(song.title)}</div></div>
-                    <div class="song-artist text-truncate" data-userid="${song.user_id}">
-                      <div class="text-truncate">${formatArtistsHTML(song.artist, song.user_id, song.is_collaborative)}</div>
-                      <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
-                      ${song.added_by_name ? `<div style="font-size: 0.7rem; color: var(--ytm-secondary-text); margin-top: 2px;">Added by: ${escapeHTML(song.added_by_name)}</div>` : ""}
-                    </div>
-                    <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${escapeHTML(song.album)}</div>
-                    <div class="song-views d-none d-md-block text-truncate" title="${song.play_count || 0} views">${formatSongCount(song.play_count || 0)}</div>
-                    ${isHistory ? `<div class="d-none d-md-block text-truncate">${playedAtHTML}</div>` : ""}
-                    <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
-                    <div class="song-more">
-                      <button class="more-btn" data-song-id="${song.id}">
-                        <i class="bi bi-three-dots-vertical"></i>
-                      </button>
-                    </div>
-                    <div class="song-artist-mobile w-100 flex-column align-items-start">
-                      <div class="d-flex justify-content-between align-items-center w-100 gap-2">
-                         <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${formatArtistsHTML(song.artist, song.user_id, song.is_collaborative)}</span>
-                         ${isHistory ? `<span class="text-secondary small flex-shrink-0">${timeAgo(song.played_at)}</span>` : ""}
-                         <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
-                      </div>
-                      <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
-                    </div>
+                <div class="song-item py-md-3 ${isNowPlaying ? "now-playing" : ""} ${isHistory ? "history-item" : ""}"
+                  data-song-id="${song.id}"
+                  data-is-favorite="${song.is_favorite == 1 ? "1" : "0"}"
+                  data-is-collaborative="${song.is_collaborative == 1 ? "1" : "0"}"
+                  data-song-title="${escapeAttr(song.title)}"
+                  data-song-artist="${escapeAttr(song.artist)}"
+                  data-song-album="${escapeAttr(song.album)}"
+                  data-song-genre="${escapeAttr(song.genre)}"
+                  data-song-user-id="${song.user_id}">
+                  <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                    <i class="bi bi-soundwave playing-icon"></i>
                   </div>
-                `;
+                  <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ""}${escapeHTML(song.title)}</div></div>
+                  <div class="song-artist text-truncate" data-userid="${song.user_id}">
+                    <div class="text-truncate">${formatArtistsHTML(song.artist, song.user_id, song.is_collaborative)}</div>
+                    <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
+                    ${song.added_by_name ? `<div style="font-size: 0.7rem; color: var(--ytm-secondary-text); margin-top: 2px;">Added by: ${escapeHTML(song.added_by_name)}</div>` : ""}
+                  </div>
+                  <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${escapeHTML(song.album)}</div>
+                  <div class="song-views d-none d-md-block text-truncate" title="${song.play_count || 0} views">${formatSongCount(song.play_count || 0)}</div>
+                  ${isHistory ? `<div class="d-none d-md-block text-truncate">${playedAtHTML}</div>` : ""}
+                  <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
+                  <div class="song-more">
+                    <button class="more-btn" data-song-id="${song.id}">
+                      <i class="bi bi-three-dots-vertical"></i>
+                    </button>
+                  </div>
+                  <div class="song-artist-mobile w-100 flex-column align-items-start">
+                    <div class="d-flex justify-content-between align-items-center w-100 gap-2">
+                       <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${formatArtistsHTML(song.artist, song.user_id, song.is_collaborative)}</span>
+                       ${isHistory ? `<span class="text-secondary small flex-shrink-0">${timeAgo(song.played_at)}</span>` : ""}
+                       <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
+                    </div>
+                    <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
+                  </div>
+                </div>
+              `;
             })
             .join("");
     
@@ -72381,24 +72570,24 @@ SOFTWARE.</div>
           if (!append) contentArea.innerHTML = "";
           if (type === "get_mixes" && !append) {
             contentArea.innerHTML = `
-                    <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
-                      <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
-                        <div class="d-flex align-items-center gap-3">
-                          <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
-                            <i class="bi bi-collection-play-fill text-danger fs-3"></i>
-                          </div>
-                          <div>
-                            <h2 class="text-white fw-bold mb-1 fs-4">Auto Mixes</h2>
-                            <p class="text-secondary small mb-0">Dynamically generated playlists based on your library's artists and genres.</p>
-                          </div>
-                        </div>
-                      </div>
-                      <div class="w-100 position-relative">
-                        <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
-                        <input type="text" id="mixes-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search mixes..." value="${escapeHTML(currentView.searchQuery || "")}" style="height: 42px;">
-                      </div>
+              <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+                  <div class="d-flex align-items-center gap-3">
+                    <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
+                      <i class="bi bi-collection-play-fill text-danger fs-3"></i>
                     </div>
-                  `;
+                    <div>
+                      <h2 class="text-white fw-bold mb-1 fs-4">Auto Mixes</h2>
+                      <p class="text-secondary small mb-0">Dynamically generated playlists based on your library's artists and genres.</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="w-100 position-relative">
+                  <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                  <input type="text" id="mixes-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search mixes..." value="${escapeHTML(currentView.searchQuery || "")}" style="height: 42px;">
+                </div>
+              </div>
+            `;
             setTimeout(() => {
               const mSearch = document.getElementById("mixes-search-input");
               if (mSearch) {
@@ -72420,28 +72609,28 @@ SOFTWARE.</div>
             }, 0);
           } else if (type === "get_user_playlists" && !append && currentUser) {
             contentArea.innerHTML = `
-                    <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
-                      <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
-                        <div class="d-flex align-items-center gap-3">
-                          <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
-                            <i class="bi bi-music-note-list text-danger fs-3"></i>
-                          </div>
-                          <div>
-                            <h2 class="text-white fw-bold mb-1 fs-4">My Playlists</h2>
-                            <p class="text-secondary small mb-0">Create, customize, and manage your private and public playlists.</p>
-                          </div>
-                        </div>
-                        <div class="d-flex gap-2">
-                          <button class="btn btn-sm btn-danger rounded-pill px-3 fw-bold shadow-sm" id="create-new-playlist-btn"><i class="bi bi-plus-lg me-1"></i> Create</button>
-                          <button class="btn btn-sm btn-outline-light rounded-pill px-3 fw-medium shadow-sm" id="import-playlist-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
-                        </div>
-                      </div>
-                      <div class="w-100 position-relative">
-                        <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
-                        <input type="text" id="playlists-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search playlists..." value="${escapeHTML(currentView.searchQuery || "")}" style="height: 42px;">
-                      </div>
+              <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+                  <div class="d-flex align-items-center gap-3">
+                    <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
+                      <i class="bi bi-music-note-list text-danger fs-3"></i>
                     </div>
-                  `;
+                    <div>
+                      <h2 class="text-white fw-bold mb-1 fs-4">My Playlists</h2>
+                      <p class="text-secondary small mb-0">Create, customize, and manage your private and public playlists.</p>
+                    </div>
+                  </div>
+                  <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-danger rounded-pill px-3 fw-bold shadow-sm" id="create-new-playlist-btn"><i class="bi bi-plus-lg me-1"></i> Create</button>
+                    <button class="btn btn-sm btn-outline-light rounded-pill px-3 fw-medium shadow-sm" id="import-playlist-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
+                  </div>
+                </div>
+                <div class="w-100 position-relative">
+                  <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                  <input type="text" id="playlists-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search playlists..." value="${escapeHTML(currentView.searchQuery || "")}" style="height: 42px;">
+                </div>
+              </div>
+            `;
     
             setTimeout(() => {
               const attachPlaylistSearch = () => {
@@ -72468,43 +72657,43 @@ SOFTWARE.</div>
             }, 0);
           } else if (type === "get_collab_playlists" && !append && currentUser) {
             contentArea.innerHTML = `
-                    <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
-                      <div class="d-flex align-items-center gap-3">
-                        <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
-                          <i class="bi bi-people-fill text-info fs-3"></i>
-                        </div>
-                        <div>
-                          <h2 class="text-white fw-bold mb-1 fs-4">Shared With Me</h2>
-                          <p class="text-secondary small mb-0">Collaborative playlists shared with you by other creators.</p>
-                        </div>
-                      </div>
-                    </div>
-                  `;
+              <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex align-items-center gap-3">
+                  <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
+                    <i class="bi bi-people-fill text-info fs-3"></i>
+                  </div>
+                  <div>
+                    <h2 class="text-white fw-bold mb-1 fs-4">Shared With Me</h2>
+                    <p class="text-secondary small mb-0">Collaborative playlists shared with you by other creators.</p>
+                  </div>
+                </div>
+              </div>
+            `;
           } else if (type === "get_following" && !append && currentUser) {
             contentArea.innerHTML = `
-                    <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
-                      <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
-                        <div class="d-flex align-items-center gap-3">
-                          <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
-                            <i class="bi bi-person-lines-fill text-primary fs-3"></i>
-                          </div>
-                          <div>
-                            <h2 class="text-white fw-bold mb-1 fs-4">Following</h2>
-                            <p class="text-secondary small mb-0">Artists and users you follow.</p>
-                          </div>
-                        </div>
-                        <div class="d-flex gap-2 flex-wrap">
-                          <button class="btn btn-outline-danger rounded-pill px-4 fw-medium shadow-sm" id="unfollow-all-btn"><i class="bi bi-person-fill-x me-1"></i> Unfollow All</button>
-                          <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-following-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</button>
-                          <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-following-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
-                        </div>
-                      </div>
-                      <div class="w-100 position-relative">
-                        <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
-                        <input type="text" id="following-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search following..." value="${escapeHTML(currentView.searchQuery || "")}" style="height: 42px;">
-                      </div>
+              <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
+                <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+                  <div class="d-flex align-items-center gap-3">
+                    <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
+                      <i class="bi bi-person-lines-fill text-primary fs-3"></i>
                     </div>
-                  `;
+                    <div>
+                      <h2 class="text-white fw-bold mb-1 fs-4">Following</h2>
+                      <p class="text-secondary small mb-0">Artists and users you follow.</p>
+                    </div>
+                  </div>
+                  <div class="d-flex gap-2 flex-wrap">
+                    <button class="btn btn-outline-danger rounded-pill px-4 fw-medium shadow-sm" id="unfollow-all-btn"><i class="bi bi-person-fill-x me-1"></i> Unfollow All</button>
+                    <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="export-following-btn"><i class="bi bi-box-arrow-up me-1"></i> Export</button>
+                    <button class="btn btn-outline-light rounded-pill px-4 fw-medium shadow-sm" id="import-following-btn"><i class="bi bi-box-arrow-in-down me-1"></i> Import</button>
+                  </div>
+                </div>
+                <div class="w-100 position-relative">
+                  <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                  <input type="text" id="following-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search following..." value="${escapeHTML(currentView.searchQuery || "")}" style="height: 42px;">
+                </div>
+              </div>
+            `;
     
             setTimeout(() => {
               const fSearch = document.getElementById("following-search-input");
@@ -72646,14 +72835,16 @@ SOFTWARE.</div>
                 type === "get_mixes"
               ) {
                 moreButton = `
-                      <button class="playlist-more-btn ${type === "get_mixes" ? "mix-more-btn" : ""}" data-type="${type === "get_mixes" ? "mixes" : "playlists"}" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-description="${escapeHTML(item.description || "")}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}" data-owner-id="${item.owner_id || ""}" data-creator="${escapeHTML(item.creator || "")}" data-image-id="${imageId || 0}">
-                        <i class="bi bi-three-dots-vertical"></i>
-                      </button>`;
+                  <button class="playlist-more-btn ${type === "get_mixes" ? "mix-more-btn" : ""}" data-type="${type === "get_mixes" ? "mixes" : "playlists"}" data-public-id="${publicId}" data-name="${escapeHTML(name)}" data-description="${escapeHTML(item.description || "")}" data-is-collab="${item.is_collaborative || 0}" data-is-private="${item.is_private || 0}" data-owner-id="${item.owner_id || ""}" data-creator="${escapeHTML(item.creator || "")}" data-image-id="${imageId || 0}">
+                    <i class="bi bi-three-dots-vertical"></i>
+                  </button>
+                `;
               } else if (type === "get_albums") {
                 moreButton = `
-                      <button class="playlist-more-btn album-more-btn" data-album="${encodeURIComponent(item.album)}" data-userid="${item.user_id || ""}" data-artistname="${encodeURIComponent(item.artist || "")}" data-id="${item.id || 0}">
-                        <i class="bi bi-three-dots-vertical"></i>
-                      </button>`;
+                  <button class="playlist-more-btn album-more-btn" data-album="${encodeURIComponent(item.album)}" data-userid="${item.user_id || ""}" data-artistname="${encodeURIComponent(item.artist || "")}" data-id="${item.id || 0}">
+                    <i class="bi bi-three-dots-vertical"></i>
+                  </button>
+                `;
               }
     
               if (
@@ -72695,33 +72886,33 @@ SOFTWARE.</div>
                     ? "border-radius: 50%;"
                     : "border-radius: 6px;";
                 return `<div class="col">
-                        <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} ${artistNameAttr} style="cursor: pointer;">
-                          ${moreButton}
-                          <div style="position: relative; display: block; ${borderStyle} overflow: hidden;">
-                            <img src="${imgSrc}${imageId || 0}&v=${item.image_v || 0}&size=small" class="card-img-top" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
-                            ${songCountBadge}
-                          </div>
-                          <div class="card-body px-0 py-2">
-                            <h5 class="card-title fs-6 fw-normal text-truncate ${titleClass}">
-                              ${type === "get_user_playlists" && item.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1"></i>' : ""}${escapeHTML(name)}
-                            </h5>
-                            ${subtext ? `<p class="card-text small text-secondary text-truncate mb-0 ${subtextClass}">${escapeHTML(subtext)}</p>` : ""}
-                            ${viewCountHtml}
-                          </div>
-                        </div>
-                      </div>`;
+                  <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} ${artistNameAttr} style="cursor: pointer;">
+                    ${moreButton}
+                    <div style="position: relative; display: block; ${borderStyle} overflow: hidden;">
+                      <img src="${imgSrc}${imageId || 0}&v=${item.image_v || 0}&size=small" class="card-img-top" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;">
+                      ${songCountBadge}
+                    </div>
+                    <div class="card-body px-0 py-2">
+                      <h5 class="card-title fs-6 fw-normal text-truncate ${titleClass}">
+                        ${type === "get_user_playlists" && item.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1"></i>' : ""}${escapeHTML(name)}
+                      </h5>
+                      ${subtext ? `<p class="card-text small text-secondary text-truncate mb-0 ${subtextClass}">${escapeHTML(subtext)}</p>` : ""}
+                      ${viewCountHtml}
+                    </div>
+                  </div>
+                </div>`;
               } else {
                 return `<div class="col">
-                        <div class="card h-100 bg-transparent text-white border-0" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
-                          <div class="d-flex align-items-center justify-content-center rounded" style="aspect-ratio: 1/1; background-color: var(--ytm-surface-2);">
-                            <i class="bi ${icon}" style="font-size: 4rem; color: var(--ytm-secondary-text);"></i>
-                          </div>
-                          <div class="card-body px-0 py-2">
-                            <h5 class="card-title fs-6 fw-normal text-truncate">${escapeHTML(name)}</h5>
-                            ${subtext ? `<p class="card-text small text-secondary text-truncate m-0">${escapeHTML(subtext)}</p>` : ""}
-                          </div>
-                        </div>
-                      </div>`;
+                  <div class="card h-100 bg-transparent text-white border-0" data-${dataType}="${encodeURIComponent(dataValue)}" ${useridAttr} style="cursor: pointer;">
+                    <div class="d-flex align-items-center justify-content-center rounded" style="aspect-ratio: 1/1; background-color: var(--ytm-surface-2);">
+                      <i class="bi ${icon}" style="font-size: 4rem; color: var(--ytm-secondary-text);"></i>
+                    </div>
+                    <div class="card-body px-0 py-2">
+                      <h5 class="card-title fs-6 fw-normal text-truncate">${escapeHTML(name)}</h5>
+                      ${subtext ? `<p class="card-text small text-secondary text-truncate m-0">${escapeHTML(subtext)}</p>` : ""}
+                    </div>
+                  </div>
+                </div>`;
               }
             })
             .join("");
@@ -72737,11 +72928,11 @@ SOFTWARE.</div>
               contentArea.insertAdjacentHTML(
                 "beforeend",
                 `
-                      <div id="mixes-footer-actions" class="d-flex flex-wrap justify-content-center gap-3 mt-5 mb-5 w-100">
-                        <button class="btn btn-outline-light rounded-pill px-4 py-2 fw-bold" id="mixes-load-more-btn"><i class="bi bi-chevron-down me-2"></i> Load More Mixes</button>
-                        <button class="btn btn-danger rounded-pill px-4 py-2 fw-bold shadow-lg" id="mixes-refresh-btn"><i class="bi bi-arrow-clockwise me-2"></i> Refresh All Mixes</button>
-                      </div>
-                    `,
+                  <div id="mixes-footer-actions" class="d-flex flex-wrap justify-content-center gap-3 mt-5 mb-5 w-100">
+                    <button class="btn btn-outline-light rounded-pill px-4 py-2 fw-bold" id="mixes-load-more-btn"><i class="bi bi-chevron-down me-2"></i> Load More Mixes</button>
+                    <button class="btn btn-danger rounded-pill px-4 py-2 fw-bold shadow-lg" id="mixes-refresh-btn"><i class="bi bi-arrow-clockwise me-2"></i> Refresh All Mixes</button>
+                  </div>
+                `,
               );
     
               const loadMoreBtn = document.getElementById("mixes-load-more-btn");
@@ -72782,54 +72973,54 @@ SOFTWARE.</div>
             const fed = currentView.f_end_date || "";
     
             const filterHTML = `
-                    <div class="search-filters-container w-100 mb-4 px-2 order-first" style="grid-column: 1 / -1;">
-                      <button class="btn btn-outline-light rounded-pill" type="button" data-bs-toggle="collapse" data-bs-target="#searchFiltersCollapse">
-                        <i class="bi bi-sliders"></i> Filters ${fsd || fed ? '<span class="badge bg-danger rounded-circle p-1 ms-1"></span>' : ""}
-                      </button>
-                      <div class="collapse mt-3" id="searchFiltersCollapse">
-                        <div class="card card-body bg-dark border-secondary text-white d-flex flex-row flex-wrap gap-5" style="border-radius: 12px;">
-                          <div class="d-flex flex-column gap-2">
-                            <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">UPLOAD DATE</h6>
-                            <a href="#" class="text-decoration-none ${fd === "" && !fsd && !fed ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_date" data-val="">Any time</a>
-                            <a href="#" class="text-decoration-none ${fd === "today" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_date" data-val="today">Today</a>
-                            <a href="#" class="text-decoration-none ${fd === "week" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_date" data-val="week">This week</a>
-                            <a href="#" class="text-decoration-none ${fd === "month" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_date" data-val="month">This month</a>
-                            <a href="#" class="text-decoration-none ${fd === "year" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_date" data-val="year">This year</a>
-                          </div>
-                          <div class="d-flex flex-column gap-2" style="min-width: 200px;">
-                            <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">CUSTOM DATE RANGE</h6>
-                            <div class="d-flex flex-column gap-2">
-                              <div>
-                                <label class="form-label text-secondary small mb-1">Start Date</label>
-                                <input type="date" id="filter-start-date" class="form-control form-control-sm bg-black text-white border-secondary" value="${fsd}">
-                              </div>
-                              <div>
-                                <label class="form-label text-secondary small mb-1">End Date</label>
-                                <input type="date" id="filter-end-date" class="form-control form-control-sm bg-black text-white border-secondary" value="${fed}">
-                              </div>
-                              <div class="d-flex gap-2 mt-1">
-                                <button class="btn btn-sm btn-danger fw-bold flex-grow-1" id="apply-date-range-btn">Apply Range</button>
-                                <button class="btn btn-sm btn-outline-secondary" id="clear-date-range-btn" title="Clear Range"><i class="bi bi-x-lg"></i></button>
-                              </div>
-                            </div>
-                          </div>
-                          <div class="d-flex flex-column gap-2">
-                            <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">DURATION</h6>
-                            <a href="#" class="text-decoration-none ${fdu === "" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_dur" data-val="">Any</a>
-                            <a href="#" class="text-decoration-none ${fdu === "short" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_dur" data-val="short">Under 4 minutes</a>
-                            <a href="#" class="text-decoration-none ${fdu === "long" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_dur" data-val="long">Over 20 minutes</a>
-                          </div>
-                          <div class="d-flex flex-column gap-2">
-                            <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">SORT BY</h6>
-                            <a href="#" class="text-decoration-none ${fs === "relevance" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_sort" data-val="relevance">Relevance</a>
-                            <a href="#" class="text-decoration-none ${fs === "date" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_sort" data-val="date">Upload date</a>
-                            <a href="#" class="text-decoration-none ${fs === "views" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_sort" data-val="views">View count</a>
-                            <a href="#" class="text-decoration-none ${fs === "likes" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_sort" data-val="likes">Rating (Songs only)</a>
-                          </div>
+              <div class="search-filters-container w-100 mb-4 px-2 order-first" style="grid-column: 1 / -1;">
+                <button class="btn btn-outline-light rounded-pill" type="button" data-bs-toggle="collapse" data-bs-target="#searchFiltersCollapse">
+                  <i class="bi bi-sliders"></i> Filters ${fsd || fed ? '<span class="badge bg-danger rounded-circle p-1 ms-1"></span>' : ""}
+                </button>
+                <div class="collapse mt-3" id="searchFiltersCollapse">
+                  <div class="card card-body bg-dark border-secondary text-white d-flex flex-row flex-wrap gap-5" style="border-radius: 12px;">
+                    <div class="d-flex flex-column gap-2">
+                      <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">UPLOAD DATE</h6>
+                      <a href="#" class="text-decoration-none ${fd === "" && !fsd && !fed ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_date" data-val="">Any time</a>
+                      <a href="#" class="text-decoration-none ${fd === "today" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_date" data-val="today">Today</a>
+                      <a href="#" class="text-decoration-none ${fd === "week" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_date" data-val="week">This week</a>
+                      <a href="#" class="text-decoration-none ${fd === "month" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_date" data-val="month">This month</a>
+                      <a href="#" class="text-decoration-none ${fd === "year" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_date" data-val="year">This year</a>
+                    </div>
+                    <div class="d-flex flex-column gap-2" style="min-width: 200px;">
+                      <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">CUSTOM DATE RANGE</h6>
+                      <div class="d-flex flex-column gap-2">
+                        <div>
+                          <label class="form-label text-secondary small mb-1">Start Date</label>
+                          <input type="date" id="filter-start-date" class="form-control form-control-sm bg-black text-white border-secondary" value="${fsd}">
+                        </div>
+                        <div>
+                          <label class="form-label text-secondary small mb-1">End Date</label>
+                          <input type="date" id="filter-end-date" class="form-control form-control-sm bg-black text-white border-secondary" value="${fed}">
+                        </div>
+                        <div class="d-flex gap-2 mt-1">
+                          <button class="btn btn-sm btn-danger fw-bold flex-grow-1" id="apply-date-range-btn">Apply Range</button>
+                          <button class="btn btn-sm btn-outline-secondary" id="clear-date-range-btn" title="Clear Range"><i class="bi bi-x-lg"></i></button>
                         </div>
                       </div>
                     </div>
-                  `;
+                    <div class="d-flex flex-column gap-2">
+                      <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">DURATION</h6>
+                      <a href="#" class="text-decoration-none ${fdu === "" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_dur" data-val="">Any</a>
+                      <a href="#" class="text-decoration-none ${fdu === "short" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_dur" data-val="short">Under 4 minutes</a>
+                      <a href="#" class="text-decoration-none ${fdu === "long" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_dur" data-val="long">Over 20 minutes</a>
+                    </div>
+                    <div class="d-flex flex-column gap-2">
+                      <h6 class="border-bottom border-secondary pb-2 mb-1 fw-bold text-secondary">SORT BY</h6>
+                      <a href="#" class="text-decoration-none ${fs === "relevance" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_sort" data-val="relevance">Relevance</a>
+                      <a href="#" class="text-decoration-none ${fs === "date" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_sort" data-val="date">Upload date</a>
+                      <a href="#" class="text-decoration-none ${fs === "views" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_sort" data-val="views">View count</a>
+                      <a href="#" class="text-decoration-none ${fs === "likes" ? "text-white fw-bold" : "text-secondary hover-white"} filter-opt" data-filter="f_sort" data-val="likes">Rating (Songs only)</a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            `;
             // Insert filters at the very top of content area
             contentArea.insertAdjacentHTML("afterbegin", filterHTML);
     
@@ -72929,41 +73120,43 @@ SOFTWARE.</div>
               const song = shelf.items[0];
               const coverSvg = getSvgPlaceholder(song.title || "Unknown");
               const shelfHTML = `
-                      <div class="recommendation-shelf mb-4">
-                        <div class="shelf-header">
-                          <h3 class="shelf-title">${shelf.title}</h3>
-                        </div>
-                        <div class="card bg-transparent border-secondary d-flex flex-row align-items-center p-3 top-result-card" data-song-id="${song.id}" style="border-radius: 12px; cursor: pointer; max-width: 600px; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'">
-                          <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
-                          <div class="d-flex flex-column justify-content-center overflow-hidden w-100">
-                            <h4 class="text-white text-truncate mb-1 fw-bold">${escapeHTML(song.title)}</h4>
-                            <p class="text-secondary text-truncate mb-0">Song • ${escapeHTML(song.artist)}</p>
-                          </div>
-                          <button class="btn btn-danger rounded-circle ms-auto me-2 d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; flex-shrink: 0;"><i class="bi bi-play-fill fs-3"></i></button>
-                        </div>
-                      </div>
-                    `;
+                <div class="recommendation-shelf mb-4">
+                  <div class="shelf-header">
+                    <h3 class="shelf-title">${shelf.title}</h3>
+                  </div>
+                  <div class="card bg-transparent border-secondary d-flex flex-row align-items-center p-3 top-result-card" data-song-id="${song.id}" style="border-radius: 12px; cursor: pointer; max-width: 600px; transition: background 0.2s;" onmouseover="this.style.backgroundColor='var(--ytm-surface-2)'" onmouseout="this.style.backgroundColor='transparent'">
+                    <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" style="width: 100px; height: 100px; object-fit: cover; border-radius: 8px; margin-right: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+                    <div class="d-flex flex-column justify-content-center overflow-hidden w-100">
+                      <h4 class="text-white text-truncate mb-1 fw-bold">${escapeHTML(song.title)}</h4>
+                      <p class="text-secondary text-truncate mb-0">Song • ${escapeHTML(song.artist)}</p>
+                    </div>
+                    <button class="btn btn-danger rounded-circle ms-auto me-2 d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; flex-shrink: 0;"><i class="bi bi-play-fill fs-3"></i></button>
+                  </div>
+                </div>
+              `;
               contentArea.insertAdjacentHTML("beforeend", shelfHTML);
               return;
             }
     
             if (shelf.type === "songs_list") {
               const shelfHTML = `
-                      <div class="recommendation-shelf mb-4">
-                        <div class="shelf-header">
-                          <h3 class="shelf-title">${shelf.title}</h3>
-                        </div>
-                        <div id="search-songs-pane"></div>
-                      </div>
-                    `;
+                <div class="recommendation-shelf mb-4">
+                  <div class="shelf-header">
+                    <h3 class="shelf-title">${shelf.title}</h3>
+                  </div>
+                  <div id="search-songs-pane"></div>
+                </div>
+              `;
               contentArea.insertAdjacentHTML("beforeend", shelfHTML);
               const targetPane = document.getElementById("search-songs-pane");
     
               let songList = document.createElement("div");
               songList.className = "song-list";
-              const header = `<div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px;">
-                      <div></div><div>Title</div><div>Artist</div><div>Album</div><div>Views</div><div>Time</div><div></div>
-                    </div>`;
+              const header = `
+                <div class="song-list-header d-none d-md-grid" style="grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) minmax(0, 2fr) 80px 40px;">
+                  <div></div><div>Title</div><div>Artist</div><div>Album</div><div>Views</div><div>Time</div><div></div>
+                </div>
+              `;
               targetPane.insertAdjacentHTML("beforeend", header);
     
               const escapeAttr = (str) =>
@@ -72975,41 +73168,41 @@ SOFTWARE.</div>
                   const isNowPlaying = currentSong && currentSong.id === song.id;
                   const coverSvg = getSvgPlaceholder(song.title || "Unknown");
                   return `
-                      <div class="song-item py-md-3 ${isNowPlaying ? "now-playing" : ""}"
-                        data-song-id="${song.id}"
-                        data-is-favorite="${song.is_favorite == 1 ? "1" : "0"}"
-                        data-is-collaborative="${song.is_collaborative == 1 ? "1" : "0"}"
-                        data-song-title="${escapeAttr(song.title)}"
-                        data-song-artist="${escapeAttr(song.artist)}"
-                        data-song-album="${escapeAttr(song.album)}"
-                        data-song-genre="${escapeAttr(song.genre)}"
-                        data-song-user-id="${song.user_id}">
-                        <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
-                          <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" onerror="this.src='${coverSvg}'" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
-                          <i class="bi bi-soundwave playing-icon"></i>
-                        </div>
-                        <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ""}${song.title}</div></div>
-                        <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
-                          <div class="text-truncate">${song.artist}</div>
-                          <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
-                        </div>
-                        <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
-                        <div class="song-views d-none d-md-block text-truncate" title="${song.play_count || 0} views">${formatSongCount(song.play_count || 0)}</div>
-                        <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
-                        <div class="song-more">
-                          <button class="more-btn" data-song-id="${song.id}">
-                            <i class="bi bi-three-dots-vertical"></i>
-                          </button>
-                        </div>
-                        <div class="song-artist-mobile w-100 flex-column align-items-start">
-                          <div class="d-flex justify-content-between align-items-center w-100">
-                             <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
-                             <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
-                          </div>
-                          <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
-                        </div>
+                    <div class="song-item py-md-3 ${isNowPlaying ? "now-playing" : ""}"
+                      data-song-id="${song.id}"
+                      data-is-favorite="${song.is_favorite == 1 ? "1" : "0"}"
+                      data-is-collaborative="${song.is_collaborative == 1 ? "1" : "0"}"
+                      data-song-title="${escapeAttr(song.title)}"
+                      data-song-artist="${escapeAttr(song.artist)}"
+                      data-song-album="${escapeAttr(song.album)}"
+                      data-song-genre="${escapeAttr(song.genre)}"
+                      data-song-user-id="${song.user_id}">
+                      <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
+                        <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}" onerror="this.src='${coverSvg}'" class="song-thumb" loading="lazy" alt="${escapeAttr(song.title)}">
+                        <i class="bi bi-soundwave playing-icon"></i>
                       </div>
-                    `;
+                      <div class="song-title-wrapper text-truncate"><div class="song-title text-truncate">${song.is_private == 1 ? '<i class="bi bi-lock-fill text-warning me-1" title="Private Song"></i>' : ""}${song.title}</div></div>
+                      <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">
+                        <div class="text-truncate">${song.artist}</div>
+                        <div class="text-secondary d-md-none" style="font-size: 0.8rem; margin-top: 2px;" title="Play Count"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
+                      </div>
+                      <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}" data-userid="${song.user_id}">${song.album}</div>
+                      <div class="song-views d-none d-md-block text-truncate" title="${song.play_count || 0} views">${formatSongCount(song.play_count || 0)}</div>
+                      <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
+                      <div class="song-more">
+                        <button class="more-btn" data-song-id="${song.id}">
+                          <i class="bi bi-three-dots-vertical"></i>
+                        </button>
+                      </div>
+                      <div class="song-artist-mobile w-100 flex-column align-items-start">
+                        <div class="d-flex justify-content-between align-items-center w-100">
+                           <span class="song-artist-name text-truncate flex-grow-1" style="min-width: 0;">${song.artist}</span>
+                           <span class="song-duration-mobile flex-shrink-0">${formatTime(song.duration)}</span>
+                        </div>
+                        <div class="text-secondary text-start" style="font-size: 0.8rem; margin-top: 2px;"><i class="bi bi-eye"></i> ${formatSongCount(song.play_count || 0)}</div>
+                      </div>
+                    </div>
+                  `;
                 })
                 .join("");
               songList.insertAdjacentHTML("beforeend", songsHTML);
@@ -73022,144 +73215,144 @@ SOFTWARE.</div>
                 .map((song) => {
                   const coverSvg = getSvgPlaceholder(song.title || "Unknown");
                   return `
-                      <div class="shelf-item position-relative"
-                        data-song-id="${song.id}"
-                        data-is-favorite="${song.is_favorite == 1 ? "1" : "0"}"
-                        data-is-collaborative="${song.is_collaborative == 1 ? "1" : "0"}"
-                        data-song-title="${escapeAttr(song.title)}"
-                        data-song-artist="${escapeAttr(song.artist)}"
-                        data-song-album="${escapeAttr(song.album)}"
-                        data-song-genre="${escapeAttr(song.genre)}"
-                        data-song-user-id="${song.user_id}">
-                        <button class="playlist-more-btn more-btn" data-song-id="${song.id}"><i class="bi bi-three-dots-vertical"></i></button>
-                        <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" alt="${escapeHTML(song.title)}">
-                        <div class="item-title">${escapeHTML(song.title)}</div>
-                        <div class="item-subtitle" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${escapeHTML(song.artist)}</div>
-                      </div>
-                    `;
+                    <div class="shelf-item position-relative"
+                      data-song-id="${song.id}"
+                      data-is-favorite="${song.is_favorite == 1 ? "1" : "0"}"
+                      data-is-collaborative="${song.is_collaborative == 1 ? "1" : "0"}"
+                      data-song-title="${escapeAttr(song.title)}"
+                      data-song-artist="${escapeAttr(song.artist)}"
+                      data-song-album="${escapeAttr(song.album)}"
+                      data-song-genre="${escapeAttr(song.genre)}"
+                      data-song-user-id="${song.user_id}">
+                      <button class="playlist-more-btn more-btn" data-song-id="${song.id}"><i class="bi bi-three-dots-vertical"></i></button>
+                      <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" onerror="this.onerror=null; this.src='${coverSvg}';" alt="${escapeHTML(song.title)}">
+                      <div class="item-title">${escapeHTML(song.title)}</div>
+                      <div class="item-subtitle" data-artist="${encodeURIComponent(song.artist)}" data-userid="${song.user_id}">${escapeHTML(song.artist)}</div>
+                    </div>
+                  `;
                 })
                 .join("");
             } else if (shelf.type === "albums") {
               itemsHTML = shelf.items
                 .map(
                   (album) => `
-                      <div class="shelf-item position-relative" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ""}" data-artistname="${encodeURIComponent(album.artist || "")}">
-                        <button class="playlist-more-btn album-more-btn" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ""}" data-artistname="${encodeURIComponent(album.artist || "")}" data-id="${album.id || 0}"><i class="bi bi-three-dots-vertical"></i></button>
-                        <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
-                          <img src="?action=get_image&id=${album.id || 0}&v=${album.image_v || 0}&size=small" alt="${escapeHTML(album.album)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
-                          ${album.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(album.song_count)}</div>` : ""}
-                        </div>
-                        <div class="item-title">${escapeHTML(album.album)}</div>
-                        <div class="item-subtitle">${escapeHTML(album.artist)}</div>
-                        ${album.total_plays !== undefined ? `<div class="item-subtitle mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(album.total_plays)} views</div>` : ""}
+                    <div class="shelf-item position-relative" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ""}" data-artistname="${encodeURIComponent(album.artist || "")}">
+                      <button class="playlist-more-btn album-more-btn" data-album="${encodeURIComponent(album.album)}" data-userid="${album.user_id || ""}" data-artistname="${encodeURIComponent(album.artist || "")}" data-id="${album.id || 0}"><i class="bi bi-three-dots-vertical"></i></button>
+                      <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
+                        <img src="?action=get_image&id=${album.id || 0}&v=${album.image_v || 0}&size=small" alt="${escapeHTML(album.album)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
+                        ${album.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(album.song_count)}</div>` : ""}
                       </div>
-                    `,
+                      <div class="item-title">${escapeHTML(album.album)}</div>
+                      <div class="item-subtitle">${escapeHTML(album.artist)}</div>
+                      ${album.total_plays !== undefined ? `<div class="item-subtitle mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(album.total_plays)} views</div>` : ""}
+                    </div>
+                  `,
                 )
                 .join("");
             } else if (shelf.type === "playlists" || shelf.type === "mixes") {
               itemsHTML = shelf.items
                 .map(
                   (playlist) => `
-                      <div class="shelf-item position-relative" data-${shelf.type === "mixes" ? "mix" : "playlist"}="${encodeURIComponent(playlist.public_id)}">
-                        <button class="playlist-more-btn mix-more-btn" data-type="${shelf.type}" data-public-id="${playlist.public_id}" data-name="${escapeHTML(playlist.name)}" data-creator="${escapeHTML(playlist.creator)}" data-image-id="${playlist.image_id || 0}"><i class="bi bi-three-dots-vertical"></i></button>
-                        <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
-                          <img src="?action=get_image&id=${playlist.image_id || 0}&v=${playlist.image_v || 0}&size=small" alt="${escapeHTML(playlist.name)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
-                          ${playlist.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(playlist.song_count)}</div>` : ""}
-                        </div>
-                        <div class="item-title">${escapeHTML(playlist.name)}</div>
-                        <div class="item-subtitle">by ${escapeHTML(playlist.creator)}</div>
-                        ${playlist.play_count !== undefined ? `<div class="item-subtitle mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(playlist.play_count)} views</div>` : ""}
+                    <div class="shelf-item position-relative" data-${shelf.type === "mixes" ? "mix" : "playlist"}="${encodeURIComponent(playlist.public_id)}">
+                      <button class="playlist-more-btn mix-more-btn" data-type="${shelf.type}" data-public-id="${playlist.public_id}" data-name="${escapeHTML(playlist.name)}" data-creator="${escapeHTML(playlist.creator)}" data-image-id="${playlist.image_id || 0}"><i class="bi bi-three-dots-vertical"></i></button>
+                      <div style="position: relative; display: block; margin-bottom: 0.5rem; border-radius: 6px; overflow: hidden;">
+                        <img src="?action=get_image&id=${playlist.image_id || 0}&v=${playlist.image_v || 0}&size=small" alt="${escapeHTML(playlist.name)}" style="margin-bottom: 0 !important; border-radius: 0 !important;">
+                        ${playlist.song_count !== undefined ? `<div class="position-absolute bottom-0 start-0 ms-1 mb-1 px-2 py-1 bg-dark bg-opacity-75 text-white rounded fw-bold" style="font-size: 0.7rem; backdrop-filter: blur(4px); line-height: 1;"><i class="bi bi-music-note-list"></i> ${formatSongCount(playlist.song_count)}</div>` : ""}
                       </div>
-                    `,
+                      <div class="item-title">${escapeHTML(playlist.name)}</div>
+                      <div class="item-subtitle">by ${escapeHTML(playlist.creator)}</div>
+                      ${playlist.play_count !== undefined ? `<div class="item-subtitle mt-1" style="font-size: 0.75rem;"><i class="bi bi-eye"></i> ${formatSongCount(playlist.play_count)} views</div>` : ""}
+                    </div>
+                  `,
                 )
                 .join("");
             } else if (shelf.type === "artists") {
               itemsHTML = shelf.items
                 .map(
                   (artist) => `
-                      <div class="shelf-item text-center" data-artist="${encodeURIComponent(artist.name)}" data-userid="${artist.is_user ? artist.id : ""}">
-                        <img src="${artist.is_user ? `?action=get_profile_picture&id=${artist.id}` : `?action=get_image&id=${artist.id || 0}&v=${artist.image_v || 0}`}" class="rounded-circle" alt="${escapeHTML(artist.name)}" style="aspect-ratio: 1/1; object-fit: cover;">
-                        <div class="item-title mt-2">${escapeHTML(artist.name)}</div>
-                        <div class="item-subtitle text-uppercase small text-secondary">Artist</div>
-                      </div>
-                    `,
+                    <div class="shelf-item text-center" data-artist="${encodeURIComponent(artist.name)}" data-userid="${artist.is_user ? artist.id : ""}">
+                      <img src="${artist.is_user ? `?action=get_profile_picture&id=${artist.id}` : `?action=get_image&id=${artist.id || 0}&v=${artist.image_v || 0}`}" class="rounded-circle" alt="${escapeHTML(artist.name)}" style="aspect-ratio: 1/1; object-fit: cover;">
+                      <div class="item-title mt-2">${escapeHTML(artist.name)}</div>
+                      <div class="item-subtitle text-uppercase small text-secondary">Artist</div>
+                    </div>
+                  `,
                 )
                 .join("");
             }
     
             const shelfHTML = `
-                    <div class="recommendation-shelf">
-                      <div class="shelf-header">
-                        <h3 class="shelf-title">${shelf.title}</h3>
-                        ${shelf.connected_view ? `<button class="btn btn-sm btn-outline-light border-0" data-view="${shelf.connected_view}" ${shelf.param ? `data-view-param="${shelf.param}"` : ""}>See All</button>` : ""}
-                      </div>
-                      <div class="shelf-items">
-                        ${itemsHTML}
-                      </div>
-                    </div>
-                  `;
+              <div class="recommendation-shelf">
+                <div class="shelf-header">
+                  <h3 class="shelf-title">${shelf.title}</h3>
+                  ${shelf.connected_view ? `<button class="btn btn-sm btn-outline-light border-0" data-view="${shelf.connected_view}" ${shelf.param ? `data-view-param="${shelf.param}"` : ""}>See All</button>` : ""}
+                </div>
+                <div class="shelf-items">
+                  ${itemsHTML}
+                </div>
+              </div>
+            `;
             contentArea.insertAdjacentHTML("beforeend", shelfHTML);
           });
         };
     
         const renderUserStats = (data) => {
           contentArea.innerHTML = `
-                  <div class="user-stats-page px-3 py-4">
-                    <div class="d-flex align-items-center justify-content-center gap-3 mb-4 border-bottom border-secondary pb-4">
-                      <i class="bi bi-bar-chart-line-fill text-info" style="font-size: 3rem;"></i>
-                      <div class="text-start">
-                        <h2 class="content-title text-white fw-bold mb-0">My Statistics</h2>
-                        <p class="text-secondary mb-0">Your overall engagement across PHP Music</p>
+            <div class="user-stats-page px-3 py-4">
+              <div class="d-flex align-items-center justify-content-center gap-3 mb-4 border-bottom border-secondary pb-4">
+                <i class="bi bi-bar-chart-line-fill text-info" style="font-size: 3rem;"></i>
+                <div class="text-start">
+                  <h2 class="content-title text-white fw-bold mb-0">My Statistics</h2>
+                  <p class="text-secondary mb-0">Your overall engagement across PHP Music</p>
+                </div>
+              </div>
+              <div class="row g-4 mt-2">
+                <div class="col-6 col-md-3">
+                  <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
+                    <div class="card-body text-center p-4">
+                      <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(13, 110, 253, 0.1);">
+                        <i class="bi bi-cloud-upload-fill text-primary fs-3"></i>
                       </div>
-                    </div>
-                    <div class="row g-4 mt-2">
-                      <div class="col-6 col-md-3">
-                        <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
-                          <div class="card-body text-center p-4">
-                            <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(13, 110, 253, 0.1);">
-                              <i class="bi bi-cloud-upload-fill text-primary fs-3"></i>
-                            </div>
-                            <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.uploads)}</h3>
-                            <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Uploads</p>
-                          </div>
-                        </div>
-                      </div>
-                      <div class="col-6 col-md-3">
-                        <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
-                          <div class="card-body text-center p-4">
-                            <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(220, 53, 69, 0.1);">
-                              <i class="bi bi-heart-fill text-danger fs-3"></i>
-                            </div>
-                            <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.favorites)}</h3>
-                            <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Favorites</p>
-                          </div>
-                        </div>
-                      </div>
-                      <div class="col-6 col-md-3">
-                        <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
-                          <div class="card-body text-center p-4">
-                            <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(25, 135, 84, 0.1);">
-                              <i class="bi bi-music-note-list text-success fs-3"></i>
-                            </div>
-                            <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.playlists)}</h3>
-                            <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Playlists</p>
-                          </div>
-                        </div>
-                      </div>
-                      <div class="col-6 col-md-3">
-                        <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
-                          <div class="card-body text-center p-4">
-                            <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(255, 193, 7, 0.1);">
-                              <i class="bi bi-play-circle-fill text-warning fs-3"></i>
-                            </div>
-                            <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.play_count)}</h3>
-                            <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Total Plays</p>
-                          </div>
-                        </div>
-                      </div>
+                      <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.uploads)}</h3>
+                      <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Uploads</p>
                     </div>
                   </div>
-                `;
+                </div>
+                <div class="col-6 col-md-3">
+                  <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
+                    <div class="card-body text-center p-4">
+                      <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(220, 53, 69, 0.1);">
+                        <i class="bi bi-heart-fill text-danger fs-3"></i>
+                      </div>
+                      <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.favorites)}</h3>
+                      <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Favorites</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="col-6 col-md-3">
+                  <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
+                    <div class="card-body text-center p-4">
+                      <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(25, 135, 84, 0.1);">
+                        <i class="bi bi-music-note-list text-success fs-3"></i>
+                      </div>
+                      <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.playlists)}</h3>
+                      <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Playlists</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="col-6 col-md-3">
+                  <div class="card bg-dark border-secondary h-100 shadow-lg" style="border-radius: 16px; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
+                    <div class="card-body text-center p-4">
+                      <div class="rounded-circle d-flex align-items-center justify-content-center mx-auto mb-3" style="width: 60px; height: 60px; background-color: rgba(255, 193, 7, 0.1);">
+                        <i class="bi bi-play-circle-fill text-warning fs-3"></i>
+                      </div>
+                      <h3 class="fw-bold text-white mb-1" style="font-size: 2.5rem;">${formatSongCount(data.stats.play_count)}</h3>
+                      <p class="text-secondary text-uppercase fw-bold small mb-0" style="letter-spacing: 1px;">Total Plays</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
         };
     
         const setupSortOptions = (viewType) => {
@@ -73543,16 +73736,16 @@ SOFTWARE.</div>
                       const cleanContent = decodedContent.replace(/<[^>]*>?/gm, "");
                       const catName = window.getCategoryName(n.category);
                       return `
-                            <div class="note-card note-card-item" data-id="${n.id}">
-                              ${n.starred == 1 ? '<button class="card-star-btn starred"><i class="bi bi-star-fill text-warning"></i></button>' : '<button class="card-star-btn"><i class="bi bi-star"></i></button>'}
-                              <div class="note-card-title">${escapeHTML(decodedTitle || cleanContent.split(/\s+/).slice(0, 5).join(" ") || "Untitled Note")}</div>
-                              <div class="note-card-body">${escapeHTML(cleanContent)}</div>
-                              <div class="note-card-footer">
-                                <span>${new Date(n.updated_at.replace(" ", "T") + "Z").toLocaleDateString()}</span>
-                                ${n.category && n.category !== "all" ? `<span class="note-chip">${escapeHTML(catName)}</span>` : ""}
-                              </div>
-                            </div>
-                          `;
+                        <div class="note-card note-card-item" data-id="${n.id}">
+                          ${n.starred == 1 ? '<button class="card-star-btn starred"><i class="bi bi-star-fill text-warning"></i></button>' : '<button class="card-star-btn"><i class="bi bi-star"></i></button>'}
+                          <div class="note-card-title">${escapeHTML(decodedTitle || cleanContent.split(/\s+/).slice(0, 5).join(" ") || "Untitled Note")}</div>
+                          <div class="note-card-body">${escapeHTML(cleanContent)}</div>
+                          <div class="note-card-footer">
+                            <span>${new Date(n.updated_at.replace(" ", "T") + "Z").toLocaleDateString()}</span>
+                            ${n.category && n.category !== "all" ? `<span class="note-chip">${escapeHTML(catName)}</span>` : ""}
+                          </div>
+                        </div>
+                      `;
                     })
                     .join("");
                   grid.insertAdjacentHTML("beforeend", html);
@@ -73592,16 +73785,16 @@ SOFTWARE.</div>
                           : "");
     
                       return `
-                            <div class="note-card task-card-wrapper" data-id="${t.id}">
-                              ${t.starred == 1 ? '<button class="card-star-btn starred"><i class="bi bi-star-fill text-warning"></i></button>' : '<button class="card-star-btn"><i class="bi bi-star"></i></button>'}
-                              <div class="note-card-title">${escapeHTML(decodeHTML(t.title) || "Untitled Task List")}</div>
-                              <div class="flex-grow-1 overflow-hidden mt-2">${itemsHtml}</div>
-                              <div class="note-card-footer mt-3">
-                                <span>${new Date(t.updated_at.replace(" ", "T") + "Z").toLocaleDateString()}</span>
-                                ${t.category && t.category !== "all" ? `<span class="note-chip">${escapeHTML(catName)}</span>` : ""}
-                              </div>
-                            </div>
-                          `;
+                        <div class="note-card task-card-wrapper" data-id="${t.id}">
+                          ${t.starred == 1 ? '<button class="card-star-btn starred"><i class="bi bi-star-fill text-warning"></i></button>' : '<button class="card-star-btn"><i class="bi bi-star"></i></button>'}
+                          <div class="note-card-title">${escapeHTML(decodeHTML(t.title) || "Untitled Task List")}</div>
+                          <div class="flex-grow-1 overflow-hidden mt-2">${itemsHtml}</div>
+                          <div class="note-card-footer mt-3">
+                            <span>${new Date(t.updated_at.replace(" ", "T") + "Z").toLocaleDateString()}</span>
+                            ${t.category && t.category !== "all" ? `<span class="note-chip">${escapeHTML(catName)}</span>` : ""}
+                          </div>
+                        </div>
+                      `;
                     })
                     .join("");
                   grid.insertAdjacentHTML("beforeend", html);
@@ -73620,22 +73813,22 @@ SOFTWARE.</div>
                   const html = data
                     .map(
                       (b) => `
-                          <div class="note-card bg-dark text-white border-secondary hover-bg-dark blog-card-owner" data-id="${b.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
-                            <div class="d-flex justify-content-between align-items-center mb-2">
-                              <span class="badge ${b.status === "public" ? "bg-success" : "bg-secondary"}">${b.status === "public" ? "Published" : "Draft/Private"}</span>
-                              <span class="small text-secondary">${new Date(b.updated_at.replace(" ", "T") + "Z").toLocaleDateString()}</span>
-                            </div>
-                            <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(b.title && b.title.trim() !== "" ? decodeHTML(b.title) : "Untitled")}</div>
-                            <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(
-                              decodeHTML(b.content)
-                                .replace(/<[^>]*>?/gm, "")
-                                .replace(/[^a-zA-Z0-9\s.,!?]/g, ""),
-                            )}</div>
-                            <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
-                              ${b.category && b.category !== "all" ? `<span class="note-chip">${escapeHTML(window.getCategoryName(b.category, "blog"))}</span>` : "<span></span>"}
-                            </div>
+                        <div class="note-card bg-dark text-white border-secondary hover-bg-dark blog-card-owner" data-id="${b.public_id}" style="border-radius: 12px; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='translateY(0)'">
+                          <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span class="badge ${b.status === "public" ? "bg-success" : "bg-secondary"}">${b.status === "public" ? "Published" : "Draft/Private"}</span>
+                            <span class="small text-secondary">${new Date(b.updated_at.replace(" ", "T") + "Z").toLocaleDateString()}</span>
                           </div>
-                        `,
+                          <div class="fw-bold fs-5 mb-2 text-truncate">${escapeHTML(b.title && b.title.trim() !== "" ? decodeHTML(b.title) : "Untitled")}</div>
+                          <div class="text-secondary small overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">${escapeHTML(
+                            decodeHTML(b.content)
+                              .replace(/<[^>]*>?/gm, "")
+                              .replace(/[^a-zA-Z0-9\s.,!?]/g, ""),
+                          )}</div>
+                          <div class="mt-auto pt-3 d-flex justify-content-between align-items-center">
+                            ${b.category && b.category !== "all" ? `<span class="note-chip">${escapeHTML(window.getCategoryName(b.category, "blog"))}</span>` : "<span></span>"}
+                          </div>
+                        </div>
+                      `,
                     )
                     .join("");
                   grid.insertAdjacentHTML("beforeend", html);
@@ -73670,60 +73863,61 @@ SOFTWARE.</div>
                       return children
                         .map(
                           (p) => `
-                                <div class="comm-card p-4" style="animation: slideFadeIn 0.4s ease forwards;">
-                                  <div class="d-flex justify-content-between align-items-start mb-3">
-                                    <div class="d-flex align-items-center gap-3 ${p.is_disabled ? "" : "user-profile-link"}" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="${p.is_disabled ? "cursor: default;" : "cursor: pointer;"}" ${p.is_disabled ? "" : 'title="View Profile"'}>
-                                      <div class="position-relative">
-                                        <img src="?action=get_profile_picture&id=${p.user_id}" class="rounded-circle shadow-lg" style="width:52px; height:52px; object-fit:cover; border: 2px solid rgba(255,255,255,0.1); transition: transform 0.3s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
-                                        ${p.user_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ""}
-                                      </div>
-                                      <div class="d-flex flex-column justify-content-center">
-                                        <div class="fw-bolder text-white hover-underline" style="font-size: 1.1rem; letter-spacing: 0.3px;">${escapeHTML(p.artist)}</div>
-                                        <span class="text-secondary fw-medium d-flex align-items-center gap-1" style="font-size: 0.8rem;">
-                                          <i class="bi bi-clock"></i> ${timeAgo(p.created_at)}
-                                        </span>
-                                      </div>
-                                    </div>
-                                    ${
-                                      currentUser &&
-                                      (currentUser.id == p.user_id ||
-                                        currentUser.status === "super_admin" ||
-                                        currentUser.is_admin == 1)
-                                        ? `
-                                    <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                                      <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                      <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                        <li><button class="dropdown-item edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                        <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                                      </ul>
-                                    </div>`
-                                        : ""
-                                    }
+                            <div class="comm-card p-4" style="animation: slideFadeIn 0.4s ease forwards;">
+                              <div class="d-flex justify-content-between align-items-start mb-3">
+                                <div class="d-flex align-items-center gap-3 ${p.is_disabled ? "" : "user-profile-link"}" data-userid="${p.user_id}" data-artist="${encodeURIComponent(p.artist)}" style="${p.is_disabled ? "cursor: default;" : "cursor: pointer;"}" ${p.is_disabled ? "" : 'title="View Profile"'}>
+                                  <div class="position-relative">
+                                    <img src="?action=get_profile_picture&id=${p.user_id}" class="rounded-circle shadow-lg" style="width:52px; height:52px; object-fit:cover; border: 2px solid rgba(255,255,255,0.1); transition: transform 0.3s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
+                                    ${p.user_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ""}
                                   </div>
-    
-                                  <div class="mb-4 text-light" style="font-size: 1.1rem; line-height: 1.6;">
-                                    ${renderContent(p.content)}
+                                  <div class="d-flex flex-column justify-content-center">
+                                    <div class="fw-bolder text-white hover-underline" style="font-size: 1.1rem; letter-spacing: 0.3px;">${escapeHTML(p.artist)}</div>
+                                    <span class="text-secondary fw-medium d-flex align-items-center gap-1" style="font-size: 0.8rem;">
+                                      <i class="bi bi-clock"></i> ${timeAgo(p.created_at)}
+                                    </span>
                                   </div>
-    
-                                  <div class="d-flex gap-2 align-items-center pt-3 border-top border-secondary border-opacity-25 flex-wrap">
-                                    <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === "like" ? "active-like" : ""}" data-id="${p.id}" data-reaction="like" title="Like">
-                                      <i class="bi ${p.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-5"></i>
-                                      <span style="font-size: 1rem;">${p.like_count}</span>
-                                    </button>
-    
-                                    <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${p.id}" data-reaction="dislike" title="Dislike">
-                                      <i class="bi ${p.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-5"></i>
-                                      <span style="font-size: 1rem;">${p.dislike_count}</span>
-                                    </button>
-    
-                                    <button class="phpmusic-comments-action-btn community-reply-btn" data-id="${p.id}" data-root-id="${p.id}" data-username="${escapeHTML(p.artist)}" data-content="${escapeHTML(p.content)}" title="Reply">
-                                      <i class="bi bi-chat-left-text fs-5"></i>
-                                      <span style="font-size: 1rem;">Reply ${children.filter((ch) => ch.parent_id == p.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == p.id).length})` : ""}</span>
-                                    </button>
-                                  </div>
-    
-                                  <div class="mt-3">${buildCommunityTree(postsList, p.id)}</div>
-                                </div>`,
+                                </div>
+                                ${
+                                  currentUser &&
+                                  (currentUser.id == p.user_id ||
+                                    currentUser.status === "super_admin" ||
+                                    currentUser.is_admin == 1)
+                                    ? `
+                                <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                                  <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                                  <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                                    <li><button class="dropdown-item edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                                    <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash2"></i> Delete</button></li>
+                                  </ul>
+                                </div>`
+                                    : ""
+                                }
+                              </div>
+
+                              <div class="mb-4 text-light" style="font-size: 1.1rem; line-height: 1.6;">
+                                ${renderContent(p.content)}
+                              </div>
+
+                              <div class="d-flex gap-2 align-items-center pt-3 border-top border-secondary border-opacity-25 flex-wrap">
+                                <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === "like" ? "active-like" : ""}" data-id="${p.id}" data-reaction="like" title="Like">
+                                  <i class="bi ${p.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-5"></i>
+                                  <span style="font-size: 1rem;">${p.like_count}</span>
+                                </button>
+
+                                <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${p.id}" data-reaction="dislike" title="Dislike">
+                                  <i class="bi ${p.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-5"></i>
+                                  <span style="font-size: 1rem;">${p.dislike_count}</span>
+                                </button>
+
+                                <button class="phpmusic-comments-action-btn community-reply-btn" data-id="${p.id}" data-root-id="${p.id}" data-username="${escapeHTML(p.artist)}" data-content="${escapeHTML(p.content)}" title="Reply">
+                                  <i class="bi bi-chat-left-text fs-5"></i>
+                                  <span style="font-size: 1rem;">Reply ${children.filter((ch) => ch.parent_id == p.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == p.id).length})` : ""}</span>
+                                </button>
+                              </div>
+
+                              <div class="mt-3">${buildCommunityTree(postsList, p.id)}</div>
+                            </div>
+                          `,
                         )
                         .join("");
                     } else {
@@ -73751,99 +73945,99 @@ SOFTWARE.</div>
                               "",
                             );
                             replyQuoteHtml = `
-                                    <div class="chat-reply-quote mb-2" onclick="const target=document.querySelector('.reply-anchor-${p.reply_to_id}'); if(target) target.scrollIntoView({behavior:'smooth', block:'center'});" title="Click to jump to post" style="background: rgba(0,0,0,0.2); border-left: 3px solid var(--ytm-accent); padding: 6px 10px; border-radius: 0 6px 6px 0; font-size: 0.85rem; cursor: pointer;">
-                                      <strong class="text-info">${escapeHTML(p.reply_sender || "Someone")}</strong><br>
-                                      <span class="text-truncate d-block text-secondary">${escapeHTML(cleanRep)}</span>
-                                    </div>
-                                  `;
+                              <div class="chat-reply-quote mb-2" onclick="const target=document.querySelector('.reply-anchor-${p.reply_to_id}'); if(target) target.scrollIntoView({behavior:'smooth', block:'center'});" title="Click to jump to post" style="background: rgba(0,0,0,0.2); border-left: 3px solid var(--ytm-accent); padding: 6px 10px; border-radius: 0 6px 6px 0; font-size: 0.85rem; cursor: pointer;">
+                                <strong class="text-info">${escapeHTML(p.reply_sender || "Someone")}</strong><br>
+                                <span class="text-truncate d-block text-secondary">${escapeHTML(cleanRep)}</span>
+                              </div>
+                            `;
                           }
                           return `
-                                  <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-dark border-2 rounded-4 p-2 reply-anchor-${p.id}" style="animation: slideFadeIn 0.3s ease forwards; --bs-border-opacity: .5;">
-                                    <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
-                                      <img src="?action=get_profile_picture&id=${p.user_id}"
-                                          class="rounded-circle shadow-sm ${p.is_disabled ? "" : "user-profile-link"}"
-                                          data-userid="${p.user_id}"
-                                          data-artist="${encodeURIComponent(p.artist)}"
-                                          style="width:36px; height:36px; object-fit:cover; cursor:${p.is_disabled ? "default" : "pointer"}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
-                                          onmouseover="this.style.transform='scale(1.15)'"
-                                          onmouseout="this.style.transform='scale(1)'">
-                                      ${children.filter((ch) => ch.parent_id == p.id).length > 0 ? `<div class="mt-2" style="width: 2px; flex-grow: 1; background: linear-gradient(to bottom, rgba(255,255,255,0.1), transparent); border-radius: 2px;"></div>` : ""}
-                                    </div>
-    
-                                    <div class="flex-grow-1" style="min-width: 0;">
-                                      <div class="d-flex justify-content-between align-items-start mb-1">
-                                        <div class="d-flex align-items-center flex-wrap gap-2">
-                                          <span class="fw-bold text-white ${p.is_disabled ? "" : "user-profile-link"}"
-                                              data-userid="${p.user_id}"
-                                              data-artist="${encodeURIComponent(p.artist)}"
-                                              style="font-size: 0.9rem; cursor:${p.is_disabled ? "default" : "pointer"}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
-                                              onmouseover="this.style.textDecoration='underline'"
-                                              onmouseout="this.style.textDecoration='none'">
-                                            ${escapeHTML(p.artist)}
-                                          </span>
-                                          <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.8;">
-                                            <i class="bi bi-clock"></i> ${timeAgo(p.created_at)}
-                                          </span>
-                                        </div>
-                                        ${
-                                          currentUser &&
-                                          (currentUser.id == c.u_id ||
-                                            currentUser.status === "super_admin" ||
-                                            currentUser.is_admin == 1)
-                                            ? `
-                                          <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                                            <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                            <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                              <li><button class="dropdown-item edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                              <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                                            </ul>
-                                          </div>
-                                        `
-                                            : ""
-                                        }
-                                      </div>
-    
-                                      <div class="p-2 mb-2">
-                                        ${replyQuoteHtml}
-                                        ${renderReplyContent(p.content)}
-                                      </div>
-    
-                                      <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
-                                        <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === "like" ? "active-like" : ""}" data-id="${p.id}" data-reaction="like" style="padding: 4px 12px; font-size: 0.85rem;">
-                                          <i class="bi ${p.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-6"></i>
-                                          <span>${p.like_count || 0}</span>
-                                        </button>
-    
-                                        <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${p.id}" data-reaction="dislike" style="padding: 4px 12px; font-size: 0.85rem;">
-                                          <i class="bi ${p.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-6"></i>
-                                          <span>${p.dislike_count || 0}</span>
-                                        </button>
-    
-                                        <button class="phpmusic-comments-action-btn community-reply-btn" data-id="${p.id}" data-root-id="${parent}" data-username="${escapeHTML(p.artist)}" data-content="${escapeHTML(p.content)}" style="padding: 4px 12px; font-size: 0.85rem;">
-                                          <i class="bi bi-chat-left-text fs-6"></i> Reply
-                                        </button>
-                                      </div>
-    
-                                      <div class="mt-3">${buildCommunityTree(data, p.id)}</div>
-                                    </div>
+                            <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-dark border-2 rounded-4 p-2 reply-anchor-${p.id}" style="animation: slideFadeIn 0.3s ease forwards; --bs-border-opacity: .5;">
+                              <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
+                                <img src="?action=get_profile_picture&id=${p.user_id}"
+                                    class="rounded-circle shadow-sm ${p.is_disabled ? "" : "user-profile-link"}"
+                                    data-userid="${p.user_id}"
+                                    data-artist="${encodeURIComponent(p.artist)}"
+                                    style="width:36px; height:36px; object-fit:cover; cursor:${p.is_disabled ? "default" : "pointer"}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
+                                    onmouseover="this.style.transform='scale(1.15)'"
+                                    onmouseout="this.style.transform='scale(1)'">
+                                ${children.filter((ch) => ch.parent_id == p.id).length > 0 ? `<div class="mt-2" style="width: 2px; flex-grow: 1; background: linear-gradient(to bottom, rgba(255,255,255,0.1), transparent); border-radius: 2px;"></div>` : ""}
+                              </div>
+
+                              <div class="flex-grow-1" style="min-width: 0;">
+                                <div class="d-flex justify-content-between align-items-start mb-1">
+                                  <div class="d-flex align-items-center flex-wrap gap-2">
+                                    <span class="fw-bold text-white ${p.is_disabled ? "" : "user-profile-link"}"
+                                        data-userid="${p.user_id}"
+                                        data-artist="${encodeURIComponent(p.artist)}"
+                                        style="font-size: 0.9rem; cursor:${p.is_disabled ? "default" : "pointer"}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
+                                        onmouseover="this.style.textDecoration='underline'"
+                                        onmouseout="this.style.textDecoration='none'">
+                                      ${escapeHTML(p.artist)}
+                                    </span>
+                                    <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.8;">
+                                      <i class="bi bi-clock"></i> ${timeAgo(p.created_at)}
+                                    </span>
                                   </div>
-                                `;
+                                  ${
+                                    currentUser &&
+                                    (currentUser.id == c.u_id ||
+                                      currentUser.status === "super_admin" ||
+                                      currentUser.is_admin == 1)
+                                      ? `
+                                    <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
+                                      <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                                      <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
+                                        <li><button class="dropdown-item edit-post-btn" data-id="${p.id}" data-content="${escapeHTML(p.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
+                                        <li><button class="dropdown-item text-danger delete-post-btn" data-id="${p.id}"><i class="bi bi-trash2"></i> Delete</button></li>
+                                      </ul>
+                                    </div>
+                                  `
+                                      : ""
+                                  }
+                                </div>
+
+                                <div class="p-2 mb-2">
+                                  ${replyQuoteHtml}
+                                  ${renderReplyContent(p.content)}
+                                </div>
+
+                                <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
+                                  <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === "like" ? "active-like" : ""}" data-id="${p.id}" data-reaction="like" style="padding: 4px 12px; font-size: 0.85rem;">
+                                    <i class="bi ${p.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-6"></i>
+                                    <span>${p.like_count || 0}</span>
+                                  </button>
+
+                                  <button class="phpmusic-comments-action-btn community-react-btn ${p.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${p.id}" data-reaction="dislike" style="padding: 4px 12px; font-size: 0.85rem;">
+                                    <i class="bi ${p.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-6"></i>
+                                    <span>${p.dislike_count || 0}</span>
+                                  </button>
+
+                                  <button class="phpmusic-comments-action-btn community-reply-btn" data-id="${p.id}" data-root-id="${parent}" data-username="${escapeHTML(p.artist)}" data-content="${escapeHTML(p.content)}" style="padding: 4px 12px; font-size: 0.85rem;">
+                                    <i class="bi bi-chat-left-text fs-6"></i> Reply
+                                  </button>
+                                </div>
+
+                                <div class="mt-3">${buildCommunityTree(data, p.id)}</div>
+                              </div>
+                            </div>
+                          `;
                         })
                         .join("");
     
                       return `
-                                <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
-                                  <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="comm-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
-                                    <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
-                                      <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
-                                    </div>
-                                    View ${children.length} ${children.length === 1 ? "reply" : "replies"}
-                                  </button>
-                                  <div id="comm-reply-container-${parent}" class="d-none mt-2 pt-2">
-                                    ${repliesHtml}
-                                  </div>
-                                </div>
-                              `;
+                        <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
+                          <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="comm-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
+                            <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
+                              <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
+                            </div>
+                            View ${children.length} ${children.length === 1 ? "reply" : "replies"}
+                          </button>
+                          <div id="comm-reply-container-${parent}" class="d-none mt-2 pt-2">
+                            ${repliesHtml}
+                          </div>
+                        </div>
+                      `;
                     }
                   };
     
@@ -74346,16 +74540,16 @@ SOFTWARE.</div>
             }
             updateContentTitle("Offline", false);
             contentArea.innerHTML = `
-                    <div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100" style="height: 60vh;">
-                      <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 5rem;"></i>
-                      <h3 class="fw-bold text-white">You are currently offline</h3>
-                      <p class="text-secondary mt-2 mb-4" style="max-width: 400px;">Try to play offline songs in your offline library.</p>
-                      <div class="d-flex gap-3 justify-content-center flex-wrap">
-                        <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="window.loadView({ type: 'get_offline_songs', param: '', sort: 'manual_order', filter_user_id: '' })"><i class="bi bi-cloud-check-fill text-success me-2"></i> Offline Library</button>
-                        <button class="btn btn-danger fw-bold px-4 py-2 rounded-pill" onclick="window.loadView({ type: 'rhythm_game', param: '', sort: '', filter_user_id: '' })"><i class="bi bi-controller me-2"></i> Rhythm Game</button>
-                      </div>
-                    </div>
-                  `;
+              <div class="d-flex flex-column align-items-center justify-content-center text-center p-5 w-100" style="height: 60vh;">
+                <i class="bi bi-wifi-off text-secondary mb-3" style="font-size: 5rem;"></i>
+                <h3 class="fw-bold text-white">You are currently offline</h3>
+                <p class="text-secondary mt-2 mb-4" style="max-width: 400px;">Try to play offline songs in your offline library.</p>
+                <div class="d-flex gap-3 justify-content-center flex-wrap">
+                  <button class="btn btn-outline-light fw-bold px-4 py-2 rounded-pill" onclick="window.loadView({ type: 'get_offline_songs', param: '', sort: 'manual_order', filter_user_id: '' })"><i class="bi bi-cloud-check-fill text-success me-2"></i> Offline Library</button>
+                  <button class="btn btn-danger fw-bold px-4 py-2 rounded-pill" onclick="window.loadView({ type: 'rhythm_game', param: '', sort: '', filter_user_id: '' })"><i class="bi bi-controller me-2"></i> Rhythm Game</button>
+                </div>
+              </div>
+            `;
             allContentloaded = true;
             hideLoader();
             return;
@@ -74371,30 +74565,70 @@ SOFTWARE.</div>
                   break;
                 }
                 contentArea.innerHTML = `
-                        <div class="rg-app">
-                          <div id="rg-screen-hub" class="rg-screen">
-                            <div class="rg-tab-container">
-                              <div id="rg-tab-songs" class="rg-tab-content">
-                                <div class="rg-search-bar" style="display: flex; gap: 8px;">
-                                  <input type="text" id="rg-search-songs" class="rg-search-input" placeholder="Search tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
-                                  <select id="rg-sort-songs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
-                                    <option value="random">Random</option>
-                                    <option value="trending">Trending</option>
-                                    <option value="id_desc">Newest</option>
-                                    <option value="title_asc">Title (A-Z)</option>
-                                    <option value="artist_asc">Artist (A-Z)</option>
-                                  </select>
-                                </div>
-                                <div class="rg-list-container" id="rg-list-songs">
-                                  <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
-                                    <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
-                                  </div>
-                                </div>
+                  <div class="rg-app">
+                    <div id="rg-screen-hub" class="rg-screen">
+                      <div class="rg-tab-container">
+                        <div id="rg-tab-songs" class="rg-tab-content">
+                          <div class="rg-search-bar" style="display: flex; gap: 8px;">
+                            <input type="text" id="rg-search-songs" class="rg-search-input" placeholder="Search tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                            <select id="rg-sort-songs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                              <option value="random">Random</option>
+                              <option value="trending">Trending</option>
+                              <option value="id_desc">Newest</option>
+                              <option value="title_asc">Title (A-Z)</option>
+                              <option value="artist_asc">Artist (A-Z)</option>
+                            </select>
+                          </div>
+                          <div class="rg-list-container" id="rg-list-songs">
+                            <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 250px; width: 100%;">
+                              <div class="spinner-border text-danger" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
+                            </div>
+                          </div>
+                        </div>
+                        <div id="rg-tab-favorites" class="rg-tab-content rg-hidden">
+                          <div class="rg-search-bar" style="display: flex; gap: 8px;">
+                            <input type="text" id="rg-search-favs" class="rg-search-input" placeholder="Search favorites..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                            <select id="rg-sort-favs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                              <option value="manual_order">My Order</option>
+                              <option value="random">Random</option>
+                              <option value="trending">Trending</option>
+                              <option value="id_desc">Newest</option>
+                              <option value="title_asc">Title (A-Z)</option>
+                              <option value="artist_asc">Artist (A-Z)</option>
+                            </select>
+                          </div>
+                          <div class="rg-list-container" id="rg-list-favs"></div>
+                        </div>
+                        <div id="rg-tab-leaderboard" class="rg-tab-content rg-hidden">
+                          <div class="rg-list-container" id="rg-list-leaderboard"></div>
+                        </div>
+                        <!-- Artist Detail Profile Page (Keeps bottom bar active) -->
+                        <div id="rg-tab-artist-detail" class="rg-tab-content rg-hidden">
+                          <div class="rg-artist-layout modern-custom-scroll">
+                            <!-- Left Sidebar: Profile Header, Tabs & Active Left Panes -->
+                            <div class="rg-artist-left">
+                              <!-- Profile Header (Populated dynamically) -->
+                              <div id="rg-artist-detail-header" class="p-3 rounded-4" style="background: linear-gradient(135deg, rgba(255,59,48,0.15) 0%, rgba(0,0,0,0.4) 100%); border: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 16px;"></div>
+
+                              <!-- Sub Navigation Tabs -->
+                              <ul class="nav nav-tabs border-secondary border-0 d-flex gap-2 w-100" id="rg-artist-detail-tabs" style="margin-bottom: 8px; flex-wrap: nowrap !important; overflow-x: auto !important; flex-shrink: 0 !important; scrollbar-width: none; max-width: 100%;">
+                                <li class="nav-item"><button class="nav-link active" id="rg-art-tab-tracks" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Tracks</button></li>
+                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-history" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">History</button></li>
+                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-playlists" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Playlists</button></li>
+                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-favs" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Favorites</button></li>
+                                <li class="nav-item"><button class="nav-link" id="rg-art-tab-following" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Following</button></li>
+                              </ul>
+
+                              <!-- History Pane -->
+                              <div id="rg-art-pane-history" class="d-none flex-column gap-2 w-100">
+                                <div id="rg-list-artist-history" class="d-flex flex-column gap-3"></div>
                               </div>
-                              <div id="rg-tab-favorites" class="rg-tab-content rg-hidden">
-                                <div class="rg-search-bar" style="display: flex; gap: 8px;">
-                                  <input type="text" id="rg-search-favs" class="rg-search-input" placeholder="Search favorites..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
-                                  <select id="rg-sort-favs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+
+                              <!-- Favorites Pane -->
+                              <div id="rg-art-pane-favs" class="d-none flex-column gap-2 w-100">
+                                <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
+                                  <input type="text" id="rg-search-artist-favs" class="rg-search-input" placeholder="Search favorites..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                                  <select id="rg-sort-artist-favs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
                                     <option value="manual_order">My Order</option>
                                     <option value="random">Random</option>
                                     <option value="trending">Trending</option>
@@ -74403,96 +74637,14 @@ SOFTWARE.</div>
                                     <option value="artist_asc">Artist (A-Z)</option>
                                   </select>
                                 </div>
-                                <div class="rg-list-container" id="rg-list-favs"></div>
+                                <div id="rg-list-artist-favs" class="d-flex flex-column gap-2"></div>
                               </div>
-                              <div id="rg-tab-leaderboard" class="rg-tab-content rg-hidden">
-                                <div class="rg-list-container" id="rg-list-leaderboard"></div>
-                              </div>
-                              <!-- Artist Detail Profile Page (Keeps bottom bar active) -->
-                              <div id="rg-tab-artist-detail" class="rg-tab-content rg-hidden">
-                                <div class="rg-artist-layout modern-custom-scroll">
-                                  <!-- Left Sidebar: Profile Header, Tabs & Active Left Panes -->
-                                  <div class="rg-artist-left">
-                                    <!-- Profile Header (Populated dynamically) -->
-                                    <div id="rg-artist-detail-header" class="p-3 rounded-4" style="background: linear-gradient(135deg, rgba(255,59,48,0.15) 0%, rgba(0,0,0,0.4) 100%); border: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 16px;"></div>
-    
-                                    <!-- Sub Navigation Tabs -->
-                                    <ul class="nav nav-tabs border-secondary border-0 d-flex gap-2 w-100" id="rg-artist-detail-tabs" style="margin-bottom: 8px; flex-wrap: nowrap !important; overflow-x: auto !important; flex-shrink: 0 !important; scrollbar-width: none; max-width: 100%;">
-                                      <li class="nav-item"><button class="nav-link active" id="rg-art-tab-tracks" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Tracks</button></li>
-                                      <li class="nav-item"><button class="nav-link" id="rg-art-tab-history" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">History</button></li>
-                                      <li class="nav-item"><button class="nav-link" id="rg-art-tab-playlists" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Playlists</button></li>
-                                      <li class="nav-item"><button class="nav-link" id="rg-art-tab-favs" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Favorites</button></li>
-                                      <li class="nav-item"><button class="nav-link" id="rg-art-tab-following" style="font-size: 0.9rem; padding: 6px 16px; border-radius: 8px !important; white-space: nowrap;">Following</button></li>
-                                    </ul>
-    
-                                    <!-- History Pane -->
-                                    <div id="rg-art-pane-history" class="d-none flex-column gap-2 w-100">
-                                      <div id="rg-list-artist-history" class="d-flex flex-column gap-3"></div>
-                                    </div>
-    
-                                    <!-- Favorites Pane -->
-                                    <div id="rg-art-pane-favs" class="d-none flex-column gap-2 w-100">
-                                      <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
-                                        <input type="text" id="rg-search-artist-favs" class="rg-search-input" placeholder="Search favorites..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
-                                        <select id="rg-sort-artist-favs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
-                                          <option value="manual_order">My Order</option>
-                                          <option value="random">Random</option>
-                                          <option value="trending">Trending</option>
-                                          <option value="id_desc">Newest</option>
-                                          <option value="title_asc">Title (A-Z)</option>
-                                          <option value="artist_asc">Artist (A-Z)</option>
-                                        </select>
-                                      </div>
-                                      <div id="rg-list-artist-favs" class="d-flex flex-column gap-2"></div>
-                                    </div>
-    
-                                    <!-- Following Pane -->
-                                    <div id="rg-art-pane-following" class="d-none flex-column gap-2 w-100">
-                                      <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
-                                        <input type="text" id="rg-search-artist-following" class="rg-search-input" placeholder="Search following..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
-                                        <select id="rg-sort-artist-following" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
-                                          <option value="name_asc">Name (A-Z)</option>
-                                          <option value="name_desc">Name (Z-A)</option>
-                                          <option value="count_desc">Most Tracks</option>
-                                          <option value="followers_desc">Most Followers</option>
-                                          <option value="score_desc">Most Scores</option>
-                                          <option value="rank_desc">Most Ranks</option>
-                                          <option value="random">Random</option>
-                                        </select>
-                                      </div>
-                                      <div id="rg-list-artist-following" class="d-flex flex-column gap-2"></div>
-                                    </div>
-    
-                                    <!-- Playlists Pane -->
-                                    <div id="rg-art-pane-playlists" class="d-none flex-column gap-2 w-100">
-                                      <div id="rg-list-artist-playlists" class="d-flex flex-column gap-2 overflow-auto modern-custom-scroll" style="flex-grow: 1; min-height: 0; padding-right: 4px;"></div>
-                                    </div>
-                                  </div>
-    
-                                  <!-- Right Sidebar: Tracks Pane -->
-                                  <div class="rg-artist-right">
-                                    <!-- Tracks Pane -->
-                                    <div id="rg-art-pane-tracks" class="d-flex flex-column gap-2 w-100">
-                                      <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
-                                        <input type="text" id="rg-search-artist-songs" class="rg-search-input" placeholder="Search tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
-                                        <select id="rg-sort-artist-songs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
-                                          <option value="random">Random</option>
-                                          <option value="trending">Trending</option>
-                                          <option value="id_desc">Newest</option>
-                                          <option value="title_asc">Title (A-Z)</option>
-                                          <option value="album_asc">Album (A-Z)</option>
-                                        </select>
-                                      </div>
-                                      <div id="rg-list-artist-songs" class="d-flex flex-column gap-2"></div>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                              <!-- Artists Tab List -->
-                              <div id="rg-tab-artists" class="rg-tab-content rg-hidden">
-                                <div class="rg-search-bar" style="display: flex; gap: 8px;">
-                                  <input type="text" id="rg-search-artists" class="rg-search-input" placeholder="Search artists..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
-                                  <select id="rg-sort-artists" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+
+                              <!-- Following Pane -->
+                              <div id="rg-art-pane-following" class="d-none flex-column gap-2 w-100">
+                                <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
+                                  <input type="text" id="rg-search-artist-following" class="rg-search-input" placeholder="Search following..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                                  <select id="rg-sort-artist-following" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
                                     <option value="name_asc">Name (A-Z)</option>
                                     <option value="name_desc">Name (Z-A)</option>
                                     <option value="count_desc">Most Tracks</option>
@@ -74502,362 +74654,404 @@ SOFTWARE.</div>
                                     <option value="random">Random</option>
                                   </select>
                                 </div>
-                                <div class="rg-list-container" id="rg-list-artists"></div>
+                                <div id="rg-list-artist-following" class="d-flex flex-column gap-2"></div>
                               </div>
-    
-                              <div id="rg-tab-settings" class="rg-tab-content rg-hidden">
-                                <div class="modern-custom-scroll" style="flex: 1; overflow-y: auto; padding: 24px 16px;">
-                                  <div style="max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; width: 100%;">
-                                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; padding-bottom: 12px; border-bottom: 2px solid rgba(255,255,255,0.1);">
-                                      <div style="display: flex; align-items: center; gap: 12px;">
-                                        <i class="bi bi-sliders" style="font-size: 1.8rem; color: #fff;"></i>
-                                        <h2 style="color: #fff; font-weight: 800; text-transform: uppercase; font-size: 1.6rem; margin: 0; letter-spacing: 1px;">Settings</h2>
-                                      </div>
-                                      <button class="btn btn-outline-light rounded-pill fw-bold d-flex align-items-center gap-2 share-view-btn" data-share-type="game" data-share-name="PHP Music Rhythm Game" data-image-url="?action=get_app_icon&size=512" style="font-size: 0.85rem;">
-                                        <i class="bi bi-share-fill"></i> Share
-                                      </button>
-                                    </div>
-    
-                                    <!-- Keybindings Card -->
-                                    <div style="background-color: #1a1a1a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 24px; margin-bottom: 20px;">
-                                      <div style="font-size: 0.95rem; font-weight: 700; color: #fff; text-transform: uppercase; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; letter-spacing: 1px;"><i class="bi bi-keyboard fs-5 text-secondary"></i> Lane Keybindings</div>
-                                      <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px;">
-                                        <button class="rg-key-btn" data-lane="0">A</button>
-                                        <button class="rg-key-btn" data-lane="1">S</button>
-                                        <button class="rg-key-btn" data-lane="2">D</button>
-                                        <button class="rg-key-btn" data-lane="3">F</button>
-                                        <button class="rg-key-btn" data-lane="4">G</button>
-                                        <button class="rg-key-btn" data-lane="5">H</button>
-                                        <button class="rg-key-btn" data-lane="6">J</button>
-                                        <button class="rg-key-btn" data-lane="7">K</button>
-                                        <button class="rg-key-btn" data-lane="8">L</button>
-                                        <button class="rg-key-btn" data-lane="9">;</button>
-                                      </div>
-                                      <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: 16px; gap: 16px; flex-wrap: wrap;">
-                                        <div style="font-size: 0.8rem; color: #888; font-weight: 500;"><i class="bi bi-info-circle me-1"></i>Tap a key to rebind. Easy/Med uses 4 keys (D,F,J,K), Hard-Master uses 6 keys (S,D,F,J,K,L), Demon uses all 10 lanes!</div>
-                                        <button class="btn btn-info text-dark rounded-pill fw-bold d-flex align-items-center gap-2 flex-shrink-0" data-bs-toggle="modal" data-bs-target="#rg-how-to-play-modal" style="font-size: 0.85rem;">
-                                          <i class="bi bi-info-circle-fill"></i> How to Play
-                                        </button>
-                                      </div>
-                                    </div>
-    
-                                    <!-- Gameplay Sliders Card -->
-                                    <div style="background-color: #1a1a1a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 24px; margin-bottom: 20px;">
-                                      <div style="font-size: 0.95rem; font-weight: 700; color: #fff; text-transform: uppercase; margin-bottom: 28px; display: flex; align-items: center; gap: 8px; letter-spacing: 1px;"><i class="bi bi-sliders fs-5 text-secondary"></i> Gameplay Options</div>
-    
-                                      <div style="margin-bottom: 28px;">
-                                        <div style="font-size: 0.85rem; font-weight: 700; color: #ccc; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 12px;">
-                                          <span>Audio Latency Offset</span>
-                                          <span id="rg-offset-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">0ms</span>
-                                        </div>
-                                        <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
-                                          <button type="button" id="rg-offset-minus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">-</button>
-                                          <input type="range" id="rg-offset-slider" min="-250" max="250" value="0" step="5" style="flex-grow: 1; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
-                                          <button type="button" id="rg-offset-plus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">+</button>
-                                        </div>
-                                      </div>
-    
-                                      <div style="margin-bottom: 28px;">
-                                        <div style="font-size: 0.85rem; font-weight: 700; color: #ccc; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 12px;">
-                                          <span>Note Speed (Tick)</span>
-                                          <span id="rg-speed-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">1.0x</span>
-                                        </div>
-                                        <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
-                                          <button type="button" id="rg-speed-minus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">-</button>
-                                          <input type="range" id="rg-speed-slider" min="0.5" max="20" value="1.0" step="0.1" style="flex-grow: 1; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
-                                          <button type="button" id="rg-speed-plus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">+</button>
-                                        </div>
-                                      </div>
-    
-                                      <div>
-                                        <div style="font-size: 0.85rem; font-weight: 700; color: #ccc; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 12px;">
-                                          <span>Hit SFX Volume</span>
-                                          <span id="rg-sfx-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">30%</span>
-                                        </div>
-                                        <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
-                                          <button type="button" id="rg-sfx-minus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">-</button>
-                                          <input type="range" id="rg-sfx-slider" min="0" max="1" value="0.3" step="0.05" style="flex-grow: 1; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
-                                          <button type="button" id="rg-sfx-plus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">+</button>
-                                        </div>
-                                      </div>
-    
-                                      <div style="display: flex; justify-content: flex-end; margin-top: 24px; padding-top: 24px; border-top: 1px solid rgba(255,255,255,0.1);">
-                                        <button id="rg-btn-reset-options" class="btn btn-outline-danger btn-sm rounded-pill fw-bold px-3 py-1"><i class="bi bi-arrow-counterclockwise"></i> Reset Options</button>
-                                      </div>
-                                    </div>
-    
-                                    <!-- Calibration Card -->
-                                    <div style="background-color: #1a1a1a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 24px;">
-                                      <div style="font-size: 0.95rem; font-weight: 700; color: #fff; text-transform: uppercase; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; letter-spacing: 1px;">
-                                        <div style="display: flex; align-items: center; gap: 8px;"><i class="bi bi-crosshair fs-5 text-secondary"></i> Calibration Tool</div>
-                                        <button id="rg-btn-cal-test" style="background: var(--rg-primary); color: #fff; border: none; border-radius: 4px; padding: 6px 16px; font-weight: 700; font-size: 0.8rem; text-transform: uppercase; transition: opacity 0.2s; cursor: pointer;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">Start Test</button>
-                                      </div>
-                                      <div style="position: relative; width: 100%; height: 160px; border-radius: 8px; overflow: hidden; display: none; margin-bottom: 16px; border: 1px solid #333;" id="rg-cal-test-area">
-                                        <canvas id="rg-cal-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #0a0a0a;"></canvas>
-                                        <div id="rg-cal-feedback" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: 'Roboto', sans-serif; font-weight: 900; font-size: 1.2rem; color: #fff; pointer-events: none; white-space: nowrap; transition: transform 0.05s ease-out;">Tap Key to Calibrate</div>
-                                      </div>
-                                      <div style="font-size: 0.8rem; color: #888; font-weight: 500; line-height: 1.5;"><i class="bi bi-info-circle me-1"></i>Test your latency offset and note speed in real-time. Hit your bound keys as the falling lines cross the red target!</div>
-                                    </div>
-                                  </div>
-                                </div>
+
+                              <!-- Playlists Pane -->
+                              <div id="rg-art-pane-playlists" class="d-none flex-column gap-2 w-100">
+                                <div id="rg-list-artist-playlists" class="d-flex flex-column gap-2 overflow-auto modern-custom-scroll" style="flex-grow: 1; min-height: 0; padding-right: 4px;"></div>
                               </div>
-    
-                              <div id="rg-tab-offline" class="rg-tab-content rg-hidden">
-                                <div class="rg-search-bar" style="display: flex; gap: 8px;">
-                                  <input type="text" id="rg-search-offline" class="rg-search-input" placeholder="Search offline tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
-                                  <select id="rg-sort-offline" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
-                                    <option value="manual_order">My Order</option>
+                            </div>
+
+                            <!-- Right Sidebar: Tracks Pane -->
+                            <div class="rg-artist-right">
+                              <!-- Tracks Pane -->
+                              <div id="rg-art-pane-tracks" class="d-flex flex-column gap-2 w-100">
+                                <div class="rg-search-bar p-0 mb-2" style="display: flex; gap: 8px;">
+                                  <input type="text" id="rg-search-artist-songs" class="rg-search-input" placeholder="Search tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                                  <select id="rg-sort-artist-songs" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
                                     <option value="random">Random</option>
                                     <option value="trending">Trending</option>
-                                    <option value="added_newest">Newest</option>
+                                    <option value="id_desc">Newest</option>
                                     <option value="title_asc">Title (A-Z)</option>
-                                    <option value="artist_asc">Artist (A-Z)</option>
+                                    <option value="album_asc">Album (A-Z)</option>
                                   </select>
                                 </div>
-                                <div class="rg-list-container" id="rg-list-offline"></div>
-                              </div>
-                            </div>
-                            <div class="rg-bottom-nav">
-                              <div class="rg-nav-item active" data-target="songs"><i class="bi bi-music-note-list fs-4"></i><div class="rg-nav-label">Songs</div></div>
-                              <div class="rg-nav-item" data-target="artists"><i class="bi bi-people-fill fs-4"></i><div class="rg-nav-label">Artists</div></div>
-                              <div class="rg-nav-item" data-target="favorites"><i class="bi bi-heart-fill fs-4"></i><div class="rg-nav-label">Favorites</div></div>
-                              <div class="rg-nav-item" data-target="leaderboard"><i class="bi bi-trophy-fill fs-4"></i><div class="rg-nav-label">Ranks</div></div>
-                              <div class="rg-nav-item" id="rg-nav-my-profile"><i class="bi bi-person-fill fs-4"></i><div class="rg-nav-label">Profile</div></div>
-                              <div class="rg-nav-item" data-target="offline"><i class="bi bi-cloud-check-fill fs-4"></i><div class="rg-nav-label">Offline</div></div>
-                              <div class="rg-nav-item" data-target="settings"><i class="bi bi-sliders fs-4"></i><div class="rg-nav-label">Settings</div></div>
-                            </div>
-                          </div>
-    
-                          <div id="rg-dialog-play" class="rg-screen rg-hidden" style="z-index: 55; background-color: rgba(0,0,0,0.85); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); display: flex;">
-    
-                            <div class="rg-play-menu-container">
-                              <!-- LEFT COLUMN: Track Details & Controls -->
-                              <div class="rg-play-menu-left d-flex flex-column align-items-center text-center modern-custom-scroll">
-    
-                                <img id="rg-dialog-cover" src="" style="width: 240px; height: 240px; object-fit: cover; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 12px 32px rgba(0,0,0,0.6); margin-bottom: 24px; flex-shrink: 0; margin-top: auto;">
-    
-                                <div class="rg-dialog-title w-100 text-truncate" id="rg-dialog-song-name" style="margin-bottom: 4px; font-size: 2.2rem; font-weight: 800; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,0.6);">Song Name</div>
-                                <div class="w-100 text-truncate fw-bold" id="rg-dialog-song-artist" style="margin-bottom: 24px; font-size: 1.1rem; color: #a1a1aa; text-shadow: 0 1px 4px rgba(0,0,0,0.5);">Artist Name</div>
-    
-                                <!-- Share and Favorite Controls -->
-                                <div class="d-flex gap-3 mb-4" style="width: 100%; max-width: 400px; margin: 0 auto;">
-                                  <button type="button" class="btn btn-outline-light flex-grow-1 fw-bold py-2 rounded-pill d-flex align-items-center justify-content-center gap-2" id="rg-dialog-fav-btn" style="font-size: 0.95rem; border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.05); color: #fff; transition: all 0.2s;">
-                                    <i class="bi bi-heart" id="rg-dialog-fav-icon"></i> <span id="rg-dialog-fav-text">Favorite</span>
-                                  </button>
-                                  <button type="button" class="btn btn-outline-light flex-grow-1 fw-bold py-2 rounded-pill d-flex align-items-center justify-content-center gap-2" id="rg-dialog-share-btn" style="font-size: 0.95rem; border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.05); color: #fff; transition: all 0.2s;">
-                                    <i class="bi bi-share-fill"></i> <span>Share</span>
-                                  </button>
-                                </div>
-    
-                                <div style="width: 100%; max-width: 400px; margin: 0 auto; background: rgba(0,0,0,0.4); padding: 20px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 8px 24px rgba(0,0,0,0.3);">
-                                  <div style="font-size: 0.8rem; font-weight: 800; color: #888; margin-bottom: 16px; text-align: left; text-transform: uppercase; letter-spacing: 1px;">Select Difficulty</div>
-                                  <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">
-                                    <button class="rg-diff-btn active" data-diff="easy"><div class="rg-diff-btn-inner">EASY <span class="lvl">LV.--</span></div></button>
-                                    <button class="rg-diff-btn" data-diff="medium"><div class="rg-diff-btn-inner">NORMAL <span class="lvl">LV.--</span></div></button>
-                                    <button class="rg-diff-btn" data-diff="hard"><div class="rg-diff-btn-inner">HARD <span class="lvl">LV.--</span></div></button>
-                                    <button class="rg-diff-btn" data-diff="expert"><div class="rg-diff-btn-inner">EXPERT <span class="lvl">LV.--</span></div></button>
-                                    <button class="rg-diff-btn" data-diff="master"><div class="rg-diff-btn-inner">MASTER <span class="lvl">LV.--</span></div></button>
-                                    <button class="rg-diff-btn" data-diff="demon"><div class="rg-diff-btn-inner">DEMON <span class="lvl">LV.--</span></div></button>
-                                  </div>
-    
-                                  <div id="rg-demon-warning" class="rounded-3 text-center" style="background-color: rgba(255, 59, 48, 0.15); border-color: #ff3b30; border-style: solid; max-height: 0; opacity: 0; margin-top: 0; padding: 0 0.5rem; overflow: hidden; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border-width: 0;">
-                                    <i class="bi bi-phone-landscape text-danger fs-4 d-block mb-1 mt-1"></i>
-                                    <span class="text-danger fw-bold" style="font-size: 0.8rem; display: block; padding-bottom: 8px;">Demon mode uses 10 lanes!<br>Rotate device to landscape or use a desktop.</span>
-                                  </div>
-                                </div>
-    
-                                <div style="width: 100%; max-width: 400px; margin: 16px auto 0 auto; display: flex; align-items: center; justify-content: space-between; background: rgba(0,0,0,0.4); padding: 12px 20px; border-radius: 100px; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
-                                  <div class="text-start" style="min-width: 0;">
-                                    <div style="font-size: 0.95rem; font-weight: 800; color: #fff;">Autoplay (Bot Mode)</div>
-                                    <div style="font-size: 0.75rem; color: #aaa; font-weight: 500;">Watch the bot play perfectly.</div>
-                                  </div>
-                                  <div class="form-check form-switch m-0 fs-4">
-                                    <input class="form-check-input" type="checkbox" id="rg-autoplay-toggle" style="cursor: pointer; accent-color: var(--ytm-accent); border-color: rgba(255,255,255,0.2);">
-                                  </div>
-                                </div>
-    
-                                <div style="width: 100%; max-width: 400px; margin: 16px auto 0 auto;">
-                                  <button id="rg-btn-view-chart" class="btn btn-outline-light w-100 fw-bold rounded-pill" style="font-size: 0.9rem; border-color: rgba(255,255,255,0.15);"><i class="bi bi-map me-1"></i> View Chart Map</button>
-                                </div>
-    
-                                <div style="display: flex; justify-content: center; align-items: center; gap: 16px; margin-top: 36px; margin-bottom: auto; width: 100%; max-width: 400px;">
-                                  <button class="btn btn-outline-secondary fw-bold rounded-pill" id="rg-btn-dialog-cancel" style="font-size: 1.1rem; width: 120px; border-color: rgba(255,255,255,0.1); color: #ccc;">Cancel</button>
-                                  <button class="btn btn-danger flex-grow-1 fw-bold fs-5 shadow-lg rounded-pill" id="rg-btn-dialog-play" style="padding: 10px;">Play</button>
-                                </div>
-                              </div>
-    
-                              <!-- RIGHT COLUMN: Leaderboard -->
-                              <div class="rg-play-menu-right">
-                                <div class="d-flex flex-column h-100 overflow-hidden w-100 rg-play-menu-right-inner">
-                                  <div class="p-3 border-bottom border-secondary d-flex align-items-center gap-2 flex-shrink-0" style="background-color: rgba(0, 0, 0, 0.25);">
-                                    <i class="bi bi-trophy-fill text-warning fs-5"></i>
-                                    <h5 class="m-0 text-white fw-bold text-uppercase" style="font-size: 1rem; letter-spacing: 1px;">Top Scores</h5>
-                                  </div>
-                                  <div id="rg-song-leaderboard" class="overflow-auto flex-grow-1 p-3 modern-custom-scroll">
-                                    <div class="text-center text-secondary small py-4">Loading scores...</div>
-                                  </div>
-                                </div>
-                              </div>
-    
-                            </div>
-                          </div>
-    
-                          <div id="rg-screen-loading" class="rg-screen rg-screen-center rg-hidden" style="justify-content: center; background-color: #000;">
-                            <div class="text-center w-100 px-4" style="max-width: 100%;">
-                              <img id="rg-loading-cover" src="" style="width: 250px; height: 250px; object-fit: cover; border-radius: 16px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); margin-bottom: 24px;">
-                              <h2 id="rg-loading-title" class="text-truncate" style="color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); margin: 0 auto 4px auto; font-size: 1.8rem; font-weight: bold; text-align: center; max-width: 100%;">Song Title</h2>
-                              <div id="rg-loading-artist" class="text-truncate text-secondary fw-bold" style="text-shadow: 0 1px 3px rgba(0,0,0,0.8); margin: 0 auto 24px auto; font-size: 1.1rem; text-align: center; max-width: 100%;">Artist Name</div>
-                              <div class="d-flex align-items-center justify-content-center gap-3">
-                                <div class="spinner-border text-danger" style="width: 1.5rem; height: 1.5rem; border-width: 0.2em;"></div>
-                                <div style="font-size: 1.2rem; font-weight: 700; color: var(--rg-primary);" id="rg-loading-text">Downloading 0%</div>
-                              </div>
-                            </div>
-                          </div>
-    
-                          <div id="rg-screen-game" class="rg-screen rg-hidden" style="background-color: #000;">
-                            <canvas id="rg-game-canvas" style="position:absolute; top:0; left:0; width:100%; height:100%; z-index:1;"></canvas>
-                            <div id="rg-touch-layer" style="position:absolute; top:0; left:0; width:100%; height:100%; z-index:30; touch-action:none;"></div>
-                            <!-- Z-index 40 ensures the HUD buttons are clickable above the touch layer -->
-                            <div class="rg-hud" style="justify-content: center; position: relative; z-index: 40;">
-                              <div style="display:flex; flex-direction:column; align-items:center; text-align: center; width: 100%; max-width: 210px; margin: 0 auto;">
-                                <div class="rg-hud-title text-truncate" id="rg-in-game-title" style="max-width: 140px;">Title</div>
-    
-                                <!-- In-Game Score Progress Bar & Rank -->
-                                <div class="w-100 d-flex align-items-center gap-2 mb-1 mt-1" style="padding: 0 6px;">
-                                  <div id="rg-in-game-rank" style="font-size: 1.3rem; font-weight: 900; font-family: 'Arial Black', sans-serif; color: #7f1d1d; min-width: 28px; text-align: left; text-shadow: 0 0 8px currentColor; line-height: 1;">F</div>
-                                  <div class="flex-grow-1" style="min-width: 0;">
-                                    <div class="d-flex justify-content-between align-items-baseline" style="font-size: 0.6rem; color: #888; font-weight: bold; letter-spacing: 0.5px;">
-                                      <span>SCORE</span>
-                                      <span id="rg-in-game-score" style="font-family: monospace; font-size: 0.85rem; color: #fff;">000000000</span>
-                                    </div>
-                                    <div style="width: 100%; height: 4px; background-color: #222; border-radius: 2px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05);">
-                                      <div id="rg-in-game-score-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #ff3b30, #ff9500); border-radius: 2px; transition: width 0.1s linear;"></div>
-                                    </div>
-                                  </div>
-                                </div>
-    
-                                <div class="rg-combo-box">
-                                  <div class="rg-combo-number" id="rg-in-game-combo">0</div>
-                                  <div class="rg-combo-text" id="rg-in-game-combo-lbl">COMBO</div>
-                                  <div id="rg-in-game-rating" style="font-size: 1.4rem; font-weight: 900; margin-top: 6px; text-transform: uppercase; min-height: 24px; transition: transform 0.05s ease-out; text-shadow: 0 2px 4px rgba(0,0,0,0.5);"></div>
-                                </div>
-                              </div>
-                              <div class="rg-hud-actions" style="position: absolute; right: 16px; top: 16px; display: flex; flex-direction: column; align-items: flex-end; gap: 6px;">
-                                <button class="rg-quit-btn" id="rg-btn-quit-game" style="padding: 0; width: 44px; height: 44px; border-radius: 50%; font-size: 1.5rem; display: flex; align-items: center; justify-content: center;"><i class="bi bi-pause-fill"></i></button>
-                                <div style="width: 80px; height: 6px; background-color: #222; border-radius: 3px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); margin-top: 2px;">
-                                  <div id="rg-in-game-hp" style="width: 100%; height: 100%; background-color: #27c93f; transition: width 0.1s, background-color: 0.1s;"></div>
-                                </div>
-                                <div id="rg-in-game-accuracy" style="font-family: monospace; font-size: 0.8rem; font-weight: bold; color: #aaa; text-shadow: 0 1px 2px rgba(0,0,0,0.8); line-height: 1;">100.00%</div>
-                                <div id="rg-in-game-fps" style="font-family: monospace; font-size: 0.7rem; font-weight: bold; color: #888; text-shadow: 0 1px 2px rgba(0,0,0,0.8); line-height: 1; margin-top: 4px;">-- FPS</div>
-                                <div id="rg-in-game-autoplay" style="font-size: 0.65rem; font-weight: 800; color: #00bcd4; text-transform: uppercase; margin-top: 2px; text-shadow: 0 0 6px rgba(0,188,212,0.4); display: none;">Autoplay</div>
-                              </div>
-                            </div>
-                          </div>
-    
-                          <div id="rg-dialog-chart-modal" class="rg-dialog-backdrop rg-hidden" style="z-index: 60;">
-                            <div class="rg-dialog-surface text-center" style="max-width: 95%; width: 100%; max-width: 600px; max-height: 80vh; padding: 0; overflow: hidden; gap: 0;">
-                              <div style="padding: 16px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: var(--rg-surface-variant); flex-shrink: 0;">
-                                <h5 class="text-white m-0 fw-bold" style="font-size: 1.1rem;"><i class="bi bi-map text-danger me-2"></i> Chart Map</h5>
-                                <button class="btn-close btn-close-white" id="rg-btn-close-chart"></button>
-                              </div>
-                              <div id="rg-chart-modal-content" style="overflow-y: auto; overflow-x: auto; background: #000; padding: 16px; flex-grow: 1;">
-                                <!-- SVG injected here -->
-                              </div>
-                              <div style="padding: 16px; border-top: 1px solid #333; background: var(--rg-surface-variant); flex-shrink: 0;">
-                                <button id="rg-btn-dl-chart" class="btn btn-info w-100 fw-bold text-dark rounded-pill"><i class="bi bi-download me-1"></i> Download SVG</button>
-                              </div>
-                            </div>
-                          </div>
-    
-                          <div id="rg-dialog-pause" class="rg-dialog-backdrop rg-hidden" style="z-index: 50;">
-                            <div class="rg-dialog-surface text-center">
-                              <h3 class="text-white fw-bold mb-1">Game Paused</h3>
-                              <div class="text-secondary small fw-bold text-uppercase mb-4">Difficulty: <span id="rg-pause-diff-display" class="text-danger">Medium</span></div>
-                              <div class="d-flex flex-column gap-3 w-100">
-                                <button class="rg-primary-btn" id="rg-btn-resume" style="background-color: #ff3b30; color: #ffffff; border-radius: 12px; border: none; padding: 16px; box-shadow: 0 4px 12px rgba(255, 59, 48, 0.4);">Resume</button>
-                                <button class="rg-primary-btn" id="rg-btn-retry-pause" style="background-color: #8e1c1c; color: #ffffff; border-radius: 12px; border: none; padding: 16px;">Retry</button>
-                                <button class="rg-primary-btn" id="rg-btn-quit" style="background-color: #4a0000; color: #ffffff; border-radius: 12px; border: none; padding: 16px;">Quit to Menu</button>
-                              </div>
-                            </div>
-                          </div>
-    
-                          <div id="rg-screen-result" class="rg-screen rg-hidden" style="background-color: transparent; overflow-y: auto; overflow-x: hidden; display: block; width: 100%; max-width: 100%; box-sizing: border-box;">
-                            <div style="width: 100%; max-width: 600px; margin: 0 auto; padding: 48px 16px 120px 16px; position: relative; z-index: 1; box-sizing: border-box; overflow-x: hidden;">
-                              <h2 style="text-align: center; color: var(--rg-primary); margin-bottom: 24px; text-transform: uppercase; font-weight: 900; font-size: 2.2rem; letter-spacing: 2px; text-shadow: 0 4px 12px rgba(0,0,0,0.5);">Stage Cleared</h2>
-    
-                              <!-- Rank & Accuracy Card -->
-                              <div class="p-3 mb-4 d-flex align-items-center justify-content-between rounded-4" style="background: linear-gradient(135deg, rgba(255,59,48,0.15), rgba(0,0,0,0.4)); border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 8px 32px rgba(0,0,0,0.3);">
-                                <div class="d-flex flex-column text-start">
-                                  <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px;">Accuracy</span>
-                                  <span id="rg-res-acc" style="font-size: 2.2rem; font-weight: 900; font-family: monospace; color: #fff; line-height: 1.1;">100.00%</span>
-                                </div>
-                                <div class="d-flex flex-column align-items-end text-end">
-                                  <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px;">Rank</span>
-                                  <span id="rg-res-rank" style="font-size: 3.5rem; font-weight: 900; line-height: 0.8; font-family: 'Arial Black', sans-serif; text-shadow: 0 0 15px currentColor; transition: color 0.3s;">SS</span>
-                                </div>
-                              </div>
-    
-                              <!-- Score Progress Bar Container -->
-                              <div class="p-3 mb-4 rounded-4" style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); box-shadow: 0 4px 16px rgba(0,0,0,0.2);">
-                                <div class="d-flex justify-content-between align-items-end mb-2">
-                                  <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px;">Total Score</span>
-                                  <span id="rg-res-score" style="font-size: 1.8rem; font-weight: 900; font-family: monospace; color: var(--rg-primary); line-height: 1;">000,000,000</span>
-                                </div>
-                                <div style="width: 100%; height: 10px; background-color: #111; border-radius: 5px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05);">
-                                  <div id="rg-res-score-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #ff3b30, #ff9500); border-radius: 5px; transition: width 0.8s cubic-bezier(0.1, 0.76, 0.55, 0.94);"></div>
-                                </div>
-                              </div>
-    
-                              <!-- Grid Judgment Stats -->
-                              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 32px;">
-                                <!-- Max Combo (Full Width) -->
-                                <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 12px 18px; border-radius: 12px;">
-                                  <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px;">Max Combo</span>
-                                  <span id="rg-res-max-combo" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff;">0</span>
-                                </div>
-    
-                                <!-- Perfect -->
-                                <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
-                                  <span style="font-size: 0.7rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 0.5px;">Perfect</span>
-                                  <span id="rg-res-perfect" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
-                                </div>
-    
-                                <!-- Great -->
-                                <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
-                                  <span style="font-size: 0.7rem; font-weight: 700; color: #ff3b30; text-transform: uppercase; letter-spacing: 0.5px;">Great</span>
-                                  <span id="rg-res-great" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
-                                </div>
-    
-                                <!-- Good -->
-                                <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
-                                  <span style="font-size: 0.7rem; font-weight: 700; color: #ffa000; text-transform: uppercase; letter-spacing: 0.5px;">Good</span>
-                                  <span id="rg-res-good" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
-                                </div>
-    
-                                <!-- Bad -->
-                                <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
-                                  <span style="font-size: 0.7rem; font-weight: 700; color: #8e1c1c; text-transform: uppercase; letter-spacing: 0.5px;">Bad</span>
-                                  <span id="rg-res-bad" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
-                                </div>
-    
-                                <!-- Miss (Full Width) -->
-                                <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 12px 18px; border-radius: 12px;">
-                                  <span style="font-size: 0.75rem; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: 1px;">Miss</span>
-                                  <span id="rg-res-miss" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff;">0</span>
-                                </div>
-                              </div>
-    
-                              <div style="display: flex; flex-direction: column; gap: 12px; width: 100%;">
-                                <button class="rg-primary-btn" id="rg-btn-result-share" style="width: 100%; background-color: #1DB954; color: #fff; padding: 16px; border-radius: 16px; margin-bottom: 8px;"><i class="bi bi-share-fill"></i> Share Score</button>
-                                <div style="display: flex; gap: 12px; width: 100%; margin-bottom: 1em;">
-                                  <button class="rg-primary-btn" id="rg-btn-result-retry" style="flex: 1; background-color: #4a0000; color: var(--rg-primary); padding: 16px; border-radius: 16px;">Retry</button>
-                                  <button class="rg-primary-btn" id="rg-btn-result-back" style="flex: 1; padding: 16px; border-radius: 16px;">Menu</button>
-                                </div>
+                                <div id="rg-list-artist-songs" class="d-flex flex-column gap-2"></div>
                               </div>
                             </div>
                           </div>
                         </div>
-                      `;
+                        <!-- Artists Tab List -->
+                        <div id="rg-tab-artists" class="rg-tab-content rg-hidden">
+                          <div class="rg-search-bar" style="display: flex; gap: 8px;">
+                            <input type="text" id="rg-search-artists" class="rg-search-input" placeholder="Search artists..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                            <select id="rg-sort-artists" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                              <option value="name_asc">Name (A-Z)</option>
+                              <option value="name_desc">Name (Z-A)</option>
+                              <option value="count_desc">Most Tracks</option>
+                              <option value="followers_desc">Most Followers</option>
+                              <option value="score_desc">Most Scores</option>
+                              <option value="rank_desc">Most Ranks</option>
+                              <option value="random">Random</option>
+                            </select>
+                          </div>
+                          <div class="rg-list-container" id="rg-list-artists"></div>
+                        </div>
+
+                        <div id="rg-tab-settings" class="rg-tab-content rg-hidden">
+                          <div class="modern-custom-scroll" style="flex: 1; overflow-y: auto; padding: 24px 16px;">
+                            <div style="max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; width: 100%;">
+                              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; padding-bottom: 12px; border-bottom: 2px solid rgba(255,255,255,0.1);">
+                                <div style="display: flex; align-items: center; gap: 12px;">
+                                  <i class="bi bi-sliders" style="font-size: 1.8rem; color: #fff;"></i>
+                                  <h2 style="color: #fff; font-weight: 800; text-transform: uppercase; font-size: 1.6rem; margin: 0; letter-spacing: 1px;">Settings</h2>
+                                </div>
+                                <button class="btn btn-outline-light rounded-pill fw-bold d-flex align-items-center gap-2 share-view-btn" data-share-type="game" data-share-name="PHP Music Rhythm Game" data-image-url="?action=get_app_icon&size=512" style="font-size: 0.85rem;">
+                                  <i class="bi bi-share-fill"></i> Share
+                                </button>
+                              </div>
+
+                              <!-- Keybindings Card -->
+                              <div style="background-color: #1a1a1a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 24px; margin-bottom: 20px;">
+                                <div style="font-size: 0.95rem; font-weight: 700; color: #fff; text-transform: uppercase; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; letter-spacing: 1px;"><i class="bi bi-keyboard fs-5 text-secondary"></i> Lane Keybindings</div>
+                                <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px;">
+                                  <button class="rg-key-btn" data-lane="0">A</button>
+                                  <button class="rg-key-btn" data-lane="1">S</button>
+                                  <button class="rg-key-btn" data-lane="2">D</button>
+                                  <button class="rg-key-btn" data-lane="3">F</button>
+                                  <button class="rg-key-btn" data-lane="4">G</button>
+                                  <button class="rg-key-btn" data-lane="5">H</button>
+                                  <button class="rg-key-btn" data-lane="6">J</button>
+                                  <button class="rg-key-btn" data-lane="7">K</button>
+                                  <button class="rg-key-btn" data-lane="8">L</button>
+                                  <button class="rg-key-btn" data-lane="9">;</button>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: 16px; gap: 16px; flex-wrap: wrap;">
+                                  <div style="font-size: 0.8rem; color: #888; font-weight: 500;"><i class="bi bi-info-circle me-1"></i>Tap a key to rebind. Easy/Med uses 4 keys (D,F,J,K), Hard-Master uses 6 keys (S,D,F,J,K,L), Demon uses all 10 lanes!</div>
+                                  <button class="btn btn-info text-dark rounded-pill fw-bold d-flex align-items-center gap-2 flex-shrink-0" data-bs-toggle="modal" data-bs-target="#rg-how-to-play-modal" style="font-size: 0.85rem;">
+                                    <i class="bi bi-info-circle-fill"></i> How to Play
+                                  </button>
+                                </div>
+                              </div>
+
+                              <!-- Gameplay Sliders Card -->
+                              <div style="background-color: #1a1a1a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 24px; margin-bottom: 20px;">
+                                <div style="font-size: 0.95rem; font-weight: 700; color: #fff; text-transform: uppercase; margin-bottom: 28px; display: flex; align-items: center; gap: 8px; letter-spacing: 1px;"><i class="bi bi-sliders fs-5 text-secondary"></i> Gameplay Options</div>
+
+                                <div style="margin-bottom: 28px;">
+                                  <div style="font-size: 0.85rem; font-weight: 700; color: #ccc; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 12px;">
+                                    <span>Audio Latency Offset</span>
+                                    <span id="rg-offset-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">0ms</span>
+                                  </div>
+                                  <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
+                                    <button type="button" id="rg-offset-minus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">-</button>
+                                    <input type="range" id="rg-offset-slider" min="-250" max="250" value="0" step="5" style="flex-grow: 1; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                    <button type="button" id="rg-offset-plus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">+</button>
+                                  </div>
+                                </div>
+
+                                <div style="margin-bottom: 28px;">
+                                  <div style="font-size: 0.85rem; font-weight: 700; color: #ccc; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 12px;">
+                                    <span>Note Speed (Tick)</span>
+                                    <span id="rg-speed-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">1.0x</span>
+                                  </div>
+                                  <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
+                                    <button type="button" id="rg-speed-minus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">-</button>
+                                    <input type="range" id="rg-speed-slider" min="0.5" max="20" value="1.0" step="0.1" style="flex-grow: 1; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                    <button type="button" id="rg-speed-plus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">+</button>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <div style="font-size: 0.85rem; font-weight: 700; color: #ccc; text-transform: uppercase; display: flex; justify-content: space-between; margin-bottom: 12px;">
+                                    <span>Hit SFX Volume</span>
+                                    <span id="rg-sfx-display" style="color: #fff; font-family: monospace; font-size: 1rem; background: #333; padding: 2px 8px; border-radius: 4px;">30%</span>
+                                  </div>
+                                  <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
+                                    <button type="button" id="rg-sfx-minus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">-</button>
+                                    <input type="range" id="rg-sfx-slider" min="0" max="1" value="0.3" step="0.05" style="flex-grow: 1; height: 6px; border-radius: 3px; background: #333; outline: none; -webkit-appearance: none; accent-color: var(--rg-primary);">
+                                    <button type="button" id="rg-sfx-plus" class="btn btn-sm btn-outline-light rounded-circle" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; border-color: rgba(255,255,255,0.2); background: transparent; color: #fff;">+</button>
+                                  </div>
+                                </div>
+
+                                <div style="display: flex; justify-content: flex-end; margin-top: 24px; padding-top: 24px; border-top: 1px solid rgba(255,255,255,0.1);">
+                                  <button id="rg-btn-reset-options" class="btn btn-outline-danger btn-sm rounded-pill fw-bold px-3 py-1"><i class="bi bi-arrow-counterclockwise"></i> Reset Options</button>
+                                </div>
+                              </div>
+
+                              <!-- Calibration Card -->
+                              <div style="background-color: #1a1a1a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 24px;">
+                                <div style="font-size: 0.95rem; font-weight: 700; color: #fff; text-transform: uppercase; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; letter-spacing: 1px;">
+                                  <div style="display: flex; align-items: center; gap: 8px;"><i class="bi bi-crosshair fs-5 text-secondary"></i> Calibration Tool</div>
+                                  <button id="rg-btn-cal-test" style="background: var(--rg-primary); color: #fff; border: none; border-radius: 4px; padding: 6px 16px; font-weight: 700; font-size: 0.8rem; text-transform: uppercase; transition: opacity 0.2s; cursor: pointer;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">Start Test</button>
+                                </div>
+                                <div style="position: relative; width: 100%; height: 160px; border-radius: 8px; overflow: hidden; display: none; margin-bottom: 16px; border: 1px solid #333;" id="rg-cal-test-area">
+                                  <canvas id="rg-cal-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #0a0a0a;"></canvas>
+                                  <div id="rg-cal-feedback" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: 'Roboto', sans-serif; font-weight: 900; font-size: 1.2rem; color: #fff; pointer-events: none; white-space: nowrap; transition: transform 0.05s ease-out;">Tap Key to Calibrate</div>
+                                </div>
+                                <div style="font-size: 0.8rem; color: #888; font-weight: 500; line-height: 1.5;"><i class="bi bi-info-circle me-1"></i>Test your latency offset and note speed in real-time. Hit your bound keys as the falling lines cross the red target!</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div id="rg-tab-offline" class="rg-tab-content rg-hidden">
+                          <div class="rg-search-bar" style="display: flex; gap: 8px;">
+                            <input type="text" id="rg-search-offline" class="rg-search-input" placeholder="Search offline tracks..." style="flex-grow: 1; min-width: 0; padding: 8px 16px; height: 38px; border-radius: 50px;">
+                            <select id="rg-sort-offline" class="rg-search-input" style="width: auto; flex-shrink: 0; padding: 0 32px 0 16px; height: 38px; cursor: pointer; border-radius: 50px;">
+                              <option value="manual_order">My Order</option>
+                              <option value="random">Random</option>
+                              <option value="trending">Trending</option>
+                              <option value="added_newest">Newest</option>
+                              <option value="title_asc">Title (A-Z)</option>
+                              <option value="artist_asc">Artist (A-Z)</option>
+                            </select>
+                          </div>
+                          <div class="rg-list-container" id="rg-list-offline"></div>
+                        </div>
+                      </div>
+                      <div class="rg-bottom-nav">
+                        <div class="rg-nav-item active" data-target="songs"><i class="bi bi-music-note-list fs-4"></i><div class="rg-nav-label">Songs</div></div>
+                        <div class="rg-nav-item" data-target="artists"><i class="bi bi-people-fill fs-4"></i><div class="rg-nav-label">Artists</div></div>
+                        <div class="rg-nav-item" data-target="favorites"><i class="bi bi-heart-fill fs-4"></i><div class="rg-nav-label">Favorites</div></div>
+                        <div class="rg-nav-item" data-target="leaderboard"><i class="bi bi-trophy-fill fs-4"></i><div class="rg-nav-label">Ranks</div></div>
+                        <div class="rg-nav-item" id="rg-nav-my-profile"><i class="bi bi-person-fill fs-4"></i><div class="rg-nav-label">Profile</div></div>
+                        <div class="rg-nav-item" data-target="offline"><i class="bi bi-cloud-check-fill fs-4"></i><div class="rg-nav-label">Offline</div></div>
+                        <div class="rg-nav-item" data-target="settings"><i class="bi bi-sliders fs-4"></i><div class="rg-nav-label">Settings</div></div>
+                      </div>
+                    </div>
+
+                    <div id="rg-dialog-play" class="rg-screen rg-hidden" style="z-index: 55; background-color: rgba(0,0,0,0.85); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); display: flex;">
+
+                      <div class="rg-play-menu-container">
+                        <!-- LEFT COLUMN: Track Details & Controls -->
+                        <div class="rg-play-menu-left d-flex flex-column align-items-center text-center modern-custom-scroll">
+
+                          <img id="rg-dialog-cover" src="" style="width: 240px; height: 240px; object-fit: cover; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 12px 32px rgba(0,0,0,0.6); margin-bottom: 24px; flex-shrink: 0; margin-top: auto;">
+
+                          <div class="rg-dialog-title w-100 text-truncate" id="rg-dialog-song-name" style="margin-bottom: 4px; font-size: 2.2rem; font-weight: 800; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,0.6);">Song Name</div>
+                          <div class="w-100 text-truncate fw-bold" id="rg-dialog-song-artist" style="margin-bottom: 24px; font-size: 1.1rem; color: #a1a1aa; text-shadow: 0 1px 4px rgba(0,0,0,0.5);">Artist Name</div>
+
+                          <!-- Share and Favorite Controls -->
+                          <div class="d-flex gap-3 mb-4" style="width: 100%; max-width: 400px; margin: 0 auto;">
+                            <button type="button" class="btn btn-outline-light flex-grow-1 fw-bold py-2 rounded-pill d-flex align-items-center justify-content-center gap-2" id="rg-dialog-fav-btn" style="font-size: 0.95rem; border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.05); color: #fff; transition: all 0.2s;">
+                              <i class="bi bi-heart" id="rg-dialog-fav-icon"></i> <span id="rg-dialog-fav-text">Favorite</span>
+                            </button>
+                            <button type="button" class="btn btn-outline-light flex-grow-1 fw-bold py-2 rounded-pill d-flex align-items-center justify-content-center gap-2" id="rg-dialog-share-btn" style="font-size: 0.95rem; border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.05); color: #fff; transition: all 0.2s;">
+                              <i class="bi bi-share-fill"></i> <span>Share</span>
+                            </button>
+                          </div>
+
+                          <div style="width: 100%; max-width: 400px; margin: 0 auto; background: rgba(0,0,0,0.4); padding: 20px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 8px 24px rgba(0,0,0,0.3);">
+                            <div style="font-size: 0.8rem; font-weight: 800; color: #888; margin-bottom: 16px; text-align: left; text-transform: uppercase; letter-spacing: 1px;">Select Difficulty</div>
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">
+                              <button class="rg-diff-btn active" data-diff="easy"><div class="rg-diff-btn-inner">EASY <span class="lvl">LV.--</span></div></button>
+                              <button class="rg-diff-btn" data-diff="medium"><div class="rg-diff-btn-inner">NORMAL <span class="lvl">LV.--</span></div></button>
+                              <button class="rg-diff-btn" data-diff="hard"><div class="rg-diff-btn-inner">HARD <span class="lvl">LV.--</span></div></button>
+                              <button class="rg-diff-btn" data-diff="expert"><div class="rg-diff-btn-inner">EXPERT <span class="lvl">LV.--</span></div></button>
+                              <button class="rg-diff-btn" data-diff="master"><div class="rg-diff-btn-inner">MASTER <span class="lvl">LV.--</span></div></button>
+                              <button class="rg-diff-btn" data-diff="demon"><div class="rg-diff-btn-inner">DEMON <span class="lvl">LV.--</span></div></button>
+                            </div>
+
+                            <div id="rg-demon-warning" class="rounded-3 text-center" style="background-color: rgba(255, 59, 48, 0.15); border-color: #ff3b30; border-style: solid; max-height: 0; opacity: 0; margin-top: 0; padding: 0 0.5rem; overflow: hidden; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border-width: 0;">
+                              <i class="bi bi-phone-landscape text-danger fs-4 d-block mb-1 mt-1"></i>
+                              <span class="text-danger fw-bold" style="font-size: 0.8rem; display: block; padding-bottom: 8px;">Demon mode uses 10 lanes!<br>Rotate device to landscape or use a desktop.</span>
+                            </div>
+                          </div>
+
+                          <div style="width: 100%; max-width: 400px; margin: 16px auto 0 auto; display: flex; align-items: center; justify-content: space-between; background: rgba(0,0,0,0.4); padding: 12px 20px; border-radius: 100px; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+                            <div class="text-start" style="min-width: 0;">
+                              <div style="font-size: 0.95rem; font-weight: 800; color: #fff;">Autoplay (Bot Mode)</div>
+                              <div style="font-size: 0.75rem; color: #aaa; font-weight: 500;">Watch the bot play perfectly.</div>
+                            </div>
+                            <div class="form-check form-switch m-0 fs-4">
+                              <input class="form-check-input" type="checkbox" id="rg-autoplay-toggle" style="cursor: pointer; accent-color: var(--ytm-accent); border-color: rgba(255,255,255,0.2);">
+                            </div>
+                          </div>
+
+                          <div style="width: 100%; max-width: 400px; margin: 16px auto 0 auto;">
+                            <button id="rg-btn-view-chart" class="btn btn-outline-light w-100 fw-bold rounded-pill" style="font-size: 0.9rem; border-color: rgba(255,255,255,0.15);"><i class="bi bi-map me-1"></i> View Chart Map</button>
+                          </div>
+
+                          <div style="display: flex; justify-content: center; align-items: center; gap: 16px; margin-top: 36px; margin-bottom: auto; width: 100%; max-width: 400px;">
+                            <button class="btn btn-outline-secondary fw-bold rounded-pill" id="rg-btn-dialog-cancel" style="font-size: 1.1rem; width: 120px; border-color: rgba(255,255,255,0.1); color: #ccc;">Cancel</button>
+                            <button class="btn btn-danger flex-grow-1 fw-bold fs-5 shadow-lg rounded-pill" id="rg-btn-dialog-play" style="padding: 10px;">Play</button>
+                          </div>
+                        </div>
+
+                        <!-- RIGHT COLUMN: Leaderboard -->
+                        <div class="rg-play-menu-right">
+                          <div class="d-flex flex-column h-100 overflow-hidden w-100 rg-play-menu-right-inner">
+                            <div class="p-3 border-bottom border-secondary d-flex align-items-center gap-2 flex-shrink-0" style="background-color: rgba(0, 0, 0, 0.25);">
+                              <i class="bi bi-trophy-fill text-warning fs-5"></i>
+                              <h5 class="m-0 text-white fw-bold text-uppercase" style="font-size: 1rem; letter-spacing: 1px;">Top Scores</h5>
+                            </div>
+                            <div id="rg-song-leaderboard" class="overflow-auto flex-grow-1 p-3 modern-custom-scroll">
+                              <div class="text-center text-secondary small py-4">Loading scores...</div>
+                            </div>
+                          </div>
+                        </div>
+
+                      </div>
+                    </div>
+
+                    <div id="rg-screen-loading" class="rg-screen rg-screen-center rg-hidden" style="justify-content: center; background-color: #000;">
+                      <div class="text-center w-100 px-4" style="max-width: 100%;">
+                        <img id="rg-loading-cover" src="" style="width: 250px; height: 250px; object-fit: cover; border-radius: 16px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); margin-bottom: 24px;">
+                        <h2 id="rg-loading-title" class="text-truncate" style="color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.8); margin: 0 auto 4px auto; font-size: 1.8rem; font-weight: bold; text-align: center; max-width: 100%;">Song Title</h2>
+                        <div id="rg-loading-artist" class="text-truncate text-secondary fw-bold" style="text-shadow: 0 1px 3px rgba(0,0,0,0.8); margin: 0 auto 24px auto; font-size: 1.1rem; text-align: center; max-width: 100%;">Artist Name</div>
+                        <div class="d-flex align-items-center justify-content-center gap-3">
+                          <div class="spinner-border text-danger" style="width: 1.5rem; height: 1.5rem; border-width: 0.2em;"></div>
+                          <div style="font-size: 1.2rem; font-weight: 700; color: var(--rg-primary);" id="rg-loading-text">Downloading 0%</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="rg-screen-game" class="rg-screen rg-hidden" style="background-color: #000;">
+                      <canvas id="rg-game-canvas" style="position:absolute; top:0; left:0; width:100%; height:100%; z-index:1;"></canvas>
+                      <div id="rg-touch-layer" style="position:absolute; top:0; left:0; width:100%; height:100%; z-index:30; touch-action:none;"></div>
+                      <!-- Z-index 40 ensures the HUD buttons are clickable above the touch layer -->
+                      <div class="rg-hud" style="justify-content: center; position: relative; z-index: 40;">
+                        <div style="display:flex; flex-direction:column; align-items:center; text-align: center; width: 100%; max-width: 210px; margin: 0 auto;">
+                          <div class="rg-hud-title text-truncate" id="rg-in-game-title" style="max-width: 140px;">Title</div>
+
+                          <!-- In-Game Score Progress Bar & Rank -->
+                          <div class="w-100 d-flex align-items-center gap-2 mb-1 mt-1" style="padding: 0 6px;">
+                            <div id="rg-in-game-rank" style="font-size: 1.3rem; font-weight: 900; font-family: 'Arial Black', sans-serif; color: #7f1d1d; min-width: 28px; text-align: left; text-shadow: 0 0 8px currentColor; line-height: 1;">F</div>
+                            <div class="flex-grow-1" style="min-width: 0;">
+                              <div class="d-flex justify-content-between align-items-baseline" style="font-size: 0.6rem; color: #888; font-weight: bold; letter-spacing: 0.5px;">
+                                <span>SCORE</span>
+                                <span id="rg-in-game-score" style="font-family: monospace; font-size: 0.85rem; color: #fff;">000000000</span>
+                              </div>
+                              <div style="width: 100%; height: 4px; background-color: #222; border-radius: 2px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05);">
+                                <div id="rg-in-game-score-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #ff3b30, #ff9500); border-radius: 2px; transition: width 0.1s linear;"></div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div class="rg-combo-box">
+                            <div class="rg-combo-number" id="rg-in-game-combo">0</div>
+                            <div class="rg-combo-text" id="rg-in-game-combo-lbl">COMBO</div>
+                            <div id="rg-in-game-rating" style="font-size: 1.4rem; font-weight: 900; margin-top: 6px; text-transform: uppercase; min-height: 24px; transition: transform 0.05s ease-out; text-shadow: 0 2px 4px rgba(0,0,0,0.5);"></div>
+                          </div>
+                        </div>
+                        <div class="rg-hud-actions" style="position: absolute; right: 16px; top: 16px; display: flex; flex-direction: column; align-items: flex-end; gap: 6px;">
+                          <button class="rg-quit-btn" id="rg-btn-quit-game" style="padding: 0; width: 44px; height: 44px; border-radius: 50%; font-size: 1.5rem; display: flex; align-items: center; justify-content: center;"><i class="bi bi-pause-fill"></i></button>
+                          <div style="width: 80px; height: 6px; background-color: #222; border-radius: 3px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); margin-top: 2px;">
+                            <div id="rg-in-game-hp" style="width: 100%; height: 100%; background-color: #27c93f; transition: width 0.1s, background-color: 0.1s;"></div>
+                          </div>
+                          <div id="rg-in-game-accuracy" style="font-family: monospace; font-size: 0.8rem; font-weight: bold; color: #aaa; text-shadow: 0 1px 2px rgba(0,0,0,0.8); line-height: 1;">100.00%</div>
+                          <div id="rg-in-game-fps" style="font-family: monospace; font-size: 0.7rem; font-weight: bold; color: #888; text-shadow: 0 1px 2px rgba(0,0,0,0.8); line-height: 1; margin-top: 4px;">-- FPS</div>
+                          <div id="rg-in-game-autoplay" style="font-size: 0.65rem; font-weight: 800; color: #00bcd4; text-transform: uppercase; margin-top: 2px; text-shadow: 0 0 6px rgba(0,188,212,0.4); display: none;">Autoplay</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="rg-dialog-chart-modal" class="rg-dialog-backdrop rg-hidden" style="z-index: 60;">
+                      <div class="rg-dialog-surface text-center" style="max-width: 95%; width: 100%; max-width: 600px; max-height: 80vh; padding: 0; overflow: hidden; gap: 0;">
+                        <div style="padding: 16px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: var(--rg-surface-variant); flex-shrink: 0;">
+                          <h5 class="text-white m-0 fw-bold" style="font-size: 1.1rem;"><i class="bi bi-map text-danger me-2"></i> Chart Map</h5>
+                          <button class="btn-close btn-close-white" id="rg-btn-close-chart"></button>
+                        </div>
+                        <div id="rg-chart-modal-content" style="overflow-y: auto; overflow-x: auto; background: #000; padding: 16px; flex-grow: 1;">
+                          <!-- SVG injected here -->
+                        </div>
+                        <div style="padding: 16px; border-top: 1px solid #333; background: var(--rg-surface-variant); flex-shrink: 0;">
+                          <button id="rg-btn-dl-chart" class="btn btn-info w-100 fw-bold text-dark rounded-pill"><i class="bi bi-download me-1"></i> Download SVG</button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="rg-dialog-pause" class="rg-dialog-backdrop rg-hidden" style="z-index: 50;">
+                      <div class="rg-dialog-surface text-center">
+                        <h3 class="text-white fw-bold mb-1">Game Paused</h3>
+                        <div class="text-secondary small fw-bold text-uppercase mb-4">Difficulty: <span id="rg-pause-diff-display" class="text-danger">Medium</span></div>
+                        <div class="d-flex flex-column gap-3 w-100">
+                          <button class="rg-primary-btn" id="rg-btn-resume" style="background-color: #ff3b30; color: #ffffff; border-radius: 12px; border: none; padding: 16px; box-shadow: 0 4px 12px rgba(255, 59, 48, 0.4);">Resume</button>
+                          <button class="rg-primary-btn" id="rg-btn-retry-pause" style="background-color: #8e1c1c; color: #ffffff; border-radius: 12px; border: none; padding: 16px;">Retry</button>
+                          <button class="rg-primary-btn" id="rg-btn-quit" style="background-color: #4a0000; color: #ffffff; border-radius: 12px; border: none; padding: 16px;">Quit to Menu</button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div id="rg-screen-result" class="rg-screen rg-hidden" style="background-color: transparent; overflow-y: auto; overflow-x: hidden; display: block; width: 100%; max-width: 100%; box-sizing: border-box;">
+                      <div style="width: 100%; max-width: 600px; margin: 0 auto; padding: 48px 16px 120px 16px; position: relative; z-index: 1; box-sizing: border-box; overflow-x: hidden;">
+                        <h2 style="text-align: center; color: var(--rg-primary); margin-bottom: 24px; text-transform: uppercase; font-weight: 900; font-size: 2.2rem; letter-spacing: 2px; text-shadow: 0 4px 12px rgba(0,0,0,0.5);">Stage Cleared</h2>
+
+                        <!-- Rank & Accuracy Card -->
+                        <div class="p-3 mb-4 d-flex align-items-center justify-content-between rounded-4" style="background: linear-gradient(135deg, rgba(255,59,48,0.15), rgba(0,0,0,0.4)); border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 8px 32px rgba(0,0,0,0.3);">
+                          <div class="d-flex flex-column text-start">
+                            <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px;">Accuracy</span>
+                            <span id="rg-res-acc" style="font-size: 2.2rem; font-weight: 900; font-family: monospace; color: #fff; line-height: 1.1;">100.00%</span>
+                          </div>
+                          <div class="d-flex flex-column align-items-end text-end">
+                            <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px;">Rank</span>
+                            <span id="rg-res-rank" style="font-size: 3.5rem; font-weight: 900; line-height: 0.8; font-family: 'Arial Black', sans-serif; text-shadow: 0 0 15px currentColor; transition: color 0.3s;">SS</span>
+                          </div>
+                        </div>
+
+                        <!-- Score Progress Bar Container -->
+                        <div class="p-3 mb-4 rounded-4" style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); box-shadow: 0 4px 16px rgba(0,0,0,0.2);">
+                          <div class="d-flex justify-content-between align-items-end mb-2">
+                            <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px;">Total Score</span>
+                            <span id="rg-res-score" style="font-size: 1.8rem; font-weight: 900; font-family: monospace; color: var(--rg-primary); line-height: 1;">000,000,000</span>
+                          </div>
+                          <div style="width: 100%; height: 10px; background-color: #111; border-radius: 5px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05);">
+                            <div id="rg-res-score-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #ff3b30, #ff9500); border-radius: 5px; transition: width 0.8s cubic-bezier(0.1, 0.76, 0.55, 0.94);"></div>
+                          </div>
+                        </div>
+
+                        <!-- Grid Judgment Stats -->
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 32px;">
+                          <!-- Max Combo (Full Width) -->
+                          <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 12px 18px; border-radius: 12px;">
+                            <span style="font-size: 0.75rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 1px;">Max Combo</span>
+                            <span id="rg-res-max-combo" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff;">0</span>
+                          </div>
+
+                          <!-- Perfect -->
+                          <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
+                            <span style="font-size: 0.7rem; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 0.5px;">Perfect</span>
+                            <span id="rg-res-perfect" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
+                          </div>
+
+                          <!-- Great -->
+                          <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
+                            <span style="font-size: 0.7rem; font-weight: 700; color: #ff3b30; text-transform: uppercase; letter-spacing: 0.5px;">Great</span>
+                            <span id="rg-res-great" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
+                          </div>
+
+                          <!-- Good -->
+                          <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
+                            <span style="font-size: 0.7rem; font-weight: 700; color: #ffa000; text-transform: uppercase; letter-spacing: 0.5px;">Good</span>
+                            <span id="rg-res-good" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
+                          </div>
+
+                          <!-- Bad -->
+                          <div style="background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 10px 16px; border-radius: 12px; display: flex; flex-direction: column; text-align: left;">
+                            <span style="font-size: 0.7rem; font-weight: 700; color: #8e1c1c; text-transform: uppercase; letter-spacing: 0.5px;">Bad</span>
+                            <span id="rg-res-bad" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff; margin-top: 2px;">0</span>
+                          </div>
+
+                          <!-- Miss (Full Width) -->
+                          <div style="grid-column: span 2; display: flex; justify-content: space-between; align-items: center; background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 12px 18px; border-radius: 12px;">
+                            <span style="font-size: 0.75rem; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: 1px;">Miss</span>
+                            <span id="rg-res-miss" style="font-size: 1.4rem; font-weight: 900; font-family: monospace; color: #fff;">0</span>
+                          </div>
+                        </div>
+
+                        <div style="display: flex; flex-direction: column; gap: 12px; width: 100%;">
+                          <button class="rg-primary-btn" id="rg-btn-result-share" style="width: 100%; background-color: #1DB954; color: #fff; padding: 16px; border-radius: 16px; margin-bottom: 8px;"><i class="bi bi-share-fill"></i> Share Score</button>
+                          <div style="display: flex; gap: 12px; width: 100%; margin-bottom: 1em;">
+                            <button class="rg-primary-btn" id="rg-btn-result-retry" style="flex: 1; background-color: #4a0000; color: var(--rg-primary); padding: 16px; border-radius: 16px;">Retry</button>
+                            <button class="rg-primary-btn" id="rg-btn-result-back" style="flex: 1; padding: 16px; border-radius: 16px;">Menu</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                `;
                 setTimeout(() => {
                   if (!localRhythmGame) {
                     localRhythmGame = new RhythmGameEngine();
